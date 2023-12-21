@@ -1643,8 +1643,7 @@ class SLM(Rasch):
                   obs=False,
                   x_obs_data=np.array([]),
                   y_obs_data=np.array([]),
-                  thresh_lines=False,
-                  central_diff=False,
+                  thresh_line=False,
                   score_lines_item=[None, []],
                   score_lines_test=[],
                   point_info_lines_item=[None, []],
@@ -1703,13 +1702,8 @@ class SLM(Rasch):
         else:
             difficulties = self.diffs
 
-        if thresh_lines:
-            plt.axvline(x=self.diffs.loc[items], color='black', linestyle='--')
-
-        if central_diff:
-            if items is not None:
-                if len(items) == 1:
-                    plt.axvline(x=thresholds[items].mean(), color='darkred', linestyle='--')
+        if thresh_line:
+            plt.axvline(x=self.diffs.loc[items], color='darkred', linestyle='--')
 
         if score_lines_item[1] != []:
 
@@ -1753,7 +1747,7 @@ class SLM(Rasch):
 
             item = point_info_lines_item[0]
 
-            info_set = [self.variance(ability, difficulties[item]) for ability in point_info_lines_item[1]]
+            info_set = [self.variance(ability, self.diffs[item]) for ability in point_info_lines_item[1]]
 
             for abil, info in zip(point_info_lines_item[1], info_set):
                 plt.vlines(x=abil, ymin=-100, ymax=info, color='black', linestyles='dashed')
@@ -1874,7 +1868,7 @@ class SLM(Rasch):
 
         plot = self.plot_data(x_data=abilities, y_data=y, x_obs_data=xobsdata, y_obs_data=yobsdata, x_min=xmin,
                               x_max=xmax, y_max=self.max_score, items=item, y_label=ylabel, graph_title=graphtitle,
-                              obs=obs, thresh_lines=thresh_line, score_lines_item=[item, score_lines],
+                              obs=obs, thresh_line=thresh_line, score_lines_item=[item, score_lines],
                               score_labels=score_labels, cat_highlight=cat_highlight, plot_style=plot_style,
                               black=black, font=font, title_font_size=title_font_size, axis_font_size=axis_font_size,
                               labelsize=labelsize, filename=filename, plot_density=dpi, file_format=file_format)
@@ -1942,7 +1936,7 @@ class SLM(Rasch):
 
         plot = self.plot_data(x_data=abilities,  y_data=y, x_min=xmin, x_max=xmax, y_max=1, x_obs_data=xobsdata,
                               y_obs_data=yobsdata, items=item, graph_title=graphtitle, y_label=ylabel,
-                              obs=obs, thresh_lines=thresh_line, cat_highlight=cat_highlight, plot_style=plot_style,
+                              obs=obs, thresh_line=thresh_line, cat_highlight=cat_highlight, plot_style=plot_style,
                               black=black, font=font, title_font_size=title_font_size, axis_font_size=axis_font_size,
                               labelsize=labelsize, filename=filename, plot_density=dpi, file_format=file_format)
 
@@ -1990,8 +1984,8 @@ class SLM(Rasch):
         ylabel = 'Fisher information'
 
         plot = self.plot_data(x_data=abilities, y_data=y, x_min=xmin, x_max=xmax, y_max=ymax,
-                              items=item, graph_title=graphtitle, y_label=ylabel, thresh_lines=thresh_line,
-                              point_info_lines_item=[items, point_info_lines], point_info_labels=point_info_labels,
+                              items=item, graph_title=graphtitle, y_label=ylabel, thresh_line=thresh_line,
+                              point_info_lines_item=[item, point_info_lines], point_info_labels=point_info_labels,
                               cat_highlight=cat_highlight, plot_style=plot_style, black=black, font=font,
                               title_font_size=title_font_size, axis_font_size=axis_font_size, labelsize=labelsize,
                               filename=filename, plot_density=dpi, file_format=file_format)
