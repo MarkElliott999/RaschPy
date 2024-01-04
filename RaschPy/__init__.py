@@ -628,7 +628,7 @@ class Rasch:
                            x_min=-6,
                            x_max=6,
                            normal=False,
-                           title=True,
+                           title=None,
                            plot_style='colorblind',
                            black=False,
                            font='Times',
@@ -671,8 +671,8 @@ class Rasch:
         plt.xlabel('Standardised residual', fontname=font, fontsize=axis_font_size, fontweight='bold')
         plt.ylabel('Density', fontname=font, fontsize=axis_font_size, fontweight='bold')
 
-        if title:
-            plt.title('Standardised residual plot', fontname=font, fontsize=title_font_size, fontweight='bold')
+        if title is not None:
+            plt.title(title, fontname=font, fontsize=title_font_size, fontweight='bold')
 
         plt.tick_params(axis="x", labelsize=labelsize)
         plt.tick_params(axis="y", labelsize=labelsize)
@@ -8627,16 +8627,6 @@ class MFRM(Rasch):
             thresholds = self.thresholds
             severities = self.severities_global
 
-        if isinstance(difficulties, pd.Series) == False:
-            difficulties = pd.Series({items: difficulties})
-        else:
-            difficulties = difficulties.loc[items]
-
-        if isinstance(severities, pd.Series) == False:
-            severities = pd.Series({raters: severities})
-        else:
-            severities = severities[raters]
-
         if isinstance(raters, list):
             person_data = [self.dataframe[items].xs(rater).loc[person].to_numpy()
                            for rater in raters]
@@ -8664,15 +8654,17 @@ class MFRM(Rasch):
 
             while (abs(change) > tolerance) & (iters <= max_iters):
 
-                person_exp_matrix = [[self.exp_score_global(estimate, item, difficulties, rater, severities, thresholds)
-                                      for item in difficulties.keys()]
+                person_exp_matrix = [[self.exp_score_global(estimate, item, difficulties,
+                                                            rater, severities, thresholds)
+                                      for item in items]
                                      for rater in raters]
                 person_exp_matrix = np.array(person_exp_matrix)
                 person_exp_matrix *= person_filter
                 result = np.nansum(person_exp_matrix)
 
-                person_info_matrix = [[self.variance_global(estimate, item, difficulties, rater, severities, thresholds)
-                                      for item in difficulties.keys()]
+                person_info_matrix = [[self.variance_global(estimate, item, difficulties,
+                                                            rater, severities, thresholds)
+                                      for item in items]
                                      for rater in raters]
                 person_info_matrix = np.array(person_info_matrix)
                 person_info_matrix *= person_filter
@@ -8717,9 +8709,6 @@ class MFRM(Rasch):
             if hasattr(self, 'anchor_diffs_global') == False:
                 print('Anchor calibration required')
                 return
-
-        #df = self.dataframe[items].unstack(level=0).dropna(how='all')
-        #valid_persons = df.index
 
         estimates = [self.abil_global(person, anchor=anchor, items=items, raters=raters, warm_corr=warm_corr,
                                       tolerance=tolerance, max_iters=max_iters,
@@ -8793,25 +8782,25 @@ class MFRM(Rasch):
         while (abs(change) > tolerance) & (iters <= max_iters):
 
             if raters is None:
+                dummy_sevs = pd.Series({'dummy_rater': 0})
+
                 exp_list = [self.exp_score_global(estimate, item, difficulties, 'dummy_rater',
-                                                  pd.Series({'dummy_rater': 0}), thresholds)
+                                                  dummy_sevs, thresholds)
                             for item in items]
+
+                info_list = [self.variance_global(estimate, item, difficulties, 'dummy_rater',
+                                                  dummy_sevs, thresholds)
+                             for item in items]
 
             else:
                 exp_list = [self.exp_score_global(estimate, item, difficulties, rater, severities, thresholds)
                             for item in items for rater in raters]
 
-            exp_list = np.array(exp_list)
-            result = exp_list.sum()
-
-            if raters is None:
-                info_list = [self.variance_global(estimate, item, difficulties, 'dummy_rater',
-                                                  pd.Series({'dummy_rater': 0}), thresholds)
-                             for item in items]
-
-            else:
                 info_list = [self.variance_global(estimate, item, difficulties, rater, severities, thresholds)
                              for item in items for rater in raters]
+
+            exp_list = np.array(exp_list)
+            result = exp_list.sum()
 
             info_list = np.array(info_list)
             info = info_list.sum()
@@ -8831,57 +8820,37 @@ class MFRM(Rasch):
 
     def abil_lookup_table_global(self,
                                  anchor=False,
-                                 raters=[],
-                                 difficulties=None,
-                                 thresholds=None,
-                                 severities=None,
+                                 items=None,
+                                 raters=None,
                                  warm_corr=True,
                                  tolerance=0.0000001,
                                  max_iters=100,
                                  ext_score_adjustment=0.5):
 
-        if anchor:
-            if hasattr(self, 'anchor_diffs_global') == False:
-                print('Anchor calibration required')
-                return None
+        if items is None:
+            if raters is None:
+                person_filter = np.array([1 for item in self.dataframe.columns])
 
-        if (raters == []) | (raters == 'none'):
-            raters = ['dummy_rater']
-            severities = None
-            
-        if raters == 'all':
-            raters = list(self.raters)
-
-            if anchor:
-                severities = self.anchor_severities_global
             else:
-                severities = self.severities_global
+                person_filter = np.array([[1 for item in self.dataframe.columns]
+                                          for rater in raters])
 
-        if difficulties is None:
-            difficulties = self.diffs
+        else:
+            if raters is None:
+                person_filter = np.array([1 for item in items])
 
-        if thresholds is None:
-            thresholds = self.thresholds
-
-        if severities is None:
-            if raters == ['dummy_rater']:
-                severities = pd.Series({'dummy_rater': 0})
             else:
+                person_filter = np.array([[1 for item in items]
+                                          for rater in raters])
 
-                if anchor:
-                    severities = self.anchor_severities_global
-                else:
-                    severities = self.severities_global
+        ext_score = person_filter.sum() * self.max_score
 
-        ext_score = len(difficulties) * self.max_score
-
-        abil_table = {score: self.score_abil_global(score, anchor=anchor, raters=raters, warm_corr=warm_corr,
-                                                    tolerance=tolerance, max_iters=max_iters,
+        abil_table = {score: self.score_abil_global(score, anchor=anchor, items=items, raters=raters,
+                                                    warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                                     ext_score_adjustment=ext_score_adjustment)
                       for score in range(ext_score + 1)}
-        abil_table = pd.Series(abil_table)
 
-        self.abil_table_global = abil_table
+        self.abil_table_global = pd.Series(abil_table)
 
     def warm_global(self,
                     estimate,
@@ -8984,10 +8953,10 @@ class MFRM(Rasch):
                    ext_score_adjustment=0.5):
 
         if items is None:
-            items = self.dataframe.columns
+            items = self.dataframe.columns.tolist()
 
         if raters is None:
-            raters = self.raters
+            raters = self.raters.tolist()
 
         if anchor:
             if hasattr(self, 'anchor_diffs_items'):
@@ -9004,10 +8973,14 @@ class MFRM(Rasch):
             thresholds = self.thresholds
             severities = self.severities_items
 
-        difficulties = difficulties.loc[items]
-        severities = severities[raters]
+        if isinstance(raters, list):
+            person_data = [self.dataframe[items].xs(rater).loc[person].to_numpy()
+                           for rater in raters]
+            person_data = np.array(person_data)
 
-        person_data = self.dataframe[items].loc[raters].xs(person, level=1, drop_level=False).to_numpy()
+        else:
+            person_data = self.dataframe[items].xs(raters).loc[person].to_numpy()
+
         person_filter = (person_data + 1) / (person_data + 1)
         score = np.nansum(person_data)
 
@@ -9028,7 +9001,7 @@ class MFRM(Rasch):
 
                 person_exp_matrix = [[self.exp_score_items(estimate, item, difficulties,
                                                            rater, severities, thresholds)
-                                      for item in difficulties.keys()]
+                                      for item in items]
                                      for rater in raters]
                 person_exp_matrix = np.array(person_exp_matrix)
                 person_exp_matrix *= person_filter
@@ -9036,7 +9009,7 @@ class MFRM(Rasch):
 
                 person_info_matrix = [[self.variance_items(estimate, item, difficulties,
                                                            rater, severities, thresholds)
-                                       for item in difficulties.keys()]
+                                       for item in items]
                                       for rater in raters]
                 person_info_matrix = np.array(person_info_matrix)
                 person_info_matrix *= person_filter
@@ -9072,31 +9045,19 @@ class MFRM(Rasch):
         '''
 
         if items is None:
-            items = self.dataframe.columns
+            items = self.dataframe.columns.tolist()
 
         if raters is None:
-            raters = self.raters
+            raters = self.raters.tolist()
 
         if anchor:
-            if hasattr(self, 'anchor_diffs_items'):
-                difficulties = self.anchor_diffs_items
-                thresholds = self.anchor_thresholds_items
-                severities = self.anchor_severities_items
-
-            else:
+            if hasattr(self, 'anchor_diffs_global') == False:
                 print('Anchor calibration required')
                 return
 
-        else:
-            difficulties = self.diffs
-            thresholds = self.thresholds
-            severities = self.severities_items
-
-        difficulties = difficulties.loc[items]
-        severities = severities[raters]
-
-        estimates = [self.abil_items(person, items=items, raters=raters, warm_corr=warm_corr, tolerance=tolerance,
-                                     max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
+        estimates = [self.abil_items(person, anchor=anchor, items=items, raters=raters, warm_corr=warm_corr,
+                                     tolerance=tolerance, max_iters=max_iters,
+                                     ext_score_adjustment=ext_score_adjustment)
                      for person in self.persons]
 
         estimates = {person: estimate for person, estimate in zip(self.persons, estimates)}
@@ -9120,8 +9081,8 @@ class MFRM(Rasch):
         if items is None:
             items = self.dataframe.columns
 
-        if raters is None:
-            raters = self.raters
+        if raters == 'all':
+            raters = self.raters.tolist()
 
         if anchor:
             if hasattr(self, 'anchor_diffs_items'):
@@ -9138,7 +9099,18 @@ class MFRM(Rasch):
             thresholds = self.thresholds
             severities = self.severities_items
 
-        person_filter = np.array([[1 for item in items] for rater in raters])
+        if isinstance(raters, str):
+            raters = [raters]
+
+        if isinstance(items, str):
+            items = [items]
+
+        if raters is None:
+            person_filter = np.array([1 for item in items])
+
+        else:
+            person_filter = np.array([[1 for item in items]
+                                      for rater in raters])
 
         ext_score = person_filter.sum() * self.max_score
 
@@ -9155,15 +9127,27 @@ class MFRM(Rasch):
 
         while (abs(change) > tolerance) & (iters <= max_iters):
 
-            exp_list = [self.exp_score_items(estimate, item, difficulties, rater, severities, thresholds)
-                        for item in difficulties.keys()
-                        for rater in raters]
+            if raters is None:
+                dummy_sevs = {'dummy_rater': {item: 0 for item in self.dataframe.columns}}
+
+                exp_list = [self.exp_score_items(estimate, item, difficulties, 'dummy_rater',
+                                                 dummy_sevs, thresholds)
+                            for item in items]
+
+                info_list = [self.variance_items(estimate, item, difficulties, 'dummy_rater',
+                                                 dummy_sevs, thresholds)
+                             for item in items]
+
+            else:
+                exp_list = [self.exp_score_items(estimate, item, difficulties, rater, severities, thresholds)
+                            for item in items for rater in raters]
+
+                info_list = [self.variance_items(estimate, item, difficulties, rater, severities, thresholds)
+                             for item in items for rater in raters]
+
             exp_list = np.array(exp_list)
             result = exp_list.sum()
 
-            info_list = [self.variance_items(estimate, item, difficulties, rater, severities, thresholds)
-                         for item in difficulties.keys()
-                         for rater in raters]
             info_list = np.array(info_list)
             info = info_list.sum()
 
@@ -9172,8 +9156,13 @@ class MFRM(Rasch):
             iters += 1
 
         if warm_corr:
-            sevs = dict((rater, severities[rater]) for rater in raters)
-            estimate += self.warm_items(estimate, person_filter, difficulties, thresholds, sevs)
+            if raters is None:
+                dummy_sevs = {'dummy_rater': {item: 0 for item in self.dataframe.columns}}
+                estimate += self.warm_items(estimate, person_filter, difficulties, thresholds, dummy_sevs)
+
+            else:
+                sevs = dict((rater, severities[rater]) for rater in raters)
+                estimate += self.warm_items(estimate, person_filter, difficulties, thresholds, sevs)
 
         if iters >= max_iters:
             print('Maximum iterations reached before convergence.')
@@ -9182,59 +9171,37 @@ class MFRM(Rasch):
 
     def abil_lookup_table_items(self,
                                 anchor=False,
-                                raters=[],
-                                difficulties=None,
-                                thresholds=None,
-                                severities=None,
+                                items=None,
+                                raters=None,
                                 warm_corr=True,
                                 tolerance=0.0000001,
                                 max_iters=100,
                                 ext_score_adjustment=0.5):
 
-        if anchor:
-            if hasattr(self, 'anchor_diffs_items') == False:
-                print('Anchor calibration required')
-                return None
+        if items is None:
+            if raters is None:
+                person_filter = np.array([1 for item in self.dataframe.columns])
 
-        if (raters == []) | (raters == 'none'):
-            raters = ['dummy_rater']
-            severities = None
-
-        if raters == 'all':
-            raters = list(self.raters)
-
-            if anchor:
-                severities = self.anchor_severities_items
             else:
-                severities = self.severities_items
+                person_filter = np.array([[1 for item in self.dataframe.columns]
+                                          for rater in raters])
 
-        if difficulties is None:
-            difficulties = self.diffs
+        else:
+            if raters is None:
+                person_filter = np.array([1 for item in items])
 
-        if thresholds is None:
-            thresholds = self.thresholds
-
-        if severities is None:
-            if raters == ['dummy_rater']:
-                severities = {'dummy_rater': {item: 0
-                                              for item in difficulties.keys()}}
             else:
+                person_filter = np.array([[1 for item in items]
+                                          for rater in raters])
 
-                if anchor:
-                    severities = self.anchor_severities_items
-                else:
-                    severities = self.severities_items
+        ext_score = person_filter.sum() * self.max_score
 
-        ext_score = len(difficulties) * self.max_score
-
-        abil_table = {score: self.score_abil_items(score, anchor=anchor, raters=raters, difficulties=difficulties,
-                                                   thresholds=thresholds, severities=severities, warm_corr=warm_corr,
-                                                   tolerance=tolerance, max_iters=max_iters,
+        abil_table = {score: self.score_abil_items(score, anchor=anchor, items=items, raters=raters,
+                                                   warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                                    ext_score_adjustment=ext_score_adjustment)
                       for score in range(ext_score + 1)}
-        abil_table = pd.Series(abil_table)
 
-        self.abil_table_items = abil_table
+        self.abil_table_items = pd.Series(abil_table)
 
     def warm_items(self,
                    estimate,
@@ -13897,6 +13864,8 @@ class MFRM(Rasch):
 
     def class_intervals_cats(self,
                              abilities,
+                             difficulties,
+                             severities,
                              item=None,
                              rater=None,
                              anchor=False,
@@ -13907,14 +13876,6 @@ class MFRM(Rasch):
 
         if rater == 'zero':
             rater = None
-
-        if anchor:
-            difficulties = self.anchor_diffs_global
-            severities = self.anchor_severities_global
-
-        else:
-            difficulties = self.diffs
-            severities = self.severities_global
 
         class_groups = [f'class_{class_no + 1}' for class_no in range(no_of_classes)]
 
@@ -14171,7 +14132,7 @@ class MFRM(Rasch):
                          labelsize=12,
                          tex=True,
                          plot_density=300,
-                         save_title='',
+                         filename=None,
                          file_format='png'):
 
         '''
@@ -14483,12 +14444,11 @@ class MFRM(Rasch):
         plt.tick_params(axis="x", labelsize=labelsize)
         plt.tick_params(axis="y", labelsize=labelsize)
 
-        if save_title != '':
-            save_title = save_title.translate(str.maketrans('', '', string.punctuation))
-            save_title = save_title.translate({32: 95})
-            plt.savefig(f'{save_title}.{file_format}', dpi=plot_density)
+        if filename is not None:
+            plt.savefig(f'{filename}.{file_format}', dpi=plot_density)
 
         plt.close()
+
 
         return graph
 
@@ -14524,10 +14484,9 @@ class MFRM(Rasch):
                         title_font_size=15,
                         axis_font_size=12,
                         labelsize=12,
-                        graph_name='plot',
                         tex=True,
                         plot_density=300,
-                        save_title='',
+                        filename=None,
                         file_format='png'):
 
         '''
@@ -14768,10 +14727,8 @@ class MFRM(Rasch):
         plt.tick_params(axis="x", labelsize=labelsize)
         plt.tick_params(axis="y", labelsize=labelsize)
 
-        if save_title != '':
-            save_title = save_title.translate(str.maketrans('', '', string.punctuation))
-            save_title = save_title.translate({32: 95})
-            plt.savefig(f'{save_title}.{file_format}', dpi=plot_density)
+        if filename is not None:
+            plt.savefig(f'{filename}.{file_format}', dpi=plot_density)
 
         plt.close()
 
@@ -14809,10 +14766,9 @@ class MFRM(Rasch):
                              title_font_size=15,
                              axis_font_size=12,
                              labelsize=12,
-                             graph_name='plot',
                              tex=True,
                              plot_density=300,
-                             save_title='',
+                             filename=None,
                              file_format='png'):
 
         '''
@@ -15050,10 +15006,8 @@ class MFRM(Rasch):
         plt.tick_params(axis="x", labelsize=labelsize)
         plt.tick_params(axis="y", labelsize=labelsize)
 
-        if save_title != '':
-            save_title = save_title.translate(str.maketrans('', '', string.punctuation))
-            save_title = save_title.translate({32: 95})
-            plt.savefig(f'{save_title}.{file_format}', dpi=plot_density)
+        if filename is not None:
+            plt.savefig(f'{filename}.{file_format}', dpi=plot_density)
 
         plt.close()
 
@@ -15094,7 +15048,7 @@ class MFRM(Rasch):
                          graph_name='plot',
                          tex=True,
                          plot_density=300,
-                         save_title='',
+                         filename=None,
                          file_format='png'):
 
         '''
@@ -15344,10 +15298,8 @@ class MFRM(Rasch):
         plt.tick_params(axis="x", labelsize=labelsize)
         plt.tick_params(axis="y", labelsize=labelsize)
 
-        if save_title != '':
-            save_title = save_title.translate(str.maketrans('', '', string.punctuation))
-            save_title = save_title.translate({32: 95})
-            plt.savefig(f'{save_title}.{file_format}', dpi=plot_density)
+        if filename is not None:
+            plt.savefig(f'{filename}.{file_format}', dpi=plot_density)
 
         plt.close()
 
@@ -15374,6 +15326,7 @@ class MFRM(Rasch):
                    title_font_size=15,
                    axis_font_size=12,
                    labelsize=12,
+                   filename=None,
                    file_format='png',
                    dpi=300):
 
@@ -15409,8 +15362,7 @@ class MFRM(Rasch):
                     self.person_abils_global()
                 abilities = self.abils_global
 
-            xobsdata, yobsdata = self.class_intervals(abilities, items=item, raters=rater,
-                                                      no_of_classes=no_of_classes)
+            xobsdata, yobsdata = self.class_intervals(abilities, items=item, raters=rater, no_of_classes=no_of_classes)
 
             yobsdata = yobsdata.values.reshape((-1, 1))
 
@@ -15445,8 +15397,8 @@ class MFRM(Rasch):
                                      score_lines_item=[item, score_lines], score_labels=score_labels,
                                      central_diff=central_diff, cat_highlight=cat_highlight, y_label=ylabel,
                                      plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
-                                     axis_font_size=axis_font_size, labelsize=labelsize, plot_density=dpi,
-                                     file_format=file_format)
+                                     axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
+                                     plot_density=dpi, file_format=file_format)
 
         return plot
 
@@ -15471,8 +15423,7 @@ class MFRM(Rasch):
                   title_font_size=15,
                   axis_font_size=12,
                   labelsize=12,
-                  save_title='',
-                  use_save_title=False,
+                  filename=None,
                   file_format='png',
                   dpi=300):
 
@@ -15497,33 +15448,20 @@ class MFRM(Rasch):
             thresholds = self.thresholds
             severities = self.severities_items
 
-        if rater is None:
-            severities = {'dummy_rater': {item: 0}}
-            rater = 'dummy_rater'
-
         if obs:
-            if rater is not None:
-                abilities = {person: self.abil_items(person, raters=[rater])
-                             for person in self.persons}
-                abilities = pd.Series(abilities)
+            if anchor:
+                if hasattr(self, 'anchor_abils_items') == False:
+                    self.person_abils_items(anchor=True)
+                abilities = self.anchor_abils_items
 
             else:
-                if anchor:
-                    if hasattr(self, 'anchor_abils_items') == False:
-                        self.person_abils_items(anchor=True)
-                    abilities = self.anchor_abils_items
+                if hasattr(self, 'abils_items') == False:
+                    self.person_abils_items()
+                abilities = self.abils_items
 
-                else:
-                    if hasattr(self, 'abils_items') == False:
-                        self.person_abils_items()
-                    abilities = self.abils_items
+            xobsdata, yobsdata = self.class_intervals(abilities, items=item, raters=rater, no_of_classes=no_of_classes)
 
-            _, _, _, xobsdata, yobsdata = self.class_intervals(abilities, [item], no_of_classes=no_of_classes)
-
-            xobsdata -= np.mean([severities[rater][item] for rater in self.raters])
-            if rater is not None:
-                xobsdata += severities[rater][item]
-            yobsdata = np.array(yobsdata).reshape((-1, 1))
+            yobsdata = yobsdata.values.reshape((-1, 1))
 
         else:
             xobsdata = np.array(np.nan)
@@ -15531,17 +15469,21 @@ class MFRM(Rasch):
 
         abilities = np.arange(-20, 20, 0.1)
 
-        y = [self.exp_score_items(ability, item, difficulties, rater, severities, thresholds)
-             for ability in abilities]
+        if rater is None:
+            dummy_sevs = {'dummy_rater': {item: 0 for item in self.dataframe.columns}}
+
+            y = [self.exp_score_items(ability, item, difficulties, 'dummy_rater',
+                                      dummy_sevs, thresholds)
+                 for ability in abilities]
+
+        else:
+            y = [self.exp_score_items(ability, item, difficulties, rater, severities, thresholds)
+                 for ability in abilities]
+
         y = np.array(y).reshape([len(abilities), 1])
 
-        if title:
-            if use_save_title:
-                if save_title != '':
-                    graphtitle = f'ICC: {save_title}'
-
-            else:
-                graphtitle = f'ICC: {item}'
+        if title is not None:
+            graphtitle = title
 
         else:
             graphtitle = ''
@@ -15554,36 +15496,35 @@ class MFRM(Rasch):
                                      score_lines_item=[item, score_lines], score_labels=score_labels,
                                      central_diff=central_diff, cat_highlight=cat_highlight, y_label=ylabel,
                                      plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
-                                     axis_font_size=axis_font_size, labelsize=labelsize, plot_density=dpi,
-                                     file_format=file_format)
+                                     axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
+                                     plot_density=dpi, file_format=file_format)
 
         return plot
 
     def icc_thresholds(self,
-                  	   item,
-                  	   anchor=False,
-                  	   rater=None,
-                 	   obs=None,
-             	       warm=True,
-             	       xmin=-10,
-           	           xmax=10,
+                       item,
+                       anchor=False,
+                       rater=None,
+                       obs=None,
+                       warm=True,
+                       xmin=-10,
+                       xmax=10,
                        no_of_classes=5,
-         	           title=True,
-         	           thresh_lines=False,
-              	       score_lines=None,
-              	       score_labels=False,
-                  	   central_diff=False,
-                  	   cat_highlight=None,
-                  	   plot_style='colorblind',
-                  	   black=False,
-                  	   font='Times',
-                  	   title_font_size=15,
-                  	   axis_font_size=12,
-                  	   labelsize=12,
-                  	   save_title='',
-                       use_save_title=False,
-                  	   file_format='png',
-                  	   dpi=300):
+                       title=True,
+                       thresh_lines=False,
+                       score_lines=None,
+                       score_labels=False,
+                       central_diff=False,
+                       cat_highlight=None,
+                       plot_style='colorblind',
+                       black=False,
+                       font='Times',
+                       title_font_size=15,
+                       axis_font_size=12,
+                       labelsize=12,
+                       filename=None,
+                       file_format='png',
+                       dpi=300):
 
         '''
         Plots Item Characteristic Curve, with optional overplotting
@@ -15627,7 +15568,7 @@ class MFRM(Rasch):
                         self.person_abils_thresholds()
                     abilities = self.abils_thresholds
 
-            _, _, _, xobsdata, yobsdata = self.class_intervals(abilities, [item], no_of_classes=no_of_classes)
+            xobsdata, yobsdata = self.class_intervals(abilities, [item], no_of_classes=no_of_classes)
 
             xobsdata -= np.mean([severities[rater][1:].mean() for rater in self.raters])
             if rater is not None:
@@ -15645,13 +15586,8 @@ class MFRM(Rasch):
              for ability in abilities]
         y = np.array(y).reshape([len(abilities), 1])
 
-        if title:
-            if use_save_title:
-                if save_title != '':
-                    graphtitle = f'ICC: {save_title}'
-
-            else:
-                graphtitle = f'ICC: {item}'
+        if title is not None:
+            graphtitle = title
 
         else:
             graphtitle = ''
@@ -15664,8 +15600,8 @@ class MFRM(Rasch):
                                      score_lines_item=[item, score_lines], score_labels=score_labels,
                                      central_diff=central_diff, cat_highlight= cat_highlight, y_label=ylabel,
                                      plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
-                                     axis_font_size=axis_font_size, labelsize=labelsize, plot_density=dpi,
-                                     file_format=file_format)
+                                     axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
+                                     plot_density=dpi, file_format=file_format)
 
         return plot
 
@@ -15690,8 +15626,7 @@ class MFRM(Rasch):
                    title_font_size=15,
                    axis_font_size=12,
                    labelsize=12,
-                   save_title='',
-                   use_save_title=False,
+                   filename=None,
                    file_format='png',
                    dpi=300):
 
@@ -15737,7 +15672,7 @@ class MFRM(Rasch):
                         self.person_abils_matrix()
                     abilities = self.abils_matrix
 
-            _, _, _, xobsdata, yobsdata = self.class_intervals(abilities, [item], no_of_classes=no_of_classes)
+            xobsdata, yobsdata = self.class_intervals(abilities, [item], no_of_classes=no_of_classes)
 
             xobsdata -= np.mean([severities[rater][item][1:].mean() for rater in self.raters])
             if rater is not None:
@@ -15755,13 +15690,8 @@ class MFRM(Rasch):
              for ability in abilities]
         y = np.array(y).reshape([len(abilities), 1])
 
-        if title:
-            if use_save_title:
-                if save_title != '':
-                    graphtitle = f'ICC: {save_title}'
-
-            else:
-                graphtitle = f'ICC: {item}'
+        if title is not None:
+            graphtitle = title
 
         else:
             graphtitle = ''
@@ -15774,20 +15704,20 @@ class MFRM(Rasch):
                                      score_lines_item=[item, score_lines], score_labels=score_labels,
                                      central_diff=central_diff, cat_highlight= cat_highlight, y_label=ylabel,
                                      plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
-                                     axis_font_size=axis_font_size, labelsize=labelsize, plot_density=dpi,
-                                     file_format=file_format)
+                                     axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
+                                     plot_density=dpi, file_format=file_format)
 
         return plot
 
     def crcs_global(self,
-                    item,
+                    item=None,
                     anchor=False,
                     rater=None,
                     obs=None,
                     xmin=-10,
                     xmax=10,
                     no_of_classes=5,
-                    title=True,
+                    title=None,
                     thresh_lines=False,
                     central_diff=False,
                     cat_highlight=None,
@@ -15797,7 +15727,7 @@ class MFRM(Rasch):
                     title_font_size=15,
                     axis_font_size=12,
                     labelsize=12,
-                    save_title='',
+                    filename=None,
                     file_format='png',
                     dpi=300):
 
@@ -15839,7 +15769,7 @@ class MFRM(Rasch):
                     self.person_abils_global()
                 abilities = self.abils_global
 
-            xobsdata, yobsdata = self.class_intervals_cats(abilities, item=item, rater=rater,
+            xobsdata, yobsdata = self.class_intervals_cats(abilities, difficulties, severities, item=item, rater=rater,
                                                            no_of_classes=no_of_classes)
 
             xobsdata -= severities.mean()
@@ -15882,34 +15812,33 @@ class MFRM(Rasch):
                                for category in range(self.max_score + 1)]
                               for ability in abilities])
 
-        if title:
-            if rater is None:
-                graphtitle = f'Category response curves for item {item}'
-            else:
-                graphtitle = f'Category response curves for item {item}, rater {rater}'
+        if title is not None:
+            graphtitle = title
+
         else:
             graphtitle = ''
 
         ylabel = 'Probability'
 
-        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, raters=rater, x_min=xmin, x_max=xmax,
-                                     y_max=1, x_obs_data=xobsdata, y_obs_data=yobsdata, items=item, y_label=ylabel,
+        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, items=item, raters=rater, x_min=xmin,
+                                     x_max=xmax, y_max=1, x_obs_data=xobsdata, y_obs_data=yobsdata, y_label=ylabel,
                                      graph_title=graphtitle, obs=obs, thresh_lines=thresh_lines, plot_style=plot_style,
                                      central_diff=central_diff, cat_highlight=cat_highlight, black=black, font=font,
-                                     save_title=save_title, title_font_size=title_font_size, labelsize=labelsize,
-                                     axis_font_size=axis_font_size, plot_density=dpi, file_format=file_format)
+                                     title_font_size=title_font_size, labelsize=labelsize,
+                                     axis_font_size=axis_font_size, filename=filename, plot_density=dpi,
+                                     file_format=file_format)
 
         return plot
 
     def crcs_items(self,
-                   item,
+                   item=None,
                    anchor=False,
                    rater=None,
                    obs=None,
                    xmin=-10,
                    xmax=10,
                    no_of_classes=5,
-                   title=True,
+                   title=None,
                    thresh_lines=False,
                    central_diff=False,
                    cat_highlight=None,
@@ -15919,7 +15848,7 @@ class MFRM(Rasch):
                    title_font_size=15,
                    axis_font_size=12,
                    labelsize=12,
-                   save_title='',
+                   filename=None,
                    file_format='png',
                    dpi=300):
 
@@ -15965,7 +15894,7 @@ class MFRM(Rasch):
                         self.person_abils_items()
                     abilities = self.abils_items
 
-            _, _, _, xobsdata, yobsdata = self.class_intervals_cats(abilities, [item], no_of_classes=no_of_classes)
+            xobsdata, yobsdata = self.class_intervals_cats(abilities, [item], no_of_classes=no_of_classes)
 
             xobsdata -= np.mean([severities[rater][item] for rater in self.raters])
             if rater is not None:
@@ -15983,36 +15912,34 @@ class MFRM(Rasch):
                        for category in range(self.max_score + 1)]
                       for ability in abilities])
 
-        if title:
-            if rater is None:
-                graphtitle = f'Category response curves for item {item}'
-            else:
-                graphtitle = f'Category response curves for item {item}, rater {rater}'
+        if title is not None:
+            graphtitle = title
+
         else:
             graphtitle = ''
 
         ylabel = 'Probability'
 
-        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, raters=rater, x_min=xmin, x_max=xmax,
-                                     y_max=1, x_obs_data=xobsdata, y_obs_data=yobsdata, items=item, y_label=ylabel,
-                                     graph_title=graphtitle, obs=obs, thresh_lines=thresh_lines, plot_style=plot_style,
-                                     central_diff=central_diff, cat_highlight=cat_highlight, black=black, font=font,
-                                     save_title=save_title, title_font_size=title_font_size, labelsize=labelsize,
-                                     axis_font_size=axis_font_size, plot_density=dpi, file_format=file_format)
+        plot = self.plot_data_items(x_data=abilities, y_data=y, anchor=anchor, items=item, raters=rater, x_min=xmin,
+                                    x_max=xmax, y_max=1, x_obs_data=xobsdata, y_obs_data=yobsdata,y_label=ylabel,
+                                    graph_title=graphtitle, obs=obs, thresh_lines=thresh_lines, plot_style=plot_style,
+                                    central_diff=central_diff, cat_highlight=cat_highlight, black=black, font=font,
+                                    title_font_size=title_font_size, labelsize=labelsize, axis_font_size=axis_font_size,
+                                    filename=filename, plot_density=dpi, file_format=file_format)
 
         return plot
 
     def crcs_thresholds(self,
-                        item,
+                        item=None,
                         anchor=False,
                         rater=None,
                         obs=None,
                         xmin=-10,
                         xmax=10,
                         no_of_classes=5,
-                        title=True,
+                        title=None,
                         thresh_lines=False,
-                  	    central_diff=False,
+                        central_diff=False,
                         cat_highlight=None,
                         plot_style='colorblind',
                         black=False,
@@ -16020,7 +15947,7 @@ class MFRM(Rasch):
                         title_font_size=15,
                         axis_font_size=12,
                         labelsize=12,
-                        save_title='',
+                        filename=None,
                         file_format='png',
                         dpi=300):
 
@@ -16066,7 +15993,7 @@ class MFRM(Rasch):
                         self.person_abils_thresholds()
                     abilities = self.abils_thresholds
 
-            _, _, _, xobsdata, yobsdata = self.class_intervals_cats(abilities, [item], no_of_classes=no_of_classes)
+            xobsdata, yobsdata = self.class_intervals_cats(abilities, [item], no_of_classes=no_of_classes)
 
             xobsdata -= np.mean([severities[rater][1:].mean() for rater in self.raters])
             if rater is not None:
@@ -16085,36 +16012,35 @@ class MFRM(Rasch):
                        for category in range(self.max_score + 1)]
                       for ability in abilities])
 
-        if title:
-            if rater is None:
-                graphtitle = f'Category response curves for item {item}'
-            else:
-                graphtitle = f'Category response curves for item {item}, rater {rater}'
+        if title is not None:
+            graphtitle = title
+
         else:
             graphtitle = ''
 
         ylabel = 'Probability'
 
-        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, raters=rater, x_min=xmin, x_max=xmax,
-                                     y_max=1, x_obs_data=xobsdata, y_obs_data=yobsdata, items=item, y_label=ylabel,
-                                     graph_title=graphtitle, obs=obs, thresh_lines=thresh_lines, plot_style=plot_style,
-                                     central_diff=central_diff, cat_highlight=cat_highlight, black=black, font=font,
-                                     save_title=save_title, title_font_size=title_font_size, labelsize=labelsize,
-                                     axis_font_size=axis_font_size, plot_density=dpi, file_format=file_format)
+        plot = self.plot_data_thresholds(x_data=abilities, y_data=y, anchor=anchor, items=item, raters=rater,
+                                         x_min=xmin, x_max=xmax, y_max=1, x_obs_data=xobsdata, y_obs_data=yobsdata,
+                                         y_label=ylabel, graph_title=graphtitle, obs=obs, thresh_lines=thresh_lines,
+                                         plot_style=plot_style, central_diff=central_diff, cat_highlight=cat_highlight,
+                                         black=black, font=font, title_font_size=title_font_size, labelsize=labelsize,
+                                         axis_font_size=axis_font_size, filename=filename, plot_density=dpi,
+                                         file_format=file_format)
 
         return plot
 
     def crcs_matrix(self,
-                    item,
+                    item=None,
                     anchor=False,
                     rater=None,
                     obs=None,
                     xmin=-10,
                     xmax=10,
                     no_of_classes=5,
-                    title=True,
+                    title=None,
                     thresh_lines=False,
-                  	central_diff=False,
+                    central_diff=False,
                     cat_highlight=None,
                     plot_style='colorblind',
                     black=False,
@@ -16122,7 +16048,7 @@ class MFRM(Rasch):
                     title_font_size=15,
                     axis_font_size=12,
                     labelsize=12,
-                    save_title='',
+                    filename=None,
                     file_format='png',
                     dpi=300):
 
@@ -16168,7 +16094,7 @@ class MFRM(Rasch):
                         self.person_abils_matrix()
                     abilities = self.abils_matrix
 
-            _, _, _, xobsdata, yobsdata = self.class_intervals_cats(abilities, [item], no_of_classes=no_of_classes)
+            xobsdata, yobsdata = self.class_intervals_cats(abilities, [item], no_of_classes=no_of_classes)
 
             xobsdata -= np.mean([severities[rater][item][1:].mean() for rater in self.raters])
             if rater is not None:
@@ -16186,22 +16112,21 @@ class MFRM(Rasch):
                        for category in range(self.max_score + 1)]
                       for ability in abilities])
 
-        if title:
-            if rater is None:
-                graphtitle = f'Category response curves for item {item}'
-            else:
-                graphtitle = f'Category response curves for item {item}, rater {rater}'
+        if title is not None:
+            graphtitle = title
+
         else:
             graphtitle = ''
 
         ylabel = 'Probability'
 
-        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, raters=rater, x_min=xmin, x_max=xmax,
-                                     y_max=1, x_obs_data=xobsdata, y_obs_data=yobsdata, items=item, y_label=ylabel,
+        plot = self.plot_data_matrix(x_data=abilities, y_data=y, anchor=anchor, items=item, raters=rater, x_min=xmin,
+                                     x_max=xmax, y_max=1, x_obs_data=xobsdata, y_obs_data=yobsdata, y_label=ylabel,
                                      graph_title=graphtitle, obs=obs, thresh_lines=thresh_lines, plot_style=plot_style,
                                      central_diff=central_diff, cat_highlight=cat_highlight, black=black, font=font,
-                                     save_title=save_title, title_font_size=title_font_size, labelsize=labelsize,
-                                     axis_font_size=axis_font_size, plot_density=dpi, file_format=file_format)
+                                     title_font_size=title_font_size, labelsize=labelsize,
+                                     axis_font_size=axis_font_size, filename=filename, plot_density=dpi,
+                                     file_format=file_format)
 
         return plot
 
@@ -16214,7 +16139,7 @@ class MFRM(Rasch):
                              xmin=-10,
                              xmax=10,
                              no_of_classes=5,
-                             title=True,
+                             title=None,
                              thresh_lines=False,
                              central_diff=False,
                              cat_highlight=None,
@@ -16224,7 +16149,7 @@ class MFRM(Rasch):
                              title_font_size=15,
                              axis_font_size=12,
                              labelsize=12,
-                             save_title='',
+                             filename=None,
                              file_format='png',
                              dpi=300):
 
@@ -16296,26 +16221,20 @@ class MFRM(Rasch):
                        for threshold in adj_thresholds]
                       for ability in abilities])
 
-        if title:
-            if (item is None) & (rater is None):
-                graphtitle = f'Threshold characteristic curves'
-            elif (item is not None) & (rater is None):
-                graphtitle = f'Threshold characteristic curves for item {item}'
-            elif (item is None) & (rater is not None):
-                graphtitle = f'Threshold characteristic curves for rater {rater}'
-            else:
-                graphtitle = f'Threshold characteristic curves for item {item}, rater {rater}'
+        if title is not None:
+            graphtitle = title
+
         else:
             graphtitle = ''
 
         ylabel = 'Probability'
 
-        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, raters=rater, y_max=1, x_min=xmin,
-                                     x_max=xmax, items=item, warm=warm, x_obs_data=xobsdata, y_obs_data=yobsdata,
+        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, items=item, raters=rater, y_max=1,
+                                     x_min=xmin, x_max=xmax, warm=warm, x_obs_data=xobsdata, y_obs_data=yobsdata,
                                      graph_title=graphtitle, y_label=ylabel, thresh_obs=obs, thresh_lines=thresh_lines,
                                      central_diff=central_diff, cat_highlight=cat_highlight, plot_style=plot_style,
                                      black=black, font=font, title_font_size=title_font_size,
-                                     axis_font_size=axis_font_size, labelsize=labelsize, save_title=save_title,
+                                     axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
                                      file_format=file_format, plot_density=dpi)
 
         return plot
@@ -16329,7 +16248,7 @@ class MFRM(Rasch):
                             xmin=-10,
                             xmax=10,
                             no_of_classes=5,
-                            title=True,
+                            title=None,
                             thresh_lines=False,
                             central_diff=False,
                             cat_highlight=None,
@@ -16339,7 +16258,7 @@ class MFRM(Rasch):
                             title_font_size=15,
                             axis_font_size=12,
                             labelsize=12,
-                            save_title='',
+                            filename=None,
                             file_format='png',
                             dpi=300):
 
@@ -16386,7 +16305,7 @@ class MFRM(Rasch):
                         self.person_abils_items()
                     abilities = self.abils_items
 
-            _, _, _, xobsdata, yobsdata = self.class_intervals_thresholds(abilities, items, difficulties=difficulties,
+            xobsdata, yobsdata = self.class_intervals_thresholds(abilities, items, difficulties=difficulties,
                                                                           no_of_classes=no_of_classes)
 
             if item is not None:
@@ -16428,18 +16347,8 @@ class MFRM(Rasch):
                        for threshold in adj_thresholds]
                       for ability in abilities])
 
-        if title:
-            if item is None:
-                if rater is None:
-                    graphtitle = f'Threshold characteristic curves'
-                else:
-                    graphtitle = f'Threshold characteristic curves for rater {rater}'
-
-            else:
-                if rater is None:
-                    graphtitle = f'Threshold characteristic curves for item {item}'
-                else:
-                    graphtitle = f'Threshold characteristic curves for item {item}, rater {rater}'
+        if title is not None:
+            graphtitle = title
 
         else:
             graphtitle = ''
@@ -16451,7 +16360,7 @@ class MFRM(Rasch):
                                      graph_title=graphtitle, y_label=ylabel, thresh_obs=obs, thresh_lines=thresh_lines,
                                      central_diff=central_diff, cat_highlight=cat_highlight, plot_style=plot_style,
                                      black=black, font=font, title_font_size=title_font_size, labelsize=labelsize,
-                                     axis_font_size=axis_font_size, save_title=save_title, file_format=file_format,
+                                     axis_font_size=axis_font_size, filename=filename, file_format=file_format,
                                      plot_density=dpi)
 
         return plot
@@ -16465,7 +16374,7 @@ class MFRM(Rasch):
                                  xmin=-10,
                                  xmax=10,
                                  no_of_classes=5,
-                                 title=True,
+                                 title=None,
                                  thresh_lines=False,
                                  central_diff=False,
                                  cat_highlight=None,
@@ -16475,7 +16384,7 @@ class MFRM(Rasch):
                                  title_font_size=15,
                                  axis_font_size=12,
                                  labelsize=12,
-                                 save_title='',
+                                 filename=None,
                                  file_format='png',
                                  dpi=300):
 
@@ -16522,7 +16431,7 @@ class MFRM(Rasch):
                         self.person_abils_thresholds()
                     abilities = self.abils_thresholds
 
-            _, _, _, xobsdata, yobsdata = self.class_intervals_thresholds(abilities, items, difficulties=difficulties,
+            xobsdata, yobsdata = self.class_intervals_thresholds(abilities, items, difficulties=difficulties,
                                                                           no_of_classes=no_of_classes)
 
             yobsdata = yobsdata.T
@@ -16561,15 +16470,9 @@ class MFRM(Rasch):
                        for threshold in adj_thresholds]
                       for ability in abilities])
 
-        if title:
-            if (item is None) & (rater is None):
-                graphtitle = f'Threshold characteristic curves'
-            elif (item is not None) & (rater is None):
-                graphtitle = f'Threshold characteristic curves for item {item}'
-            elif (item is None) & (rater is not None):
-                graphtitle = f'Threshold characteristic curves for rater {rater}'
-            else:
-                graphtitle = f'Threshold characteristic curves for item {item}, rater {rater}'
+        if title is not None:
+            graphtitle = title
+
         else:
             graphtitle = ''
 
@@ -16580,7 +16483,7 @@ class MFRM(Rasch):
                                      graph_title=graphtitle, y_label=ylabel, thresh_obs=obs, thresh_lines=thresh_lines,
                                      central_diff=central_diff, cat_highlight=cat_highlight, plot_style=plot_style,
                                      black=black, font=font, title_font_size=title_font_size, labelsize=labelsize,
-                                     axis_font_size=axis_font_size, save_title=save_title, file_format=file_format,
+                                     axis_font_size=axis_font_size, filename=filename, file_format=file_format,
                                      plot_density=dpi)
 
         return plot
@@ -16594,7 +16497,7 @@ class MFRM(Rasch):
                              xmin=-10,
                              xmax=10,
                              no_of_classes=5,
-                             title=True,
+                             title=None,
                              thresh_lines=False,
                              central_diff=False,
                              cat_highlight=None,
@@ -16604,7 +16507,7 @@ class MFRM(Rasch):
                              title_font_size=15,
                              axis_font_size=12,
                              labelsize=12,
-                             save_title='',
+                             filename=None,
                              file_format='png',
                              dpi=300):
 
@@ -16651,7 +16554,7 @@ class MFRM(Rasch):
                         self.person_abils_matrix()
                     abilities = self.abils_matrix
 
-            _, _, _, xobsdata, yobsdata = self.class_intervals_thresholds(abilities, items, difficulties=difficulties,
+            xobsdata, yobsdata = self.class_intervals_thresholds(abilities, items, difficulties=difficulties,
                                                                           no_of_classes=no_of_classes)
 
             yobsdata = yobsdata.T
@@ -16693,15 +16596,9 @@ class MFRM(Rasch):
                        for threshold in adj_thresholds]
                       for ability in abilities])
 
-        if title:
-            if (item is None) & (rater is None):
-                graphtitle = f'Threshold characteristic curves'
-            elif (item is not None) & (rater is None):
-                graphtitle = f'Threshold characteristic curves for item {item}'
-            elif (item is None) & (rater is not None):
-                graphtitle = f'Threshold characteristic curves for rater {rater}'
-            else:
-                graphtitle = f'Threshold characteristic curves for item {item}, rater {rater}'
+        if title is not None:
+            graphtitle = title
+
         else:
             graphtitle = ''
 
@@ -16712,7 +16609,7 @@ class MFRM(Rasch):
                                      graph_title=graphtitle, y_label=ylabel, thresh_obs=obs, thresh_lines=thresh_lines,
                                      central_diff=central_diff, cat_highlight=cat_highlight, plot_style=plot_style,
                                      black=black, font=font, title_font_size=title_font_size, labelsize=labelsize,
-                                     axis_font_size=axis_font_size, save_title=save_title, file_format=file_format,
+                                     axis_font_size=axis_font_size, filename=filename, file_format=file_format,
                                      plot_density=dpi)
 
         return plot
@@ -16728,14 +16625,14 @@ class MFRM(Rasch):
                    point_info_lines=None,
                    point_info_labels=False,
                    cat_highlight=None,
-                   title=True,
+                   title=None,
                    plot_style='colorblind',
                    black=False,
                    font='Times',
                    title_font_size=15,
                    axis_font_size=12,
                    labelsize=12,
-                   save_title='',
+                   filename=None,
                    file_format='png',
                    dpi=300):
 
@@ -16769,8 +16666,9 @@ class MFRM(Rasch):
              for ability in abilities]
         y = np.array(y).reshape(len(abilities), 1)
 
-        if title:
-            graphtitle = f'Item information curve for item {item}'
+        if title is not None:
+            graphtitle = title
+
         else:
             graphtitle = ''
 
@@ -16781,7 +16679,7 @@ class MFRM(Rasch):
                                      point_info_lines_item=[item, point_info_lines], score_labels=point_info_labels,
                                      cat_highlight=cat_highlight, central_diff=central_diff, graph_title=graphtitle,
                                      y_label=ylabel, black=black, font=font, title_font_size=title_font_size,
-                                     axis_font_size=axis_font_size, labelsize=labelsize, save_title=save_title,
+                                     axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
                                      plot_density=dpi, file_format=file_format)
 
         return plot
@@ -16797,14 +16695,14 @@ class MFRM(Rasch):
                    point_info_lines=None,
                    point_info_labels=False,
                    cat_highlight=None,
-                   title=True,
+                   title=None,
                    plot_style='colorblind',
                    black=False,
                    font='Times',
                    title_font_size=15,
                    axis_font_size=12,
                    labelsize=12,
-                   save_title='',
+                   filename=None,
                    file_format='png',
                    dpi=300):
 
@@ -16837,8 +16735,9 @@ class MFRM(Rasch):
              for ability in abilities]
         y = np.array(y).reshape(len(abilities), 1)
 
-        if title:
-            graphtitle = f'Item information curve for item {item}'
+        if title is not None:
+            graphtitle = title
+
         else:
             graphtitle = ''
 
@@ -16849,7 +16748,7 @@ class MFRM(Rasch):
                                      point_info_lines_item=[item, point_info_lines], score_labels=point_info_labels,
                                      cat_highlight=cat_highlight, central_diff=central_diff, graph_title=graphtitle,
                                      y_label=ylabel, black=black, font=font, title_font_size=title_font_size,
-                                     axis_font_size=axis_font_size, labelsize=labelsize, save_title=save_title,
+                                     axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
                                      plot_density=dpi, file_format=file_format)
 
         return plot
@@ -16865,14 +16764,14 @@ class MFRM(Rasch):
                        point_info_lines=None,
                        point_info_labels=False,
                        cat_highlight=None,
-                       title=True,
+                       title=None,
                        plot_style='colorblind',
                        black=False,
                        font='Times',
                        title_font_size=15,
                        axis_font_size=12,
                        labelsize=12,
-                       save_title='',
+                       filename=None,
                        file_format='png',
                        dpi=300):
 
@@ -16905,8 +16804,9 @@ class MFRM(Rasch):
              for ability in abilities]
         y = np.array(y).reshape(len(abilities), 1)
 
-        if title:
-            graphtitle = f'Item information curve for item {item}'
+        if title is not None:
+            graphtitle = title
+
         else:
             graphtitle = ''
 
@@ -16917,7 +16817,7 @@ class MFRM(Rasch):
                                      point_info_lines_item=[item, point_info_lines], score_labels=point_info_labels,
                                      cat_highlight=cat_highlight, central_diff=central_diff, graph_title=graphtitle,
                                      y_label=ylabel, black=black, font=font, title_font_size=title_font_size,
-                                     axis_font_size=axis_font_size, labelsize=labelsize, save_title=save_title,
+                                     axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
                                      plot_density=dpi, file_format=file_format)
 
         return plot
@@ -16933,14 +16833,14 @@ class MFRM(Rasch):
                    point_info_lines=None,
                    point_info_labels=False,
                    cat_highlight=None,
-                   title=True,
+                   title=None,
                    plot_style='colorblind',
                    black=False,
                    font='Times',
                    title_font_size=15,
                    axis_font_size=12,
                    labelsize=12,
-                   save_title='',
+                   filename=None,
                    file_format='png',
                    dpi=300):
 
@@ -16974,8 +16874,9 @@ class MFRM(Rasch):
              for ability in abilities]
         y = np.array(y).reshape(len(abilities), 1)
 
-        if title:
-            graphtitle = f'Item information curve for item {item}'
+        if title is not None:
+            graphtitle = title
+
         else:
             graphtitle = ''
 
@@ -16986,7 +16887,7 @@ class MFRM(Rasch):
                                      point_info_lines_item=[item, point_info_lines], score_labels=point_info_labels,
                                      cat_highlight=cat_highlight, central_diff=central_diff, graph_title=graphtitle,
                                      y_label=ylabel, black=black, font=font, title_font_size=title_font_size,
-                                     axis_font_size=axis_font_size, labelsize=labelsize, save_title=save_title,
+                                     axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
                                      plot_density=dpi, file_format=file_format)
 
         return plot
@@ -16999,8 +16900,8 @@ class MFRM(Rasch):
                    xmin=-10,
                    xmax=10,
                    no_of_classes=5,
-                   title=True,
-                   score_lines=[],
+                   title=None,
+                   score_lines=None,
                    score_labels=False,
                    plot_style='colorblind',
                    black=False,
@@ -17008,7 +16909,7 @@ class MFRM(Rasch):
                    title_font_size=15,
                    axis_font_size=12,
                    labelsize=12,
-                   save_title='',
+                   filename=None,
                    file_format='png',
                    dpi=300):
 
@@ -17056,8 +16957,8 @@ class MFRM(Rasch):
                     self.person_abils_global()
                 abilities = self.abils_global
 
-            _, _, _, xobsdata, yobsdata = self.class_intervals(abilities, items=items, raters=raters,
-                                                               no_of_classes=no_of_classes)
+            xobsdata, yobsdata = self.class_intervals(abilities, items=items, raters=raters,
+                                                      no_of_classes=no_of_classes)
 
             yobsdata = np.array(yobsdata).reshape((-1, 1))
 
@@ -17136,8 +17037,9 @@ class MFRM(Rasch):
 
         y_max = self.max_score * no_of_items * no_of_raters
 
-        if title:
-            graphtitle = 'Test characteristic curve'
+        if title is not None:
+            graphtitle = title
+
         else:
             graphtitle = ''
 
@@ -17148,7 +17050,7 @@ class MFRM(Rasch):
                                      score_lines_test=score_lines, score_labels=score_labels, graph_title=graphtitle,
                                      y_label=ylabel, obs=obs, plot_style=plot_style, black=black, font=font,
                                      title_font_size=title_font_size, axis_font_size=axis_font_size, labelsize=labelsize,
-                                     save_title=save_title, plot_density=dpi, file_format=file_format)
+                                     filename=filename, plot_density=dpi, file_format=file_format)
 
         return plot
 
@@ -17159,8 +17061,8 @@ class MFRM(Rasch):
                   xmin=-10,
                   xmax=10,
                   no_of_classes=5,
-                  title=True,
-                  score_lines=[],
+                  title=None,
+                  score_lines=None,
                   score_labels=False,
                   plot_style='colorblind',
                   black=False,
@@ -17168,7 +17070,7 @@ class MFRM(Rasch):
                   title_font_size=15,
                   axis_font_size=12,
                   labelsize=12,
-                  save_title='',
+                  filename=None,
                   file_format='png',
                   dpi=300):
 
@@ -17207,7 +17109,7 @@ class MFRM(Rasch):
                     self.person_abils_items()
                 abilities = self.abils_items
 
-            _, _, _, xobsdata, yobsdata = self.class_intervals(abilities, self.dataframe.columns,
+            xobsdata, yobsdata = self.class_intervals(abilities, self.dataframe.columns,
                                                                no_of_classes=no_of_classes)
 
             xobsdata -= np.mean([np.mean([severities[rater][item] for rater in self.raters])
@@ -17229,8 +17131,9 @@ class MFRM(Rasch):
 
         y_max = self.max_score * len(items) * len(raters)
 
-        if title:
-            graphtitle = 'Test characteristic curve'
+        if title is not None:
+            graphtitle = title
+
         else:
             graphtitle = ''
 
@@ -17241,7 +17144,7 @@ class MFRM(Rasch):
                                      score_lines_test=score_lines, score_labels=score_labels, graph_title=graphtitle,
                                      y_label=ylabel, obs=obs, plot_style=plot_style, black=black, font=font,
                                      title_font_size=title_font_size, axis_font_size=axis_font_size, labelsize=labelsize,
-                                     save_title=save_title, plot_density=dpi, file_format=file_format)
+                                     filename=filename, plot_density=dpi, file_format=file_format)
 
         return plot
 
@@ -17252,8 +17155,8 @@ class MFRM(Rasch):
                        xmin=-10,
                        xmax=10,
                        no_of_classes=5,
-                       title=True,
-                       score_lines=[],
+                       title=None,
+                       score_lines=None,
                        score_labels=False,
                        plot_style='colorblind',
                        black=False,
@@ -17261,7 +17164,7 @@ class MFRM(Rasch):
                        title_font_size=15,
                        axis_font_size=12,
                        labelsize=12,
-                       save_title='',
+                       filename=None,
                        file_format='png',
                        dpi=300):
 
@@ -17300,7 +17203,7 @@ class MFRM(Rasch):
                     self.person_abils_thresholds()
                 abilities = self.abils_thresholds
 
-            _, _, _, xobsdata, yobsdata = self.class_intervals(abilities, self.dataframe.columns,
+            xobsdata, yobsdata = self.class_intervals(abilities, self.dataframe.columns,
                                                                no_of_classes=no_of_classes)
 
             xobsdata -= np.mean([severities[rater][1:].mean() for rater in self.raters])
@@ -17321,8 +17224,9 @@ class MFRM(Rasch):
 
         y_max = self.max_score * len(items) * len(raters)
 
-        if title:
-            graphtitle = 'Test characteristic curve'
+        if title is not None:
+            graphtitle = title
+
         else:
             graphtitle = ''
 
@@ -17333,7 +17237,7 @@ class MFRM(Rasch):
                                      score_lines_test=score_lines, score_labels=score_labels, graph_title=graphtitle,
                                      y_label=ylabel, obs=obs, plot_style=plot_style, black=black, font=font,
                                      title_font_size=title_font_size, axis_font_size=axis_font_size, labelsize=labelsize,
-                                     save_title=save_title, plot_density=dpi, file_format=file_format)
+                                     filename=filename, plot_density=dpi, file_format=file_format)
 
         return plot
 
@@ -17344,8 +17248,8 @@ class MFRM(Rasch):
                    xmin=-10,
                    xmax=10,
                    no_of_classes=5,
-                   title=True,
-                   score_lines=[],
+                   title=None,
+                   score_lines=None,
                    score_labels=False,
                    plot_style='colorblind',
                    black=False,
@@ -17353,7 +17257,7 @@ class MFRM(Rasch):
                    title_font_size=15,
                    axis_font_size=12,
                    labelsize=12,
-                   save_title='',
+                   filename=None,
                    file_format='png',
                    dpi=300):
 
@@ -17393,7 +17297,7 @@ class MFRM(Rasch):
                     self.person_abils_matrix()
                 abilities = self.abils_matrix
 
-            _, _, _, xobsdata, yobsdata = self.class_intervals(abilities, self.dataframe.columns,
+            xobsdata, yobsdata = self.class_intervals(abilities, self.dataframe.columns,
                                                                no_of_classes=no_of_classes)
 
             xobsdata -= np.mean([np.mean([severities[rater][item][1:].mean() for rater in self.raters])
@@ -17415,8 +17319,9 @@ class MFRM(Rasch):
 
         y_max = self.max_score * len(items) * len(raters)
 
-        if title:
-            graphtitle = 'Test characteristic curve'
+        if title is not None:
+            graphtitle = title
+
         else:
             graphtitle = ''
 
@@ -17427,7 +17332,7 @@ class MFRM(Rasch):
                                      score_lines_test=score_lines, score_labels=score_labels, graph_title=graphtitle,
                                      y_label=ylabel, obs=obs, plot_style=plot_style, black=black, font=font,
                                      title_font_size=title_font_size, axis_font_size=axis_font_size, labelsize=labelsize,
-                                     save_title=save_title, plot_density=dpi, file_format=file_format)
+                                     filename=filename, plot_density=dpi, file_format=file_format)
 
         return plot
 
@@ -17440,14 +17345,14 @@ class MFRM(Rasch):
                          xmin=-10,
                          xmax=10,
                          ymax=None,
-                         title=True,
+                         title=None,
                          plot_style='colorblind',
                          black=False,
                          font='Times',
                          title_font_size=15,
                          axis_font_size=12,
                          labelsize=12,
-                         save_title='',
+                         filename=None,
                          file_format='png',
                          dpi=300):
 
@@ -17520,8 +17425,9 @@ class MFRM(Rasch):
         if ymax is None:
             ymax = max(y) * 1.1
 
-        if title:
-            graphtitle = 'Test information curve'
+        if title is not None:
+            graphtitle = title
+
         else:
             graphtitle = ''
 
@@ -17531,7 +17437,7 @@ class MFRM(Rasch):
                                      x_max=xmax, y_max=ymax, point_info_lines_test=point_info_lines,
                                      score_labels=point_info_labels, graph_title=graphtitle, y_label=ylabel,
                                      plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
-                                     axis_font_size=axis_font_size, labelsize=labelsize, save_title=save_title,
+                                     axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
                                      plot_density=dpi, file_format=file_format)
 
         return plot
@@ -17545,14 +17451,14 @@ class MFRM(Rasch):
                         xmin=-10,
                         xmax=10,
                         ymax=None,
-                        title=True,
+                        title=None,
                         plot_style='colorblind',
                         black=False,
                         font='Times',
                         title_font_size=15,
                         axis_font_size=12,
                         labelsize=12,
-                        save_title='',
+                        filename=None,
                         file_format='png',
                         dpi=300):
 
@@ -17586,8 +17492,9 @@ class MFRM(Rasch):
         if ymax is None:
             ymax = max(y) * 1.1
 
-        if title:
-            graphtitle = 'Test information curve'
+        if title is not None:
+            graphtitle = title
+
         else:
             graphtitle = ''
 
@@ -17597,7 +17504,7 @@ class MFRM(Rasch):
                                      x_max=xmax, y_max=ymax, point_info_lines_test=point_info_lines,
                                      score_labels=point_info_labels, graph_title=graphtitle, y_label=ylabel,
                                      plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
-                                     axis_font_size=axis_font_size, labelsize=labelsize, save_title=save_title,
+                                     axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
                                      plot_density=dpi, file_format=file_format)
 
         return plot
@@ -17611,14 +17518,14 @@ class MFRM(Rasch):
                              xmin=-10,
                              xmax=10,
                              ymax=None,
-                             title=True,
+                             title=None,
                              plot_style='colorblind',
                              black=False,
                              font='Times',
                              title_font_size=15,
                              axis_font_size=12,
                              labelsize=12,
-                             save_title='',
+                             filename=None,
                              file_format='png',
                              dpi=300):
 
@@ -17652,8 +17559,9 @@ class MFRM(Rasch):
         if ymax is None:
             ymax = max(y) * 1.1
 
-        if title:
-            graphtitle = 'Test information curve'
+        if title is not None:
+            graphtitle = title
+
         else:
             graphtitle = ''
 
@@ -17663,7 +17571,7 @@ class MFRM(Rasch):
                                          x_min=xmin, x_max=xmax, y_max=ymax, point_info_lines_test=point_info_lines,
                                          score_labels=point_info_labels, graph_title=graphtitle, y_label=ylabel,
                                          plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
-                                         axis_font_size=axis_font_size, labelsize=labelsize, save_title=save_title,
+                                         axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
                                          plot_density=dpi, file_format=file_format)
 
         return plot
@@ -17677,14 +17585,14 @@ class MFRM(Rasch):
                          xmin=-10,
                          xmax=10,
                          ymax=None,
-                         title=True,
+                         title=None,
                          plot_style='colorblind',
                          black=False,
                          font='Times',
                          title_font_size=15,
                          axis_font_size=12,
                          labelsize=12,
-                         save_title='',
+                         filename=None,
                          file_format='png',
                          dpi=300):
 
@@ -17719,18 +17627,17 @@ class MFRM(Rasch):
         if ymax is None:
             ymax = max(y) * 1.1
 
-        if title:
-            graphtitle = 'Test information curve'
+        if title is not None:
+            graphtitle = title
+
         else:
             graphtitle = ''
-
-        ylabel = 'Fisher information'
 
         plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, items=items, raters=raters, x_min=xmin,
                                      x_max=xmax, y_max=ymax, point_info_lines_test=point_info_lines,
                                      score_labels=point_info_labels, graph_title=graphtitle, y_label=ylabel,
                                      plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
-                                     axis_font_size=axis_font_size, labelsize=labelsize, save_title=save_title,
+                                     axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
                                      plot_density=dpi, file_format=file_format)
 
         return plot
@@ -17744,14 +17651,14 @@ class MFRM(Rasch):
                          xmin=-10,
                          xmax=10,
                          ymax=5,
-                         title=True,
+                         title=None,
                          plot_style='colorblind',
                          black=False,
                          font='Times',
                          title_font_size=15,
                          axis_font_size=12,
                          labelsize=12,
-                         save_title='',
+                         filename=None,
                          file_format='png',
                          dpi=300):
 
@@ -17823,8 +17730,9 @@ class MFRM(Rasch):
         y = 1 / np.sqrt(y)
         y = y.reshape(len(abilities), 1)
 
-        if title:
-            graphtitle = 'Test conditional SEM curve'
+        if title is not None:
+            graphtitle = title
+
         else:
             graphtitle = ''
 
@@ -17834,7 +17742,7 @@ class MFRM(Rasch):
                                      x_min=xmin, x_max=xmax, y_max=ymax, point_csem_lines=point_csem_lines,
                                      score_labels=point_csem_labels, graph_title=graphtitle, y_label=ylabel,
                                      plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
-                                     axis_font_size=axis_font_size, labelsize=labelsize, save_title=save_title,
+                                     axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
                                      plot_density=dpi, file_format=file_format)
 
         return plot
@@ -17848,14 +17756,14 @@ class MFRM(Rasch):
                         xmin=-10,
                         xmax=10,
                         ymax=5,
-                        title=True,
+                        title=None,
                         plot_style='colorblind',
                         black=False,
                         font='Times',
                         title_font_size=15,
                         axis_font_size=12,
                         labelsize=12,
-                        save_title='',
+                        filename=None,
                         file_format='png',
                         dpi=300):
 
@@ -17890,8 +17798,9 @@ class MFRM(Rasch):
         y = 1 / np.sqrt(y)
         y = y.reshape(len(abilities), 1)
 
-        if title:
-            graphtitle = 'Test conditional SEM curve'
+        if title is not None:
+            graphtitle = title
+
         else:
             graphtitle = ''
 
@@ -17901,7 +17810,7 @@ class MFRM(Rasch):
                                     x_min=xmin, x_max=xmax, y_max=ymax, point_csem_lines=point_csem_lines,
                                     score_labels=point_csem_labels, graph_title=graphtitle, y_label=ylabel,
                                     plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
-                                    axis_font_size=axis_font_size, labelsize=labelsize, save_title=save_title,
+                                    axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
                                     plot_density=dpi, file_format=file_format)
 
         return plot
@@ -17915,14 +17824,14 @@ class MFRM(Rasch):
                              xmin=-10,
                              xmax=10,
                              ymax=5,
-                             title=True,
+                             title=None,
                              plot_style='colorblind',
                              black=False,
                              font='Times',
                              title_font_size=15,
                              axis_font_size=12,
                              labelsize=12,
-                             save_title='',
+                             filename=None,
                              file_format='png',
                              dpi=300):
 
@@ -17957,8 +17866,9 @@ class MFRM(Rasch):
         y = 1 / np.sqrt(y)
         y = y.reshape(len(abilities), 1)
 
-        if title:
-            graphtitle = 'Test conditional SEM curve'
+        if title is not None:
+            graphtitle = title
+
         else:
             graphtitle = ''
 
@@ -17968,7 +17878,7 @@ class MFRM(Rasch):
                                          x_min=xmin, x_max=xmax, y_max=ymax, point_csem_lines=point_csem_lines,
                                          score_labels=point_csem_labels, graph_title=graphtitle, y_label=ylabel,
                                          plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
-                                         axis_font_size=axis_font_size, labelsize=labelsize, save_title=save_title,
+                                         axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
                                          plot_density=dpi, file_format=file_format)
 
         return plot
@@ -17982,14 +17892,14 @@ class MFRM(Rasch):
                          xmin=-10,
                          xmax=10,
                          ymax=5,
-                         title=True,
+                         title=None,
                          plot_style='colorblind',
                          black=False,
                          font='Times',
                          title_font_size=15,
                          axis_font_size=12,
                          labelsize=12,
-                         save_title='',
+                         filename=None,
                          file_format='png',
                          dpi=300):
 
@@ -18025,8 +17935,9 @@ class MFRM(Rasch):
         y = 1 / np.sqrt(y)
         y = y.reshape(len(abilities), 1)
 
-        if title:
-            graphtitle = 'Test conditional SEM curve'
+        if title is not None:
+            graphtitle = title
+
         else:
             graphtitle = ''
 
@@ -18036,7 +17947,7 @@ class MFRM(Rasch):
                                      x_min=xmin, x_max=xmax, y_max=ymax, point_csem_lines=point_csem_lines,
                                      score_labels=point_csem_labels, graph_title=graphtitle, y_label=ylabel,
                                      plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
-                                     axis_font_size=axis_font_size, labelsize=labelsize, save_title=save_title,
+                                     axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
                                      plot_density=dpi, file_format=file_format)
 
         return plot
@@ -18048,7 +17959,7 @@ class MFRM(Rasch):
                                   x_min=-6,
                                   x_max=6,
                                   normal=False,
-                                  title=True,
+                                  title=None,
                                   plot_style='colorblind',
                                   font='Times',
                                   title_font_size=15,
@@ -18089,15 +18000,14 @@ class MFRM(Rasch):
                                  x_min=-6,
                                  x_max=6,
                                  normal=False,
-                                 title=True,
+                                 title=None,
                                  plot_style='colorblind',
                                  font='Times',
                                  title_font_size=15,
                                  axis_font_size=12,
                                  labelsize=12,
-                                 save_title='',
+                                 filename=None,
                                  file_format='png',
-                                 tex=True,
                                  plot_density=300):
 
         '''
@@ -18112,8 +18022,8 @@ class MFRM(Rasch):
 
         plot = self.std_residuals_hist(std_residual_list, bin_width=bin_width, x_min=x_min, x_max=x_max, normal=normal,
                                        title=title, plot_style=plot_style, font=font, title_font_size=title_font_size,
-                                       axis_font_size=axis_font_size, labelsize=labelsize, save_title=save_title,
-                                       file_format=file_format, tex=tex, plot_density=plot_density)
+                                       axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
+                                       file_format=file_format, plot_density=plot_density)
 
         return plot
 
@@ -18123,15 +18033,14 @@ class MFRM(Rasch):
                                       x_min=-6,
                                       x_max=6,
                                       normal=False,
-                                      title=True,
+                                      title=None,
                                       plot_style='colorblind',
                                       font='Times',
                                       title_font_size=15,
                                       axis_font_size=12,
                                       labelsize=12,
-                                      save_title='',
+                                      filename=None,
                                       file_format='png',
-                                      tex=True,
                                       plot_density=300):
 
         if rater is None:
@@ -18142,8 +18051,8 @@ class MFRM(Rasch):
 
         plot = self.std_residuals_hist(std_residual_list, bin_width=bin_width, x_min=x_min, x_max=x_max, normal=normal,
                                        title=title, plot_style=plot_style, font=font, title_font_size=title_font_size,
-                                       axis_font_size=axis_font_size, labelsize=labelsize, save_title=save_title,
-                                       file_format=file_format, tex=tex, plot_density=plot_density)
+                                       axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
+                                       file_format=file_format, plot_density=plot_density)
 
         return plot
 
@@ -18153,15 +18062,14 @@ class MFRM(Rasch):
                                   x_min=-6,
                                   x_max=6,
                                   normal=False,
-                                  title=True,
+                                  title=None,
                                   plot_style='colorblind',
                                   font='Times',
                                   title_font_size=15,
                                   axis_font_size=12,
                                   labelsize=12,
-                                  save_title='',
+                                  filename=None,
                                   file_format='png',
-                                  tex=True,
                                   plot_density=300):
 
         if rater is None:
@@ -18172,8 +18080,8 @@ class MFRM(Rasch):
 
         plot = self.std_residuals_hist(std_residual_list, bin_width=bin_width, x_min=x_min, x_max=x_max, normal=normal,
                                        title=title, plot_style=plot_style, font=font, title_font_size=title_font_size,
-                                       axis_font_size=axis_font_size, labelsize=labelsize, save_title=save_title,
-                                       file_format=file_format, tex=tex, plot_density=plot_density)
+                                       axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
+                                       file_format=file_format, plot_density=plot_density)
 
         return plot
 
@@ -19014,7 +18922,7 @@ class MFRM_Sim_Items(MFRM_Sim):
 
         self.items = [f'Item_{item + 1}' for item in range(self.no_of_items)]
         self.raters = [f'Rater_{rater + 1}' for rater in range(self.no_of_raters)]
-        self.persons = [f'Person_{item + 1}' for person in range(self.no_of_persons)]
+        self.persons = [f'Person_{person + 1}' for person in range(self.no_of_persons)]
         
         '''
         Calculates probability of a response in each category
