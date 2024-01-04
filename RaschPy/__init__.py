@@ -472,6 +472,9 @@ class Rasch:
         if old not in self.dataframe.columns:
             print(f'Old item name "{old}" not found in data. Please check')
 
+        if isinstance(new, str) == False:
+            print('Item names must be strings')
+
         else:
             self.dataframe.rename(columns={old: new},
                                   inplace=True)
@@ -504,6 +507,9 @@ class Rasch:
         if old not in self.dataframe.index:
             print(f'Old person name "{old}" not found in data. Please check')
 
+        if isinstance(new, str) == False:
+            print('Person names must be strings')
+
         else:
             self.dataframe.rename(index={old: new},
                                   inplace=True)
@@ -514,10 +520,13 @@ class Rasch:
         list_length = len(new_names)
 
         if len(new_names) != len(set(new_names)):
-            print('List of new rater names contains duplicates. Please ensure all raters have unique names')
+            print('List of new person names contains duplicates. Please ensure all raters have unique names')
 
         elif list_length != self.no_of_persons:
-            print(f'Incorrect number of rater names. {list_length} in list, {self.no_of_persons} raters in data.')
+            print(f'Incorrect number of person names. {list_length} in list, {self.no_of_persons} raters in data.')
+
+        if all(isinstance(name, str) for name in new_names) == False:
+            print('Person names must be strings')
 
         else:
             self.dataframe.rename(index={old: new
@@ -1297,7 +1306,7 @@ class SLM(Rasch):
     def item_stats_df(self,
                       full=False,
                       zstd=False,
-                      discrim=False,
+                      disc=False,
                       point_measure_corr=False,
                       dp=3,
                       warm_corr=True,
@@ -1311,7 +1320,7 @@ class SLM(Rasch):
 
         if full:
             zstd = True
-            discrim=True
+            disc=True
             point_measure_corr = True
 
             if interval is None:
@@ -1344,7 +1353,7 @@ class SLM(Rasch):
         if zstd:
             self.item_stats['Outfit Z'] = self.item_outfit_zstd.to_numpy().round(dp)
 
-        if discrim:
+        if disc:
             self.item_stats['Discrim'] = self.discrimination.to_numpy().round(dp)
 
         if point_measure_corr:
@@ -1645,14 +1654,14 @@ class SLM(Rasch):
                   y_obs_data=np.array([]),
                   thresh_line=False,
                   score_lines_item=[None, []],
-                  score_lines_test=[],
+                  score_lines_test=None,
                   point_info_lines_item=[None, []],
-                  point_info_lines_test=[],
-                  point_csem_lines=[],
+                  point_info_lines_test=None,
+                  point_csem_lines=None,
                   score_labels=False,
                   point_info_labels=False,
                   warm=True,
-                  cat_highlight=-1,
+                  cat_highlight=None,
                   graph_title='',
                   y_label='',
                   plot_style='colorblind',
@@ -1705,7 +1714,7 @@ class SLM(Rasch):
         if thresh_line:
             plt.axvline(x=self.diffs.loc[items], color='darkred', linestyle='--')
 
-        if score_lines_item[1] != []:
+        if score_lines_item[1] is not None:
 
             if (all(x > 0 for x in score_lines_item[1]) &
                 all(x < 1 for x in score_lines_item[1])):
@@ -1724,7 +1733,7 @@ class SLM(Rasch):
             else:
                 print('Invalid score for score line.')
 
-        if score_lines_test != []:
+        if score_lines_test is not None:
 
             if (all(x > 0 for x in score_lines_test) &
                 all(x < len(difficulties) for x in score_lines_test)):
@@ -1743,11 +1752,12 @@ class SLM(Rasch):
             else:
                 print('Invalid score for score line.')
 
-        if point_info_lines_item[1] != []:
+        if point_info_lines_item[1] is not None:
 
             item = point_info_lines_item[0]
 
-            info_set = [self.variance(ability, self.diffs[item]) for ability in point_info_lines_item[1]]
+            info_set = [self.variance(ability, self.diffs[item])
+                        for ability in point_info_lines_item[1]]
 
             for abil, info in zip(point_info_lines_item[1], info_set):
                 plt.vlines(x=abil, ymin=-100, ymax=info, color='black', linestyles='dashed')
@@ -1757,9 +1767,10 @@ class SLM(Rasch):
                 if point_info_labels:
                     plt.text(x_min + (x_max - x_min) / 100, info + y_max / 50, str(round(info, 3)))
 
-        if point_info_lines_test != []:
+        if point_info_lines_test is not None:
 
-            info_set = [sum(self.variance(ability, difficulty) for difficulty in difficulties)
+            info_set = [sum(self.variance(ability, difficulty)
+                            for difficulty in difficulties)
                         for ability in point_info_lines_test]
 
             for abil, info in zip(point_info_lines_test, info_set):
@@ -1770,9 +1781,10 @@ class SLM(Rasch):
                 if point_info_labels:
                     plt.text(x_min + (x_max - x_min) / 100, info + y_max / 50, str(round(info, 3)))
 
-        if point_csem_lines != []:
+        if point_csem_lines is not None:
 
-            info_set = [sum(self.variance(ability, difficulty) for difficulty in difficulties)
+            info_set = [sum(self.variance(ability, difficulty)
+                            for difficulty in difficulties)
                         for ability in point_csem_lines]
             info_set = np.array(info_set)
             csem_set = 1 / np.sqrt(info_set)
@@ -1821,9 +1833,9 @@ class SLM(Rasch):
             no_of_classes=5,
             title=None,
             thresh_line=False,
-            score_lines=[],
+            score_lines=None,
             score_labels=False,
-            cat_highlight=-1,
+            cat_highlight=None,
             plot_style='dark-palette',
             black=False,
             font='Times',
@@ -1883,7 +1895,7 @@ class SLM(Rasch):
              no_of_classes=5,
              title=None,
              thresh_line=False,
-             cat_highlight=-1,
+             cat_highlight=None,
              plot_style='colorblind',
              black=False,
              font='Times',
@@ -1949,9 +1961,9 @@ class SLM(Rasch):
             ymax=None,
             title=None,
             thresh_line=False,
-            point_info_lines=[],
+            point_info_lines=None,
             point_info_labels=False,
-            cat_highlight=-1,
+            cat_highlight=None,
             plot_style='colorblind',
             black=False,
             font='Times',
@@ -1999,7 +2011,7 @@ class SLM(Rasch):
             xmax=5,
             no_of_classes=5,
             title=None,
-            score_lines=[],
+            score_lines=None,
             score_labels=False,
             plot_style='colorblind',
             black=False,
@@ -2024,7 +2036,8 @@ class SLM(Rasch):
         else:
             difficulties = self.diffs.loc[items]
 
-        y = [sum(self.exp_score(ability, difficulties[item]) for item in items)
+        y = [sum(self.exp_score(ability, difficulties[item])
+                 for item in items)
              for ability in abilities]
         y = np.array(y).reshape(len(abilities), 1)
 
@@ -2053,7 +2066,7 @@ class SLM(Rasch):
 
         plot = self.plot_data(x_data=abilities, y_data=y, items=items, x_obs_data=xobsdata, y_obs_data=yobsdata,
                               x_min=xmin, x_max=xmax, y_max=len(items), score_lines_test=score_lines,
-                              graph_title=graphtitle, y_label=ylabel, obs=obs,score_labels=score_labels,
+                              graph_title=graphtitle, y_label=ylabel, obs=obs, score_labels=score_labels,
                               plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
                               axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
                               plot_density=dpi, file_format=file_format)
@@ -2062,7 +2075,7 @@ class SLM(Rasch):
 
     def test_info(self,
                   items=None,
-                  point_info_lines=[],
+                  point_info_lines=None,
                   point_info_labels=False,
                   xmin=-5,
                   xmax=5,
@@ -2115,7 +2128,7 @@ class SLM(Rasch):
 
     def test_csem(self,
                   items=None,
-                  point_csem_lines=[],
+                  point_csem_lines=None,
                   point_csem_labels=False,
                   xmin=-5,
                   xmax=5,
@@ -3459,9 +3472,6 @@ class PCM(Rasch):
         if zstd:
             self.item_stats['Outfit Z'] = self.item_outfit_zstd.to_numpy().round(dp)
 
-        #sq_residuals = self.residual_df ** 2
-        #self.item_stats['RMSR'] = np.sqrt(sq_residuals.mean(axis = 0)).to_numpy().round(dp)
-
         if point_measure_corr:
             self.item_stats['PM corr'] = self.point_measure.to_numpy().round(dp)
             self.item_stats['Exp PM corr'] = self.exp_point_measure.to_numpy().round(dp)
@@ -3515,8 +3525,6 @@ class PCM(Rasch):
         self.threshold_stats_uncentred['Infit Z'] = self.threshold_infit_zstd.to_numpy().round(dp)
         self.threshold_stats_uncentred['Outfit MS'] = self.threshold_outfit_ms.to_numpy().round(dp)
         self.threshold_stats_uncentred['Outfit Z'] = self.threshold_outfit_zstd.to_numpy().round(dp)
-
-        #self.threshold_stats_uncentred['RMSR'] = self.threshold_rmsr.to_numpy().round(dp)
 
         if disc:
             self.threshold_stats_uncentred['Discrim'] = self.threshold_discrimination.to_numpy().round(dp)
@@ -3951,7 +3959,7 @@ class PCM(Rasch):
                   point_csem_lines=[],
                   score_labels=False,
                   warm=True,
-                  cat_highlight=-1,
+                  cat_highlight=None,
                   graph_title='',
                   y_label='',
                   plot_style='colorblind',
@@ -4156,7 +4164,7 @@ class PCM(Rasch):
             central_diff=False,
             score_lines=[],
             score_labels=False,
-            cat_highlight=-1,
+            cat_highlight=None,
             plot_style='colorblind',
             black=False,
             font='Times',
@@ -4224,7 +4232,7 @@ class PCM(Rasch):
              title=True,
              thresh_lines=False,
              central_diff=False,
-             cat_highlight=-1,
+             cat_highlight=None,
              plot_style='colorblind',
              black=False,
              font='Times',
@@ -4292,7 +4300,7 @@ class PCM(Rasch):
                       title=True,
                       thresh_lines=False,
                       central_diff=False,
-                      cat_highlight=-1,
+                      cat_highlight=None,
                       plot_style='colorblind',
                       black=False,
                       font='Times',
@@ -4361,7 +4369,7 @@ class PCM(Rasch):
             central_diff=False,
             point_info_lines=[],
             point_info_labels=False,
-            cat_highlight=-1,
+            cat_highlight=None,
             title=True,
             plot_style='colorblind',
             black=False,
@@ -4586,11 +4594,11 @@ class RSM(Rasch):
 
     def __init__(self,
                  dataframe,
-                 max_score=0,
+                 max_score=None,
                  extreme_persons=True,
                  no_of_classes=5):
 
-        if max_score == 0:
+        if max_score is None:
             self.max_score = int(np.nanmax(dataframe))
 
         else:
@@ -4608,6 +4616,7 @@ class RSM(Rasch):
             self.dataframe = dataframe[(scores > 0) & (scores < max_scores)]
         
         self.no_of_items = self.dataframe.shape[1]
+        self.items = self.dataframe.columns
         self.no_of_persons = self.dataframe.shape[0]
         self.persons = self.dataframe.index
         self.no_of_classes = no_of_classes
@@ -4876,16 +4885,49 @@ class RSM(Rasch):
             threshold_low = None
             threshold_high = None
 
+        cat_widths = {cat + 1: threshold_ests[:,cat + 2] - threshold_ests[:,cat + 1]
+                      for cat in range(self.max_score - 1)}
+        cat_width_se = {cat: np.nanstd(estimates)
+                        for cat, estimates in cat_widths.items()}
+
+        if interval is not None:
+            cat_width_low = {cat: np.percentile(estimates, 50 * (1 - interval))
+                            for cat, estimates in cat_widths.items()}
+            cat_width_high = {cat: np.percentile(estimates, 50 * (1 + interval))
+                            for cat, estimates in cat_widths.items()}
+
+        else:
+            cat_width_low = None
+            cat_width_high = None
+
+        item_bootstrap = pd.DataFrame(item_ests)
+        item_bootstrap.columns = self.dataframe.columns
+        item_bootstrap.index = [f'Sample {i + 1}' for i in range (no_of_samples)]
+
+        threshold_bootstrap = pd.DataFrame(threshold_ests)
+        threshold_bootstrap.columns = [cat + 1 for cat in range(self.max_score + 1)]
+        threshold_bootstrap.index = [f'Sample {i + 1}' for i in range (no_of_samples)]
+
+        cat_width_bootstrap = pd.DataFrame(cat_widths)
+        cat_width_bootstrap.columns = [cat + 1 for cat in range(self.max_score - 1)]
+        cat_width_bootstrap.index = [f'Sample {i + 1}' for i in range (no_of_samples)]
+
+        self.item_bootstrap = item_bootstrap
         self.item_se = item_se
         self.item_low = item_low
         self.item_high = item_high
+        self.threshold_bootstrap = threshold_bootstrap
         self.threshold_se = threshold_se
         self.threshold_low = threshold_low
         self.threshold_high = threshold_high
+        self.cat_width_bootstrap = cat_width_bootstrap
+        self.cat_width_se = cat_width_se
+        self.cat_width_low = cat_width_low
+        self.cat_width_high = cat_width_high
 
     def abil(self,
              person,
-             difficulties=None,
+             items=None,
              warm_corr=True,
              tolerance=0.0000001,
              max_iters=100,
@@ -4897,8 +4939,12 @@ class RSM(Rasch):
         optional Warm (1989) bias correction.
         '''
 
-        if difficulties is None:
+        if items is None:
+            items = self.items
             difficulties = self.diffs
+
+        else:
+            difficulties = self.diffs.loc[items]
 
         person_data = self.dataframe.loc[person].to_numpy()
         person_filter = (person_data + 1) / (person_data + 1)
@@ -4946,9 +4992,30 @@ class RSM(Rasch):
 
         return estimate
 
+    def person_abils(self,
+                     items=None,
+                     warm_corr=True,
+                     tolerance=0.0000001,
+                     max_iters=100,
+                     ext_score_adjustment=0.5):
+
+        '''
+        Creates raw score to ability estimate look-up table. Newton-Raphson ML
+        estimation, includes optional Warm (1989) bias correction.
+        '''
+
+        if items is None:
+            items = self.items
+
+        estimates = {person: self.abil(person, items=items, warm_corr=warm_corr, tolerance=tolerance,
+                                       max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
+                     for person in self.dataframe.index}
+
+        self.person_abilities = pd.Series(estimates)
+
     def score_abil(self,
                    score,
-                   difficulties=None,
+                   items=None,
                    warm_corr=True,
                    tolerance=0.0000001,
                    max_iters=100,
@@ -4960,11 +5027,15 @@ class RSM(Rasch):
         optional Warm (1989) bias correction.
         '''
 
-        if difficulties is None:
+        if items is None:
+            items = self.items
             difficulties = self.diffs
 
-        person_filter = np.array([True for item in self.dataframe.columns])
-        ext_score = self.no_of_items * self.max_score
+        else:
+            difficulties = self.diffs.loc[items]
+
+        person_filter = np.array([True for item in items])
+        ext_score = len(items) * self.max_score
 
         if score == 0:
             score = ext_score_adjustment
@@ -5002,20 +5073,31 @@ class RSM(Rasch):
         return estimate
 
     def abil_lookup_table(self,
-                          difficulties=None,
+                          items=None,
+                          ext_scores=True,
                           warm_corr=True,
                           tolerance=0.0000001,
                           max_iters=100,
                           ext_score_adjustment=0.5):
 
-        if difficulties is None:
+        if items is None:
+            items = self.items
             difficulties = self.diffs
+
+        else:
+            difficulties = self.diffs.loc[items]
+
+        if ext_scores:
+            score_range = range(len(items) * self.max_score + 1)
+
+        else:
+            score_range = range(1, len(items) * self.max_score)
 
         ext_score = len(difficulties) * self.max_score
 
-        abil_table = {score: self.score_abil(score, difficulties=difficulties, warm_corr=warm_corr, tolerance=tolerance,
+        abil_table = {score: self.score_abil(score, items=items, warm_corr=warm_corr, tolerance=tolerance,
                                              max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
-                      for score in range(ext_score + 1)}
+                      for score in score_range}
         abil_table = pd.Series(abil_table)
 
         self.abil_table = abil_table
@@ -5055,19 +5137,23 @@ class RSM(Rasch):
     def csem(self,
              person,
              abilities=None,
-             difficulties=None):
+             items=None):
 
         '''
         Calculates conditional standard error of measurement for an ability.
         '''
 
-        if difficulties is None:
+        if items is None:
+            items = self.items
             difficulties = self.diffs
+
+        else:
+            difficulties = self.diffs.loc[items]
 
         if abilities is None:
             abilities = self.person_abilities
 
-        person_data = self.dataframe.loc[person].to_numpy()
+        person_data = self.dataframe.loc[person, items].to_numpy()
         person_filter = (person_data + 1) / (person_data + 1)
 
         total_info = sum(self.variance(abilities[person], difficulty, self.thresholds)
@@ -5077,28 +5163,6 @@ class RSM(Rasch):
         cond_sem = 1 / np.sqrt(total_info)
 
         return cond_sem
-
-    def person_abils(self,
-                     difficulties=None,
-                     warm_corr=True,
-                     tolerance=0.0000001,
-                     max_iters=100,
-                     ext_score_adjustment=0.5):
-
-        '''
-        Creates raw score to ability estimate look-up table. Newton-Raphson ML
-        estimation, includes optional Warm (1989) bias correction.
-        '''
-
-        if difficulties is None:
-            difficulties = self.diffs
-
-        estimates = {person: self.abil(person, difficulties, warm_corr=warm_corr, tolerance=tolerance,
-                                       max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
-                     for person in self.dataframe.index}
-
-        self.person_abilities = pd.Series(estimates)
-        self.person_abilities.index.names = self.dataframe.index.names
 
     def category_counts_item(self,
                              item):
@@ -5569,8 +5633,6 @@ class RSM(Rasch):
         if zstd:
             self.threshold_stats['Outfit Z'] = self.threshold_outfit_zstd.to_numpy().round(dp)
 
-        #self.threshold_stats['RMSR'] = self.threshold_rmsr.to_numpy().round(dp)
-
         if disc:
             self.threshold_stats['Discrim'] = self.threshold_discrimination.to_numpy().round(dp)
 
@@ -5792,21 +5854,19 @@ class RSM(Rasch):
                 self.loadings.round(dp).to_csv(f'{filename}_principal_component_loadings.csv')
 
     def class_intervals(self,
-                        item=None,
+                        abilities,
+                        items=None,
                         no_of_classes=5):
 
         class_groups = [f'class_{class_no + 1}' for class_no in range(no_of_classes)]
 
-        df = self.dataframe
+        df = self.dataframe.copy()
 
-        if item is not None:
-            df = df[item]
-            abils = self.person_abilities[df == df]
+        if items is None:
+            items = self.dataframe.columns.tolist()
 
-        else:
-            abils = self.person_abilities[~df.isnull().all(axis=1)]
-
-        df = df.dropna(how='all')
+        df = df[items].dropna()
+        abils = abilities.loc[df.index]
 
         quantiles = (abils.quantile([(i + 1) / no_of_classes
                                      for i in range(no_of_classes - 1)]))
@@ -5829,34 +5889,31 @@ class RSM(Rasch):
                           for class_group in class_groups}
         mean_abilities = pd.Series(mean_abilities)
 
-        if item is not None:
-            obs_means = {class_group: df[mask_dict[class_group]].mean()
-                         for class_group in class_groups}
-
-        else:
-            obs_means = {class_group: df[mask_dict[class_group]].mean().sum()
-                         for class_group in class_groups}
+        obs = {class_group: df[mask_dict[class_group]].mean().sum()
+               for class_group in class_groups}
 
         for class_group in class_groups:
-            obs_means[class_group] = pd.Series(obs_means[class_group])
+            obs[class_group] = pd.Series(obs[class_group])
 
-        obs_means = pd.concat(obs_means, keys=obs_means.keys())
+        obs = pd.concat(obs, keys=obs.keys())
 
         class_abilities = {class_group: abils[mask_dict[class_group]]
                            for class_group in class_groups}
         class_abilities = pd.concat(class_abilities, keys=class_abilities.keys())
 
-        return class_sizes, response_classes, class_abilities, mean_abilities, obs_means
+        return class_sizes, response_classes, class_abilities, mean_abilities, obs
 
     def class_intervals_cats(self,
-                        	 item,
-                        	 no_of_classes=5):
+                             abilities,
+                             item,
+                             no_of_classes=5):
 
         class_groups = [f'class_{class_no + 1}' for class_no in range(no_of_classes)]
 
-        df = self.dataframe[item]
-        abils = self.person_abilities[df == df]
-        df = df.dropna(how='all')
+        df = self.dataframe.copy()
+        df = df[item].dropna()
+
+        abils = abilities.loc[df.index]
 
         quantiles = (abils.quantile([(i + 1) / no_of_classes
                                      for i in range(no_of_classes - 1)]))
@@ -5979,23 +6036,23 @@ class RSM(Rasch):
     def plot_data(self,
                   x_data,
                   y_data,
-                  x_min=-10,
-                  x_max=10,
-                  y_max=0,
-                  item=None,
+                  items=None,
                   obs=None,
                   x_obs_data=np.array([]),
                   y_obs_data=np.array([]),
                   thresh_lines=False,
                   central_diff=False,
                   score_lines_item=[None, []],
-                  score_lines_test=[],
+                  score_lines_test=None,
                   point_info_lines_item=[None, []],
-                  point_info_lines_test=[],
-                  point_csem_lines=[],
+                  point_info_lines_test=None,
+                  point_csem_lines=None,
                   score_labels=False,
+                  x_min=-10,
+                  x_max=10,
+                  y_max=0,
                   warm=True,
-                  cat_highlight=-1,
+                  cat_highlight=None,
                   graph_title='',
                   y_label='',
                   plot_style='colorblind',
@@ -6005,16 +6062,22 @@ class RSM(Rasch):
                   title_font_size=15,
                   axis_font_size=12,
                   labelsize=12,
-                  graph_name='plot',
                   tex=True,
                   plot_density=300,
-                  save_title='',
+                  filename=None,
                   file_format='png'):
 
         '''
         Basic plotting function to be called when plotting specific functions
         of person ability for RSM.
         '''
+
+        if items is None:
+            items = self.items
+            difficulties = self.diffs
+
+        else:
+            difficulties = self.diffs.loc[items]
 
         if tex:
             plt.rcParams["text.latex.preamble"].join([r"\usepackage{dashbox}", r"\setmainfont{xcolor}",])
@@ -6050,31 +6113,24 @@ class RSM(Rasch):
             except:
                 pass
 
-        if item is not None:
-            difficulties = {item: self.diffs[item]}
-            difficulties = pd.Series(difficulties)
-
-        else:
-            difficulties = self.diffs
-
         if thresh_lines:
             for threshold in range(self.max_score):
-                if item is None:
+                if items is None:
                     plt.axvline(x=self.thresholds[threshold + 1],
                                 color='black', linestyle='--')
                 else:
-                    plt.axvline(x = self.diffs[item] + self.thresholds[threshold + 1],
+                    plt.axvline(x = self.diffs[items] + self.thresholds[threshold + 1],
                                 color = 'black', linestyle='--')
 
         if central_diff:
-            plt.axvline(x = self.diffs[item], color = 'darkred', linestyle='--')
+            plt.axvline(x = self.diffs[items], color = 'darkred', linestyle='--')
 
         if score_lines_item[1] != []:
 
             if (all(x > 0 for x in score_lines_item[1]) &
                 all(x < self.max_score for x in score_lines_item[1])):
 
-                abils_set = [self.score_abil(score, difficulties=difficulties, warm_corr=warm)
+                abils_set = [self.score_abil(score, items=[score_lines_item[0]], warm_corr=False)
                              for score in score_lines_item[1]]
 
                 for thresh, abil in zip(score_lines_item[1], abils_set):
@@ -6088,12 +6144,12 @@ class RSM(Rasch):
             else:
                 print('Invalid score for score line.')
 
-        if score_lines_test != []:
+        if score_lines_test is not None:
 
             if (all(x > 0 for x in score_lines_test) &
-                all(x < self.max_score * self.no_of_items for x in score_lines_test)):
+                all(x < self.max_score * len(difficulties) for x in score_lines_test)):
 
-                abils_set = [self.score_abil(score, difficulties=difficulties, warm_corr=warm)
+                abils_set = [self.score_abil(score, items=difficulties.keys(), warm_corr=warm)
                              for score in score_lines_test]
 
                 for thresh, abil in zip(score_lines_test, abils_set):
@@ -6109,9 +6165,7 @@ class RSM(Rasch):
 
         if point_info_lines_item[1] != []:
 
-            item = point_info_lines_item[0]
-
-            info_set = [self.variance(ability, difficulties[item], self.thresholds)
+            info_set = [self.variance(ability, difficulties, self.thresholds)
             			for ability in point_info_lines_item[1]]
 
             for abil, info in zip(point_info_lines_item[1], info_set):
@@ -6122,10 +6176,10 @@ class RSM(Rasch):
                 if score_labels:
                     plt.text(x_min + (x_max - x_min) / 100, info + y_max / 50, str(round(info, 3)))
 
-        if point_info_lines_test != []:
+        if point_info_lines_test is not None:
 
             info_set = [sum(self.variance(ability, difficulty, self.thresholds)
-            				for difficulty in self.diffs)
+            				for difficulty in difficulties)
                         for ability in point_info_lines_test]
 
             for abil, info in zip(point_info_lines_test, info_set):
@@ -6136,10 +6190,10 @@ class RSM(Rasch):
                 if score_labels:
                     plt.text(x_min + (x_max - x_min) / 100, info + y_max / 50, str(round(info, 3)))
 
-        if point_csem_lines != []:
+        if point_csem_lines is not None:
 
             info_set = [sum(self.variance(ability, difficulty, self.thresholds)
-            				for difficulty in self.diffs)
+            				for difficulty in difficulties)
                         for ability in point_csem_lines]
             info_set = np.array(info_set)
             csem_set = 1 / np.sqrt(info_set)
@@ -6152,34 +6206,34 @@ class RSM(Rasch):
                 if score_labels:
                     plt.text(x_min + (x_max - x_min) / 100, csem + y_max / 50, str(round(csem, 3)))
 
-        if item is not None:
+        if items is not None:
             if cat_highlight in range(self.max_score + 1):
 
                 if cat_highlight == 0:
-                    if item is None:
+                    if items is None:
                         plt.axvspan(-100, self.thresholds[1],
                                     facecolor='blue', alpha=0.2)
                     else:
-                        plt.axvspan(-100, self.diffs[item] + self.thresholds[1],
+                        plt.axvspan(-100, self.diffs[items] + self.thresholds[1],
                                     facecolor='blue', alpha=0.2)
 
                 elif cat_highlight == self.max_score:
-                    if item is None:
+                    if items is None:
                         plt.axvspan(self.thresholds[self.max_score], 100,
                                     facecolor='blue', alpha=0.2)
                     else:
-                        plt.axvspan(self.diffs[item] + self.thresholds[self.max_score], 100,
+                        plt.axvspan(self.diffs[items] + self.thresholds[self.max_score], 100,
                                     facecolor='blue', alpha=0.2)
 
                 else:
                     if (self.thresholds[cat_highlight + 1] >
                         self.thresholds[cat_highlight]):
-                        if item is None:
+                        if items is None:
                             plt.axvspan(self.thresholds[cat_highlight], self.thresholds[cat_highlight + 1],
                                         facecolor='blue', alpha=0.2)
                         else:
-                            plt.axvspan(self.diffs[item] + self.thresholds[cat_highlight],
-                                        self.diffs[item] + self.thresholds[cat_highlight + 1],
+                            plt.axvspan(self.diffs[items] + self.thresholds[cat_highlight],
+                                        self.diffs[items] + self.thresholds[cat_highlight + 1],
                                         facecolor='blue', alpha=0.2)
 
         if y_max <= 0:
@@ -6197,10 +6251,8 @@ class RSM(Rasch):
         plt.tick_params(axis="x", labelsize=labelsize)
         plt.tick_params(axis="y", labelsize=labelsize)
 
-        if save_title != '':
-            save_title = save_title.translate(str.maketrans('', '', string.punctuation))
-            save_title = save_title.translate({32: 95})
-            plt.savefig(f'{save_title}.{file_format}', dpi=plot_density)
+        if filename is not None:
+            plt.savefig(f'{filename}.{file_format}', dpi=plot_density)
 
         plt.close()
 
@@ -6215,16 +6267,16 @@ class RSM(Rasch):
             title=True,
             thresh_lines=False,
             central_diff=False,
-            score_lines=[],
+            score_lines=None,
             score_labels=False,
-            cat_highlight=-1,
+            cat_highlight=None,
             plot_style='colorblind',
             black=False,
             font='Times',
             title_font_size=15,
             axis_font_size=12,
             labelsize=12,
-            save_title='',
+            filename=None,
             use_save_title=False,
             file_format='png',
             dpi=300):
@@ -6243,7 +6295,8 @@ class RSM(Rasch):
             if hasattr(self, 'person_abiliites') == False:
                 self.person_abils(warm_corr=False)
 
-            _, _, _, mean_abilities, obs_means = self.class_intervals(item=item, no_of_classes=no_of_classes)
+            _, _, _, mean_abilities, obs_means = self.class_intervals(self.person_abilities, items=item,
+                                                                      no_of_classes=no_of_classes)
 
             xobsdata = mean_abilities
             yobsdata = obs_means
@@ -6267,11 +6320,11 @@ class RSM(Rasch):
         ylabel = 'Expected score'
 
         plot = self.plot_data(x_data=abilities, y_data=y, x_obs_data=xobsdata, y_obs_data=yobsdata, x_min=xmin,
-                              x_max=xmax, y_max=self.max_score, item=item, graph_title = graphtitle, y_label=ylabel,
+                              x_max=xmax, y_max=self.max_score, items=item, graph_title=graphtitle, y_label=ylabel,
                               obs=obs, thresh_lines=thresh_lines, central_diff=central_diff, plot_style=plot_style,
                               score_lines_item=[item, score_lines], score_labels=score_labels, black=black, font=font,
                               cat_highlight= cat_highlight, title_font_size=title_font_size, labelsize=labelsize,
-                              axis_font_size=axis_font_size,  save_title=save_title, plot_density=dpi,
+                              axis_font_size=axis_font_size,  filename=filename, plot_density=dpi,
                               file_format=file_format)
 
         return plot
@@ -6285,14 +6338,14 @@ class RSM(Rasch):
              title=True,
              thresh_lines=False,
              central_diff=False,
-             cat_highlight=-1,
+             cat_highlight=None,
              plot_style='colorblind',
              black=False,
              font='Times',
              title_font_size=15,
              axis_font_size=12,
              labelsize=12,
-             save_title='',
+             filename='',
              file_format='png',
              dpi=300):
 
@@ -6302,6 +6355,7 @@ class RSM(Rasch):
         '''
 
         abilities = np.arange(-20, 20, 0.1)
+
         y = np.array([[self.cat_prob(ability, self.diffs[item], category, self.thresholds)
                        for category in range(self.max_score + 1)]
                       for ability in abilities])
@@ -6310,7 +6364,8 @@ class RSM(Rasch):
             if hasattr(self, 'person_abiliites') == False:
                 self.person_abils(warm_corr=False)
 
-            _, _, _, mean_abilities, obs_props = self.class_intervals_cats(item=item, no_of_classes=no_of_classes)
+            _, _, _, mean_abilities, obs_props = self.class_intervals_cats(self.person_abilities, item=item,
+                                                                           no_of_classes=no_of_classes)
 
             xobsdata = mean_abilities
             yobsdata = obs_props
@@ -6335,10 +6390,10 @@ class RSM(Rasch):
         ylabel = 'Probability'
 
         plot = self.plot_data(x_data=abilities, y_data=y, x_min=xmin, x_max=xmax, y_max=1, x_obs_data=xobsdata,
-                              y_obs_data=yobsdata, item=item, graph_title=graphtitle, y_label=ylabel, obs=obs,
+                              y_obs_data=yobsdata, items=item, graph_title=graphtitle, y_label=ylabel, obs=obs,
                               thresh_lines=thresh_lines, central_diff=central_diff, cat_highlight=cat_highlight,
                               plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
-                              axis_font_size=axis_font_size, labelsize=labelsize, save_title=save_title,
+                              axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
                               plot_density=dpi, file_format=file_format)
 
         return plot
@@ -6352,14 +6407,14 @@ class RSM(Rasch):
                       title=True,
                       thresh_lines=False,
                       central_diff=False,
-                      cat_highlight=-1,
+                      cat_highlight=None,
                       plot_style='colorblind',
                       black=False,
                       font='Times',
                       title_font_size=15,
                       axis_font_size=12,
                       labelsize=12,
-                      save_title='',
+                      filename=None,
                       file_format='png',
                       dpi=300):
 
@@ -6369,6 +6424,7 @@ class RSM(Rasch):
         '''
 
         abilities = np.arange(-20, 20, 0.1)
+
         if item is None:
             abs_thresholds = self.thresholds[1:]
         else:
@@ -6410,11 +6466,11 @@ class RSM(Rasch):
 
         ylabel = 'Probability'
 
-        plot = self.plot_data(x_data=abilities, y_data=y, y_max=1, x_min=xmin, x_max=xmax, item=item, obs=obs,
+        plot = self.plot_data(x_data=abilities, y_data=y, y_max=1, x_min=xmin, x_max=xmax, items=item, obs=obs,
                               x_obs_data=xobsdata, y_obs_data=yobsdata, graph_title=graphtitle, y_label=ylabel,
                               thresh_lines=thresh_lines, central_diff=central_diff, cat_highlight=cat_highlight,
                               plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
-                              axis_font_size=axis_font_size, labelsize=labelsize, save_title=save_title,
+                              axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
                               file_format=file_format, plot_density=dpi)
 
         return plot
@@ -6426,9 +6482,9 @@ class RSM(Rasch):
             ymax=None,
             thresh_lines=False,
             central_diff=False,
-            point_info_lines=[],
+            point_info_lines=None,
             point_info_labels=False,
-            cat_highlight=-1,
+            cat_highlight=None,
             title=True,
             plot_style='colorblind',
             black=False,
@@ -6436,7 +6492,7 @@ class RSM(Rasch):
             title_font_size=15,
             axis_font_size=12,
             labelsize=12,
-            save_title='',
+            filename=None,
             file_format='png',
             dpi=300):
 
@@ -6445,6 +6501,7 @@ class RSM(Rasch):
         '''
 
         abilities = np.arange(-20, 20, 0.1)
+
         y = [self.variance(ability,
                            self.diffs[item],
                            self.thresholds)
@@ -6461,22 +6518,23 @@ class RSM(Rasch):
 
         ylabel = 'Fisher information'
 
-        plot = self.plot_data(x_data=abilities, y_data=y, x_min=xmin, x_max=xmax, y_max=ymax, item=item,
+        plot = self.plot_data(x_data=abilities, y_data=y, x_min=xmin, x_max=xmax, y_max=ymax, items=item,
                               thresh_lines=thresh_lines, point_info_lines_item=[item, point_info_lines],
                               score_labels=point_info_labels, cat_highlight=cat_highlight, central_diff=central_diff,
                               graph_title=graphtitle, y_label=ylabel, plot_style=plot_style, black=black, font=font,
                               title_font_size=title_font_size, axis_font_size=axis_font_size, labelsize=labelsize,
-                              save_title=save_title, plot_density=dpi, file_format=file_format)
+                              filename=filename, plot_density=dpi, file_format=file_format)
 
         return plot
 
     def tcc(self,
+            items=None,
             obs=False,
             xmin=-10,
             xmax=10,
             no_of_classes=5,
             title=True,
-            score_lines=[],
+            score_lines=None,
             score_labels=False,
             plot_style='colorblind',
             black=False,
@@ -6484,7 +6542,7 @@ class RSM(Rasch):
             title_font_size=15,
             axis_font_size=12,
             labelsize=12,
-            save_title='',
+            filename=None,
             file_format='png',
             dpi=300):
 
@@ -6493,8 +6551,16 @@ class RSM(Rasch):
         '''
 
         abilities = np.arange(-20, 20, 0.1)
-        y = [sum(self.exp_score(ability, self.diffs[item], self.thresholds)
-                 for item in range(self.no_of_items))
+
+        if items is None:
+            items = list(self.dataframe.columns)
+            difficulties = self.diffs
+
+        else:
+            difficulties = self.diffs.loc[items]
+
+        y = [sum(self.exp_score(ability, difficulties[item], self.thresholds)
+                 for item in items)
              for ability in abilities]
         y = np.array(y).reshape(len(abilities), 1)
 
@@ -6502,7 +6568,8 @@ class RSM(Rasch):
             if hasattr(self, 'person_abiliites') == False:
                 self.person_abils(warm_corr=False)
 
-            _, _, _, mean_abilities, obs_means = self.class_intervals(no_of_classes=no_of_classes)
+            _, _, _, mean_abilities, obs_means = self.class_intervals(self.person_abilities, items=items,
+                                                                      no_of_classes=no_of_classes)
 
             xobsdata = mean_abilities
             yobsdata = obs_means
@@ -6512,24 +6579,26 @@ class RSM(Rasch):
             xobsdata = np.array(np.nan)
             yobsdata = np.array(np.nan)
 
-        if title:
-            graphtitle = 'Test characteristic curve'
+        if title is not None:
+            graphtitle = title
+
         else:
             graphtitle = ''
 
         ylabel = 'Expected score'
 
-        plot = self.plot_data(x_data=abilities, y_data=y, x_obs_data=xobsdata, y_obs_data=yobsdata, x_min=xmin,
-                              x_max=xmax, y_max=self.max_score * self.no_of_items, score_lines_test=score_lines,
-                              score_labels=score_labels, graph_title=graphtitle, y_label=ylabel, obs=obs,
-                              plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
-                              axis_font_size=axis_font_size, labelsize=labelsize, save_title=save_title,
-                              plot_density=dpi, file_format=file_format)
+        plot = self.plot_data(x_data=abilities, y_data=y, items=items, x_obs_data=xobsdata, y_obs_data=yobsdata,
+                              x_min=xmin, x_max=xmax, y_max=self.max_score * len(difficulties),
+                              score_lines_test=score_lines, score_labels=score_labels, graph_title=graphtitle,
+                              y_label=ylabel, obs=obs, plot_style=plot_style, black=black, font=font,
+                              title_font_size=title_font_size, axis_font_size=axis_font_size, labelsize=labelsize,
+                              filename=filename, plot_density=dpi, file_format=file_format)
 
         return plot
 
     def test_info(self,
-                  point_info_lines=[],
+                  items=None,
+                  point_info_lines=None,
                   point_info_labels=False,
                   xmin=-10,
                   xmax=10,
@@ -6541,7 +6610,7 @@ class RSM(Rasch):
                   title_font_size=15,
                   axis_font_size=12,
                   labelsize=12,
-                  save_title='',
+                  filename=None,
                   file_format='png',
                   dpi=300):
 
@@ -6549,32 +6618,41 @@ class RSM(Rasch):
         Plots Test Information Curve for RSM.
         '''
 
+        if items is None:
+            difficulties = self.diffs
+            items = self.dataframe.columns
+
+        else:
+            difficulties = self.diffs.loc[items]
+
         abilities = np.arange(-20, 20, 0.1)
-        y = np.array([sum(self.variance(ability, self.diffs[item], self.thresholds)
-                          for item in range(self.no_of_items))
+        y = np.array([sum(self.variance(ability, difficulty, self.thresholds)
+                          for difficulty in difficulties)
                       for ability in abilities])
         y = y.reshape(len(abilities), 1)
 
         if ymax is None:
             ymax = max(y) * 1.1
 
-        if title:
-            graphtitle = 'Test information curve'
+        if title is not None:
+            graphtitle = title
+
         else:
             graphtitle = ''
 
         ylabel = 'Fisher information'
 
-        plot = self.plot_data(x_data=abilities, y_data=y, x_min=xmin, x_max=xmax, y_max=ymax, graph_title=graphtitle,
-                              point_info_lines_test=point_info_lines, score_labels=point_info_labels, y_label=ylabel,
-                              plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
-                              axis_font_size=axis_font_size, labelsize=labelsize, save_title=save_title,
-                              plot_density=dpi, file_format=file_format)
+        plot = self.plot_data(x_data=abilities, y_data=y, items=items, x_min=xmin, x_max=xmax, y_max=ymax,
+                              graph_title=graphtitle, point_info_lines_test=point_info_lines,
+                              score_labels=point_info_labels, y_label=ylabel, plot_style=plot_style, black=black,
+                              font=font, title_font_size=title_font_size, axis_font_size=axis_font_size,
+                              labelsize=labelsize, filename=filename, plot_density=dpi, file_format=file_format)
 
         return plot
 
     def test_csem(self,
-                  point_csem_lines=[],
+                  items=None,
+                  point_csem_lines=None,
                   point_csem_labels=False,
                   xmin=-10,
                   xmax=10,
@@ -6586,7 +6664,7 @@ class RSM(Rasch):
                   title_font_size=15,
                   axis_font_size=12,
                   labelsize=12,
-                  save_title='',
+                  filename=None,
                   file_format='png',
                   dpi=300):
 
@@ -6594,29 +6672,38 @@ class RSM(Rasch):
         Plots Test Conditional Standard Error of Measurement Curve for RSM.
         '''
 
+        if items is None:
+            difficulties = self.diffs
+            items = self.dataframe.columns
+
+        else:
+            difficulties = self.diffs.loc[items]
+
         abilities = np.arange(-20, 20, 0.1)
-        y = np.array([sum(self.variance(ability, self.diffs[item], self.thresholds)
-                          for item in range(self.no_of_items))
+        y = np.array([sum(self.variance(ability, difficulty, self.thresholds)
+                          for difficulty in difficulties)
                       for ability in abilities])
         y = 1 / np.sqrt(y)
         y = y.reshape(len(abilities), 1)
 
-        if title:
-            graphtitle = 'Test conditional SEM curve'
+        if title is not None:
+            graphtitle = title
+
         else:
             graphtitle = ''
 
         ylabel = 'Conditional SEM'
 
-        plot = self.plot_data(x_data=abilities, y_data=y, x_min=xmin, x_max=xmax, y_max=ymax, graph_title=graphtitle,
-                              point_csem_lines=point_csem_lines, score_labels=point_csem_labels, y_label=ylabel,
-                              plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
-                              axis_font_size=axis_font_size, labelsize=labelsize, save_title=save_title,
-                              plot_density=dpi, file_format=file_format)
+        plot = self.plot_data(x_data=abilities, y_data=y, items=items, x_min=xmin, x_max=xmax, y_max=ymax,
+                              graph_title=graphtitle, point_csem_lines=point_csem_lines, score_labels=point_csem_labels,
+                              y_label=ylabel, plot_style=plot_style, black=black, font=font,
+                              title_font_size=title_font_size, axis_font_size=axis_font_size, labelsize=labelsize,
+                              filename=filename, plot_density=dpi, file_format=file_format)
 
         return plot
 
     def std_residuals_plot(self,
+                           items=None,
                            bin_width=0.5,
                            x_min=-6,
                            x_max=6,
@@ -6627,21 +6714,24 @@ class RSM(Rasch):
                            title_font_size=15,
                            axis_font_size=12,
                            labelsize=12,
-                           save_title='',
+                           filename=None,
                            file_format='png',
-                           tex=True,
                            plot_density=300):
 
         '''
         Plots histogram of standardised residuals for SLM, with optional overplotting of Standard Normal Distribution.
         '''
 
-        std_residual_list = self.std_residual_df.unstack().dropna()
+        if items is None:
+            items = self.dataframe.columns
+
+        std_residual_df = self.std_residual_df[items]
+        std_residual_list = std_residual_df.unstack().dropna()
 
         plot = self.std_residuals_hist(std_residual_list, bin_width=bin_width, x_min=x_min, x_max=x_max, normal=normal,
                                        title=title, plot_style=plot_style, font=font, title_font_size=title_font_size,
-                                       axis_font_size=axis_font_size, labelsize=labelsize, save_title=save_title,
-                                       file_format=file_format, tex=tex, plot_density=plot_density)
+                                       axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
+                                       file_format=file_format, plot_density=plot_density)
 
         return plot
 
@@ -6684,6 +6774,7 @@ class MFRM(Rasch):
         self.no_of_raters = len(self.dataframe.index.levels[0])
         self.no_of_classes = no_of_classes
         self.data = self.dataframe.to_numpy() # (item, rater, person)
+        self.items = self.dataframe.columns
         self.raters = self.dataframe.index.get_level_values(0).unique()
         self.persons = self.dataframe.index.get_level_values(1).unique()
         self.anchor_raters_global = []
@@ -6696,13 +6787,16 @@ class MFRM(Rasch):
                      new):
 
         if old == new:
-            print('New item name is the same as old item name.')
+            print('New rater name is the same as old rater name.')
 
         elif new in self.raters:
-            print('New item name is a duplicate of an existing item name')
+            print('New rater name is a duplicate of an existing rater name')
 
         if old not in self.raters:
-            print(f'Old item name "{old}" not found in data. Please check')
+            print(f'Old rater name "{old}" not found in data. Please check')
+
+        if isinstance(new, str) == False:
+            print('Rater names must be strings')
 
         else:
             new_names = [new if rater == old else rater for rater in self.raters]
@@ -6718,6 +6812,10 @@ class MFRM(Rasch):
 
         elif list_length != self.no_of_raters:
             print(f'Incorrect number of rater names. {list_length} in list, {self.no_of_raters} raters in data.')
+
+        if all(isinstance(name, str) for name in new_names) == False:
+            print('Rater names must be strings')
+
 
         else:
             df_dict = {new: self.dataframe.xs(old) for old, new in zip(self.raters, new_names)}
@@ -6759,19 +6857,21 @@ class MFRM(Rasch):
                                   inplace=True)
             self.persons = new_names
 
-    def cat_prob(self,
-                 ability,
-                 difficulty,
-                 severity,
-                 category,
-                 thresholds):
+    def cat_prob_global(self,
+                        ability,
+                        item,
+                        difficulties,
+                        rater,
+                        severities,
+                        category,
+                        thresholds):
 
         '''
         Calculates the probability of a score given ability, difficulty,
         set of thresholds and rater severity, basic MFRM.
         '''
 
-        cat_prob_nums = [exp(cat * (ability - difficulty - severity) -
+        cat_prob_nums = [exp(cat * (ability - difficulties[item] - severities[rater]) -
                              sum(thresholds[:cat + 1]))
                          for cat in range(self.max_score + 1)]
 
@@ -6799,7 +6899,8 @@ class MFRM(Rasch):
 
     def cat_prob_thresholds(self,
                             ability,
-                            difficulty,
+                            item,
+                            difficulties,
                             rater,
                             severities,
                             category,
@@ -6810,7 +6911,7 @@ class MFRM(Rasch):
         extended vector-by-threshold form of the Many-Facet Rasch Model (MFRM).
         '''
 
-        cat_prob_nums = [exp(cat * (ability - difficulty) -
+        cat_prob_nums = [exp(cat * (ability - difficulties[item]) -
                              sum(thresholds[:cat + 1]) - sum(severities[rater][:cat + 1]))
                          for cat in range(self.max_score + 1)]
 
@@ -6836,18 +6937,20 @@ class MFRM(Rasch):
 
         return cat_prob_nums[category] / sum(cat_prob_nums)
 
-    def exp_score(self,
-                  ability,
-                  difficulty,
-                  severity,
-                  thresholds):
+    def exp_score_global(self,
+                         ability,
+                         item,
+                         difficulties,
+                         rater,
+                         severities,
+                         thresholds):
 
         '''
         Calculates the expected score given ability, difficulty,
         set of thresholds and rater severity, basic MFRM.
         '''
 
-        cat_prob_nums = [exp(category * (ability - difficulty - severity) -
+        cat_prob_nums = [exp(category * (ability - difficulties[item] - severities[rater]) -
                              sum(thresholds[:category + 1]))
                          for category in range(self.max_score + 1)]
 
@@ -6880,7 +6983,8 @@ class MFRM(Rasch):
 
     def exp_score_thresholds(self,
                              ability,
-                             difficulty,
+                             item,
+                             difficulties,
                              rater,
                              severities,
                              thresholds):
@@ -6890,7 +6994,7 @@ class MFRM(Rasch):
         vector-by-threshold form of the Many-Facet Rasch Model (MFRM).
         '''
 
-        cat_prob_nums = [exp(category * (ability - difficulty) -
+        cat_prob_nums = [exp(category * (ability - difficulties[item]) -
                              sum(thresholds[:category + 1] + severities[rater][:category + 1]))
                          for category in range(self.max_score + 1)]
 
@@ -6921,21 +7025,23 @@ class MFRM(Rasch):
 
         return exp_score
 
-    def variance(self,
-                 ability,
-                 difficulty,
-                 severity,
-                 thresholds):
+    def variance_global(self,
+                        ability,
+                        item,
+                        difficulties,
+                        rater,
+                        severities,
+                        thresholds):
 
         '''
         Calculates the item information / variance given ability, difficulty,
         set of thresholds and rater severity, basic MFRM.
         '''
 
-        expected = self.exp_score(ability, difficulty, severity, thresholds)
+        expected = self.exp_score_global(ability, item, difficulties, rater, severities, thresholds)
 
         variance = sum(((category - expected) ** 2) *
-                        self.cat_prob(ability, difficulty, severity, category, thresholds)
+                        self.cat_prob_global(ability, item, difficulties, rater, severities, category, thresholds)
                        for category in range(self.max_score + 1))
 
         return variance
@@ -6963,7 +7069,8 @@ class MFRM(Rasch):
 
     def variance_thresholds(self,
                             ability,
-                            difficulty,
+                            item,
+                            difficulties,
                             rater,
                             severities,
                             thresholds):
@@ -6973,10 +7080,10 @@ class MFRM(Rasch):
         set of thresholds and rater severity, extended MFRM by threshold.
         '''
 
-        expected = self.exp_score_thresholds(ability, difficulty, rater, severities, thresholds)
+        expected = self.exp_score_thresholds(ability, item, difficulties, rater, severities, thresholds)
 
         variance = sum(((category - expected) ** 2) *
-                       self.cat_prob_thresholds(ability, difficulty, rater, severities, category, thresholds)
+                       self.cat_prob_thresholds(ability, item, difficulties, rater, severities, category, thresholds)
                        for category in range(self.max_score + 1))
 
         return variance
@@ -7002,21 +7109,23 @@ class MFRM(Rasch):
 
         return variance
 
-    def kurtosis(self,
-                 ability,
-                 difficulty,
-                 severity,
-                 thresholds):
+    def kurtosis_global(self,
+                        ability,
+                        item,
+                        difficulties,
+                        rater,
+                        severities,
+                        thresholds):
 
         '''
         Calculates the item kurtosis given ability, difficulty,
         set of thresholds and rater severity, basic MFRM.
         '''
 
-        cat_probs = [self.cat_prob(ability, difficulty, severity, category, thresholds)
+        cat_probs = [self.cat_prob_global(ability, item, difficulties, rater, severities, category, thresholds)
                      for category in range(self.max_score + 1)]
 
-        expected = self.exp_score(ability, difficulty, severity, thresholds)
+        expected = self.exp_score_global(ability, item, difficulties, rater, severities, thresholds)
 
         kurtosis = sum(((category - expected) ** 4) * prob
                        for category, prob in enumerate(cat_probs))
@@ -7048,7 +7157,8 @@ class MFRM(Rasch):
 
     def kurtosis_thresholds(self,
                             ability,
-                            difficulty,
+                            item,
+                            difficulties,
                             rater,
                             severities,
                             thresholds):
@@ -7058,10 +7168,10 @@ class MFRM(Rasch):
         set of thresholds and rater severity, basic MFRM.
         '''
 
-        cat_probs = [self.cat_prob_thresholds(ability, difficulty, rater, severities, category, thresholds)
+        cat_probs = [self.cat_prob_thresholds(ability, item, difficulties, rater, severities, category, thresholds)
                      for category in range(self.max_score + 1)]
 
-        expected = self.exp_score_thresholds(ability, difficulty, rater, severities, thresholds)
+        expected = self.exp_score_thresholds(ability, item, difficulties, rater, severities, thresholds)
 
         kurtosis = sum(((category - expected) ** 4) * prob
                        for category, prob in enumerate(cat_probs))
@@ -7389,10 +7499,10 @@ class MFRM(Rasch):
         self.marginal_severities_items = marginal_items
         self.marginal_severities_thresholds = marginal_thresholds
 
-    def _threshold_distance_global(self,
-                                   threshold,
-                                   difficulties,
-                                   constant=0.1):
+    def _threshold_distance(self,
+                            threshold,
+                            difficulties,
+                            constant=0.1):
 
         '''
         ** Private method **
@@ -7437,15 +7547,15 @@ class MFRM(Rasch):
 
         return estimator
 
-    def ra_thresholds_global(self,
-                             difficulties,
-                             constant=0.1):
+    def ra_thresholds(self,
+                      difficulties,
+                      constant=0.1):
 
         '''
         Calculates set of threshold estimates using CPAT
         '''
 
-        distances = [self._threshold_distance_global(category, difficulties, constant)
+        distances = [self._threshold_distance(category, difficulties, constant)
                      for category in range(1, self.max_score)]
 
         thresholds = [sum(distances[:threshold])
@@ -7454,76 +7564,6 @@ class MFRM(Rasch):
         thresholds = np.array(thresholds)
 
         np.add(thresholds, -np.mean(thresholds), out = thresholds, casting = 'unsafe')
-
-        thresholds = np.insert(thresholds, 0, 0)
-
-        return thresholds
-
-    def _threshold_distance_extended(self,
-                                     threshold,
-                                     difficulties,
-                                     constant=0.1):
-
-        '''
-        ** Private method **
-        Calculates difference between a pair of adjacent thresholds.
-        '''
-
-        data = self.dataframe.values.reshape(self.no_of_raters, self.no_of_persons, -1).swapaxes(1, 2)
-        data = data.transpose((1, 0, 2))
-
-        estimator = 0
-        weights_sum = 0
-
-        for item_1 in range(self.no_of_items):
-            for item_2 in range(self.no_of_items):
-
-                num = sum(np.count_nonzero((data[item_1, rater, :] == threshold) &
-                                           (data[item_2, rater, :] == threshold))
-                          for rater in range(self.no_of_raters))
-
-                den = sum(np.count_nonzero((data[item_1, rater, :] == threshold - 1) &
-                                           (data[item_2, rater, :] == threshold + 1))
-                          for rater in range(self.no_of_raters))
-
-                if num + den == 0:
-                    pass
-
-                else:
-                    num += constant
-                    den += constant
-
-                    weight = hmean([num, den])
-
-                    estimator += weight * (log(num) - log(den) +
-                                           difficulties[item_1] - difficulties[item_2])
-                    weights_sum += weight
-
-        try:
-            estimator /= weights_sum
-
-        except:
-            estimator = np.nan
-
-        return estimator
-
-    def ra_thresholds_extended(self,
-                               difficulties,
-                               constant=0.1):
-
-        '''
-        Calculates set of threshold estimates using CPAT
-        '''
-
-        distances = [self._threshold_distance_extended(category, difficulties, constant)
-                     for category in range(1, self.max_score)]
-
-        thresholds = [sum(distances[:threshold])
-                      for threshold in range(self.max_score)]
-
-        thresholds = np.array(thresholds)
-
-        np.add(thresholds, -np.mean(thresholds), out=thresholds, casting='unsafe')
 
         thresholds = np.insert(thresholds, 0, 0)
 
@@ -7552,8 +7592,8 @@ class MFRM(Rasch):
         self.no_of_persons = len(self.persons)
 
         self.item_diffs(constant=constant, method=method, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
+        self.thresholds = self.ra_thresholds(self.diffs, constant)
         self.raters_global(constant=constant, method=method, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
-        self.thresholds_global = self.ra_thresholds_global(self.diffs, constant)
 
     def calibrate_items(self,
                         constant=0.1,
@@ -7578,8 +7618,8 @@ class MFRM(Rasch):
         self.no_of_persons = len(self.persons)
 
         self.item_diffs(constant=constant, method=method, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
+        self.thresholds = self.ra_thresholds(self.diffs, constant)
         self.raters_items(constant=constant, method=method, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
-        self.thresholds_items = self.ra_thresholds_extended(self.diffs, constant)
 
 
     def calibrate_thresholds(self,
@@ -7605,8 +7645,8 @@ class MFRM(Rasch):
         self.no_of_persons = len(self.persons)
 
         self.item_diffs(constant=constant, method=method, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
+        self.thresholds = self.ra_thresholds(self.diffs, constant)
         self.raters_thresholds(constant=constant, method=method, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
-        self.thresholds_thresholds = self.ra_thresholds_extended(self.diffs, constant)
 
     def calibrate_matrix(self,
                          constant=0.1,
@@ -7631,11 +7671,11 @@ class MFRM(Rasch):
         self.no_of_persons = len(self.persons)
 
         self.item_diffs(constant=constant, method=method, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
+        self.thresholds = self.ra_thresholds(self.diffs, constant)
         self.raters_matrix(constant=constant, method=method, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
-        self.thresholds_matrix = self.ra_thresholds_extended(self.diffs, constant)
 
     def std_errors_global(self,
-                          anchor_raters=[],
+                          anchor_raters=None,
                           interval=None,
                           no_of_samples=100,
                           constant=0.1,
@@ -7668,18 +7708,18 @@ class MFRM(Rasch):
             sample.calibrate_global(constant=constant, method=method,
                                     matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
-            if anchor_raters != []:
+            if anchor_raters is not None:
                 sample.calibrate_global_anchor(anchor_raters, constant=constant, method=method,
                                                matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
-        if anchor_raters != []:
+        if anchor_raters is not None:
             item_ests = np.array([sample.anchor_diffs_global.values for sample in samples])
             threshold_ests = np.array([sample.anchor_thresholds_global for sample in samples])
             rater_ests = np.array([sample.anchor_severities_global.values for sample in samples])
 
         else:
             item_ests = np.array([sample.diffs.values for sample in samples])
-            threshold_ests = np.array([sample.thresholds_global for sample in samples])
+            threshold_ests = np.array([sample.thresholds for sample in samples])
             rater_ests = np.array([sample.severities_global.values for sample in samples])
 
         item_se = {item: se for item, se in zip(self.dataframe.columns, np.nanstd(item_ests, axis=0))}
@@ -7778,7 +7818,7 @@ class MFRM(Rasch):
             self.rater_high_global = rater_high
 
     def std_errors_items(self,
-                         anchor_raters=[],
+                         anchor_raters=None,
                          interval=None,
                          no_of_samples=100,
                          constant=0.1,
@@ -7811,11 +7851,11 @@ class MFRM(Rasch):
             sample.calibrate_items(constant=constant, method=method,
                                    matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
-            if anchor_raters != []:
+            if anchor_raters is not None:
                 sample.calibrate_items_anchor(anchor_raters, constant=constant, method=method,
                                               matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
-        if anchor_raters != []:
+        if anchor_raters is not None:
             item_ests = np.array([sample.anchor_diffs_items.values for sample in samples])
             threshold_ests = np.array([sample.anchor_thresholds_items for sample in samples])
 
@@ -7826,7 +7866,7 @@ class MFRM(Rasch):
 
         else:
             item_ests = np.array([sample.diffs.values for sample in samples])
-            threshold_ests = np.array([sample.thresholds_items for sample in samples])
+            threshold_ests = np.array([sample.thresholds for sample in samples])
 
             rater_ests = {sample_no: pd.DataFrame.from_dict(sample.severities_items, orient='index')
                           for sample_no, sample in enumerate(samples)}
@@ -7931,7 +7971,7 @@ class MFRM(Rasch):
             self.rater_high_items = rater_high
 
     def std_errors_thresholds(self,
-                              anchor_raters=[],
+                              anchor_raters=None,
                               interval=None,
                               no_of_samples=100,
                               constant=0.1,
@@ -7964,18 +8004,18 @@ class MFRM(Rasch):
             sample.calibrate_thresholds(constant=constant, method=method,
                                         matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
-            if anchor_raters != []:
+            if anchor_raters is not None:
                 sample.calibrate_thresholds_anchor(anchor_raters, constant=constant, method=method,
                                                    matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
-        if anchor_raters != []:
+        if anchor_raters is not None:
             item_ests = np.array([sample.anchor_diffs_thresholds.values for sample in samples])
             threshold_ests = np.array([sample.anchor_thresholds_thresholds for sample in samples])
             rater_ests = np.array([list(sample.anchor_severities_thresholds.values()) for sample in samples])
 
         else:
             item_ests = np.array([sample.diffs.values for sample in samples])
-            threshold_ests = np.array([sample.thresholds_thresholds for sample in samples])
+            threshold_ests = np.array([sample.thresholds for sample in samples])
             rater_ests = np.array([list(sample.severities_thresholds.values()) for sample in samples])
 
         item_se = {item: se for item, se in zip(self.dataframe.columns, np.nanstd(item_ests, axis=0))}
@@ -8071,7 +8111,7 @@ class MFRM(Rasch):
             self.rater_high_thresholds = rater_high
 
     def std_errors_matrix(self,
-                          anchor_raters=[],
+                          anchor_raters=None,
                           interval=None,
                           no_of_samples=100,
                           constant=0.1,
@@ -8104,11 +8144,11 @@ class MFRM(Rasch):
             sample.calibrate_matrix(constant=constant, method=method,
                                     matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
-            if anchor_raters != []:
+            if anchor_raters is not None:
                 sample.calibrate_matrix_anchor(anchor_raters, constant=constant, method=method,
                                                matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
-        if anchor_raters != []:
+        if anchor_raters is not None:
             item_ests = np.array([sample.anchor_diffs_matrix.values for sample in samples])
             threshold_ests = np.array([sample.anchor_thresholds_matrix for sample in samples])
 
@@ -8118,7 +8158,7 @@ class MFRM(Rasch):
 
         else:
             item_ests = np.array([sample.diffs.values for sample in samples])
-            threshold_ests = np.array([sample.thresholds_matrix for sample in samples])
+            threshold_ests = np.array([sample.thresholds for sample in samples])
 
             rater_ests = {i: sample.severities_matrix for i, sample in enumerate(samples)}
             rater_ests = {rater: {i: rater_ests[i][rater] for i, sample in enumerate(samples)}
@@ -8128,7 +8168,7 @@ class MFRM(Rasch):
             for i in range(no_of_samples):
                 rater_ests[rater][i] = pd.DataFrame.from_dict(rater_ests[rater][i]).T
 
-        if anchor_raters != []:
+        if anchor_raters is not None:
             marginal_rater_ests_items = {i: sample.anchor_marginal_severities_items
                                          for i, sample in enumerate(samples)}
         else:
@@ -8139,7 +8179,7 @@ class MFRM(Rasch):
                                              for i, sample in enumerate(samples)}
                                      for rater in self.raters}
 
-        if anchor_raters != []:
+        if anchor_raters is not None:
             marginal_rater_ests_thresholds = {i: sample.anchor_marginal_severities_thresholds
                                               for i, sample in enumerate(samples)}
         else:
@@ -8313,7 +8353,7 @@ class MFRM(Rasch):
                                   matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         self.anchor_diffs_global = self.diffs.copy()
-        self.anchor_thresholds_global = self.thresholds_global.copy()
+        self.anchor_thresholds_global = self.thresholds.copy()
         self.anchor_severities_global = self.severities_global.copy()
 
         anchor_severities = [self.severities_global[rater] for rater in anchor_raters]
@@ -8429,7 +8469,7 @@ class MFRM(Rasch):
                                  matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         self.anchor_diffs_items = self.diffs.copy()
-        self.anchor_thresholds_items = self.thresholds_items.copy()
+        self.anchor_thresholds_items = self.thresholds.copy()
 
         severities_items_df = pd.DataFrame(self.severities_items).T
 
@@ -8466,7 +8506,7 @@ class MFRM(Rasch):
                                       matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         self.anchor_diffs_thresholds = self.diffs.copy()
-        self.anchor_thresholds_thresholds = self.thresholds_thresholds.copy()
+        self.anchor_thresholds_thresholds = self.thresholds.copy()
 
         severities_thresholds_df = pd.DataFrame(self.severities_thresholds).T
 
@@ -8498,7 +8538,7 @@ class MFRM(Rasch):
                                   matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         self.anchor_diffs_matrix = self.diffs.copy()
-        self.anchor_thresholds_matrix = self.thresholds_matrix.copy()
+        self.anchor_thresholds_matrix = self.thresholds.copy()
 
         severities_matrix_df = {rater: pd.DataFrame(self.severities_matrix.copy()[rater]).T
                                 for rater in self.raters}
@@ -8559,14 +8599,18 @@ class MFRM(Rasch):
     def abil_global(self,
                     person,
                     anchor=False,
-                    difficulties=None,
-                    thresholds=None,
+                    items=None,
                     raters=None,
-                    severities=None,
                     warm_corr=True,
                     tolerance=0.0000001,
                     max_iters=100,
                     ext_score_adjustment=0.5):
+
+        if items is None:
+            items = self.dataframe.columns.tolist()
+
+        if raters is None:
+            raters = self.raters.tolist()
 
         if anchor:
             if hasattr(self, 'anchor_diffs_global'):
@@ -8574,29 +8618,33 @@ class MFRM(Rasch):
                 thresholds = self.anchor_thresholds_global
                 severities = self.anchor_severities_global
 
-                if raters is None:
-                    raters = self.raters
-
             else:
                 print('Anchor calibration required')
                 return
 
         else:
-            if difficulties is None:
-                difficulties = self.diffs
+            difficulties = self.diffs
+            thresholds = self.thresholds
+            severities = self.severities_global
 
-            if thresholds is None:
-                thresholds = self.thresholds_global
+        if isinstance(difficulties, pd.Series) == False:
+            difficulties = pd.Series({items: difficulties})
+        else:
+            difficulties = difficulties.loc[items]
 
-            if raters is None:
-                raters = self.raters
+        if isinstance(severities, pd.Series) == False:
+            severities = pd.Series({raters: severities})
+        else:
+            severities = severities[raters]
 
-            if severities is None:
-                severities = self.severities_global
+        if isinstance(raters, list):
+            person_data = [self.dataframe[items].xs(rater).loc[person].to_numpy()
+                           for rater in raters]
+            person_data = np.array(person_data)
 
-        severities = severities[raters]
+        else:
+            person_data = self.dataframe[items].xs(raters).loc[person].to_numpy()
 
-        person_data = self.dataframe.loc[raters].xs(person, level=1, drop_level=False).to_numpy()
         person_filter = (person_data + 1) / (person_data + 1)
         score = np.nansum(person_data)
 
@@ -8616,15 +8664,15 @@ class MFRM(Rasch):
 
             while (abs(change) > tolerance) & (iters <= max_iters):
 
-                person_exp_matrix = [[self.exp_score(estimate, difficulty, severities[rater], thresholds)
-                                      for difficulty in difficulties]
+                person_exp_matrix = [[self.exp_score_global(estimate, item, difficulties, rater, severities, thresholds)
+                                      for item in difficulties.keys()]
                                      for rater in raters]
                 person_exp_matrix = np.array(person_exp_matrix)
                 person_exp_matrix *= person_filter
                 result = np.nansum(person_exp_matrix)
 
-                person_info_matrix = [[self.variance(estimate, difficulty, severities[rater], thresholds)
-                                      for difficulty in difficulties]
+                person_info_matrix = [[self.variance_global(estimate, item, difficulties, rater, severities, thresholds)
+                                      for item in difficulties.keys()]
                                      for rater in raters]
                 person_info_matrix = np.array(person_info_matrix)
                 person_info_matrix *= person_filter
@@ -8645,58 +8693,89 @@ class MFRM(Rasch):
 
         return estimate
 
+    def person_abils_global(self,
+                            anchor=False,
+                            items=None,
+                            raters=None,
+                            warm_corr=True,
+                            tolerance=0.0000001,
+                            max_iters=100,
+                            ext_score_adjustment=0.5):
+
+        '''
+        Creates raw score to ability estimate look-up table. Newton-Raphson ML
+        estimation, includes optional Warm (1989) bias correction.
+        '''
+
+        if items is None:
+            items = self.dataframe.columns.tolist()
+
+        if raters is None:
+            raters = self.raters.tolist()
+
+        if anchor:
+            if hasattr(self, 'anchor_diffs_global') == False:
+                print('Anchor calibration required')
+                return
+
+        #df = self.dataframe[items].unstack(level=0).dropna(how='all')
+        #valid_persons = df.index
+
+        estimates = [self.abil_global(person, anchor=anchor, items=items, raters=raters, warm_corr=warm_corr,
+                                      tolerance=tolerance, max_iters=max_iters,
+                                      ext_score_adjustment=ext_score_adjustment)
+                     for person in self.persons]
+        estimates = {person: estimate for person, estimate in zip(self.persons, estimates)}
+
+        if anchor:
+            self.anchor_abils_global = pd.Series(estimates)
+
+        else:
+            self.abils_global = pd.Series(estimates)
+
     def score_abil_global(self,
                           score,
                           anchor=False,
-                          raters=[],
-                          difficulties=None,
-                          thresholds=None,
-                          severities=None,
+                          items=None,
+                          raters=None,
                           warm_corr=True,
                           tolerance=0.0000001,
                           max_iters=100,
                           ext_score_adjustment=0.5):
 
-        if difficulties is None:
-            if anchor:
-                if hasattr(self, 'anchor_diffs_global'):
-                    difficulties = self.anchor_diffs_global
+        if items is None:
+            items = self.dataframe.columns.tolist()
 
-                else:
-                    print('Anchor calibration required')
-                    return
+        if raters == 'all':
+            raters = self.raters.tolist()
 
-            else:
-                difficulties = self.diffs
-
-        if thresholds is None:
-            if anchor:
-                if hasattr(self, 'anchor_diffs_global'):
-                    thresholds = self.anchor_thresholds_global
-
-                else:
-                    print('Anchor calibration required')
-                    return
+        if anchor:
+            if hasattr(self, 'anchor_diffs_global'):
+                difficulties = self.anchor_diffs_global
+                thresholds = self.anchor_thresholds_global
+                severities = self.anchor_severities_global
 
             else:
-                thresholds = self.thresholds_global
+                print('Anchor calibration required')
+                return
 
-        if severities is None:
-            if anchor:
-                if hasattr(self, 'anchor_diffs_global'):
-                    severities = self.anchor_severities_global
+        else:
+            difficulties = self.diffs
+            thresholds = self.thresholds
+            severities = self.severities_global
 
-                else:
-                    print('Anchor calibration required')
-                    return
+        if isinstance(raters, str):
+            raters = [raters]
 
-            else:
-                severities = self.severities_global
+        if isinstance(items, str):
+            items = [items]
 
-        if raters == []:
-            raters = self.raters
+        if raters is None:
+            person_filter = np.array([1 for item in items])
 
-        person_filter = np.array([[1 for item in difficulties] for rater in raters])
+        else:
+            person_filter = np.array([[1 for item in items]
+                                      for rater in raters])
 
         ext_score = person_filter.sum() * self.max_score
 
@@ -8713,15 +8792,27 @@ class MFRM(Rasch):
 
         while (abs(change) > tolerance) & (iters <= max_iters):
 
-            exp_list = [self.exp_score(estimate, difficulty, severities[rater], thresholds)
-                        for difficulty in difficulties
-                        for rater in raters]
+            if raters is None:
+                exp_list = [self.exp_score_global(estimate, item, difficulties, 'dummy_rater',
+                                                  pd.Series({'dummy_rater': 0}), thresholds)
+                            for item in items]
+
+            else:
+                exp_list = [self.exp_score_global(estimate, item, difficulties, rater, severities, thresholds)
+                            for item in items for rater in raters]
+
             exp_list = np.array(exp_list)
             result = exp_list.sum()
 
-            info_list = [self.variance(estimate, difficulty, severities[rater], thresholds)
-                         for difficulty in difficulties
-                         for rater in raters]
+            if raters is None:
+                info_list = [self.variance_global(estimate, item, difficulties, 'dummy_rater',
+                                                  pd.Series({'dummy_rater': 0}), thresholds)
+                             for item in items]
+
+            else:
+                info_list = [self.variance_global(estimate, item, difficulties, rater, severities, thresholds)
+                             for item in items for rater in raters]
+
             info_list = np.array(info_list)
             info = info_list.sum()
 
@@ -8770,7 +8861,7 @@ class MFRM(Rasch):
             difficulties = self.diffs
 
         if thresholds is None:
-            thresholds = self.thresholds_global
+            thresholds = self.thresholds
 
         if severities is None:
             if raters == ['dummy_rater']:
@@ -8784,8 +8875,7 @@ class MFRM(Rasch):
 
         ext_score = len(difficulties) * self.max_score
 
-        abil_table = {score: self.score_abil_global(score, anchor=anchor, raters=raters, difficulties=difficulties,
-                                                    thresholds=thresholds, severities=severities, warm_corr=warm_corr,
+        abil_table = {score: self.score_abil_global(score, anchor=anchor, raters=raters, warm_corr=warm_corr,
                                                     tolerance=tolerance, max_iters=max_iters,
                                                     ext_score_adjustment=ext_score_adjustment)
                       for score in range(ext_score + 1)}
@@ -8804,22 +8894,22 @@ class MFRM(Rasch):
         Warm's (1989) bias correction for ML abiity estimates
         '''
 
-        exp_matrix = [[self.exp_score(estimate, difficulty, severity, thresholds)
-                       for difficulty in difficulties]
-                      for severity in severities]
+        exp_matrix = [[self.exp_score_global(estimate, item, difficulties, rater, severities, thresholds)
+                       for item in difficulties.keys()]
+                      for rater in severities.keys()]
         exp_matrix = np.array(exp_matrix)
         exp_matrix *= person_filter
 
-        info_matrix = [[self.variance(estimate, difficulty, severity, thresholds)
-                        for difficulty in difficulties]
-                       for severity in severities]
+        info_matrix = [[self.variance_global(estimate, item, difficulties, rater, severities, thresholds)
+                        for item in difficulties.keys()]
+                       for rater in severities.keys()]
         info_matrix = np.array(info_matrix)
         info_matrix *= person_filter
 
-        cat_prob_dict = {category + 1: [[self.cat_prob(estimate, difficulty, severity,
-                                                       category + 1, thresholds)
-                                         for difficulty in difficulties]
-                                        for severity in severities]
+        cat_prob_dict = {category + 1: [[self.cat_prob_global(estimate, item, difficulties, rater, severities,
+                                                              category + 1, thresholds)
+                                         for item in difficulties.keys()]
+                                        for rater in severities.keys()]
                          for category in range(self.max_score)}
 
         for category in range(self.max_score):
@@ -8839,11 +8929,19 @@ class MFRM(Rasch):
 
     def csem_global(self,
                     person,
-                    ability,
                     anchor=False,
-                    difficulties=None,
-                    thresholds=None,
-                    severities=None):
+                    items=None,
+                    raters=None,
+                    warm_corr=True,
+                    tolerance=0.0000001,
+                    max_iters=100,
+                    ext_score_adjustment=0.5):
+
+        if items is None:
+            items = self.dataframe.columns
+
+        if raters is None:
+            raters = self.raters
 
         if anchor:
             if hasattr(self, 'anchor_diffs_global'):
@@ -8856,89 +8954,40 @@ class MFRM(Rasch):
                 return
 
         else:
-            if difficulties is None:
-                difficulties = self.diffs
+            difficulties = self.diffs
+            thresholds = self.thresholds
+            severities = self.severities_global
 
-            if thresholds is None:
-                thresholds = self.thresholds_global
+        difficulties = difficulties.loc[items]
+        severities = severities[raters]
 
-            if severities is None:
-                severities = self.severities_global
+        ability = self.abil_global(person, anchor=anchor, items=items, raters=raters, warm_corr=warm_corr,
+                                   tolerance=tolerance, max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
 
-        person_data = self.dataframe.xs(person, level=1, drop_level=False).to_numpy()
-        person_filter = (person_data + 1) / (person_data + 1)
+        info_list = [self.variance_global(ability, item, difficulties, rater, severities, thresholds)
+                     for item in items for rater in raters
+                     if self.dataframe.loc[(rater, person), item] == self.dataframe.loc[(rater, person), item]]
 
-        info_matrix = [[self.variance(ability, difficulty, severity, thresholds)
-                        for difficulty in difficulties]
-                       for severity in severities]
-        info_matrix = np.array(info_matrix)
-        info_matrix *= person_filter
-
-        total_info = np.nansum(info_matrix)
-
+        total_info = sum(info_list)
         csem = 1 / np.sqrt(total_info)
 
         return csem
 
-    def person_abils_global(self,
-                            anchor=False,
-                            difficulties=None,
-                            thresholds=None,
-                            raters=None,
-                            severities=None,
-                            warm_corr=True,
-                            tolerance=0.0000001,
-                            max_iters=100,
-                            ext_score_adjustment=0.5):
-
-        '''
-        Creates raw score to ability estimate look-up table. Newton-Raphson ML
-        estimation, includes optional Warm (1989) bias correction.
-        '''
-
-        if anchor:
-            if hasattr(self, 'anchor_diffs_global'):
-                difficulties = self.anchor_diffs_global
-                thresholds = self.anchor_thresholds_global
-                severities = self.anchor_severities_global
-
-            else:
-                print('Anchor calibration required')
-                return
-
-        else:
-            if difficulties is None:
-                difficulties = self.diffs
-
-            if thresholds is None:
-                thresholds = self.thresholds_global
-
-            if severities is None:
-                severities = self.severities_global
-
-        estimates = [self.abil_global(person, difficulties=difficulties, thresholds=thresholds, raters=raters,
-                                      severities=severities, warm_corr=warm_corr, tolerance=tolerance,
-                                      max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
-                     for person in self.persons]
-        estimates = {person: estimate for person, estimate in zip(self.persons, estimates)}
-
-        if anchor:
-            self.anchor_abils_global = pd.Series(estimates)
-
-        else:
-            self.abils_global = pd.Series(estimates)
-
     def abil_items(self,
                    person,
                    anchor=False,
-                   difficulties=None,
-                   thresholds=None,
+                   items=None,
                    raters=None,
-                   severities=None,
                    warm_corr=True,
                    tolerance=0.0000001,
                    max_iters=100,
                    ext_score_adjustment=0.5):
+
+        if items is None:
+            items = self.dataframe.columns
+
+        if raters is None:
+            raters = self.raters
 
         if anchor:
             if hasattr(self, 'anchor_diffs_items'):
@@ -8946,28 +8995,19 @@ class MFRM(Rasch):
                 thresholds = self.anchor_thresholds_items
                 severities = self.anchor_severities_items
 
-                if raters is None:
-                    raters = self.raters
             else:
                 print('Anchor calibration required')
                 return
 
         else:
-            if difficulties is None:
-                difficulties = self.diffs
+            difficulties = self.diffs
+            thresholds = self.thresholds
+            severities = self.severities_items
 
-            if thresholds is None:
-                thresholds = self.thresholds_items
+        difficulties = difficulties.loc[items]
+        severities = severities[raters]
 
-            if raters is None:
-                raters = self.raters
-
-            if severities is None:
-                severities = self.severities_items
-
-        severities = {rater: severities[rater] for rater in raters}
-
-        person_data = self.dataframe.loc[raters].xs(person, level=1, drop_level=False).to_numpy()
+        person_data = self.dataframe[items].loc[raters].xs(person, level=1, drop_level=False).to_numpy()
         person_filter = (person_data + 1) / (person_data + 1)
         score = np.nansum(person_data)
 
@@ -9017,58 +9057,88 @@ class MFRM(Rasch):
 
         return estimate
 
+    def person_abils_items(self,
+                           anchor=False,
+                           items=None,
+                           raters=None,
+                           warm_corr=True,
+                           tolerance=0.0000001,
+                           max_iters=100,
+                           ext_score_adjustment=0.5):
+
+        '''
+        Creates raw score to ability estimate look-up table. Newton-Raphson ML
+        estimation, includes optional Warm (1989) bias correction.
+        '''
+
+        if items is None:
+            items = self.dataframe.columns
+
+        if raters is None:
+            raters = self.raters
+
+        if anchor:
+            if hasattr(self, 'anchor_diffs_items'):
+                difficulties = self.anchor_diffs_items
+                thresholds = self.anchor_thresholds_items
+                severities = self.anchor_severities_items
+
+            else:
+                print('Anchor calibration required')
+                return
+
+        else:
+            difficulties = self.diffs
+            thresholds = self.thresholds
+            severities = self.severities_items
+
+        difficulties = difficulties.loc[items]
+        severities = severities[raters]
+
+        estimates = [self.abil_items(person, items=items, raters=raters, warm_corr=warm_corr, tolerance=tolerance,
+                                     max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
+                     for person in self.persons]
+
+        estimates = {person: estimate for person, estimate in zip(self.persons, estimates)}
+
+        if anchor:
+            self.anchor_abils_items = pd.Series(estimates)
+
+        else:
+            self.abils_items = pd.Series(estimates)
+
     def score_abil_items(self,
                          score,
                          anchor=False,
-                         raters=[],
-                         difficulties=None,
-                         thresholds=None,
-                         severities=None,
+                         items=None,
+                         raters=None,
                          warm_corr=True,
                          tolerance=0.0000001,
                          max_iters=100,
                          ext_score_adjustment=0.5):
 
-        if difficulties is None:
-            if anchor:
-                if hasattr(self, 'anchor_diffs_items'):
-                    difficulties = self.anchor_diffs_items
+        if items is None:
+            items = self.dataframe.columns
 
-                else:
-                    print('Anchor calibration required')
-                    return
-
-            else:
-                difficulties = self.diffs
-
-        if thresholds is None:
-            if anchor:
-                if hasattr(self, 'anchor_diffs_items'):
-                    thresholds = self.anchor_thresholds_items
-
-                else:
-                    print('Anchor calibration required')
-                    return
-
-            else:
-                thresholds = self.thresholds_items
-
-        if severities is None:
-            if anchor:
-                if hasattr(self, 'anchor_diffs_items'):
-                    severities = self.anchor_severities_items
-
-                else:
-                    print('Anchor calibration required')
-                    return
-
-            else:
-                severities = self.severities_items
-
-        if raters == []:
+        if raters is None:
             raters = self.raters
 
-        person_filter = np.array([[1 for item in difficulties] for rater in raters])
+        if anchor:
+            if hasattr(self, 'anchor_diffs_items'):
+                difficulties = self.anchor_diffs_items
+                thresholds = self.anchor_thresholds_items
+                severities = self.anchor_severities_items
+
+            else:
+                print('Anchor calibration required')
+                return
+
+        else:
+            difficulties = self.diffs
+            thresholds = self.thresholds
+            severities = self.severities_items
+
+        person_filter = np.array([[1 for item in items] for rater in raters])
 
         ext_score = person_filter.sum() * self.max_score
 
@@ -9142,7 +9212,7 @@ class MFRM(Rasch):
             difficulties = self.diffs
 
         if thresholds is None:
-            thresholds = self.thresholds_items
+            thresholds = self.thresholds
 
         if severities is None:
             if raters == ['dummy_rater']:
@@ -9212,47 +9282,19 @@ class MFRM(Rasch):
 
     def csem_items(self,
                    person,
-                   ability,
-                   difficulties=None,
-                   severities=None):
+                   anchor=False,
+                   items=None,
+                   raters=None,
+                   warm_corr=True,
+                   tolerance=0.0000001,
+                   max_iters=100,
+                   ext_score_adjustment=0.5):
 
-        if difficulties is None:
-            difficulties = self.diffs
+        if items is None:
+            items = self.dataframe.columns
 
-        if severities is None:
-            severities = self.severities_items
-
-        person_data = self.dataframe.xs(person, level=1, drop_level=False).to_numpy()
-        person_filter = (person_data + 1) / (person_data + 1)
-
-        info_matrix = [[self.variance_items(ability, item, difficulties,
-                                            rater, severities, self.thresholds_items)
-                        for item, difficulty in difficulties.items()]
-                       for rater in severities.keys()]
-        info_matrix = np.array(info_matrix)
-        info_matrix *= person_filter
-
-        total_info = np.nansum(info_matrix)
-
-        csem = 1 / np.sqrt(total_info)
-
-        return csem
-
-    def person_abils_items(self,
-                           anchor=False,
-                           difficulties=None,
-                           thresholds=None,
-                           raters=None,
-                           severities=None,
-                           warm_corr=True,
-                           tolerance=0.0000001,
-                           max_iters=100,
-                           ext_score_adjustment=0.5):
-
-        '''
-        Creates raw score to ability estimate look-up table. Newton-Raphson ML
-        estimation, includes optional Warm (1989) bias correction.
-        '''
+        if raters is None:
+            raters = self.raters
 
         if anchor:
             if hasattr(self, 'anchor_diffs_items'):
@@ -9265,69 +9307,60 @@ class MFRM(Rasch):
                 return
 
         else:
-            if difficulties is None:
-                difficulties = self.diffs
+            difficulties = self.diffs
+            thresholds = self.thresholds
+            severities = self.severities_items
 
-            if thresholds is None:
-                thresholds = self.thresholds_items
+        difficulties = difficulties.loc[items]
+        severities = severities[raters]
 
-            if severities is None:
-                severities = self.severities_items
+        ability = self.abil_items(person, anchor=anchor, items=items, raters=raters, warm_corr=warm_corr,
+                                   tolerance=tolerance, max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
 
-        estimates = [self.abil_items(person, difficulties=difficulties, thresholds=thresholds, raters=raters,
-                                     severities=severities, warm_corr=warm_corr, tolerance=tolerance,
-                                     max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
-                     for person in self.persons]
+        info_list = [self.variance_items(ability, item, difficulties, rater, severities, thresholds)
+                     for item in items for rater in raters
+                     if self.dataframe.loc[(rater, person), item] == self.dataframe.loc[(rater, person), item]]
 
-        estimates = {person: estimate for person, estimate in zip(self.persons, estimates)}
+        total_info = sum(info_list)
+        csem = 1 / np.sqrt(total_info)
 
-        if anchor:
-            self.anchor_abils_items = pd.Series(estimates)
-
-        else:
-            self.abils_items = pd.Series(estimates)
+        return csem
 
     def abil_thresholds(self,
                         person,
                         anchor=False,
-                        difficulties=None,
-                        thresholds=None,
+                        items=None,
                         raters=None,
-                        severities=None,
                         warm_corr=True,
                         tolerance=0.0000001,
                         max_iters=100,
                         ext_score_adjustment=0.5):
 
+        if items is None:
+            items = self.dataframe.columns
+
+        if raters is None:
+            raters = self.raters
+
         if anchor:
-            if hasattr(self, 'anchor_diffs_thresholds'):
+            if hasattr(self, 'anchor_diffs_global'):
                 difficulties = self.anchor_diffs_thresholds
                 thresholds = self.anchor_thresholds_thresholds
                 severities = self.anchor_severities_thresholds
-
-                if raters is None:
-                    raters = self.raters
 
             else:
                 print('Anchor calibration required')
                 return
 
         else:
-            if difficulties is None:
-                difficulties = self.diffs
+            difficulties = self.diffs
+            thresholds = self.thresholds
+            severities = self.severities_thresholds
 
-            if thresholds is None:
-                thresholds = self.thresholds_thresholds
+        difficulties = difficulties.loc[items]
+        severities = severities[raters]
 
-            if raters is None:
-                raters = self.raters
-
-            if severities is None:
-                severities = self.severities_thresholds
-
-        severities = {rater: severities[rater] for rater in raters}
-
-        person_data = self.dataframe.loc[raters].xs(person, level=1, drop_level=False).to_numpy()
+        person_data = self.dataframe[items].loc[raters].xs(person, level=1, drop_level=False).to_numpy()
         person_filter = (person_data + 1) / (person_data + 1)
         score = np.nansum(person_data)
 
@@ -9347,15 +9380,17 @@ class MFRM(Rasch):
 
             while (abs(change) > tolerance) & (iters <= max_iters):
 
-                person_exp_matrix = [[self.exp_score_thresholds(estimate, difficulty, rater, severities, thresholds)
-                                      for difficulty in difficulties]
+                person_exp_matrix = [[self.exp_score_thresholds(estimate, item, difficulties, rater, severities,
+                                                                thresholds)
+                                      for item in difficulties.keys()]
                                      for rater in raters]
                 person_exp_matrix = np.array(person_exp_matrix)
                 person_exp_matrix *= person_filter
                 result = np.nansum(person_exp_matrix)
 
-                person_info_matrix = [[self.variance_thresholds(estimate, difficulty, rater, severities, thresholds)
-                                       for difficulty in difficulties]
+                person_info_matrix = [[self.variance_thresholds(estimate, item, difficulties, rater, severities,
+                                                                thresholds)
+                                       for item in difficulties.keys()]
                                       for rater in raters]
                 person_info_matrix = np.array(person_info_matrix)
                 person_info_matrix *= person_filter
@@ -9376,58 +9411,90 @@ class MFRM(Rasch):
 
         return estimate
 
+    def person_abils_thresholds(self,
+                                anchor=False,
+                                difficulties=None,
+                                thresholds=None,
+                                raters=None,
+                                severities=None,
+                                warm_corr=True,
+                                tolerance=0.0000001,
+                                max_iters=100,
+                                ext_score_adjustment=0.5):
+
+        '''
+        Creates raw score to ability estimate look-up table. Newton-Raphson ML
+        estimation, includes optional Warm (1989) bias correction.
+        '''
+
+        if items is None:
+            items = self.dataframe.columns
+
+        if raters is None:
+            raters = self.raters
+
+        if anchor:
+            if hasattr(self, 'anchor_diffs_thresholds'):
+                difficulties = self.anchor_diffs_thresholds
+                thresholds = self.anchor_thresholds_thresholds
+                severities = self.anchor_severities_thresholds
+
+            else:
+                print('Anchor calibration required')
+                return
+
+        else:
+            difficulties = self.diffs
+            thresholds = self.thresholds
+            severities = self.severities_thresholds
+
+        difficulties = difficulties.loc[items]
+        severities = severities[raters]
+
+        estimates = [self.abil_thresholds(person, items=items, raters=raters, warm_corr=warm_corr, tolerance=tolerance,
+                                          max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
+                     for person in self.persons]
+
+        estimates = {person: estimate for person, estimate in zip(self.persons, estimates)}
+
+        if anchor:
+            self.anchor_abils_thresholds = pd.Series(estimates)
+
+        else:
+            self.abils_thresholds = pd.Series(estimates)
+
     def score_abil_thresholds(self,
                               score,
                               anchor=False,
-                              raters=[],
-                              difficulties=None,
-                              thresholds=None,
-                              severities=None,
+                              items=None,
+                              raters=None,
                               warm_corr=True,
                               tolerance=0.0000001,
                               max_iters=100,
                               ext_score_adjustment=0.5):
 
-        if difficulties is None:
-            if anchor:
-                if hasattr(self, 'anchor_diffs_thresholds'):
-                    difficulties = self.anchor_diffs_thresholds
+        if items is None:
+            items = self.dataframe.columns
 
-                else:
-                    print('Anchor calibration required')
-                    return
-
-            else:
-                difficulties = self.diffs
-
-        if thresholds is None:
-            if anchor:
-                if hasattr(self, 'anchor_diffs_thresholds'):
-                    thresholds = self.anchor_thresholds_thresholds
-
-                else:
-                    print('Anchor calibration required')
-                    return
-
-            else:
-                thresholds = self.thresholds_thresholds
-
-        if severities is None:
-            if anchor:
-                if hasattr(self, 'anchor_diffs_thresholds'):
-                    severities = self.anchor_severities_thresholds
-
-                else:
-                    print('Anchor calibration required')
-                    return
-
-            else:
-                severities = self.severities_thresholds
-
-        if raters == []:
+        if raters is None:
             raters = self.raters
 
-        person_filter = np.array([[1 for item in difficulties] for rater in raters])
+        if anchor:
+            if hasattr(self, 'anchor_diffs_thresholds'):
+                difficulties = self.anchor_diffs_thresholds
+                thresholds = self.anchor_thresholds_thresholds
+                severities = self.anchor_severities_thresholds
+
+            else:
+                print('Anchor calibration required')
+                return
+
+        else:
+            difficulties = self.diffs
+            thresholds = self.thresholds
+            severities = self.severities_thresholds
+
+        person_filter = np.array([[1 for item in items] for rater in raters])
 
         ext_score = person_filter.sum() * self.max_score
 
@@ -9444,14 +9511,14 @@ class MFRM(Rasch):
 
         while (abs(change) > tolerance) & (iters <= max_iters):
 
-            exp_list = [self.exp_score_thresholds(estimate, difficulty, rater, severities, thresholds)
-                        for difficulty in difficulties
+            exp_list = [self.exp_score_thresholds(estimate, item, difficulties, rater, severities, thresholds)
+                        for item in difficulties.keys()
                         for rater in raters]
             exp_list = np.array(exp_list)
             result = exp_list.sum()
 
-            info_list = [self.variance_thresholds(estimate, difficulty, rater, severities, thresholds)
-                         for difficulty in difficulties
+            info_list = [self.variance_thresholds(estimate, item, difficulties, rater, severities, thresholds)
+                         for item in difficulties.keys()
                          for rater in raters]
             info_list = np.array(info_list)
             info = info_list.sum()
@@ -9501,7 +9568,7 @@ class MFRM(Rasch):
             difficulties = self.diffs
 
         if thresholds is None:
-            thresholds = self.thresholds_thresholds
+            thresholds = self.thresholds
 
         if severities is None:
             if raters == ['dummy_rater']:
@@ -9535,21 +9602,21 @@ class MFRM(Rasch):
         Warm's (1989) bias correction for ML abiity estimates
         '''
 
-        exp_matrix = [[self.exp_score_thresholds(estimate, difficulty, rater, severities, thresholds)
-                       for difficulty in difficulties]
+        exp_matrix = [[self.exp_score_thresholds(estimate, item, difficulties, rater, severities, thresholds)
+                       for item in difficulties.keys()]
                       for rater in severities.keys()]
         exp_matrix = np.array(exp_matrix)
         exp_matrix *= person_filter
 
-        info_matrix = [[self.variance_thresholds(estimate, difficulty, rater, severities, thresholds)
-                        for difficulty in difficulties]
+        info_matrix = [[self.variance_thresholds(estimate, item, difficulties, rater, severities, thresholds)
+                        for item in difficulties.keys()]
                        for rater in severities.keys()]
         info_matrix = np.array(info_matrix)
         info_matrix *= person_filter
 
-        cat_prob_dict = {category + 1: [[self.cat_prob_thresholds(estimate, difficulty, rater, severities,
+        cat_prob_dict = {category + 1: [[self.cat_prob_thresholds(estimate, item, difficulties, rater, severities,
                                                                   category + 1, thresholds)
-                                         for difficulty in difficulties]
+                                         for item in difficulties.keys()]
                                         for rater in severities.keys()]
                          for category in range(self.max_score)}
 
@@ -9570,47 +9637,19 @@ class MFRM(Rasch):
 
     def csem_thresholds(self,
                         person,
-                        ability,
-                        difficulties=None,
-                        severities=None):
+                        anchor=False,
+                        items=None,
+                        raters=None,
+                        warm_corr=True,
+                        tolerance=0.0000001,
+                        max_iters=100,
+                        ext_score_adjustment=0.5):
 
-        if difficulties is None:
-            difficulties = self.diffs
+        if items is None:
+            items = self.dataframe.columns
 
-        if severities is None:
-            severities = self.severities_thresholds
-
-        person_data = self.dataframe.xs(person, level=1, drop_level=False).to_numpy()
-        person_filter = (person_data + 1) / (person_data + 1)
-
-        info_matrix = [[self.variance_thresholds(ability, difficulty, rater,
-                                                 severities, self.thresholds_thresholds)
-                        for difficulty in difficulties]
-                       for rater in severities.keys()]
-        info_matrix = np.array(info_matrix)
-        info_matrix *= person_filter
-
-        total_info = np.nansum(info_matrix)
-
-        csem = 1 / np.sqrt(total_info)
-
-        return csem
-
-    def person_abils_thresholds(self,
-                                anchor=False,
-                                difficulties=None,
-                                thresholds=None,
-                                raters=None,
-                                severities=None,
-                                warm_corr=True,
-                                tolerance=0.0000001,
-                                max_iters=100,
-                                ext_score_adjustment=0.5):
-
-        '''
-        Creates raw score to ability estimate look-up table. Newton-Raphson ML
-        estimation, includes optional Warm (1989) bias correction.
-        '''
+        if raters is None:
+            raters = self.raters
 
         if anchor:
             if hasattr(self, 'anchor_diffs_thresholds'):
@@ -9623,69 +9662,60 @@ class MFRM(Rasch):
                 return
 
         else:
-            if difficulties is None:
-                difficulties = self.diffs
+            difficulties = self.diffs
+            thresholds = self.thresholds
+            severities = self.severities_thresholds
 
-            if thresholds is None:
-                thresholds = self.thresholds_thresholds
+        difficulties = difficulties.loc[items]
+        severities = severities[raters]
 
-            if severities is None:
-                severities = self.severities_thresholds
+        ability = self.abil_thresholds(person, anchor=anchor, items=items, raters=raters, warm_corr=warm_corr,
+                                   tolerance=tolerance, max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
 
-        estimates = [self.abil_thresholds(person, difficulties=difficulties, thresholds=thresholds, raters=raters,
-                                          severities=severities, warm_corr=warm_corr, tolerance=tolerance,
-                                          max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
-                     for person in self.persons]
+        info_list = [self.variance_thresholds(ability, item, difficulties, rater, severities, thresholds)
+                     for item in items for rater in raters
+                     if self.dataframe.loc[(rater, person), item] == self.dataframe.loc[(rater, person), item]]
 
-        estimates = {person: estimate for person, estimate in zip(self.persons, estimates)}
+        total_info = sum(info_list)
+        csem = 1 / np.sqrt(total_info)
 
-        if anchor:
-            self.anchor_abils_thresholds = pd.Series(estimates)
-
-        else:
-            self.abils_thresholds = pd.Series(estimates)
+        return csem
 
     def abil_matrix(self,
                     person,
                     anchor=False,
-                    difficulties=None,
-                    thresholds=None,
+                    items=None,
                     raters=None,
-                    severities=None,
                     warm_corr=True,
                     tolerance=0.0000001,
                     max_iters=100,
                     ext_score_adjustment=0.5):
 
+        if items is None:
+            items = self.dataframe.columns
+
+        if raters is None:
+            raters = self.raters
+
         if anchor:
-            if hasattr(self, 'anchor_diffs_matrix'):
+            if hasattr(self, 'anchor_diffs_global'):
                 difficulties = self.anchor_diffs_matrix
                 thresholds = self.anchor_thresholds_matrix
                 severities = self.anchor_severities_matrix
-
-                if raters is None:
-                    raters = self.raters
 
             else:
                 print('Anchor calibration required')
                 return
 
         else:
-            if difficulties is None:
-                difficulties = self.diffs
+            difficulties = self.diffs
+            thresholds = self.thresholds
+            severities = self.severities_matrix
 
-            if thresholds is None:
-                thresholds = self.thresholds_matrix
+        difficulties = difficulties.loc[items]
+        severities = severities[raters]
 
-            if raters is None:
-                raters = self.raters
-
-            if severities is None:
-                severities = self.severities_matrix
-
-        severities = {rater: severities[rater] for rater in raters}
-
-        person_data = self.dataframe.loc[raters].xs(person, level=1, drop_level=False).to_numpy()
+        person_data = self.dataframe[items].loc[raters].xs(person, level=1, drop_level=False).to_numpy()
         person_filter = (person_data + 1) / (person_data + 1)
         score = np.nansum(person_data)
 
@@ -9734,58 +9764,88 @@ class MFRM(Rasch):
 
         return estimate
 
+    def person_abils_matrix(self,
+                            anchor=False,
+                            items=None,
+                            raters=None,
+                            warm_corr=True,
+                            tolerance=0.0000001,
+                            max_iters=100,
+                            ext_score_adjustment=0.5):
+
+        '''
+        Creates raw score to ability estimate look-up table. Newton-Raphson ML
+        estimation, includes optional Warm (1989) bias correction.
+        '''
+
+        if items is None:
+            items = self.dataframe.columns
+
+        if raters is None:
+            raters = self.raters
+
+        if anchor:
+            if hasattr(self, 'anchor_diffs_matrix'):
+                difficulties = self.anchor_diffs_matrix
+                thresholds = self.anchor_thresholds_matrix
+                severities = self.anchor_severities_matrix
+
+            else:
+                print('Anchor calibration required')
+                return
+
+        else:
+            difficulties = self.diffs
+            thresholds = self.thresholds
+            severities = self.severities_matrix
+
+            difficulties = difficulties.loc[items]
+            severities = severities[raters]
+
+        estimates = [self.abil_matrix(person, items=items, raters=raters, warm_corr=warm_corr, tolerance=tolerance,
+                                      max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
+                     for person in self.persons]
+
+        estimates = {person: estimate for person, estimate in zip(self.persons, estimates)}
+
+        if anchor:
+            self.anchor_abils_matrix = pd.Series(estimates)
+
+        else:
+            self.abils_matrix = pd.Series(estimates)
+
     def score_abil_matrix(self,
                           score,
                           anchor=False,
-                          raters=[],
-                          difficulties=None,
-                          thresholds=None,
-                          severities=None,
+                          items=None,
+                          raters=None,
                           warm_corr=True,
                           tolerance=0.0000001,
                           max_iters=100,
                           ext_score_adjustment=0.5):
 
-        if difficulties is None:
-            if anchor:
-                if hasattr(self, 'anchor_diffs_matrix'):
-                    difficulties = self.anchor_diffs_matrix
+        if items is None:
+            items = self.dataframe.columns
 
-                else:
-                    print('Anchor calibration required')
-                    return
-
-            else:
-                difficulties = self.diffs
-
-        if thresholds is None:
-            if anchor:
-                if hasattr(self, 'anchor_diffs_matrix'):
-                    thresholds = self.anchor_thresholds_matrix
-
-                else:
-                    print('Anchor calibration required')
-                    return
-
-            else:
-                thresholds = self.thresholds_matrix
-
-        if severities is None:
-            if anchor:
-                if hasattr(self, 'anchor_diffs_matrix'):
-                    severities = self.anchor_severities_matrix
-
-                else:
-                    print('Anchor calibration required')
-                    return
-
-            else:
-                severities = self.severities_matrix
-
-        if raters == []:
+        if raters is None:
             raters = self.raters
 
-        person_filter = np.array([[1 for item in difficulties] for rater in raters])
+        if anchor:
+            if hasattr(self, 'anchor_diffs_matrix'):
+                difficulties = self.anchor_diffs_matrix
+                thresholds = self.anchor_thresholds_matrix
+                severities = self.anchor_severities_matrix
+
+            else:
+                print('Anchor calibration required')
+                return
+
+        else:
+            difficulties = self.diffs
+            thresholds = self.thresholds
+            severities = self.severities_matrix
+
+        person_filter = np.array([[1 for item in items] for rater in raters])
 
         ext_score = person_filter.sum() * self.max_score
 
@@ -9859,7 +9919,7 @@ class MFRM(Rasch):
             difficulties = self.diffs
 
         if thresholds is None:
-            thresholds = self.thresholds_matrix
+            thresholds = self.thresholds
 
         if severities is None:
             if raters == ['dummy_rater']:
@@ -9929,79 +9989,19 @@ class MFRM(Rasch):
 
     def csem_matrix(self,
                     person,
-                    ability,
                     anchor=False,
-                    difficulties=None,
-                    thresholds=None,
-                    severities=None):
+                    items=None,
+                    raters=None,
+                    warm_corr=True,
+                    tolerance=0.0000001,
+                    max_iters=100,
+                    ext_score_adjustment=0.5):
 
-        if difficulties is None:
-            if anchor:
-                if hasattr(self, 'anchor_diffs_matrix'):
-                    difficulties = self.anchor_diffs_matrix
+        if items is None:
+            items = self.dataframe.columns
 
-                else:
-                    print('Anchor calibration required')
-                    return
-
-            else:
-                difficulties = self.diffs
-
-        if thresholds is None:
-            if anchor:
-                if hasattr(self, 'anchor_diffs_matrix'):
-                    thresholds = self.anchor_thresholds_matrix
-
-                else:
-                    print('Anchor calibration required')
-                    return
-
-            else:
-                thresholds = self.thresholds_matrix
-
-        if severities is None:
-            if anchor:
-                if hasattr(self, 'anchor_diffs_matrix'):
-                    severities = self.anchor_severities_matrix
-
-                else:
-                    print('Anchor calibration required')
-                    return
-
-            else:
-                severities = self.severities_matrix
-
-        person_data = self.dataframe.xs(person, level=1, drop_level=False).to_numpy()
-        person_filter = (person_data + 1) / (person_data + 1)
-
-        info_matrix = [[self.variance_matrix(ability, item, difficulties,
-                                             rater, severities, thresholds)
-                        for item, difficulty in difficulties.items()]
-                       for rater in severities.keys()]
-        info_matrix = np.array(info_matrix)
-        info_matrix *= person_filter
-
-        total_info = np.nansum(info_matrix)
-
-        csem = 1 / np.sqrt(total_info)
-
-        return csem
-
-    def person_abils_matrix(self,
-                            anchor=False,
-                            difficulties=None,
-                            thresholds=None,
-                            raters=None,
-                            severities=None,
-                            warm_corr=True,
-                            tolerance=0.0000001,
-                            max_iters=100,
-                            ext_score_adjustment=0.5):
-
-        '''
-        Creates raw score to ability estimate look-up table. Newton-Raphson ML
-        estimation, includes optional Warm (1989) bias correction.
-        '''
+        if raters is None:
+            raters = self.raters
 
         if anchor:
             if hasattr(self, 'anchor_diffs_matrix'):
@@ -10014,27 +10014,24 @@ class MFRM(Rasch):
                 return
 
         else:
-            if difficulties is None:
-                difficulties = self.diffs
+            difficulties = self.diffs
+            thresholds = self.thresholds
+            severities = self.severities_matrix
 
-            if thresholds is None:
-                thresholds = self.thresholds_matrix
+        difficulties = difficulties.loc[items]
+        severities = severities[raters]
 
-            if severities is None:
-                severities = self.severities_matrix
+        ability = self.abil_matrix(person, anchor=anchor, items=items, raters=raters, warm_corr=warm_corr,
+                                   tolerance=tolerance, max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
 
-        estimates = [self.abil_matrix(person, difficulties=difficulties, thresholds=thresholds, raters=raters,
-                                      severities=severities, warm_corr=warm_corr, tolerance=tolerance,
-                                      max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
-                     for person in self.persons]
+        info_list = [self.variance_matrix(ability, item, difficulties, rater, severities, thresholds)
+                     for item in items for rater in raters
+                     if self.dataframe.loc[(rater, person), item] == self.dataframe.loc[(rater, person), item]]
 
-        estimates = {person: estimate for person, estimate in zip(self.persons, estimates)}
+        total_info = sum(info_list)
+        csem = 1 / np.sqrt(total_info)
 
-        if anchor:
-            self.anchor_abils_matrix = pd.Series(estimates)
-
-        else:
-            self.abils_matrix = pd.Series(estimates)
+        return csem
 
     def category_counts_item(self,
                              item,
@@ -10055,28 +10052,19 @@ class MFRM(Rasch):
         else:
             print('Invalid item name')
 
-    def category_counts_df(self,
-                           rater=None):
+    def category_counts_df(self):
 
         category_counts_df = pd.DataFrame(0, index=self.dataframe.columns, columns=np.arange(self.max_score + 1))
 
         for item in self.dataframe.columns:
-            for score, count in self.category_counts_item(item, rater=rater).items():
+            for score, count in self.category_counts_item(item).items():
                 category_counts_df.loc[item].iloc[int(score)] = count
 
-        if rater is None:
-            category_counts_df['Total'] = self.dataframe.count()
-        else:
-            category_counts_df['Total'] = self.dataframe.xs(rater).count()
-
-        if rater is None:
-            category_counts_df['Missing'] = self.dataframe.shape[0] - category_counts_df['Total']
-        else:
-            category_counts_df['Missing'] = self.dataframe.xs(rater).shape[0] - category_counts_df['Total']
+        category_counts_df['Total'] = self.dataframe.count()
+        category_counts_df['Missing'] = self.dataframe.shape[0] - category_counts_df['Total']
 
         category_counts_df = category_counts_df.astype(int)
-
-        category_counts_df.loc['Total']= category_counts_df.sum()
+        category_counts_df.loc['Total'] = category_counts_df.sum()
 
         self.category_counts = category_counts_df
 
@@ -10103,7 +10091,7 @@ class MFRM(Rasch):
                                                 keys=self.category_counts_raters.keys())
 
     def item_stats_df_global(self,
-                             anchor_raters=[],
+                             anchor_raters=None,
                              full=False,
                              zstd=False,
                              point_measure_corr=False,
@@ -10124,7 +10112,7 @@ class MFRM(Rasch):
             if interval is None:
                 interval = 0.95
 
-        if anchor_raters != []:
+        if anchor_raters is not None:
             if (hasattr(self, 'anchor_severites_global') == False) or (self.anchor_raters_global != anchor_raters):
                 self.calibrate_global_anchor(anchor_raters, constant=constant, method=method)
                 self.std_errors_global(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
@@ -10148,7 +10136,7 @@ class MFRM(Rasch):
                                             method=method, constant=constant, no_of_samples=no_of_samples,
                                             interval=interval)
 
-        if anchor_raters != []:
+        if anchor_raters is not None:
             difficulties = self.anchor_diffs_global
             std_errors = self.anchor_item_se_global
             low = self.anchor_item_low_global
@@ -10180,8 +10168,6 @@ class MFRM(Rasch):
         if zstd:
             self.item_stats_global['Outfit Z'] = self.item_outfit_zstd_global.to_numpy().round(dp)
 
-        #self.item_stats_global['RMSR'] = np.sqrt(sq_residuals.mean(axis = 0)).astype(float).round(dp)
-
         if point_measure_corr:
             self.item_stats_global['PM corr'] = self.point_measure_global.to_numpy().round(dp)
             self.item_stats_global['Exp PM corr'] = self.exp_point_measure_global.to_numpy().round(dp)
@@ -10189,7 +10175,7 @@ class MFRM(Rasch):
         self.item_stats_global.index = self.dataframe.columns
 
     def threshold_stats_df_global(self,
-                                  anchor_raters=[],
+                                  anchor_raters=None,
                                   full=False,
                                   zstd=False,
                                   disc=False,
@@ -10212,7 +10198,7 @@ class MFRM(Rasch):
             if interval is None:
                 interval = 0.95
 
-        if anchor_raters != []:
+        if anchor_raters is not None:
             if (hasattr(self, 'anchor_severites_global') == False) or (self.anchor_raters_global != anchor_raters):
                 self.calibrate_global_anchor(anchor_raters, constant=constant, method=method)
                 self.std_errors_global(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
@@ -10235,10 +10221,10 @@ class MFRM(Rasch):
                                                  max_iters=max_iters, ext_score_adjustment=ext_score_adjustment,
                                                  method=method, constant=constant)
 
-        if anchor_raters != []:
+        if anchor_raters is not None:
             thresholds = self.anchor_thresholds_global
         else:
-            thresholds = self.thresholds_global
+            thresholds = self.thresholds
 
         self.threshold_stats_global = pd.DataFrame()
 
@@ -10246,7 +10232,7 @@ class MFRM(Rasch):
         self.threshold_stats_global['SE'] = self.threshold_se_global[1:].round(dp)
 
         if interval is not None:
-            if anchor_raters != []:
+            if anchor_raters is not None:
                 self.threshold_stats_global[f'{round((1 - interval) * 50, 1)}%'] = self.anchor_threshold_low_global[1:].round(dp)
                 self.threshold_stats_global[f'{round((1 + interval) * 50, 1)}%'] = self.anchor_threshold_high_global[1:].round(dp)
 
@@ -10271,7 +10257,7 @@ class MFRM(Rasch):
         self.threshold_stats_global.index = [f'Threshold {threshold + 1}' for threshold in range(self.max_score)]
 
     def rater_stats_df_global(self,
-                              anchor_raters=[],
+                              anchor_raters=None,
                               full=False,
                               zstd=False,
                               dp=3,
@@ -10290,7 +10276,7 @@ class MFRM(Rasch):
             if interval is None:
                 interval = 0.95
 
-        if anchor_raters != []:
+        if anchor_raters is not None:
             if (hasattr(self, 'anchor_severites_global') == False) or (self.anchor_raters_global != anchor_raters):
                 self.calibrate_global_anchor(anchor_raters, constant=constant, method=method)
                 self.std_errors_global(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
@@ -10306,7 +10292,7 @@ class MFRM(Rasch):
                                              ext_score_adjustment=ext_score_adjustment, method=method,
                                              constant=constant, no_of_samples=no_of_samples, interval=interval)
 
-        if anchor_raters != []:
+        if anchor_raters is not None:
             severities = self.anchor_severities_global
 
             se = self.anchor_rater_se_global
@@ -10342,6 +10328,7 @@ class MFRM(Rasch):
         self.rater_stats_global.index = self.raters
 
     def person_stats_df_global(self,
+                               anchor_raters=None,
                                full=False,
                                rsem=False,
                                zstd=False,
@@ -10358,6 +10345,12 @@ class MFRM(Rasch):
         CSEM and RSEM for each person.
         '''
 
+        if anchor_raters is not None:
+            if (hasattr(self, 'anchor_severites_global') == False) or (self.anchor_raters_global != anchor_raters):
+                self.calibrate_global_anchor(anchor_raters, constant=constant, method=method)
+                self.std_errors_global(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
+                                       constant=constant, method=method)
+
         if hasattr(self, 'person_outfit_ms_global') == False:
             self.person_fit_statistics_global(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                               ext_score_adjustment=ext_score_adjustment, method=method,
@@ -10370,7 +10363,11 @@ class MFRM(Rasch):
         person_stats_df = pd.DataFrame()
         person_stats_df.index = self.dataframe.index.get_level_values(1).unique()
 
-        person_stats_df['Estimate'] = self.abils_global.to_numpy().round(dp)
+        if anchor_raters is None:
+            person_stats_df['Estimate'] = self.abils_global.to_numpy().round(dp)
+
+        else:
+            person_stats_df['Estimate'] = self.anchor_abils_global.to_numpy().round(dp)
 
         person_stats_df['CSEM'] = self.csem_vector_global.round(dp)
         if rsem:
@@ -10411,9 +10408,7 @@ class MFRM(Rasch):
                              max_iters=100,
                              ext_score_adjustment=0.5,
                              method='cos',
-                             constant=0.1,
-                             no_of_samples=100,
-                             interval=None):
+                             constant=0.1):
 
         if hasattr(self, 'psi_global') == False:
             self.test_fit_statistics_global(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
@@ -10499,7 +10494,7 @@ class MFRM(Rasch):
             self.test_stats_global.to_csv(f'{filename}_test_stats.csv')
 
     def item_stats_df_items(self,
-                            anchor_raters=[],
+                            anchor_raters=None,
                             full=False,
                             zstd=False,
                             point_measure_corr=False,
@@ -10520,7 +10515,7 @@ class MFRM(Rasch):
             if interval is None:
                 interval = 0.95
 
-        if anchor_raters != []:
+        if anchor_raters is not None:
             if (hasattr(self, 'anchor_severites_items') == False) or (self.anchor_raters_items != anchor_raters):
                 self.calibrate_items_anchor(anchor_raters, constant=constant, method=method)
                 self.std_errors_items(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
@@ -10544,7 +10539,7 @@ class MFRM(Rasch):
                                            max_iters=max_iters, ext_score_adjustment=ext_score_adjustment, method=method,
                                            constant=constant, no_of_samples=no_of_samples, interval=interval)
 
-        if anchor_raters != []:
+        if anchor_raters is not None:
             difficulties = self.anchor_diffs_items
             std_errors = self.anchor_item_se_items
             low = self.anchor_item_low_items
@@ -10573,9 +10568,6 @@ class MFRM(Rasch):
         if zstd:
             self.item_stats_items['Outfit Z'] = self.item_outfit_zstd_items.to_numpy().round(dp)
 
-        #sq_residuals = self.residual_df_items ** 2
-        #self.item_stats_items['RMSR'] = np.sqrt(sq_residuals.mean(axis = 0)).to_numpy().round(dp)
-
         if point_measure_corr:
             self.item_stats_items['PM corr'] = self.point_measure_items.to_numpy().round(dp)
             self.item_stats_items['Exp PM corr'] = self.exp_point_measure_items.to_numpy().round(dp)
@@ -10583,7 +10575,7 @@ class MFRM(Rasch):
         self.item_stats_items.index = self.dataframe.columns
 
     def threshold_stats_df_items(self,
-                                 anchor_raters=[],
+                                 anchor_raters=None,
                                  full=False,
                                  zstd=False,
                                  disc=False,
@@ -10606,7 +10598,7 @@ class MFRM(Rasch):
             if interval is None:
                 interval = 0.95
 
-        if anchor_raters != []:
+        if anchor_raters is not None:
             if (hasattr(self, 'anchor_severites_items') == False) or (self.anchor_raters_items != anchor_raters):
                 self.calibrate_items_anchor(anchor_raters, constant=constant, method=method)
                 self.std_errors_items(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
@@ -10630,10 +10622,10 @@ class MFRM(Rasch):
                                                 max_iters=max_iters, ext_score_adjustment=ext_score_adjustment,
                                                 method=method, constant=constant)
 
-        if anchor_raters != []:
+        if anchor_raters is not None:
             thresholds = self.anchor_thresholds_items
         else:
-            thresholds = self.thresholds_items
+            thresholds = self.thresholds
 
         self.threshold_stats_items = pd.DataFrame()
 
@@ -10666,7 +10658,7 @@ class MFRM(Rasch):
         self.threshold_stats_items.index = [f'Threshold {threshold + 1}' for threshold in range(self.max_score)]
 
     def rater_stats_df_items(self,
-                             anchor_raters=[],
+                             anchor_raters=None,
                              full=False,
                              zstd=False,
                              dp=3,
@@ -10685,7 +10677,7 @@ class MFRM(Rasch):
             if interval is None:
                 interval = 0.95
 
-        if anchor_raters != []:
+        if anchor_raters is not None:
             if (hasattr(self, 'anchor_severites_items') == False) or (self.anchor_raters_items != anchor_raters):
                 self.calibrate_items_anchor(anchor_raters, constant=constant, method=method)
                 self.std_errors_items(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
@@ -10701,7 +10693,7 @@ class MFRM(Rasch):
                                             ext_score_adjustment=ext_score_adjustment, method=method,
                                             constant=constant, no_of_samples=no_of_samples, interval=interval)
 
-        if anchor_raters != []:
+        if anchor_raters is not None:
             severities = self.anchor_severities_items
 
             se = self.anchor_rater_se_items
@@ -10749,6 +10741,7 @@ class MFRM(Rasch):
         self.rater_stats_items = pd.concat(self.rater_stats_items.values(), keys=self.rater_stats_items.keys()).T
 
     def person_stats_df_items(self,
+                              anchor_raters=None,
                               full=False,
                               rsem=False,
                               zstd=False,
@@ -10777,7 +10770,11 @@ class MFRM(Rasch):
         person_stats_df = pd.DataFrame()
         person_stats_df.index = self.dataframe.index.get_level_values(1).unique()
 
-        person_stats_df['Estimate'] = self.abils_items.to_numpy().round(dp)
+        if anchor_raters is None:
+            person_stats_df['Estimate'] = self.abils_items.to_numpy().round(dp)
+
+        else:
+            person_stats_df['Estimate'] = self.anchor_abils_items.to_numpy().round(dp)
 
         person_stats_df['CSEM'] = self.csem_vector_items.round(dp)
         if rsem:
@@ -10903,7 +10900,7 @@ class MFRM(Rasch):
             self.test_stats_items.to_csv(f'{filename}_test_stats.csv')
 
     def item_stats_df_thresholds(self,
-                                 anchor_raters=[],
+                                 anchor_raters=None,
                                  full=False,
                                  zstd=False,
                                  point_measure_corr=False,
@@ -10924,7 +10921,7 @@ class MFRM(Rasch):
             if interval is None:
                 interval = 0.95
 
-        if anchor_raters != []:
+        if anchor_raters is not None:
             if (hasattr(self, 'anchor_severites_thresholds') == False) or (self.anchor_raters_thresholds != anchor_raters):
                 self.calibrate_thresholds_anchor(anchor_raters, constant=constant, method=method)
                 self.std_errors_thresholds(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
@@ -10949,11 +10946,12 @@ class MFRM(Rasch):
                                                 method=method, constant=constant, no_of_samples=no_of_samples,
                                                 interval=interval)
 
-        if anchor_raters != []:
+        if anchor_raters is not None:
             difficulties = self.anchor_diffs_thresholds
             std_errors = self.anchor_item_se_thresholds
             low = self.anchor_item_low_thresholds
             high = self.anchor_item_high_thresholds
+
         else:
             difficulties = self.diffs
             std_errors = self.item_se
@@ -10978,11 +10976,6 @@ class MFRM(Rasch):
         if zstd:
             self.item_stats_thresholds['Outfit Z'] = self.item_outfit_zstd_thresholds.to_numpy().round(dp)
 
-        #sq_residuals = self.residual_df_thresholds ** 2
-        #self.item_stats_thresholds['RMSR'] = np.sqrt(sq_residuals.mean(axis = 0)).to_numpy().round(dp)
-
-        #self.item_stats['Discrim'] = self.discrimination.to_numpy().round(dp)
-
         if point_measure_corr:
             self.item_stats_thresholds['PM corr'] = self.point_measure_thresholds.to_numpy().round(dp)
             self.item_stats_thresholds['Exp PM corr'] = self.exp_point_measure_thresholds.to_numpy().round(dp)
@@ -10990,7 +10983,7 @@ class MFRM(Rasch):
         self.item_stats_thresholds.index = self.dataframe.columns
 
     def threshold_stats_df_thresholds(self,
-                                      anchor_raters=[],
+                                      anchor_raters=None,
                                       full=False,
                                       zstd=False,
                                       disc=False,
@@ -11013,7 +11006,7 @@ class MFRM(Rasch):
             if interval is None:
                 interval = 0.95
 
-        if anchor_raters != []:
+        if anchor_raters is not None:
             if (hasattr(self, 'anchor_severites_thresholds') == False) or (self.anchor_raters_thresholds != anchor_raters):
                 self.calibrate_thresholds_anchor(anchor_raters, constant=constant, method=method)
                 self.std_errors_thresholds(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
@@ -11038,10 +11031,10 @@ class MFRM(Rasch):
                                                      ext_score_adjustment=ext_score_adjustment, method=method,
                                                      constant=constant)
 
-        if anchor_raters != []:
+        if anchor_raters is not None:
             thresholds = self.anchor_thresholds_thresholds
         else:
-            thresholds = self.thresholds_thresholds
+            thresholds = self.thresholds
 
         self.threshold_stats_thresholds = pd.DataFrame()
 
@@ -11074,7 +11067,7 @@ class MFRM(Rasch):
         self.threshold_stats_thresholds.index = [f'Threshold {threshold + 1}' for threshold in range(self.max_score)]
 
     def rater_stats_df_thresholds(self,
-                                  anchor_raters=[],
+                                  anchor_raters=None,
                                   full=False,
                                   zstd=True,
                                   dp=3,
@@ -11093,7 +11086,7 @@ class MFRM(Rasch):
             if interval is None:
                 interval = 0.95
 
-        if anchor_raters != []:
+        if anchor_raters is not None:
             if (hasattr(self, 'anchor_severites_thresholds') == False) or (self.anchor_raters_thresholds != anchor_raters):
                 self.calibrate_thresholds_anchor(anchor_raters, constant=constant, method=method)
                 self.std_errors_thresholds(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
@@ -11109,7 +11102,7 @@ class MFRM(Rasch):
                                                  ext_score_adjustment=ext_score_adjustment, method=method,
                                                  constant=constant, no_of_samples=no_of_samples, interval=interval)
 
-        if anchor_raters != []:
+        if anchor_raters is not None:
             severities = self.anchor_severities_thresholds
 
             se = self.anchor_rater_se_thresholds
@@ -11158,6 +11151,7 @@ class MFRM(Rasch):
                                                 keys=self.rater_stats_thresholds.keys()).T
 
     def person_stats_df_thresholds(self,
+                                   anchor_raters=None,
                                    full=False,
                                    rsem=False,
                                    zstd=False,
@@ -11186,7 +11180,11 @@ class MFRM(Rasch):
         person_stats_df = pd.DataFrame()
         person_stats_df.index = self.dataframe.index.get_level_values(1).unique()
 
-        person_stats_df['Estimate'] = self.abils_thresholds.to_numpy().round(dp)
+        if anchor_raters is None:
+            person_stats_df['Estimate'] = self.abils_thresholds.to_numpy().round(dp)
+
+        else:
+            person_stats_df['Estimate'] = self.anchor_abils_thresholds.to_numpy().round(dp)
 
         person_stats_df['CSEM'] = self.csem_vector_thresholds.round(dp)
         if rsem:
@@ -11312,6 +11310,508 @@ class MFRM(Rasch):
             self.person_stats_thresholds.to_csv(f'{filename}_person_stats.csv')
             self.test_stats_thresholds.to_csv(f'{filename}_test_stats.csv')
 
+    def item_stats_df_matrix(self,
+                             anchor_raters=None,
+                             full=False,
+                             zstd=False,
+                             point_measure_corr=False,
+                             dp=3,
+                             warm_corr=True,
+                             tolerance=0.0000001,
+                             max_iters=100,
+                             ext_score_adjustment=0.5,
+                             method='cos',
+                             constant=0.1,
+                             no_of_samples=100,
+                             interval=None):
+
+        if full:
+            zstd = True
+            point_measure_corr = True
+
+            if interval is None:
+                interval = 0.95
+
+        if anchor_raters is not None:
+            if (hasattr(self, 'anchor_severites_matrix') == False) or (self.anchor_raters_matrix != anchor_raters):
+                self.calibrate_matrix_anchor(anchor_raters, constant=constant, method=method)
+                self.std_errors_matrix(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
+                                       constant=constant, method=method)
+
+            elif (self.anchor_item_low_matrix is None) and (interval is not None):
+                self.std_errors_global(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
+                                       constant=constant, method=method)
+
+        else:
+            if hasattr(self, 'anchor_item_se_matrix') == False:
+                self.std_errors_matrix(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
+                                       constant=constant, method=method)
+
+            elif (self.item_low is None) and (interval is not None):
+                self.std_errors_matrix(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
+                                       constant=constant, method=method)
+
+        if hasattr(self, 'item_outfit_ms_matrix') == False:
+            self.item_fit_statistics_matrix(anchor_raters=anchor_raters, warm_corr=warm_corr, tolerance=tolerance,
+                                            max_iters=max_iters, ext_score_adjustment=ext_score_adjustment, method=method,
+                                            constant=constant, no_of_samples=no_of_samples, interval=interval)
+
+        if anchor_raters is not None:
+            difficulties = self.anchor_diffs_matrix
+            std_errors = self.anchor_item_se_matrix
+            low = self.anchor_item_low_matrix
+            high = self.anchor_item_high_matrix
+
+        else:
+            difficulties = self.diffs
+            std_errors = self.item_se
+            low = self.item_low
+            high = self.item_high
+
+        self.item_stats_matrix = pd.DataFrame()
+
+        self.item_stats_matrix['Estimate'] = difficulties.to_numpy().round(dp)
+        self.item_stats_matrix['SE'] = std_errors.to_numpy().round(dp)
+
+        if interval is not None:
+            self.item_stats_matrix[f'{round((1 - interval) * 50, 1)}%'] = low.to_numpy().round(dp)
+            self.item_stats_matrix[f'{round((1 + interval) * 50, 1)}%'] = high.to_numpy().round(dp)
+
+        self.item_stats_matrix['Count'] = self.response_counts.to_numpy().astype(int)
+        self.item_stats_matrix['Facility'] = self.item_facilities.to_numpy().round(dp)
+
+        self.item_stats_matrix['Infit MS'] = self.item_infit_ms_matrix.to_numpy().round(dp)
+        if zstd:
+            self.item_stats_matrix['Infit Z'] = self.item_infit_zstd_matrix.to_numpy().round(dp)
+        self.item_stats_matrix['Outfit MS'] = self.item_outfit_ms_matrix.to_numpy().round(dp)
+        if zstd:
+            self.item_stats_matrix['Outfit Z'] = self.item_outfit_zstd_matrix.to_numpy().round(dp)
+
+        if point_measure_corr:
+            self.item_stats_matrix['PM corr'] = self.point_measure_matrix.to_numpy().round(dp)
+            self.item_stats_matrix['Exp PM corr'] = self.exp_point_measure_matrix.to_numpy().round(dp)
+
+        self.item_stats_matrix.index = self.dataframe.columns
+
+    def threshold_stats_df_matrix(self,
+                                  anchor_raters=None,
+                                  full=False,
+                                  zstd=False,
+                                  disc=False,
+                                  point_measure_corr=False,
+                                  dp=3,
+                                  warm_corr=True,
+                                  tolerance=0.0000001,
+                                  max_iters=100,
+                                  ext_score_adjustment=0.5,
+                                  method='cos',
+                                  constant=0.1,
+                                  no_of_samples=100,
+                                  interval=None):
+
+        if full:
+            zstd = True
+            disc = True
+            point_measure_corr = True
+
+            if interval is None:
+                interval = 0.95
+
+        if anchor_raters is not None:
+            if (hasattr(self, 'anchor_severites_matrix') == False) or (self.anchor_raters_matrix != anchor_raters):
+                self.calibrate_matrix_anchor(anchor_raters, constant=constant, method=method)
+                self.std_errors_matrix(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
+                                       constant=constant, method=method)
+
+            elif (self.anchor_item_low_matrix is None) and (interval is not None):
+                self.std_errors_global(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
+                                       constant=constant, method=method)
+
+        else:
+            if hasattr(self, 'anchor_item_se_matrix') == False:
+                self.std_errors_matrix(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
+                                       constant=constant, method=method)
+
+            elif (self.item_low is None) and (interval is not None):
+                self.std_errors_matrix(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
+                                       constant=constant, method=method)
+
+        if hasattr(self, 'threshold_outfit_ms_matrix') == False:
+            self.threshold_fit_statistics_matrix(anchor_raters=anchor_raters, warm_corr=warm_corr, tolerance=tolerance,
+                                                 max_iters=max_iters, ext_score_adjustment=ext_score_adjustment,
+                                                 method=method, constant=constant)
+
+        if anchor_raters is not None:
+            thresholds = self.anchor_thresholds_matrix
+        else:
+            thresholds = self.thresholds
+
+        self.threshold_stats_matrix = pd.DataFrame()
+
+        self.threshold_stats_matrix['Estimate'] = thresholds[1:].round(dp)
+        self.threshold_stats_matrix['SE'] = self.threshold_se_matrix[1:].round(dp)
+
+        if interval is not None:
+            if anchor_raters != []:
+                self.threshold_stats_matrix[f'{round((1 - interval) * 50, 1)}%'] = self.anchor_threshold_low_matrix[1:].round(dp)
+                self.threshold_stats_matrix[f'{round((1 + interval) * 50, 1)}%'] = self.anchor_threshold_high_matrix[1:].round(dp)
+
+            else:
+                self.threshold_stats_matrix[f'{round((1 - interval) * 50, 1)}%'] = self.threshold_low_matrix[1:].round(dp)
+                self.threshold_stats_matrix[f'{round((1 + interval) * 50, 1)}%'] = self.threshold_high_matrix[1:].round(dp)
+
+        self.threshold_stats_matrix['Infit MS'] = self.threshold_infit_ms_matrix.to_numpy().round(dp)
+        if zstd:
+            self.threshold_stats_matrix['Infit Z'] = self.threshold_infit_zstd_matrix.to_numpy().round(dp)
+        self.threshold_stats_matrix['Outfit MS'] = self.threshold_outfit_ms_matrix.to_numpy().round(dp)
+        if zstd:
+            self.threshold_stats_matrix['Outfit Z'] = self.threshold_outfit_zstd_matrix.to_numpy().round(dp)
+
+        if disc:
+            self.threshold_stats_matrix['Discrim'] = self.threshold_discrimination_matrix.to_numpy().round(dp)
+
+        if point_measure_corr:
+            self.threshold_stats_matrix['PM corr'] = self.threshold_point_measure_matrix.to_numpy().round(dp)
+            self.threshold_stats_matrix['Exp PM corr'] = self.threshold_exp_point_measure_matrix.to_numpy().round(dp)
+
+        self.threshold_stats_matrix.index = [f'Threshold {threshold + 1}' for threshold in range(self.max_score)]
+
+    def rater_stats_df_matrix(self,
+                              anchor_raters=None,
+                              full=False,
+                              zstd=False,
+                              marginal=True,
+                              dp=3,
+                              warm_corr=True,
+                              tolerance=0.0000001,
+                              max_iters=100,
+                              ext_score_adjustment=0.5,
+                              method='cos',
+                              constant=0.1,
+                              no_of_samples=100,
+                              interval=None):
+
+        if full:
+            zstd = True
+
+            if interval is None:
+                interval = 0.95
+
+        if anchor_raters is not None:
+            if (hasattr(self, 'anchor_severites_matrix') == False) or (self.anchor_raters_matrix != anchor_raters):
+                self.calibrate_matrix_anchor(anchor_raters, constant=constant, method=method)
+                self.std_errors_matrix(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
+                                       constant=constant, method=method)
+
+        else:
+            if hasattr(self, 'anchor_item_se_matrix') == False:
+                self.std_errors_matrix(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
+                                       constant=constant, method=method)
+
+        if hasattr(self, 'rater_outfit_ms_matrix') == False:
+            self.rater_fit_statistics_matrix(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
+                                             ext_score_adjustment=ext_score_adjustment, method=method,
+                                             constant=constant, no_of_samples=no_of_samples, interval=interval)
+
+        if anchor_raters is not None:
+            severities = self.anchor_severities_matrix
+            marginal_items = self.anchor_marginal_severities_items
+            marginal_thresholds = self.anchor_marginal_severities_thresholds
+
+            se = self.anchor_rater_se_matrix
+            low = self.anchor_rater_low_matrix
+            high = self.anchor_rater_high_matrix
+
+        else:
+            severities = self.severities_matrix
+            marginal_items = self.marginal_severities_items
+            marginal_thresholds = self.marginal_severities_thresholds
+
+            se = self.rater_se_matrix
+            low = self.rater_low_matrix
+            high = self.rater_high_matrix
+
+        if marginal:
+            self.rater_stats_matrix = {}
+
+            for item in self.dataframe.columns:
+
+                item_stats = pd.DataFrame()
+
+                item_stats['Estimate'] = np.array([marginal_items[rater][item]
+                                                   for rater in self.raters]).round(dp)
+
+                if anchor_raters != []:
+                    item_stats['SE'] = np.array([self.anchor_rater_se_marginal_items[rater][item]
+                                                for rater in self.raters]).round(dp)
+                else:
+                    item_stats['SE'] = np.array([self.rater_se_marginal_items[rater][item]
+                                                for rater in self.raters]).round(dp)
+
+                if interval is not None:
+                    if anchor_raters != []:
+                        item_stats[f'{round((1 - interval) * 50, 1)}%'] = np.array([self.anchor_rater_low_marginal_items[rater][item]
+                                                                                    for rater in self.raters]).round(dp)
+                        item_stats[f'{round((1 + interval) * 50, 1)}%'] = np.array([self.anchor_rater_high_marginal_items[rater][item]
+                                                                                for rater in self.raters]).round(dp)
+
+                    else:
+                        item_stats[f'{round((1 - interval) * 50, 1)}%'] = np.array([self.rater_low_marginal_items[rater][item]
+                                                                                    for rater in self.raters]).round(dp)
+                        item_stats[f'{round((1 + interval) * 50, 1)}%'] = np.array([self.rater_high_marginal_items[rater][item]
+                                                                                for rater in self.raters]).round(dp)
+
+                item_stats.index = self.raters
+                self.rater_stats_matrix[item] = item_stats.T
+
+            for threshold in range(self.max_score):
+
+                item_stats = pd.DataFrame()
+
+                item_stats['Estimate'] = np.array([marginal_thresholds[rater][threshold + 1]
+                                                   for rater in self.raters]).round(dp)
+
+                if anchor_raters != []:
+                    item_stats['SE'] = np.array([self.anchor_rater_se_marginal_thresholds[rater][threshold + 1]
+                                                 for rater in self.raters]).round(dp)
+                else:
+                    item_stats['SE'] = np.array([self.rater_se_marginal_thresholds[rater][threshold + 1]
+                                                 for rater in self.raters]).round(dp)
+
+                if interval is not None:
+                    if anchor_raters != []:
+                        item_stats[ f'{round((1 - interval) * 50, 1)}%'] = np.array([self.anchor_rater_low_marginal_thresholds[rater][threshold + 1]
+                                                                                     for rater in self.raters]).round(dp)
+                        item_stats[f'{round((1 + interval) * 50, 1)}%'] = np.array([self.anchor_rater_high_marginal_thresholds[rater][threshold + 1]
+                                                                                    for rater in self.raters]).round(dp)
+
+                    else:
+                        item_stats[ f'{round((1 - interval) * 50, 1)}%'] = np.array([self.rater_low_marginal_thresholds[rater][threshold + 1]
+                                                                                     for rater in self.raters]).round(dp)
+                        item_stats[f'{round((1 + interval) * 50, 1)}%'] = np.array([self.rater_high_marginal_thresholds[rater][threshold + 1]
+                                                                                    for rater in self.raters]).round(dp)
+
+                item_stats.index = self.raters
+                self.rater_stats_matrix[f'Threshold {threshold + 1}'] = item_stats.T
+
+            ov_stats_df = pd.DataFrame()
+
+            ov_stats_df['Count'] = np.array([self.dataframe.xs(rater).count().sum() for rater in self.raters]).astype(int)
+            ov_stats_df['Infit MS'] = self.rater_infit_ms_matrix.to_numpy().round(dp)
+            if zstd:
+                ov_stats_df['Infit Z'] = self.rater_infit_zstd_matrix.to_numpy().round(dp)
+            ov_stats_df['Outfit MS'] = self.rater_outfit_ms_matrix.to_numpy().round(dp)
+            if zstd:
+                ov_stats_df['Outfit Z'] = self.rater_outfit_zstd_matrix.to_numpy().round(dp)
+
+            ov_stats_df.index = self.raters
+            self.rater_stats_matrix['Overall statistics'] = ov_stats_df.T
+
+            self.rater_stats_matrix = pd.concat(self.rater_stats_matrix.values(), keys=self.rater_stats_matrix.keys()).T
+
+        else:
+            self.rater_stats_matrix = {}
+
+            for item in self.dataframe.columns:
+                for threshold in range(self.max_score):
+
+                    item_stats = pd.DataFrame()
+
+                    item_stats['Estimate'] = np.array([severities[rater][item][threshold + 1]
+                                                       for rater in self.raters]).round(dp)
+                    item_stats['SE'] = np.array([se[rater][item][threshold + 1]
+                                                 for rater in self.raters]).round(dp)
+
+                    if interval is not None:
+                        item_stats[f'{round((1 - interval) * 50, 1)}%'] = np.array([low[rater][item][threshold + 1]
+                                                                                    for rater in self.raters]).round(dp)
+                        item_stats[f'{round((1 + interval) * 50, 1)}%'] = np.array([high[rater][item][threshold + 1]
+                                                                                    for rater in self.raters]).round(dp)
+
+                    item_stats.index = self.raters
+                    self.rater_stats_matrix[f'{item}, Threshold {threshold + 1}'] = item_stats.T
+
+            ov_stats_df = pd.DataFrame()
+
+            ov_stats_df['Count'] = np.array([self.dataframe.xs(rater).count().sum() for rater in self.raters]).astype(int)
+            ov_stats_df['Infit MS'] = self.rater_infit_ms_matrix.to_numpy().round(dp)
+            if zstd:
+                ov_stats_df['Infit Z'] = self.rater_infit_zstd_matrix.to_numpy().round(dp)
+            ov_stats_df['Outfit MS'] = self.rater_outfit_ms_matrix.to_numpy().round(dp)
+            if zstd:
+                ov_stats_df['Outfit Z'] = self.rater_outfit_zstd_matrix.to_numpy().round(dp)
+
+            ov_stats_df.index = self.raters
+            self.rater_stats_matrix['Overall statistics'] = ov_stats_df.T
+
+            self.rater_stats_matrix = pd.concat(self.rater_stats_matrix.values(), keys=self.rater_stats_matrix.keys()).T
+
+    def person_stats_df_matrix(self,
+                               anchor_raters=None,
+                               full=False,
+                               rsem=False,
+                               zstd=False,
+                               dp=3,
+                               warm_corr=True,
+                               tolerance=0.0000001,
+                               max_iters=100,
+                               ext_score_adjustment=0.5,
+                               method='cos',
+                               constant=0.1):
+
+        '''
+        Produces a person stats dataframe with raw score, ability estimate,
+        CSEM and RSEM for each person.
+        '''
+
+        if hasattr(self, 'person_outfit_ms_matrix') == False:
+            self.person_fit_statistics_matrix(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
+                                              ext_score_adjustment=ext_score_adjustment, method=method,
+                                              constant=constant)
+
+        if full:
+            rsem = True
+            zstd = True
+
+        person_stats_df = pd.DataFrame()
+        person_stats_df.index = self.dataframe.index.get_level_values(1).unique()
+
+        if anchor_raters is None:
+            person_stats_df['Estimate'] = self.abils_matrix.to_numpy().round(dp)
+
+        else:
+            person_stats_df['Estimate'] = self.anchor_abils_matrix.to_numpy().round(dp)
+
+        person_stats_df['CSEM'] = self.csem_vector_matrix.round(dp)
+        if rsem:
+            person_stats_df['RSEM'] = self.rsem_vector_matrix.round(dp)
+
+        person_stats_df['Score'] = [np.nan for person in self.persons]
+        person_stats_df['Score'].update(self.dataframe.unstack(level=0).sum(axis=1))
+        person_stats_df['Score'] = person_stats_df['Score'].astype(int)
+
+        person_stats_df['Max score'] = [np.nan for person in self.persons]
+        person_stats_df['Max score'].update(self.dataframe.unstack(level=0).count(axis=1) * self.max_score)
+        person_stats_df['Max score'] = person_stats_df['Max score'].astype(int)
+
+        person_stats_df['p'] = [np.nan for person in self.persons]
+        person_stats_df['p'].update(self.dataframe.unstack(level=0).mean(axis=1) / self.max_score)
+        person_stats_df['p'] = person_stats_df['p'].round(dp)
+
+        person_stats_df['Infit MS'] = [np.nan for person in self.persons]
+        person_stats_df['Infit MS'].update(self.person_infit_ms_matrix.round(dp))
+
+        if zstd:
+            person_stats_df['Infit Z'] = [np.nan for person in self.persons]
+            person_stats_df['Infit Z'].update(self.person_infit_zstd_matrix.round(dp))
+
+        person_stats_df['Outfit MS'] = [np.nan for person in self.persons]
+        person_stats_df['Outfit MS'].update(self.person_outfit_ms_matrix.round(dp))
+
+        if zstd:
+            person_stats_df['Outfit Z'] = [np.nan for person in self.persons]
+            person_stats_df['Outfit Z'].update(self.person_outfit_zstd_matrix.round(dp))
+
+        self.person_stats_matrix = person_stats_df
+
+    def test_stats_df_matrix(self,
+                             dp=3,
+                             warm_corr=True,
+                             tolerance=0.0000001,
+                             max_iters=100,
+                             ext_score_adjustment=0.5,
+                             method='cos',
+                             constant=0.1):
+
+        '''
+        Produces a test statistics dataframe with raw score, ability estimate,
+        CSEM and RSEM for each person.
+        '''
+
+        if hasattr(self, 'psi_matrix') == False:
+            self.test_fit_statistics_matrix(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
+                                            ext_score_adjustment=ext_score_adjustment, method=method,
+                                            constant=constant)
+
+        self.test_stats_matrix = pd.DataFrame()
+
+        self.test_stats_matrix['Items'] = [self.diffs.mean(),
+                                           self.diffs.std(),
+                                           self.isi_matrix,
+                                           self.item_strata_matrix,
+                                           self.item_reliability_matrix]
+
+        self.test_stats_matrix['Persons'] = [self.abils_matrix.mean(),
+                                             self.abils_matrix.std(),
+
+                                             self.psi_matrix,
+                                             self.person_strata_matrix,
+                                             self.person_reliability_matrix]
+
+        self.test_stats_matrix.index = ['Mean', 'SD', 'Separation ratio', 'Strata', 'Reliability']
+        self.test_stats_matrix = round(self.test_stats_matrix, dp)
+
+    def save_stats_matrix(self,
+                         filename,
+                         format='csv',
+                         dp=3,
+                         warm_corr=True,
+                         tolerance=0.0000001,
+                         max_iters=100,
+                         ext_score_adjustment=0.5,
+                         method='cos',
+                         constant=0.1,
+                         no_of_samples=100,
+                         interval=None):
+
+        if hasattr(self, 'item_stats_matrix') == False:
+            self.item_stats_df_matrix(dp=dp, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
+                                      ext_score_adjustment=ext_score_adjustment, method=method, constant=constant,
+                                      no_of_samples=no_of_samples, interval=interval)
+
+        if hasattr(self, 'threshold_stats_matrix') == False:
+            self.threshold_stats_df_matrix(dp=dp, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
+                                           ext_score_adjustment=ext_score_adjustment, method=method, constant=constant,
+                                           no_of_samples=no_of_samples, interval=interval)
+
+        if hasattr(self, 'rater_stats_matrix') == False:
+            self.rater_stats_df_matrix(dp=dp, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
+                                       ext_score_adjustment=ext_score_adjustment, method=method, constant=constant,
+                                       no_of_samples=no_of_samples, interval=interval)
+
+        if hasattr(self, 'person_stats_matrix') == False:
+            self.person_stats_df_matrix(dp=dp, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
+                                        ext_score_adjustment=ext_score_adjustment, method=method, constant=constant)
+
+        if hasattr(self, 'test_stats_matrix') == False:
+            self.test_stats_df_matrix(dp=dp, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
+                                      ext_score_adjustment=ext_score_adjustment, method=method, constant=constant)
+
+        if format == 'xlsx':
+
+            if filename[-5:] != '.xlsx':
+                filename += '.xlsx'
+
+            writer = pd.ExcelWriter(filename, engine='xlsxwriter')
+
+            self.item_stats_matrix.to_excel(writer, sheet_name='Item statistics')
+            self.threshold_stats_matrix.to_excel(writer, sheet_name='Threshold statistics')
+            self.rater_stats_matrix.to_excel(writer, sheet_name='Rater statistics')
+            self.person_stats_matrix.to_excel(writer, sheet_name='Person statistics')
+            self.test_stats_matrix.to_excel(writer, sheet_name='Test statistics')
+
+            writer.save()
+
+        else:
+            if filename[-4:] == '.csv':
+                filename = filename[:-4]
+
+            self.item_stats_matrix.to_csv(f'{filename}_item_stats.csv')
+            self.threshold_stats_matrix.to_csv(f'{filename}_threshold_stats.csv')
+            self.rater_stats_matrix.to_csv(f'{filename}_rater_stats.csv')
+            self.person_stats_matrix.to_csv(f'{filename}_person_stats.csv')
+            self.test_stats_matrix.to_csv(f'{filename}_test_stats.csv')
+
     def category_probability_dict_global(self,
                                          anchor_raters=[],
                                          warm_corr=True,
@@ -11341,11 +11841,11 @@ class MFRM(Rasch):
 
         else:
             difficulties = self.diffs
-            thresholds = self.thresholds_global
+            thresholds = self.thresholds
             severities = self.severities_global
 
-        cat_prob_dict = {cat: {rater: {item: {person: self.cat_prob(abil, difficulties[item], severities[rater],
-                                                                    cat, thresholds)
+        cat_prob_dict = {cat: {rater: {item: {person: self.cat_prob_global(abil, item, difficulties, rater, severities,
+                                                                           cat, thresholds)
                                               for person, abil in self.abils_global.items()}
                                        for item in self.dataframe.columns}
                                for rater in self.raters}
@@ -11400,7 +11900,7 @@ class MFRM(Rasch):
 
         else:
             difficulties = self.diffs
-            thresholds = self.thresholds_items
+            thresholds = self.thresholds
             severities = self.severities_items
 
         cat_prob_dict = {cat: {rater: {item: {person: self.cat_prob_items(abil, item, difficulties, rater,
@@ -11459,10 +11959,10 @@ class MFRM(Rasch):
 
         else:
             difficulties = self.diffs
-            thresholds = self.thresholds_thresholds
+            thresholds = self.thresholds
             severities = self.severities_thresholds
 
-        cat_prob_dict = {cat: {rater: {item: {person: self.cat_prob_thresholds(abil, difficulties[item], rater,
+        cat_prob_dict = {cat: {rater: {item: {person: self.cat_prob_thresholds(abil, item, difficulties, rater,
                                                                                severities, cat, thresholds)
                                               for person, abil in self.abils_thresholds.items()}
                                        for item in self.dataframe.columns}
@@ -11522,7 +12022,7 @@ class MFRM(Rasch):
 
         else:
             difficulties = self.diffs
-            thresholds = self.thresholds_matrix
+            thresholds = self.thresholds
             severities = self.severities_matrix
 
         cat_prob_dict = {cat: {rater: {item: {person: self.cat_prob_matrix(abil, item, difficulties, rater,
@@ -11898,7 +12398,15 @@ class MFRM(Rasch):
                 item_variance_explained,
                 item_loadings)
 
-    def item_res_corr_analysis_global(self):
+    def item_res_corr_analysis_global(self,
+                                      warm_corr=True,
+                                      tolerance=0.0000001,
+                                      max_iters=100,
+                                      ext_score_adjustment=0.5,
+                                      constant=0.1,
+                                      method='cos',
+                                      matrix_power=3,
+                                      log_lik_tol=0.000001):
 
         if hasattr(self, 'std_residual_df_global') == False:
             self.fit_statistics_global(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
@@ -11912,7 +12420,15 @@ class MFRM(Rasch):
          self.item_variance_explained_global,
          self.item_loadings_global) = self.item_res_corr_analysis(self.std_residual_df_global)
 
-    def item_res_corr_analysis_items(self):
+    def item_res_corr_analysis_items(self,
+                                     warm_corr=True,
+                                     tolerance=0.0000001,
+                                     max_iters=100,
+                                     ext_score_adjustment=0.5,
+                                     constant=0.1,
+                                     method='cos',
+                                     matrix_power=3,
+                                     log_lik_tol=0.000001):
 
         if hasattr(self, 'std_residual_df_items') == False:
             self.fit_statistics_items(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
@@ -11926,7 +12442,15 @@ class MFRM(Rasch):
          self.item_variance_explained_items,
          self.item_loadings_items) = self.item_res_corr_analysis(self.std_residual_df_items)
 
-    def item_res_corr_analysis_thresholds(self):
+    def item_res_corr_analysis_thresholds(self,
+                                          warm_corr=True,
+                                          tolerance=0.0000001,
+                                          max_iters=100,
+                                          ext_score_adjustment=0.5,
+                                          constant=0.1,
+                                          method='cos',
+                                          matrix_power=3,
+                                          log_lik_tol=0.000001):
 
         if hasattr(self, 'std_residual_df_thresholds') == False:
             self.fit_statistics_thresholds(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
@@ -11940,7 +12464,15 @@ class MFRM(Rasch):
          self.item_variance_explained_thresholds,
          self.item_loadings_thresholds) = self.item_res_corr_analysis(self.std_residual_df_thresholds)
 
-    def item_res_corr_analysis_matrix(self):
+    def item_res_corr_analysis_matrix(self,
+                                      warm_corr=True,
+                                      tolerance=0.0000001,
+                                      max_iters=100,
+                                      ext_score_adjustment=0.5,
+                                      constant=0.1,
+                                      method='cos',
+                                      matrix_power=3,
+                                      log_lik_tol=0.000001):
 
         if hasattr(self, 'std_residual_df_matrix') == False:
             self.fit_statistics_matrix(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
@@ -12150,14 +12682,14 @@ class MFRM(Rasch):
                                         constant=0.1):
 
         if hasattr(self, 'abils_global') == False:
-            self.person_abils_global(anchor_raters=anchor_raters, warm_corr=warm_corr, tolerance=tolerance,
+            self.person_abils_global(anchor=False, warm_corr=warm_corr, tolerance=tolerance,
                                      max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
 
         if anchor_raters != []:
             if hasattr(self, 'anchor_thresholds_global') == False:
                 self.calibrate_global_anchor(anchor_raters, constant=constant, method=method)
 
-                self.person_abils_global(anchor_raters=anchor_raters, warm_corr=warm_corr, tolerance=tolerance,
+                self.person_abils_global(anchor=False, warm_corr=warm_corr, tolerance=tolerance,
                                          max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
 
         if anchor_raters != []:
@@ -12167,7 +12699,7 @@ class MFRM(Rasch):
 
         else:
             difficulties = self.diffs
-            thresholds = self.thresholds_global
+            thresholds = self.thresholds
             severities = self.severities_global
 
         diff_df_dict = {}
@@ -12220,7 +12752,7 @@ class MFRM(Rasch):
 
         else:
             difficulties = self.diffs
-            thresholds = self.thresholds_items
+            thresholds = self.thresholds
             severities = self.severities_items
 
         diff_df_dict = {}
@@ -12274,7 +12806,7 @@ class MFRM(Rasch):
 
         else:
             difficulties = self.diffs
-            thresholds = self.thresholds_thresholds
+            thresholds = self.thresholds
             severities = self.severities_thresholds
 
         diff_df_dict = {}
@@ -12329,7 +12861,7 @@ class MFRM(Rasch):
 
         else:
             difficulties = self.diffs
-            thresholds = self.thresholds_matrix
+            thresholds = self.thresholds
             severities = self.severities_matrix
 
         diff_df_dict = {}
@@ -12751,7 +13283,7 @@ class MFRM(Rasch):
         person_strata = (4 * psi + 1) / 3
         person_reliability = (psi ** 2) / (1 + (psi ** 2))
 
-        return isi, psi, item_strata, item_reliability, person_strata, person_reliability
+        return isi, item_strata, item_reliability, psi, person_strata, person_reliability
 
 
     def test_fit_statistics_global(self,
@@ -12972,506 +13504,6 @@ class MFRM(Rasch):
         self.rater_fit_statistics_matrix()
         self.person_fit_statistics_matrix()
         self.test_fit_statistics_matrix()
-
-    def item_stats_df_matrix(self,
-                             anchor_raters=[],
-                             full=False,
-                             zstd=False,
-                             point_measure_corr=False,
-                             dp=3,
-                             warm_corr=True,
-                             tolerance=0.0000001,
-                             max_iters=100,
-                             ext_score_adjustment=0.5,
-                             method='cos',
-                             constant=0.1,
-                             no_of_samples=100,
-                             interval=None):
-
-        if full:
-            zstd = True
-            point_measure_corr = True
-
-            if interval is None:
-                interval = 0.95
-
-        if anchor_raters != []:
-            if (hasattr(self, 'anchor_severites_matrix') == False) or (self.anchor_raters_matrix != anchor_raters):
-                self.calibrate_matrix_anchor(anchor_raters, constant=constant, method=method)
-                self.std_errors_matrix(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                       constant=constant, method=method)
-
-            elif (self.anchor_item_low_matrix is None) and (interval is not None):
-                self.std_errors_global(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                       constant=constant, method=method)
-
-        else:
-            if hasattr(self, 'anchor_item_se_matrix') == False:
-                self.std_errors_matrix(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                       constant=constant, method=method)
-
-            elif (self.item_low is None) and (interval is not None):
-                self.std_errors_matrix(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                       constant=constant, method=method)
-
-        if hasattr(self, 'item_outfit_ms_matrix') == False:
-            self.item_fit_statistics_matrix(anchor_raters=anchor_raters, warm_corr=warm_corr, tolerance=tolerance,
-                                            max_iters=max_iters, ext_score_adjustment=ext_score_adjustment, method=method,
-                                            constant=constant, no_of_samples=no_of_samples, interval=interval)
-
-        if anchor_raters != []:
-            difficulties = self.anchor_diffs_matrix
-            std_errors = self.anchor_item_se_matrix
-            low = self.anchor_item_low_matrix
-            high = self.anchor_item_high_matrix
-
-        else:
-            difficulties = self.diffs
-            std_errors = self.item_se
-            low = self.item_low
-            high = self.item_high
-
-        self.item_stats_matrix = pd.DataFrame()
-
-        self.item_stats_matrix['Estimate'] = difficulties.to_numpy().round(dp)
-        self.item_stats_matrix['SE'] = std_errors.to_numpy().round(dp)
-
-        if interval is not None:
-            self.item_stats_matrix[f'{round((1 - interval) * 50, 1)}%'] = low.to_numpy().round(dp)
-            self.item_stats_matrix[f'{round((1 + interval) * 50, 1)}%'] = high.to_numpy().round(dp)
-
-        self.item_stats_matrix['Count'] = self.response_counts.to_numpy().astype(int)
-        self.item_stats_matrix['Facility'] = self.item_facilities.to_numpy().round(dp)
-
-        self.item_stats_matrix['Infit MS'] = self.item_infit_ms_matrix.to_numpy().round(dp)
-        if zstd:
-            self.item_stats_matrix['Infit Z'] = self.item_infit_zstd_matrix.to_numpy().round(dp)
-        self.item_stats_matrix['Outfit MS'] = self.item_outfit_ms_matrix.to_numpy().round(dp)
-        if zstd:
-            self.item_stats_matrix['Outfit Z'] = self.item_outfit_zstd_matrix.to_numpy().round(dp)
-
-        #sq_residuals = self.residual_df_matrix ** 2
-        #self.item_stats_matrix['RMSR'] = np.sqrt(sq_residuals.mean(axis = 0)).to_numpy().round(dp)
-
-        if point_measure_corr:
-            self.item_stats_matrix['PM corr'] = self.point_measure_matrix.to_numpy().round(dp)
-            self.item_stats_matrix['Exp PM corr'] = self.exp_point_measure_matrix.to_numpy().round(dp)
-
-        self.item_stats_matrix.index = self.dataframe.columns
-
-    def threshold_stats_df_matrix(self,
-                                  anchor_raters=[],
-                                  full=False,
-                                  zstd=False,
-                                  disc=False,
-                                  point_measure_corr=False,
-                                  dp=3,
-                                  warm_corr=True,
-                                  tolerance=0.0000001,
-                                  max_iters=100,
-                                  ext_score_adjustment=0.5,
-                                  method='cos',
-                                  constant=0.1,
-                                  no_of_samples=100,
-                                  interval=None):
-
-        if full:
-            zstd = True
-            disc = True
-            point_measure_corr = True
-
-            if interval is None:
-                interval = 0.95
-
-        if anchor_raters != []:
-            if (hasattr(self, 'anchor_severites_matrix') == False) or (self.anchor_raters_matrix != anchor_raters):
-                self.calibrate_matrix_anchor(anchor_raters, constant=constant, method=method)
-                self.std_errors_matrix(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                       constant=constant, method=method)
-
-            elif (self.anchor_item_low_matrix is None) and (interval is not None):
-                self.std_errors_global(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                       constant=constant, method=method)
-
-        else:
-            if hasattr(self, 'anchor_item_se_matrix') == False:
-                self.std_errors_matrix(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                       constant=constant, method=method)
-
-            elif (self.item_low is None) and (interval is not None):
-                self.std_errors_matrix(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                       constant=constant, method=method)
-
-        if hasattr(self, 'threshold_outfit_ms_matrix') == False:
-            self.threshold_fit_statistics_matrix(anchor_raters=anchor_raters, warm_corr=warm_corr, tolerance=tolerance,
-                                                 max_iters=max_iters, ext_score_adjustment=ext_score_adjustment,
-                                                 method=method, constant=constant)
-
-        if anchor_raters != []:
-            thresholds = self.anchor_thresholds_matrix
-        else:
-            thresholds = self.thresholds_matrix
-
-        self.threshold_stats_matrix = pd.DataFrame()
-
-        self.threshold_stats_matrix['Estimate'] = thresholds[1:].round(dp)
-        self.threshold_stats_matrix['SE'] = self.threshold_se_matrix[1:].round(dp)
-
-        if interval is not None:
-            if anchor_raters != []:
-                self.threshold_stats_matrix[f'{round((1 - interval) * 50, 1)}%'] = self.anchor_threshold_low_matrix[1:].round(dp)
-                self.threshold_stats_matrix[f'{round((1 + interval) * 50, 1)}%'] = self.anchor_threshold_high_matrix[1:].round(dp)
-
-            else:
-                self.threshold_stats_matrix[f'{round((1 - interval) * 50, 1)}%'] = self.threshold_low_matrix[1:].round(dp)
-                self.threshold_stats_matrix[f'{round((1 + interval) * 50, 1)}%'] = self.threshold_high_matrix[1:].round(dp)
-
-        self.threshold_stats_matrix['Infit MS'] = self.threshold_infit_ms_matrix.to_numpy().round(dp)
-        if zstd:
-            self.threshold_stats_matrix['Infit Z'] = self.threshold_infit_zstd_matrix.to_numpy().round(dp)
-        self.threshold_stats_matrix['Outfit MS'] = self.threshold_outfit_ms_matrix.to_numpy().round(dp)
-        if zstd:
-            self.threshold_stats_matrix['Outfit Z'] = self.threshold_outfit_zstd_matrix.to_numpy().round(dp)
-
-        if disc:
-            self.threshold_stats_matrix['Discrim'] = self.threshold_discrimination_matrix.to_numpy().round(dp)
-
-        if point_measure_corr:
-            self.threshold_stats_matrix['PM corr'] = self.threshold_point_measure_matrix.to_numpy().round(dp)
-            self.threshold_stats_matrix['Exp PM corr'] = self.threshold_exp_point_measure_matrix.to_numpy().round(dp)
-
-        self.threshold_stats_matrix.index = [f'Threshold {threshold + 1}' for threshold in range(self.max_score)]
-
-    def rater_stats_df_matrix(self,
-                              anchor_raters=[],
-                              full=False,
-                              zstd=False,
-                              marginal=True,
-                              dp=3,
-                              warm_corr=True,
-                              tolerance=0.0000001,
-                              max_iters=100,
-                              ext_score_adjustment=0.5,
-                              method='cos',
-                              constant=0.1,
-                              no_of_samples=100,
-                              interval=None):
-
-        if full:
-            zstd = True
-
-            if interval is None:
-                interval = 0.95
-
-        if anchor_raters != []:
-            if (hasattr(self, 'anchor_severites_matrix') == False) or (self.anchor_raters_matrix != anchor_raters):
-                self.calibrate_matrix_anchor(anchor_raters, constant=constant, method=method)
-                self.std_errors_matrix(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                       constant=constant, method=method)
-
-        else:
-            if hasattr(self, 'anchor_item_se_matrix') == False:
-                self.std_errors_matrix(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                       constant=constant, method=method)
-
-        if hasattr(self, 'rater_outfit_ms_matrix') == False:
-            self.rater_fit_statistics_matrix(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
-                                             ext_score_adjustment=ext_score_adjustment, method=method,
-                                             constant=constant, no_of_samples=no_of_samples, interval=interval)
-
-        if anchor_raters != []:
-            severities = self.anchor_severities_matrix
-            marginal_items = self.anchor_marginal_severities_items
-            marginal_thresholds = self.anchor_marginal_severities_thresholds
-
-            se = self.anchor_rater_se_matrix
-            low = self.anchor_rater_low_matrix
-            high = self.anchor_rater_high_matrix
-
-        else:
-            severities = self.severities_matrix
-            marginal_items = self.marginal_severities_items
-            marginal_thresholds = self.marginal_severities_thresholds
-
-            se = self.rater_se_matrix
-            low = self.rater_low_matrix
-            high = self.rater_high_matrix
-
-        if marginal:
-            self.rater_stats_matrix = {}
-
-            for item in self.dataframe.columns:
-
-                item_stats = pd.DataFrame()
-
-                item_stats['Estimate'] = np.array([marginal_items[rater][item]
-                                                   for rater in self.raters]).round(dp)
-
-                if anchor_raters != []:
-                    item_stats['SE'] = np.array([self.anchor_rater_se_marginal_items[rater][item]
-                                                for rater in self.raters]).round(dp)
-                else:
-                    item_stats['SE'] = np.array([self.rater_se_marginal_items[rater][item]
-                                                for rater in self.raters]).round(dp)
-
-                if interval is not None:
-                    if anchor_raters != []:
-                        item_stats[f'{round((1 - interval) * 50, 1)}%'] = np.array([self.anchor_rater_low_marginal_items[rater][item]
-                                                                                    for rater in self.raters]).round(dp)
-                        item_stats[f'{round((1 + interval) * 50, 1)}%'] = np.array([self.anchor_rater_high_marginal_items[rater][item]
-                                                                                for rater in self.raters]).round(dp)
-
-                    else:
-                        item_stats[f'{round((1 - interval) * 50, 1)}%'] = np.array([self.rater_low_marginal_items[rater][item]
-                                                                                    for rater in self.raters]).round(dp)
-                        item_stats[f'{round((1 + interval) * 50, 1)}%'] = np.array([self.rater_high_marginal_items[rater][item]
-                                                                                for rater in self.raters]).round(dp)
-
-                item_stats.index = self.raters
-                self.rater_stats_matrix[item] = item_stats.T
-
-            for threshold in range(self.max_score):
-
-                item_stats = pd.DataFrame()
-
-                item_stats['Estimate'] = np.array([marginal_thresholds[rater][threshold + 1]
-                                                   for rater in self.raters]).round(dp)
-
-                if anchor_raters != []:
-                    item_stats['SE'] = np.array([self.anchor_rater_se_marginal_thresholds[rater][threshold + 1]
-                                                 for rater in self.raters]).round(dp)
-                else:
-                    item_stats['SE'] = np.array([self.rater_se_marginal_thresholds[rater][threshold + 1]
-                                                 for rater in self.raters]).round(dp)
-
-                if interval is not None:
-                    if anchor_raters != []:
-                        item_stats[ f'{round((1 - interval) * 50, 1)}%'] = np.array([self.anchor_rater_low_marginal_thresholds[rater][threshold + 1]
-                                                                                     for rater in self.raters]).round(dp)
-                        item_stats[f'{round((1 + interval) * 50, 1)}%'] = np.array([self.anchor_rater_high_marginal_thresholds[rater][threshold + 1]
-                                                                                    for rater in self.raters]).round(dp)
-
-                    else:
-                        item_stats[ f'{round((1 - interval) * 50, 1)}%'] = np.array([self.rater_low_marginal_thresholds[rater][threshold + 1]
-                                                                                     for rater in self.raters]).round(dp)
-                        item_stats[f'{round((1 + interval) * 50, 1)}%'] = np.array([self.rater_high_marginal_thresholds[rater][threshold + 1]
-                                                                                    for rater in self.raters]).round(dp)
-
-                item_stats.index = self.raters
-                self.rater_stats_matrix[f'Threshold {threshold + 1}'] = item_stats.T
-
-            ov_stats_df = pd.DataFrame()
-
-            ov_stats_df['Count'] = np.array([self.dataframe.xs(rater).count().sum() for rater in self.raters]).astype(int)
-            ov_stats_df['Infit MS'] = self.rater_infit_ms_matrix.to_numpy().round(dp)
-            if zstd:
-                ov_stats_df['Infit Z'] = self.rater_infit_zstd_matrix.to_numpy().round(dp)
-            ov_stats_df['Outfit MS'] = self.rater_outfit_ms_matrix.to_numpy().round(dp)
-            if zstd:
-                ov_stats_df['Outfit Z'] = self.rater_outfit_zstd_matrix.to_numpy().round(dp)
-
-            ov_stats_df.index = self.raters
-            self.rater_stats_matrix['Overall statistics'] = ov_stats_df.T
-
-            self.rater_stats_matrix = pd.concat(self.rater_stats_matrix.values(), keys=self.rater_stats_matrix.keys()).T
-
-        else:
-            self.rater_stats_matrix = {}
-
-            for item in self.dataframe.columns:
-                for threshold in range(self.max_score):
-
-                    item_stats = pd.DataFrame()
-
-                    item_stats['Estimate'] = np.array([severities[rater][item][threshold + 1]
-                                                       for rater in self.raters]).round(dp)
-                    item_stats['SE'] = np.array([se[rater][item][threshold + 1]
-                                                 for rater in self.raters]).round(dp)
-
-                    if interval is not None:
-                        item_stats[f'{round((1 - interval) * 50, 1)}%'] = np.array([low[rater][item][threshold + 1]
-                                                                                    for rater in self.raters]).round(dp)
-                        item_stats[f'{round((1 + interval) * 50, 1)}%'] = np.array([high[rater][item][threshold + 1]
-                                                                                    for rater in self.raters]).round(dp)
-
-                    item_stats.index = self.raters
-                    self.rater_stats_matrix[f'{item}, Threshold {threshold + 1}'] = item_stats.T
-
-            ov_stats_df = pd.DataFrame()
-
-            ov_stats_df['Count'] = np.array([self.dataframe.xs(rater).count().sum() for rater in self.raters]).astype(int)
-            ov_stats_df['Infit MS'] = self.rater_infit_ms_matrix.to_numpy().round(dp)
-            if zstd:
-                ov_stats_df['Infit Z'] = self.rater_infit_zstd_matrix.to_numpy().round(dp)
-            ov_stats_df['Outfit MS'] = self.rater_outfit_ms_matrix.to_numpy().round(dp)
-            if zstd:
-                ov_stats_df['Outfit Z'] = self.rater_outfit_zstd_matrix.to_numpy().round(dp)
-
-            ov_stats_df.index = self.raters
-            self.rater_stats_matrix['Overall statistics'] = ov_stats_df.T
-
-            self.rater_stats_matrix = pd.concat(self.rater_stats_matrix.values(), keys=self.rater_stats_matrix.keys()).T
-
-    def person_stats_df_matrix(self,
-                               full=False,
-                               rsem=False,
-                               zstd=False,
-                               dp=3,
-                               warm_corr=True,
-                               tolerance=0.0000001,
-                               max_iters=100,
-                               ext_score_adjustment=0.5,
-                               method='cos',
-                               constant=0.1):
-
-        '''
-        Produces a person stats dataframe with raw score, ability estimate,
-        CSEM and RSEM for each person.
-        '''
-
-        if hasattr(self, 'person_outfit_ms_matrix') == False:
-            self.person_fit_statistics_matrix(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
-                                              ext_score_adjustment=ext_score_adjustment, method=method,
-                                              constant=constant)
-
-        if full:
-            rsem = True
-            zstd = True
-
-        person_stats_df = pd.DataFrame()
-        person_stats_df.index = self.dataframe.index.get_level_values(1).unique()
-
-        person_stats_df['Estimate'] = self.abils_matrix.round(dp)
-
-        person_stats_df['CSEM'] = self.csem_vector_matrix.round(dp)
-        if rsem:
-            person_stats_df['RSEM'] = self.rsem_vector_matrix.round(dp)
-
-        person_stats_df['Score'] = [np.nan for person in self.persons]
-        person_stats_df['Score'].update(self.dataframe.unstack(level=0).sum(axis=1))
-        person_stats_df['Score'] = person_stats_df['Score'].astype(int)
-
-        person_stats_df['Max score'] = [np.nan for person in self.persons]
-        person_stats_df['Max score'].update(self.dataframe.unstack(level=0).count(axis=1) * self.max_score)
-        person_stats_df['Max score'] = person_stats_df['Max score'].astype(int)
-
-        person_stats_df['p'] = [np.nan for person in self.persons]
-        person_stats_df['p'].update(self.dataframe.unstack(level=0).mean(axis=1) / self.max_score)
-        person_stats_df['p'] = person_stats_df['p'].round(dp)
-
-        person_stats_df['Infit MS'] = [np.nan for person in self.persons]
-        person_stats_df['Infit MS'].update(self.person_infit_ms_matrix.round(dp))
-
-        if zstd:
-            person_stats_df['Infit Z'] = [np.nan for person in self.persons]
-            person_stats_df['Infit Z'].update(self.person_infit_zstd_matrix.round(dp))
-
-        person_stats_df['Outfit MS'] = [np.nan for person in self.persons]
-        person_stats_df['Outfit MS'].update(self.person_outfit_ms_matrix.round(dp))
-
-        if zstd:
-            person_stats_df['Outfit Z'] = [np.nan for person in self.persons]
-            person_stats_df['Outfit Z'].update(self.person_outfit_zstd_matrix.round(dp))
-
-        self.person_stats_matrix = person_stats_df
-
-    def test_stats_df_matrix(self,
-                             dp=3,
-                             warm_corr=True,
-                             tolerance=0.0000001,
-                             max_iters=100,
-                             ext_score_adjustment=0.5,
-                             method='cos',
-                             constant=0.1):
-
-        '''
-        Produces a test statistics dataframe with raw score, ability estimate,
-        CSEM and RSEM for each person.
-        '''
-
-        if hasattr(self, 'psi_matrix') == False:
-            self.test_fit_statistics_matrix(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
-                                            ext_score_adjustment=ext_score_adjustment, method=method,
-                                            constant=constant)
-
-        self.test_stats_matrix = pd.DataFrame()
-
-        self.test_stats_matrix['Items'] = [self.diffs.mean(),
-                                           self.diffs.std(),
-                                           self.isi_matrix,
-                                           self.item_strata_matrix,
-                                           self.item_reliability_matrix]
-
-        self.test_stats_matrix['Persons'] = [self.abils_matrix.mean(),
-                                             self.abils_matrix.std(),
-                                             
-                                             self.psi_matrix,
-                                             self.person_strata_matrix,
-                                             self.person_reliability_matrix]
-
-        self.test_stats_matrix.index = ['Mean', 'SD', 'Separation ratio', 'Strata', 'Reliability']
-        self.test_stats_matrix = round(self.test_stats_matrix, dp)
-
-    def save_stats_matrix(self,
-                         filename,
-                         format='csv',
-                         dp=3,
-                         warm_corr=True,
-                         tolerance=0.0000001,
-                         max_iters=100,
-                         ext_score_adjustment=0.5,
-                         method='cos',
-                         constant=0.1,
-                         no_of_samples=100,
-                         interval=None):
-
-        if hasattr(self, 'item_stats_matrix') == False:
-            self.item_stats_df_matrix(dp=dp, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
-                                      ext_score_adjustment=ext_score_adjustment, method=method, constant=constant,
-                                      no_of_samples=no_of_samples, interval=interval)
-
-        if hasattr(self, 'threshold_stats_matrix') == False:
-            self.threshold_stats_df_matrix(dp=dp, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
-                                           ext_score_adjustment=ext_score_adjustment, method=method, constant=constant,
-                                           no_of_samples=no_of_samples, interval=interval)
-
-        if hasattr(self, 'rater_stats_matrix') == False:
-            self.rater_stats_df_matrix(dp=dp, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
-                                       ext_score_adjustment=ext_score_adjustment, method=method, constant=constant,
-                                       no_of_samples=no_of_samples, interval=interval)
-
-        if hasattr(self, 'person_stats_matrix') == False:
-            self.person_stats_df_matrix(dp=dp, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
-                                        ext_score_adjustment=ext_score_adjustment, method=method, constant=constant)
-
-        if hasattr(self, 'test_stats_matrix') == False:
-            self.test_stats_df_matrix(dp=dp, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
-                                      ext_score_adjustment=ext_score_adjustment, method=method, constant=constant)
-
-        if format == 'xlsx':
-
-            if filename[-5:] != '.xlsx':
-                filename += '.xlsx'
-
-            writer = pd.ExcelWriter(filename, engine='xlsxwriter')
-
-            self.item_stats_matrix.to_excel(writer, sheet_name='Item statistics')
-            self.threshold_stats_matrix.to_excel(writer, sheet_name='Threshold statistics')
-            self.rater_stats_matrix.to_excel(writer, sheet_name='Rater statistics')
-            self.person_stats_matrix.to_excel(writer, sheet_name='Person statistics')
-            self.test_stats_matrix.to_excel(writer, sheet_name='Test statistics')
-
-            writer.save()
-
-        else:
-            if filename[-4:] == '.csv':
-                filename = filename[:-4]
-
-            self.item_stats_matrix.to_csv(f'{filename}_item_stats.csv')
-            self.threshold_stats_matrix.to_csv(f'{filename}_threshold_stats.csv')
-            self.rater_stats_matrix.to_csv(f'{filename}_rater_stats.csv')
-            self.person_stats_matrix.to_csv(f'{filename}_person_stats.csv')
-            self.test_stats_matrix.to_csv(f'{filename}_test_stats.csv')
 
     def save_residuals(self,
                        eigenvectors,
@@ -13746,142 +13778,206 @@ class MFRM(Rasch):
 
     def class_intervals(self,
                         abilities,
-                        items,
-                        severities=None,
-                        anchor=None,
+                        items=None,
                         raters=None,
                         no_of_classes=5):
 
-        if raters is None:
-            raters = self.raters
+        if (items == 'all') | (items is None):
+            items = self.dataframe.columns.tolist()
+
+        if raters == 'all':
+            raters = self.raters.tolist()
+
+        if raters == 'none':
+            raters = None
+
+        if raters == 'zero':
+            raters = None
 
         class_groups = [f'class_{class_no + 1}' for class_no in range(no_of_classes)]
 
-        df = self.dataframe[items].loc[raters]
+        df = self.dataframe.copy()
 
-        abils = {rater: abilities for rater in raters}
-        abils = pd.concat(abils.values(), keys=abils.keys())
-        abils = abils.loc[df.index[~df.isnull().all(axis=1)]]
+        abil_index = self.dataframe[items].unstack(level=0).dropna(how='any').index
+        abils = abilities.loc[abil_index]
 
-        df = df.dropna(how='all')
+        if isinstance(raters, list):
+            df = {rater: df.xs(rater) for rater in raters}
+            df = pd.concat(df.values(), keys=df.keys())
+
+        elif isinstance(raters, str):
+            df = {raters: df.xs(raters)}
+            df = pd.concat(df.values(), keys=df.keys())
+
+        elif raters is None:
+            df = df
+
+        df = df[items]
+
+        if isinstance(items, list):
+            df = df.loc[pd.IndexSlice[:, abil_index], :]
+
+        if isinstance(items, str):
+            df = df.loc[pd.IndexSlice[:, abil_index]]
 
         quantiles = (abils.quantile([(i + 1) / no_of_classes
                                      for i in range(no_of_classes - 1)]))
 
         mask_dict = {}
+
         mask_dict['class_1'] = (abils < quantiles.values[0])
         mask_dict[f'class_{no_of_classes}'] = (abils >= quantiles.values[no_of_classes - 2])
         for class_no in range(no_of_classes - 2):
             mask_dict[f'class_{class_no + 2}'] = ((abils >= quantiles.values[class_no]) &
                                                   (abils < quantiles.values[class_no + 1]))
 
-        class_sizes = {class_group: sum(mask_dict[class_group]) for class_group in class_groups}
-        class_sizes = pd.Series(class_sizes)
-
-        response_classes = {class_group: df.index[mask_dict[class_group]]
-                            for class_group in class_groups}
-
-        mean_abilities = {class_group: abils[mask_dict[class_group]].mean()
-                          for class_group in class_groups}
-        mean_abilities = pd.Series(mean_abilities)
-
-        obs_means = {class_group: df[mask_dict[class_group]].mean().sum()
-                     for class_group in class_groups}
-
-        for class_group in class_groups:
-            obs_means[class_group] = pd.Series(obs_means[class_group])
-
-        obs_means = pd.concat(obs_means, keys=obs_means.keys())
-
-        class_abilities = {class_group: abils[mask_dict[class_group]]
-                           for class_group in class_groups}
-        class_abilities = pd.concat(class_abilities, keys=class_abilities.keys())
-
-        return class_sizes, response_classes, class_abilities, mean_abilities, obs_means
-
-    def class_intervals_cats(self,
-                        	 abilities,
-                        	 items,
-                        	 severities=None,
-                        	 anchor=None,
-                        	 raters=None,
-                        	 no_of_classes=5):
+        df_mask_dict = {}
 
         if raters is None:
-            raters = self.raters
+            for class_no in range(no_of_classes):
+                class_name = f'class_{class_no + 1}'
+                df_mask_dict[class_name] = {rater: mask_dict[class_name] for rater in self.raters.tolist()}
+                df_mask_dict[class_name] = pd.concat(df_mask_dict[class_name].values(),
+                                                     keys=df_mask_dict[class_name].keys())
 
-        class_groups = [f'class_{class_no + 1}' for class_no in range(no_of_classes)]
+        if (isinstance(raters, list)):
+            for class_no in range(no_of_classes):
+                class_name = f'class_{class_no + 1}'
+                df_mask_dict[class_name] = {rater: mask_dict[class_name] for rater in raters}
+                df_mask_dict[class_name] = pd.concat(df_mask_dict[class_name].values(),
+                                                     keys=df_mask_dict[class_name].keys())
 
-        df = self.dataframe[items].loc[raters]
-
-        abils = {rater: abilities for rater in raters}
-        abils = pd.concat(abils.values(), keys=abils.keys())
-        abils = abils.loc[df.index[~df.isnull().all(axis=1)]]
-
-        df = df.dropna(how='all')
-
-        quantiles = (abils.quantile([(i + 1) / no_of_classes
-                                     for i in range(no_of_classes - 1)]))
-
-        mask_dict = {}
-        mask_dict['class_1'] = (abils < quantiles.values[0])
-        mask_dict[f'class_{no_of_classes}'] = (abils >= quantiles.values[no_of_classes - 2])
-        for class_no in range(no_of_classes - 2):
-            mask_dict[f'class_{class_no + 2}'] = ((abils >= quantiles.values[class_no]) &
-                                                  (abils < quantiles.values[class_no + 1]))
-
-        class_sizes = {class_group: sum(mask_dict[class_group]) for class_group in class_groups}
-        class_sizes = pd.Series(class_sizes)
-
-        response_classes = {class_group: df.index[mask_dict[class_group]]
-                            for class_group in class_groups}
+        if (isinstance(raters, str)):
+            for class_no in range(no_of_classes):
+                class_name = f'class_{class_no + 1}'
+                df_mask_dict[class_name] = {raters: mask_dict[class_name]}
+                df_mask_dict[class_name] = pd.concat(df_mask_dict[class_name].values(),
+                                                     keys=df_mask_dict[class_name].keys())
 
         mean_abilities = {class_group: abils[mask_dict[class_group]].mean()
                           for class_group in class_groups}
         mean_abilities = pd.Series(mean_abilities)
 
-        obs_props = {class_group: np.array([(df[mask_dict[class_group]] == cat).sum()[0]
-                                            for cat in range(self.max_score + 1)])
-                     for class_group in class_groups}
+        if isinstance(items, str):
+            if raters is None:
+                obs = {class_group: sum(df.loc[df_mask_dict[class_group]].mean()
+                                        for rater in self.raters.tolist()) / self.no_of_raters
+                       for class_group in class_groups}
 
-        for class_group in class_groups:
-            obs_props[class_group] = obs_props[class_group] / obs_props[class_group].sum()
-
-        obs_props = pd.DataFrame(obs_props).to_numpy()
-
-        class_abilities = {class_group: abils[mask_dict[class_group]]
-                           for class_group in class_groups}
-        class_abilities = pd.concat(class_abilities, keys=class_abilities.keys())
-
-        return class_sizes, response_classes, class_abilities, mean_abilities, obs_props
-
-    def class_intervals_thresholds(self,
-                                   abilities,
-                                   items,
-                                   difficulties=None,
-                                   severities=None,
-                                   anchor=False,
-                                   raters=None,
-                                   no_of_classes=5):
-
-        if difficulties is None:
-            if anchor:
-                difficulties = self.anchor_diffs_global
+            elif isinstance(raters, list):
+                obs = {class_group: sum(df.loc[df_mask_dict[class_group]].mean()
+                                        for rater in raters)
+                       for class_group in class_groups}
 
             else:
-                difficulties = self.diffs
+                obs = {class_group: df.loc[df_mask_dict[class_group]].mean()
+                       for class_group in class_groups}
 
-        if raters is None:
-            raters = self.raters
+        if isinstance(items, list):
+            if raters is None:
+                obs = {class_group: sum(df.loc[df_mask_dict[class_group]].xs(rater).mean().sum()
+                                        for rater in self.raters.tolist()) / self.no_of_raters
+                       for class_group in class_groups}
+
+            elif isinstance(raters, list):
+                obs = {class_group: sum(df.loc[df_mask_dict[class_group]].xs(rater).mean().sum()
+                                        for rater in raters)
+                       for class_group in class_groups}
+
+            else:
+                obs = {class_group: df.loc[df_mask_dict[class_group]].mean().sum()
+                       for class_group in class_groups}
+
+        for class_group in class_groups:
+            obs[class_group] = pd.Series(obs[class_group])
+
+        obs = pd.concat(obs, keys=obs.keys())
+
+        return mean_abilities, obs
+
+    def class_intervals_cats(self,
+                             abilities,
+                             item=None,
+                             rater=None,
+                             anchor=False,
+                             no_of_classes=5):
+
+        if rater == 'none':
+            rater = None
+
+        if rater == 'zero':
+            rater = None
+
+        if anchor:
+            difficulties = self.anchor_diffs_global
+            severities = self.anchor_severities_global
+
+        else:
+            difficulties = self.diffs
+            severities = self.severities_global
 
         class_groups = [f'class_{class_no + 1}' for class_no in range(no_of_classes)]
 
-        def mask_dictionary(abils):
+        df = self.dataframe.copy()
+
+        abil_df = pd.DataFrame()
+
+        for item_ in self.dataframe.columns:
+            abil_df[item_] = abilities
+
+        if item is None:
+            for item_ in self.dataframe.columns:
+                abil_df.loc[:, item_] -= difficulties[item_]
+
+        abil_dict = {}
+
+        for rater_ in self.raters:
+            abil_dict[rater_] = abil_df.copy()
+
+            if rater is None:
+                abil_dict[rater_] -= severities[rater_]
+
+        abil_df = pd.concat(abil_dict.values(), keys=abil_dict.keys())
+
+        if item is None:
+            if rater is None:
+                df = df
+                df_mask = (df + 1) / (df + 1)
+                abil_df = abil_df * df_mask
+
+                mask_scores = df.unstack().unstack()
+                mask_abils = abil_df.unstack().unstack()
+
+            else:
+                df = df.xs(rater)
+                df_mask = (df + 1) / (df + 1)
+                abil_df = abil_df.xs(rater) * df_mask
+
+                mask_scores = df.unstack()
+                mask_abils = abil_df.unstack()
+
+        else:
+            if rater is None:
+                df = df[item].unstack(level=0)
+                df_mask = (df + 1) / (df + 1)
+                abil_df = abil_df[item].unstack(level=0) * df_mask
+
+                mask_scores = df.unstack()
+                mask_abils = abil_df.unstack()
+
+            else:
+                df = df[item].xs(rater)
+                df_mask = (df + 1) / (df + 1)
+                abil_df = abil_df[item].xs(rater) * df_mask
+
+                mask_scores = df
+                mask_abils = abil_df
+
+        def class_masks(abils):
+            mask_dict = {}
 
             quantiles = (abils.quantile([(i + 1) / no_of_classes
                                          for i in range(no_of_classes - 1)]))
-
-            mask_dict = {}
 
             mask_dict['class_1'] = (abils < quantiles.values[0])
             mask_dict[f'class_{no_of_classes}'] = (abils >= quantiles.values[no_of_classes - 2])
@@ -13889,75 +13985,153 @@ class MFRM(Rasch):
                 mask_dict[f'class_{class_group + 2}'] = ((abils >= quantiles.values[class_group]) &
                                                          (abils < quantiles.values[class_group + 1]))
 
+            for class_group in class_groups:
+                mask_dict[class_group] = mask_dict[class_group][mask_dict[class_group]].index
+
             return mask_dict
+
+        mask = class_masks(mask_abils)
+        mean_abilities = [mask_abils.loc[mask[class_group]].mean()
+                          for class_group in class_groups]
+        mean_abilities = np.array(mean_abilities)
+
+        obs_props = []
+
+        for category in range(self.max_score + 1):
+            obs_props_cat = [len(mask_scores.loc[mask[class_group]][mask_scores == category]) / len(
+                mask_scores.loc[mask[class_group]])
+                             for class_group in class_groups]
+            obs_props.append(obs_props_cat)
+
+        obs_props = np.array(obs_props)
+
+        return mean_abilities, obs_props
+
+    def class_intervals_thresholds(self,
+                                   abilities,
+                                   item=None,
+                                   rater=None,
+                                   anchor=False,
+                                   no_of_classes=5):
+
+        if rater == 'none':
+            rater = None
+
+        if rater == 'zero':
+            rater = None
+            
+        if anchor:
+            difficulties = self.anchor_diffs_global
+            severities = self.anchor_severities_global
+        
+        else:
+            difficulties = self.diffs
+            severities = self.severities_global
 
         class_groups = [f'class_{class_no + 1}' for class_no in range(no_of_classes)]
 
-        if items is None:
-            df = self.dataframe.loc[raters]
+        df = self.dataframe.copy()
 
+        abil_df = pd.DataFrame()
+
+        for item_ in self.dataframe.columns:
+            abil_df[item_] = abilities
+
+        if item is None:
+            for item_ in self.dataframe.columns:
+                abil_df.loc[:, item_] -= difficulties[item_]
+
+        abil_dict = {}
+
+        for rater_ in self.raters:
+            abil_dict[rater_] = abil_df.copy()
+
+            if rater is None:
+                abil_dict[rater_] -= severities[rater_]
+
+        abil_df = pd.concat(abil_dict.values(), keys=abil_dict.keys())
+
+        if item is None:
+            if rater is None:
+                df = df
+                abil_df = abil_df
+    
+            else:
+                df = df.xs(rater)
+                abil_df = abil_df.xs(rater)
+                
         else:
-            df = self.dataframe[items].loc[raters]
+            if rater is None:
+                df = df[item].unstack(level=0)
+                abil_df = abil_df[item].unstack(level=0)
+    
+            else:
+                df = df[item].xs(rater)
+                abil_df = abil_df[item].xs(rater)
 
-        abils = {rater: abilities for rater in raters}
-        abils = pd.concat(abils.values(), keys=abils.keys())
+        def class_masks(abils):
+            mask_dict = {}
 
-        quantiles = (abils.quantile([(i + 1) / no_of_classes
-                                     for i in range(no_of_classes - 1)]))
+            quantiles = (abils.quantile([(i + 1) / no_of_classes
+                                         for i in range(no_of_classes - 1)]))
 
-        mask_dict = {}
-        mask_dict['class_1'] = (abils < quantiles.values[0])
-        mask_dict[f'class_{no_of_classes}'] = (abils >= quantiles.values[no_of_classes - 2])
-        for class_no in range(no_of_classes - 2):
-            mask_dict[f'class_{class_no + 2}'] = ((abils >= quantiles.values[class_no]) &
-                                                  (abils < quantiles.values[class_no + 1]))
+            mask_dict['class_1'] = (abils < quantiles.values[0])
+            mask_dict[f'class_{no_of_classes}'] = (abils >= quantiles.values[no_of_classes - 2])
+            for class_group in range(no_of_classes - 2):
+                mask_dict[f'class_{class_group + 2}'] = ((abils >= quantiles.values[class_group]) &
+                                                         (abils < quantiles.values[class_group + 1]))
 
-        class_sizes = {class_group: sum(mask_dict[class_group]) for class_group in class_groups}
-        class_sizes = pd.Series(class_sizes)
+            for class_group in class_groups:
+                mask_dict[class_group] = mask_dict[class_group][mask_dict[class_group]].index
 
-        response_classes = {class_group: df.index[mask_dict[class_group]]
-                            for class_group in class_groups}
+            return mask_dict
 
         mean_abilities = []
         obs_props = []
 
-        adjusted_abils_df = pd.DataFrame()
-        for item in difficulties.keys():
-            adjusted_abils_df[item] = abils - difficulties[item]
-
         for threshold in range(self.max_score):
             cond_df = df[df.isin([threshold, threshold + 1])]
+            cond_df -= threshold
+
             cond_df_mask = (cond_df + 1) / (cond_df + 1)
 
-            adj_abils = adjusted_abils_df * cond_df_mask
-            adj_abils = adj_abils.unstack().unstack()
-            adj_abils = adj_abils[adj_abils == adj_abils]
+            cond_abils = abil_df * cond_df_mask
 
-            cond_df_list = cond_df.unstack().unstack()
-            cond_df_list = cond_df_list[cond_df_list == cond_df_list]
+            obs_data_df = pd.DataFrame()
 
-            adj_abil_score_df = pd.DataFrame()
-            adj_abil_score_df['abil'] = adj_abils
-            adj_abil_score_df['score'] = cond_df_list
+            if item is None:
+                if rater is None:
+                    obs_data_df['ability'] = cond_abils.stack()
+                    obs_data_df['score'] = cond_df.stack()
+                    obs_data_df = obs_data_df.droplevel(level=[0, 2])
 
-            masks = mask_dictionary(adj_abils)
+                else:
+                    obs_data_df['ability'] = cond_abils.stack()
+                    obs_data_df['score'] = cond_df.stack()
+                    obs_data_df = obs_data_df.droplevel(level=1)
 
-            cond_classes = {class_group: adj_abil_score_df[masks[class_group]]
-                            for class_group in class_groups}
+            else:
+                if rater is None:
+                    obs_data_df['ability'] = cond_abils.stack()
+                    obs_data_df['score'] = cond_df.stack()
+                    obs_data_df = obs_data_df.droplevel(level=1)
 
-            mean_abilities.append([cond_classes[class_group]['abil'].mean()
+                else:
+                    obs_data_df['ability'] = cond_abils
+                    obs_data_df['score'] = cond_df
+
+            mask_dict = class_masks(obs_data_df['ability'])
+
+            mean_abilities.append([obs_data_df.loc[mask_dict[class_group]]['ability'].mean()
                                    for class_group in class_groups])
-            obs_props.append([(cond_classes[class_group]['score'] - threshold).mean()
+
+            obs_props.append([obs_data_df.loc[mask_dict[class_group]]['score'].mean()
                               for class_group in class_groups])
 
-        mean_abilities = np.array(mean_abilities).T
-        obs_props = np.array(obs_props).T
+        mean_abilities = np.array(mean_abilities)
+        obs_props = np.array(obs_props)
 
-        class_abilities = {class_group: abils[mask_dict[class_group]]
-                           for class_group in class_groups}
-        class_abilities = pd.concat(class_abilities, keys=class_abilities.keys())
-
-        return class_sizes, response_classes, class_abilities, mean_abilities, obs_props
+        return mean_abilities, obs_props
 
     '''
     *** PLOTS ***
@@ -13967,25 +14141,25 @@ class MFRM(Rasch):
                          x_data,
                          y_data,
                          anchor=False,
-                         rater=None,
-                         x_min=-10,
-                         x_max=10,
-                         y_max=0,
-                         item=None,
+                         items=None,
+                         raters=None,
                          obs=None,
                          thresh_obs=None,
                          x_obs_data=np.array([]),
                          y_obs_data=np.array([]),
                          thresh_lines=False,
                          central_diff=False,
-                         score_lines_item=[None, []],
-                         score_lines_test=[],
-                         point_info_lines_item=[None, []],
-                         point_info_lines_test=[],
-                         point_csem_lines=[],
+                         score_lines_item=[None, None],
+                         score_lines_test=None,
+                         point_info_lines_item=[None, None],
+                         point_info_lines_test=None,
+                         point_csem_lines=None,
                          score_labels=False,
+                         x_min=-10,
+                         x_max=10,
+                         y_max=0,
                          warm=True,
-                         cat_highlight=-1,
+                         cat_highlight=None,
                          graph_title='',
                          y_label='',
                          plot_style='colorblind',
@@ -13995,7 +14169,6 @@ class MFRM(Rasch):
                          title_font_size=15,
                          axis_font_size=12,
                          labelsize=12,
-                         graph_name='plot',
                          tex=True,
                          plot_density=300,
                          save_title='',
@@ -14005,6 +14178,28 @@ class MFRM(Rasch):
         Basic plotting function to be called when plotting specific functions
         of person ability for RSM.
         '''
+
+        if anchor:
+            difficulties = self.anchor_diffs_global
+            thresholds = self.anchor_thresholds_global
+            severities = self.anchor_severities_global
+            
+        else:
+            difficulties = self.diffs
+            thresholds = self.thresholds
+            severities = self.severities_global
+
+        if raters == 'all':
+            raters = self.raters
+
+        if raters == 'none':
+            raters = None
+
+        if items == 'all':
+            items = self.dataframe.columns
+
+        if items == 'none':
+            items = None
 
         if tex:
             plt.rcParams["text.latex.preamble"].join([r"\usepackage{dashbox}", r"\setmainfont{xcolor}",])
@@ -14027,73 +14222,70 @@ class MFRM(Rasch):
 
         if obs is not None:
             try:
-                no_of_observed_cats = y_obs_data.shape[1]
-                for j in range (no_of_observed_cats):
-                    ax.plot(x_obs_data, y_obs_data[:, j], 'o')
+                if isinstance(y_obs_data, pd.Series):
+                    ax.plot(x_obs_data, y_obs_data, 'o')
+
+                else:
+                    no_of_observed_cats = y_obs_data.shape[1]
+                    for j in range (no_of_observed_cats):
+                        ax.plot(x_obs_data, y_obs_data[:, j], 'o')
 
             except:
                 pass
 
         if thresh_obs is not None:
+            if thresh_obs == 'all':
+                thresh_obs = np.arange(self.max_score + 1)
             try:
-                no_of_observed_cats = y_obs_data.shape[1]
-                for j in range (no_of_observed_cats):
-                    ax.plot(x_obs_data[j, :], y_obs_data[j, :], 'o')
+                for ob in thresh_obs:
+                        ax.plot(x_obs_data[ob - 1, :], y_obs_data[ob - 1, :], 'o')
 
             except:
                 pass
 
-        if anchor:
-            if item is not None:
-                difficulties = {item: self.anchor_diffs_global[item]}
-                difficulties = pd.Series(difficulties)
-            thresholds = self.anchor_thresholds_global
-
-            if rater is None:
-                severities = {'dummy_rater': 0}
-                severities = pd.Series(severities)
-                rater = 'dummy_rater'
-
-            else:
-                severities = self.anchor_severities_global
-
-        else:
-            if item is not None:
-                difficulties = {item: self.diffs[item]}
-                difficulties = pd.Series(difficulties)
-            thresholds = self.thresholds_global
-
-            if rater is None:
-                severities = {'dummy_rater': 0}
-                severities = pd.Series(severities)
-                rater = 'dummy_rater'
-
-            else:
-                severities = self.severities_global
-
         if thresh_lines:
-            for threshold in range(self.max_score):
-                if item is None:
-                    plt.axvline(x = thresholds[threshold + 1] + severities[rater],
-                                color='black', linestyle='--')
+            if items is None:
+                if raters is None:
+                    for threshold in range(self.max_score):
+                        plt.axvline(x=thresholds[threshold + 1],
+                                    color='black', linestyle='--')
+
                 else:
-                    plt.axvline(x = difficulties[item] + thresholds[threshold + 1] + severities[rater],
-                                color='black', linestyle='--')
+                    for threshold in range(self.max_score):
+                        plt.axvline(x=thresholds[threshold + 1] + severities[raters],
+                                    color='black', linestyle='--')
+
+            else:
+                if raters is None:
+                    for threshold in range(self.max_score):
+                        plt.axvline(x=difficulties[items] + thresholds[threshold + 1],
+                                    color='black', linestyle='--')
+
+                else:
+                    for threshold in range(self.max_score):
+                        plt.axvline(x=difficulties[items] +thresholds[threshold + 1] + severities[raters],
+                                    color='black', linestyle='--')
 
         if central_diff:
-            if item is None:
-                plt.axvline(x = severities[rater], color='darkred', linestyle='--')
+            if items is None:
+                if raters is None:
+                    plt.axvline(x=0, color='darkred', linestyle='--')
+
+                else:
+                    plt.axvline(x=severities[raters], color='darkred', linestyle='--')
 
             else:
-                plt.axvline(x = difficulties[item] + severities[rater], color='darkred', linestyle='--')
+                if raters is None:
+                    plt.axvline(x = difficulties[items], color='darkred', linestyle='--')
 
-        if score_lines_item[1] != []:
+                else:
+                    plt.axvline(x = difficulties[items] + severities[raters], color='darkred', linestyle='--')
 
+        if score_lines_item[1] is not None:
             if (all(x > 0 for x in score_lines_item[1]) &
                 all(x < self.max_score for x in score_lines_item[1])):
 
-                abils_set = [self.score_abil_global(score, anchor=anchor, raters=[rater], difficulties=difficulties,
-                                                    thresholds=thresholds, severities=severities, warm_corr=False)
+                abils_set = [self.score_abil_global(score, anchor=anchor, items=items, raters=raters, warm_corr=False)
                              for score in score_lines_item[1]]
 
                 for thresh, abil in zip(score_lines_item[1], abils_set):
@@ -14107,19 +14299,28 @@ class MFRM(Rasch):
             else:
                 print('Invalid score for score line.')
 
-        if score_lines_test != []:
+        if score_lines_test is not None:
 
-            if (all(x > 0 for x in score_lines_test) &
-                all(x < self.max_score * self.no_of_items for x in score_lines_test)):
+            if isinstance(raters, list):
+                no_of_raters = len(raters)
 
-                if anchor:
-                    score_line_diffs = self.anchor_diffs_global
+            else:
+                no_of_raters = 1
+
+            if items is None:
+                no_of_items = self.no_of_items
+
+            else:
+                if isinstance(items, list):
+                    no_of_items = len(items)
 
                 else:
-                    score_line_diffs = self.diffs
+                    no_of_items = 1
 
-                abils_set = [self.score_abil_global(score, anchor=anchor, raters=[rater], difficulties=score_line_diffs,
-                                                    thresholds=thresholds, severities=severities, warm_corr=False)
+            if (all(x > 0 for x in score_lines_test) &
+                all(x < self.max_score * no_of_items * no_of_raters for x in score_lines_test)):
+
+                abils_set = [self.score_abil_global(score, anchor=anchor, items=items, raters=raters, warm_corr=False)
                              for score in score_lines_test]
 
                 for thresh, abil in zip(score_lines_test, abils_set):
@@ -14133,12 +14334,18 @@ class MFRM(Rasch):
             else:
                 print('Invalid score for score line.')
 
-        if point_info_lines_item[1] != []:
+        if point_info_lines_item[1] is not None:
 
             item = point_info_lines_item[0]
 
-            info_set = [self.variance(ability, difficulties[item], severities[rater], thresholds)
-                        for ability in point_info_lines_item[1]]
+            if raters is None:
+                info_set = [self.variance_global(ability, item, difficulties, 'dummy_rater',
+                                                 pd.Series({'dummy_rater': 0}), thresholds)
+                            for ability in point_info_lines_item[1]]
+
+            else:
+                info_set = [self.variance_global(ability, item, difficulties, raters, severities, thresholds)
+                            for ability in point_info_lines_item[1]]
 
             for abil, info in zip(point_info_lines_item[1], info_set):
                 plt.vlines(x=abil, ymin=-100, ymax=info, color='black', linestyles='dashed')
@@ -14148,17 +14355,31 @@ class MFRM(Rasch):
                 if score_labels:
                     plt.text(x_min + (x_max - x_min) / 100, info + y_max / 50, str(round(info, 3)))
 
-        if point_info_lines_test != []:
+        if point_info_lines_test is not None:
 
-            if anchor:
-                point_info_diffs = self.anchor_diffs_global
+            if items is None:
+                if raters is None:
+                    info_set = [sum(self.variance_global(ability, item, difficulties, 'dummy_rater',
+                                                         pd.Series({'dummy_rater': 0}), thresholds)
+                                    for item in self.dataframe.columns)
+                                for ability in point_info_lines_test]
 
+                else:
+                    info_set = [sum(self.variance_global(ability, item, difficulties, rater, severities, thresholds)
+                                    for item in self.dataframe.columns for rater in raters)
+                                for ability in point_info_lines_test]
+                    
             else:
-                point_info_diffs = self.diffs
+                if raters is None:
+                    info_set = [sum(self.variance_global(ability, item, difficulties, 'dummy_rater',
+                                                         pd.Series({'dummy_rater': 0}), thresholds)
+                                    for item in items)
+                                for ability in point_info_lines_test]
 
-            info_set = [sum(self.variance(ability, difficulty, severities[rater], thresholds)
-                            for difficulty in point_info_diffs)
-                        for ability in point_info_lines_test]
+                else:
+                    info_set = [sum(self.variance_global(ability, item, difficulties, rater, severities, thresholds)
+                                    for item in items for rater in raters)
+                                for ability in point_info_lines_test]
 
             for abil, info in zip(point_info_lines_test, info_set):
                 plt.vlines(x=abil, ymin=-100, ymax=info, color='black', linestyles='dashed')
@@ -14168,17 +14389,32 @@ class MFRM(Rasch):
                 if score_labels:
                     plt.text(x_min + (x_max - x_min) / 100, info + y_max / 50, str(round(info, 3)))
 
-        if point_csem_lines != []:
+        if point_csem_lines is not None:
 
-            if anchor:
-                point_csem_diffs = self.anchor_diffs_global
+            if items is None:
+                if raters is None:
+                    info_set = [sum(self.variance_global(ability, item, difficulties, 'dummy_rater',
+                                                         pd.Series({'dummy_rater': 0}), thresholds)
+                                    for item in self.dataframe.columns)
+                                for ability in point_csem_lines]
 
+                else:
+                    info_set = [sum(self.variance_global(ability, item, difficulties, rater, severities, thresholds)
+                                    for item in self.dataframe.columns for rater in raters)
+                                for ability in point_csem_lines]
+                    
             else:
-                point_csem_diffs = self.diffs
+                if raters is None:
+                    info_set = [sum(self.variance_global(ability, item, difficulties, 'dummy_rater',
+                                                         pd.Series({'dummy_rater': 0}), thresholds)
+                                    for item in items)
+                                for ability in point_csem_lines]
 
-            info_set = [sum(self.variance(ability, difficulty, severities[rater], thresholds)
-                            for difficulty in point_csem_diffs)
-                        for ability in point_csem_lines]
+                else:
+                    info_set = [sum(self.variance_global(ability, item, difficulties, rater, severities, thresholds)
+                                    for item in items for rater in raters)
+                                for ability in point_csem_lines]
+            
             info_set = np.array(info_set)
             csem_set = 1 / np.sqrt(info_set)
 
@@ -14193,32 +14429,44 @@ class MFRM(Rasch):
         if cat_highlight in range(self.max_score + 1):
 
             if cat_highlight == 0:
-                if item is None:
-                    plt.axvspan(-100, thresholds[1] + severities[rater],
+                if items is None:
+                    plt.axvspan(-100, thresholds[1] + severities,
                                 facecolor='blue', alpha=0.2)
                 else:
-                    plt.axvspan(-100, difficulties[item] + thresholds[1] + severities[rater],
+                    plt.axvspan(-100, difficulties + thresholds[1] + severities,
                                 facecolor='blue', alpha=0.2)
 
             elif cat_highlight == self.max_score:
-                if item is None:
-                    plt.axvspan(thresholds[self.max_score] + severities[rater],
+                if items is None:
+                    plt.axvspan(thresholds[self.max_score] + severities,
                                 100, facecolor='blue', alpha=0.2)
                 else:
-                    plt.axvspan(difficulties[item] + thresholds[self.max_score] + severities[rater],
+                    plt.axvspan(difficulties + thresholds[self.max_score] + severities,
                                 100, facecolor='blue', alpha=0.2)
 
             else:
                 if (thresholds[cat_highlight + 1] >
                     thresholds[cat_highlight]):
-                    if item is None:
-                        plt.axvspan(thresholds[cat_highlight] + severities[rater],
-                                    thresholds[cat_highlight + 1] + severities[rater],
-                                    facecolor='blue', alpha=0.2)
+                    if items is None:
+                        if raters is None:
+                            plt.axvspan(thresholds[cat_highlight],
+                                        thresholds[cat_highlight + 1],
+                                        facecolor='blue', alpha=0.2)
+
+                        else:
+                            plt.axvspan(thresholds[cat_highlight] + severities[raters],
+                                        thresholds[cat_highlight + 1] + severities[raters],
+                                        facecolor='blue', alpha=0.2)
                     else:
-                        plt.axvspan(difficulties[item] + thresholds[cat_highlight] + severities[rater],
-                                    difficulties[item] + thresholds[cat_highlight + 1] + severities[rater],
-                                    facecolor='blue', alpha=0.2)
+                        if raters is None:
+                            plt.axvspan(difficulties[items] + thresholds[cat_highlight],
+                                        difficulties[items] + thresholds[cat_highlight + 1],
+                                        facecolor='blue', alpha=0.2)
+
+                        else:
+                            plt.axvspan(difficulties[items] + thresholds[cat_highlight] + severities[raters],
+                                        difficulties[items] + thresholds[cat_highlight + 1] + severities[raters],
+                                        facecolor='blue', alpha=0.2)
 
         if y_max <= 0:
             y_max = y_data.max() * 1.1
@@ -14258,14 +14506,14 @@ class MFRM(Rasch):
                         x_obs_data=np.array([]),
                         y_obs_data=np.array([]),
                         thresh_lines=False,
-                        score_lines_item=[None, []],
-                        score_lines_test=[],
-                        point_info_lines_item=[None, []],
-                        point_info_lines_test=[],
-                        point_csem_lines=[],
-                        score_labels=False,
                         central_diff=False,
-                        cat_highlight=-1,
+                        score_lines_item=[None, None],
+                        score_lines_test=None,
+                        point_info_lines_item=[None, None],
+                        point_info_lines_test=None,
+                        point_csem_lines=None,
+                        score_labels=False,
+                        cat_highlight=None,
                         graph_title='',
                         y_label='',
                         plot_style='colorblind',
@@ -14341,7 +14589,7 @@ class MFRM(Rasch):
             if item is not None:
                 difficulties = {item: self.diffs[item]}
                 difficulties = pd.Series(difficulties)
-            thresholds = self.thresholds_items
+            thresholds = self.thresholds
 
             if rater is None:
                 severities = {'dummy_rater': {item: 0 for item in self.dataframe.columns}}
@@ -14370,7 +14618,7 @@ class MFRM(Rasch):
                 plt.axvline(x = difficulties[item] + severities[rater][item],
                             color='darkred', linestyle='--')
 
-        if score_lines_item[1] != []:
+        if score_lines_item[1] is not None:
 
             if (all(x > 0 for x in score_lines_item[1]) &
                 all(x < self.max_score for x in score_lines_item[1])):
@@ -14390,7 +14638,7 @@ class MFRM(Rasch):
             else:
                 print('Invalid score for score line.')
 
-        if score_lines_test != []:
+        if score_lines_test is not None:
 
             if (all(x > 0 for x in score_lines_test) &
                 all(x < self.max_score * self.no_of_items for x in score_lines_test)):
@@ -14416,7 +14664,7 @@ class MFRM(Rasch):
             else:
                 print('Invalid score for score line.')
 
-        if point_info_lines_item[1] != []:
+        if point_info_lines_item[1] is not None:
 
             item = point_info_lines_item[0]
 
@@ -14431,7 +14679,7 @@ class MFRM(Rasch):
                 if score_labels:
                     plt.text(x_min + (x_max - x_min) / 100, info + y_max / 50, str(round(info, 3)))
 
-        if point_info_lines_test != []:
+        if point_info_lines_test is not None:
 
             if anchor:
                 point_info_diffs = self.anchor_diffs_items
@@ -14451,7 +14699,7 @@ class MFRM(Rasch):
                 if score_labels:
                     plt.text(x_min + (x_max - x_min) / 100, info + y_max / 50, str(round(info, 3)))
 
-        if point_csem_lines != []:
+        if point_csem_lines is not None:
 
             if anchor:
                 point_csem_diffs = self.anchor_diffs_items
@@ -14543,14 +14791,14 @@ class MFRM(Rasch):
                              x_obs_data=np.array([]),
                              y_obs_data=np.array([]),
                              thresh_lines=False,
-                             score_lines_item=[None, []],
-                             score_lines_test=[],
-                             point_info_lines_item=[None, []],
-                             point_info_lines_test=[],
-                             point_csem_lines=[],
-                             score_labels=False,
                              central_diff=False,
-                             cat_highlight=-1,
+                             score_lines_item=[None, None],
+                             score_lines_test=None,
+                             point_info_lines_item=[None, None],
+                             point_info_lines_test=None,
+                             point_csem_lines=None,
+                             score_labels=False,
+                             cat_highlight=None,
                              graph_title='',
                              y_label='',
                              plot_style='colorblind',
@@ -14626,7 +14874,7 @@ class MFRM(Rasch):
             if item is not None:
                 difficulties = {item: self.diffs[item]}
                 difficulties = pd.Series(difficulties)
-            thresholds = self.thresholds_thresholds
+            thresholds = self.thresholds
 
             if rater is None:
                 severities = {'dummy_rater': np.zeros(self.max_score + 1)}
@@ -14654,7 +14902,7 @@ class MFRM(Rasch):
                 plt.axvline(x = difficulties[item] + np.mean(severities[rater][1:]),
                             color='darkred', linestyle='--')
 
-        if score_lines_item[1] != []:
+        if score_lines_item[1] is not None:
 
             if (all(x > 0 for x in score_lines_item[1]) &
                 all(x < self.max_score for x in score_lines_item[1])):
@@ -14674,7 +14922,7 @@ class MFRM(Rasch):
             else:
                 print('Invalid score for score line.')
 
-        if score_lines_test != []:
+        if score_lines_test is not None:
 
             if (all(x > 0 for x in score_lines_test) &
                 all(x < self.max_score * self.no_of_items for x in score_lines_test)):
@@ -14700,11 +14948,11 @@ class MFRM(Rasch):
             else:
                 print('Invalid score for score line.')
 
-        if point_info_lines_item[1] != []:
+        if point_info_lines_item[1] is not None:
 
             item = point_info_lines_item[0]
 
-            info_set = [self.variance_thresholds(ability, difficulties[item], rater, severities, thresholds)
+            info_set = [self.variance_thresholds(ability, item, difficulties, rater, severities, thresholds)
                         for ability in point_info_lines_item[1]]
 
             for abil, info in zip(point_info_lines_item[1], info_set):
@@ -14715,7 +14963,7 @@ class MFRM(Rasch):
                 if score_labels:
                     plt.text(x_min + (x_max - x_min) / 100, info + y_max / 50, str(round(info, 3)))
 
-        if point_info_lines_test != []:
+        if point_info_lines_test is not None:
 
             if anchor:
                 point_info_diffs = self.anchor_diffs_thresholds
@@ -14723,7 +14971,7 @@ class MFRM(Rasch):
             else:
                 point_info_diffs = self.diffs
 
-            info_set = [sum(self.variance_thresholds(ability, point_info_diffs[item], rater, severities, thresholds)
+            info_set = [sum(self.variance_thresholds(ability, item, point_info_diffs, rater, severities, thresholds)
                             for item in point_info_diffs.keys())
                         for ability in point_info_lines_test]
 
@@ -14735,7 +14983,7 @@ class MFRM(Rasch):
                 if score_labels:
                     plt.text(x_min + (x_max - x_min) / 100, info + y_max / 50, str(round(info, 3)))
 
-        if point_csem_lines != []:
+        if point_csem_lines is not None:
 
             if anchor:
                 point_csem_diffs = self.anchor_diffs_thresholds
@@ -14743,7 +14991,7 @@ class MFRM(Rasch):
             else:
                 point_csem_diffs = self.diffs
 
-            info_set = [sum(self.variance_thresholds(ability, point_csem_diffs[item], rater, severities, thresholds)
+            info_set = [sum(self.variance_thresholds(ability, item, point_csem_diffs, rater, severities, thresholds)
                             for item in point_csem_diffs.keys())
                         for ability in point_csem_lines]
             info_set = np.array(info_set)
@@ -14826,14 +15074,14 @@ class MFRM(Rasch):
                          x_obs_data=np.array([]),
                          y_obs_data=np.array([]),
                          thresh_lines=False,
-                         score_lines_item=[None, []],
-                         score_lines_test=[],
-                         point_info_lines_item=[None, []],
-                         point_info_lines_test=[],
-                         point_csem_lines=[],
-                         score_labels=False,
                          central_diff=False,
-                         cat_highlight=-1,
+                         score_lines_item=[None, None],
+                         score_lines_test=None,
+                         point_info_lines_item=[None, None],
+                         point_info_lines_test=None,
+                         point_csem_lines=None,
+                         score_labels=False,
+                         cat_highlight=None,
                          graph_title='',
                          y_label='',
                          plot_style='colorblind',
@@ -14909,7 +15157,7 @@ class MFRM(Rasch):
             if item is not None:
                 difficulties = {item: self.diffs[item]}
                 difficulties = pd.Series(difficulties)
-            thresholds = self.thresholds_matrix
+            thresholds = self.thresholds
 
             if rater is None:
                 severities = {'dummy_rater': {item: np.zeros(self.max_score + 1)
@@ -14942,13 +15190,12 @@ class MFRM(Rasch):
             else:
                 plt.axvline(x = difficulties[item] + severities_mean_list[item], color='darkred', linestyle='--')
 
-        if score_lines_item[1] != []:
+        if score_lines_item[1] is not None:
 
             if (all(x > 0 for x in score_lines_item[1]) &
                 all(x < self.max_score for x in score_lines_item[1])):
 
-                abils_set = [self.score_abil_matrix(score, anchor=anchor, rater=rater, difficulties=difficulties,
-                                                    thresholds=thresholds, severities=severities, warm_corr=False)
+                abils_set = [self.score_abil_matrix(score, anchor=anchor, items=item, raters=rater, warm_corr=False)
                              for score in score_lines_item[1]]
 
                 for thresh, abil in zip(score_lines_item[1], abils_set):
@@ -14962,7 +15209,7 @@ class MFRM(Rasch):
             else:
                 print('Invalid score for score line.')
 
-        if score_lines_test != []:
+        if score_lines_test is not None:
 
             if (all(x > 0 for x in score_lines_test) &
                 all(x < self.max_score * self.no_of_items for x in score_lines_test)):
@@ -14988,7 +15235,7 @@ class MFRM(Rasch):
             else:
                 print('Invalid score for score line.')
 
-        if point_info_lines_item[1] != []:
+        if point_info_lines_item[1] is not None:
 
             if anchor:
                 point_info_diffs = self.anchor_diffs_matrix
@@ -15009,7 +15256,7 @@ class MFRM(Rasch):
                 if score_labels:
                     plt.text(x_min + (x_max - x_min) / 100, info + y_max / 50, str(round(info, 3)))
 
-        if point_info_lines_test != []:
+        if point_info_lines_test is not None:
 
             if anchor:
                 point_info_diffs = self.anchor_diffs_matrix
@@ -15029,7 +15276,7 @@ class MFRM(Rasch):
                 if score_labels:
                     plt.text(x_min + (x_max - x_min) / 100, info + y_max / 50, str(round(info, 3)))
 
-        if point_csem_lines != []:
+        if point_csem_lines is not None:
 
             if anchor:
                 point_csem_diffs = self.anchor_diffs_matrix
@@ -15059,7 +15306,7 @@ class MFRM(Rasch):
 
             else:
                 difficulties = self.diffs
-                thresholds = self.thresholds_matrix
+                thresholds = self.thresholds
 
             if cat_highlight == 0:
                 if item is None:
@@ -15115,20 +15362,18 @@ class MFRM(Rasch):
                    xmin=-10,
                    xmax=10,
                    no_of_classes=5,
-                   title=True,
+                   title=None,
                    thresh_lines=False,
-                   score_lines=[],
+                   score_lines=None,
                    score_labels=False,
                    central_diff=False,
-                   cat_highlight=-1,
+                   cat_highlight=None,
                    plot_style='colorblind',
                    black=False,
                    font='Times',
                    title_font_size=15,
                    axis_font_size=12,
                    labelsize=12,
-                   save_title='',
-                   use_save_title=False,
                    file_format='png',
                    dpi=300):
 
@@ -15150,40 +15395,24 @@ class MFRM(Rasch):
 
         else:
             difficulties = self.diffs
-            thresholds = self.thresholds_global
+            thresholds = self.thresholds
             severities = self.severities_global
 
-        if rater is None:
-            severity = 0
-
-        else:
-            severity = severities[rater]
-
         if obs:
-            if rater is not None:
-                abilities = {person: self.abil_global(person, difficulties=difficulties, thresholds=thresholds,
-                                                      raters=[rater], severities=severities)
-                             for person in self.persons}
-                abilities = pd.Series(abilities)
+            if anchor:
+                if hasattr(self, 'anchor_abils_global') == False:
+                    self.person_abils_global(anchor=True)
+                abilities = self.anchor_abils_global
 
             else:
-                if anchor:
-                    if hasattr(self, 'anchor_abils_global') == False:
-                        self.person_abils_global(anchor=True)
-                    abilities = self.anchor_abils_global
+                if hasattr(self, 'abils_global') == False:
+                    self.person_abils_global()
+                abilities = self.abils_global
 
-                else:
-                    if hasattr(self, 'abils_global') == False:
-                        self.person_abils_global()
-                    abilities = self.abils_global
+            xobsdata, yobsdata = self.class_intervals(abilities, items=item, raters=rater,
+                                                      no_of_classes=no_of_classes)
 
-            _, _, _, xobsdata, yobsdata = self.class_intervals(abilities, [item], no_of_classes=no_of_classes)
-
-            xobsdata -= severities.mean()
-            if rater is not None:
-                xobsdata += severities[rater]
-
-            yobsdata = np.array(yobsdata).reshape((-1, 1))
+            yobsdata = yobsdata.values.reshape((-1, 1))
 
         else:
             xobsdata = np.array(np.nan)
@@ -15191,31 +15420,33 @@ class MFRM(Rasch):
 
         abilities = np.arange(-20, 20, 0.1)
 
-        y = [self.exp_score(ability, difficulties[item], severity, thresholds)
-             for ability in abilities]
+        if rater is None:
+            y = [self.exp_score_global(ability, item, difficulties, 'dummy_rater',
+                                       pd.Series({'dummy_rater': 0}), thresholds)
+                 for ability in abilities]
+
+        else:
+            y = [self.exp_score_global(ability, item, difficulties, rater, severities, thresholds)
+                 for ability in abilities]
+
         y = np.array(y).reshape([len(abilities), 1])
 
-        if title:
-            if use_save_title:
-                if save_title != '':
-                    graphtitle = f'ICC: {save_title}'
-
-            else:
-                graphtitle = f'ICC: {item}'
+        if title is not None:
+            graphtitle = title
 
         else:
             graphtitle = ''
 
         ylabel = 'Expected score'
 
-        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, rater=rater, x_min=xmin, x_max=xmax,
-                                     y_max=self.max_score, item=item, obs=obs,  warm=warm, x_obs_data=xobsdata,
-                                     y_obs_data=yobsdata, thresh_lines=thresh_lines, graph_title = graphtitle,
+        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, raters=rater, x_min=xmin, x_max=xmax,
+                                     y_max=self.max_score, items=item, obs=obs, warm=warm, x_obs_data=xobsdata,
+                                     y_obs_data=yobsdata, thresh_lines=thresh_lines, graph_title=graphtitle,
                                      score_lines_item=[item, score_lines], score_labels=score_labels,
-                                     central_diff=central_diff, cat_highlight= cat_highlight, y_label=ylabel,
+                                     central_diff=central_diff, cat_highlight=cat_highlight, y_label=ylabel,
                                      plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
                                      axis_font_size=axis_font_size, labelsize=labelsize, plot_density=dpi,
-                                     save_title=save_title, file_format=file_format)
+                                     file_format=file_format)
 
         return plot
 
@@ -15230,10 +15461,10 @@ class MFRM(Rasch):
                   no_of_classes=5,
                   title=True,
                   thresh_lines=False,
-                  score_lines=[],
+                  score_lines=None,
                   score_labels=False,
                   central_diff=False,
-                  cat_highlight=-1,
+                  cat_highlight=None,
                   plot_style='colorblind',
                   black=False,
                   font='Times',
@@ -15257,35 +15488,22 @@ class MFRM(Rasch):
                 return
 
         if anchor:
-            y_difficulties = self.anchor_diffs_items
-            y_thresholds = self.anchor_thresholds_items
+            difficulties = self.anchor_diffs_items
+            thresholds = self.anchor_thresholds_items
             severities = self.anchor_severities_items
 
-            if rater is None:
-                y_severities = {'dummy_rater': {item: 0}}
-                y_rater = 'dummy_rater'
-
-            else:
-                y_severities = self.anchor_severities_items
-                y_rater = rater
-
         else:
-            y_difficulties = self.diffs
-            y_thresholds = self.thresholds_items
+            difficulties = self.diffs
+            thresholds = self.thresholds
             severities = self.severities_items
 
-            if rater is None:
-                y_severities = {'dummy_rater': {item: 0}}
-                y_rater = 'dummy_rater'
-
-            else:
-                y_severities = self.severities_items
-                y_rater = rater
+        if rater is None:
+            severities = {'dummy_rater': {item: 0}}
+            rater = 'dummy_rater'
 
         if obs:
             if rater is not None:
-                abilities = {person: self.abil_items(person, difficulties=y_difficulties, thresholds=y_thresholds,
-                                                     raters=[rater], severities={rater: severities[rater]})
+                abilities = {person: self.abil_items(person, raters=[rater])
                              for person in self.persons}
                 abilities = pd.Series(abilities)
 
@@ -15313,7 +15531,7 @@ class MFRM(Rasch):
 
         abilities = np.arange(-20, 20, 0.1)
 
-        y = [self.exp_score_items(ability, item, y_difficulties, y_rater, y_severities, y_thresholds)
+        y = [self.exp_score_items(ability, item, difficulties, rater, severities, thresholds)
              for ability in abilities]
         y = np.array(y).reshape([len(abilities), 1])
 
@@ -15330,14 +15548,14 @@ class MFRM(Rasch):
 
         ylabel = 'Expected score'
 
-        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, rater=rater, x_min=xmin, x_max=xmax,
-                                     y_max=self.max_score, item=item, obs=obs,  warm=warm, x_obs_data=xobsdata,
-                                     y_obs_data=yobsdata, thresh_lines=thresh_lines, graph_title = graphtitle,
+        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, raters=rater, x_min=xmin, x_max=xmax,
+                                     y_max=self.max_score, items=item, obs=obs,  warm=warm, x_obs_data=xobsdata,
+                                     y_obs_data=yobsdata, thresh_lines=thresh_lines, graph_title=graphtitle,
                                      score_lines_item=[item, score_lines], score_labels=score_labels,
-                                     central_diff=central_diff, cat_highlight= cat_highlight, y_label=ylabel,
+                                     central_diff=central_diff, cat_highlight=cat_highlight, y_label=ylabel,
                                      plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
                                      axis_font_size=axis_font_size, labelsize=labelsize, plot_density=dpi,
-                                     save_title=save_title, file_format=file_format)
+                                     file_format=file_format)
 
         return plot
 
@@ -15352,10 +15570,10 @@ class MFRM(Rasch):
                        no_of_classes=5,
          	           title=True,
          	           thresh_lines=False,
-              	       score_lines=[],
+              	       score_lines=None,
               	       score_labels=False,
                   	   central_diff=False,
-                  	   cat_highlight=-1,
+                  	   cat_highlight=None,
                   	   plot_style='colorblind',
                   	   black=False,
                   	   font='Times',
@@ -15379,35 +15597,22 @@ class MFRM(Rasch):
                 return
 
         if anchor:
-            y_difficulties = self.anchor_diffs_thresholds
-            y_thresholds = self.anchor_thresholds_thresholds
+            difficulties = self.anchor_diffs_thresholds
+            thresholds = self.anchor_thresholds_thresholds
             severities = self.anchor_severities_thresholds
 
-            if rater is None:
-                y_severities = {'dummy_rater': np.zeros(self.max_score + 1)}
-                y_rater = 'dummy_rater'
-
-            else:
-                y_severities = self.anchor_severities_thresholds
-                y_rater = rater
-
         else:
-            y_difficulties = self.diffs
-            y_thresholds = self.thresholds_thresholds
+            difficulties = self.diffs
+            thresholds = self.thresholds
             severities = self.severities_thresholds
 
-            if rater is None:
-                y_severities = {'dummy_rater': np.zeros(self.max_score + 1)}
-                y_rater = 'dummy_rater'
-
-            else:
-                y_severities = self.severities_thresholds
-                y_rater = rater
+        if rater is None:
+            severities = {'dummy_rater': np.zeros(self.max_score + 1)}
+            rater = 'dummy_rater'
 
         if obs:
             if rater is not None:
-                abilities = {person: self.abil_thresholds(person, difficulties=y_difficulties, thresholds=y_thresholds,
-                                                      raters=[rater], severities={rater: severities[rater]})
+                abilities = {person: self.abil_thresholds(person, raters=[rater])
                              for person in self.persons}
                 abilities = pd.Series(abilities)
 
@@ -15436,7 +15641,7 @@ class MFRM(Rasch):
 
         abilities = np.arange(-20, 20, 0.1)
 
-        y = [self.exp_score_thresholds(ability, y_difficulties[item], y_rater, y_severities, y_thresholds)
+        y = [self.exp_score_thresholds(ability, item, difficulties, rater, severities, thresholds)
              for ability in abilities]
         y = np.array(y).reshape([len(abilities), 1])
 
@@ -15453,14 +15658,14 @@ class MFRM(Rasch):
 
         ylabel = 'Expected score'
 
-        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, rater=rater, x_min=xmin, x_max=xmax,
-                                     y_max=self.max_score, item=item, obs=obs,  warm=warm, x_obs_data=xobsdata,
+        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, raters=rater, x_min=xmin, x_max=xmax,
+                                     y_max=self.max_score, items=item, obs=obs,  warm=warm, x_obs_data=xobsdata,
                                      y_obs_data=yobsdata, thresh_lines=thresh_lines, graph_title = graphtitle,
                                      score_lines_item=[item, score_lines], score_labels=score_labels,
                                      central_diff=central_diff, cat_highlight= cat_highlight, y_label=ylabel,
                                      plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
                                      axis_font_size=axis_font_size, labelsize=labelsize, plot_density=dpi,
-                                     save_title=save_title, file_format=file_format)
+                                     file_format=file_format)
 
         return plot
 
@@ -15475,10 +15680,10 @@ class MFRM(Rasch):
                    no_of_classes=5,
                    title=True,
                    thresh_lines=False,
-                   score_lines=[],
+                   score_lines=None,
                    score_labels=False,
                    central_diff=False,
-                   cat_highlight=-1,
+                   cat_highlight=None,
                    plot_style='colorblind',
                    black=False,
                    font='Times',
@@ -15502,35 +15707,22 @@ class MFRM(Rasch):
                 return
 
         if anchor:
-            y_difficulties = self.anchor_diffs_matrix
-            y_thresholds = self.anchor_thresholds_matrix
+            difficulties = self.anchor_diffs_matrix
+            thresholds = self.anchor_thresholds_matrix
             severities = self.anchor_severities_matrix
 
-            if rater is None:
-                y_severities = {'dummy_rater': {item: np.zeros(self.max_score + 1)}}
-                y_rater = 'dummy_rater'
-
-            else:
-                y_severities = self.anchor_severities_matrix
-                y_rater = rater
-
         else:
-            y_difficulties = self.diffs
-            y_thresholds = self.thresholds_matrix
+            difficulties = self.diffs
+            thresholds = self.thresholds
             severities = self.severities_matrix
 
-            if rater is None:
-                y_severities = {'dummy_rater': {item: np.zeros(self.max_score + 1)}}
-                y_rater = 'dummy_rater'
-
-            else:
-                y_severities = self.severities_matrix
-                y_rater = rater
+        if rater is None:
+            severities = {'dummy_rater': {item: np.zeros(self.max_score + 1)}}
+            rater = 'dummy_rater'
 
         if obs:
             if rater is not None:
-                abilities = {person: self.abil_matrix(person, difficulties=y_difficulties, thresholds=y_thresholds,
-                                                      raters=[rater], severities={rater: severities[rater]})
+                abilities = {person: self.abil_matrix(person, raters=[rater])
                              for person in self.persons}
                 abilities = pd.Series(abilities)
 
@@ -15559,7 +15751,7 @@ class MFRM(Rasch):
 
         abilities = np.arange(-20, 20, 0.1)
 
-        y = [self.exp_score_matrix(ability, item, y_difficulties, y_rater, y_severities, y_thresholds)
+        y = [self.exp_score_matrix(ability, item, difficulties, rater, severities, thresholds)
              for ability in abilities]
         y = np.array(y).reshape([len(abilities), 1])
 
@@ -15576,14 +15768,14 @@ class MFRM(Rasch):
 
         ylabel = 'Expected score'
 
-        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, rater=rater, x_min=xmin, x_max=xmax,
-                                     y_max=self.max_score, item=item, obs=obs,  warm=warm, x_obs_data=xobsdata,
+        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, raters=rater, x_min=xmin, x_max=xmax,
+                                     y_max=self.max_score, items=item, obs=obs,  warm=warm, x_obs_data=xobsdata,
                                      y_obs_data=yobsdata, thresh_lines=thresh_lines, graph_title = graphtitle,
                                      score_lines_item=[item, score_lines], score_labels=score_labels,
                                      central_diff=central_diff, cat_highlight= cat_highlight, y_label=ylabel,
                                      plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
                                      axis_font_size=axis_font_size, labelsize=labelsize, plot_density=dpi,
-                                     save_title=save_title, file_format=file_format)
+                                     file_format=file_format)
 
         return plot
 
@@ -15598,7 +15790,7 @@ class MFRM(Rasch):
                     title=True,
                     thresh_lines=False,
                     central_diff=False,
-                    cat_highlight=-1,
+                    cat_highlight=None,
                     plot_style='colorblind',
                     black=False,
                     font='Times',
@@ -15627,34 +15819,28 @@ class MFRM(Rasch):
 
         else:
             difficulties = self.diffs
-            thresholds = self.thresholds_global
+            thresholds = self.thresholds
             severities = self.severities_global
-
-        if rater is None:
-            severity = 0
-
-        else:
-            severity = severities[rater]
+            
+        if obs == 'none':
+            obs = None
+            
+        if obs == 'all':
+            obs = [cat for cat in range(self.max_score + 1)]
 
         if obs is not None:
-            if rater is not None:
-                abilities = {person: self.abil_global(person, difficulties=difficulties, thresholds=thresholds,
-                                                      raters=[rater], severities=severities)
-                             for person in self.persons}
-                abilities = pd.Series(abilities)
+            if anchor:
+                if hasattr(self, 'anchor_abils_global') == False:
+                    self.person_abils_global(anchor=True)
+                abilities = self.anchor_abils_global
 
             else:
-                if anchor:
-                    if hasattr(self, 'anchor_abils_global') == False:
-                        self.person_abils_global(anchor=True)
-                    abilities = self.anchor_abils_global
+                if hasattr(self, 'abils_global') == False:
+                    self.person_abils_global()
+                abilities = self.abils_global
 
-                else:
-                    if hasattr(self, 'abils_global') == False:
-                        self.person_abils_global()
-                    abilities = self.abils_global
-
-            _, _, _, xobsdata, yobsdata = self.class_intervals_cats(abilities, [item], no_of_classes=no_of_classes)
+            xobsdata, yobsdata = self.class_intervals_cats(abilities, item=item, rater=rater,
+                                                           no_of_classes=no_of_classes)
 
             xobsdata -= severities.mean()
             if rater is not None:
@@ -15668,9 +15854,33 @@ class MFRM(Rasch):
             yobsdata = np.array(np.nan)
 
         abilities = np.arange(-20, 20, 0.1)
-        y = np.array([[self.cat_prob(ability, difficulties[item], severity, category, thresholds)
-                       for category in range(self.max_score + 1)]
-                      for ability in abilities])
+
+        if rater is None:
+            if item is None:
+                y = np.array([[self.cat_prob_global(ability, 'dummy_item', pd.Series({'dummy_item': 0}), 'dummy_rater',
+                                                    pd.Series({'dummy_rater': 0}), category, thresholds)
+                               for category in range(self.max_score + 1)]
+                              for ability in abilities])
+
+
+            else:
+                y = np.array([[self.cat_prob_global(ability, item, difficulties, 'dummy_rater',
+                                                    pd.Series({'dummy_rater': 0}), category, thresholds)
+                               for category in range(self.max_score + 1)]
+                              for ability in abilities])
+
+        else:
+            if item is None:
+                y = np.array([[self.cat_prob_global(ability, 'dummy_item', pd.Series({'dummy_item': 0}), rater,
+                                                    severities, category, thresholds)
+                               for category in range(self.max_score + 1)]
+                              for ability in abilities])
+
+
+            else:
+                y = np.array([[self.cat_prob_global(ability, item, difficulties, rater, severities, category, thresholds)
+                               for category in range(self.max_score + 1)]
+                              for ability in abilities])
 
         if title:
             if rater is None:
@@ -15682,8 +15892,8 @@ class MFRM(Rasch):
 
         ylabel = 'Probability'
 
-        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, rater=rater, x_min=xmin, x_max=xmax,
-                                     y_max=1, x_obs_data=xobsdata, y_obs_data=yobsdata, item=item, y_label=ylabel,
+        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, raters=rater, x_min=xmin, x_max=xmax,
+                                     y_max=1, x_obs_data=xobsdata, y_obs_data=yobsdata, items=item, y_label=ylabel,
                                      graph_title=graphtitle, obs=obs, thresh_lines=thresh_lines, plot_style=plot_style,
                                      central_diff=central_diff, cat_highlight=cat_highlight, black=black, font=font,
                                      save_title=save_title, title_font_size=title_font_size, labelsize=labelsize,
@@ -15702,7 +15912,7 @@ class MFRM(Rasch):
                    title=True,
                    thresh_lines=False,
                    central_diff=False,
-                   cat_highlight=-1,
+                   cat_highlight=None,
                    plot_style='colorblind',
                    black=False,
                    font='Times',
@@ -15725,35 +15935,22 @@ class MFRM(Rasch):
                 return
 
         if anchor:
-            y_difficulties = self.anchor_diffs_items
-            y_thresholds = self.anchor_thresholds_items
+            difficulties = self.anchor_diffs_items
+            thresholds = self.anchor_thresholds_items
             severities = self.anchor_severities_items
 
-            if rater is None:
-                y_severities = {'dummy_rater': {item: 0}}
-                y_rater = 'dummy_rater'
-
-            else:
-                y_severities = self.anchor_severities_items
-                y_rater = rater
-
         else:
-            y_difficulties = self.diffs
-            y_thresholds = self.thresholds_items
+            difficulties = self.diffs
+            thresholds = self.thresholds
             severities = self.severities_items
 
-            if rater is None:
-                y_severities = {'dummy_rater': {item: 0}}
-                y_rater = 'dummy_rater'
-
-            else:
-                y_severities = self.severities_items
-                y_rater = rater
+        if rater is None:
+            severities = {'dummy_rater': {item: 0}}
+            rater = 'dummy_rater'
 
         if obs is not None:
             if rater is not None:
-                abilities = {person: self.abil_items(person, difficulties=y_difficulties, thresholds=y_thresholds,
-                                                      raters=[rater], severities=severities)
+                abilities = {person: self.abil_items(person, raters=[rater])
                              for person in self.persons}
                 abilities = pd.Series(abilities)
 
@@ -15782,7 +15979,7 @@ class MFRM(Rasch):
             yobsdata = np.array(np.nan)
 
         abilities = np.arange(-20, 20, 0.1)
-        y = np.array([[self.cat_prob_items(ability, item, y_difficulties, y_rater, y_severities, category, y_thresholds)
+        y = np.array([[self.cat_prob_items(ability, item, difficulties, rater, severities, category, thresholds)
                        for category in range(self.max_score + 1)]
                       for ability in abilities])
 
@@ -15796,8 +15993,8 @@ class MFRM(Rasch):
 
         ylabel = 'Probability'
 
-        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, rater=rater, x_min=xmin, x_max=xmax,
-                                     y_max=1, x_obs_data=xobsdata, y_obs_data=yobsdata, item=item, y_label=ylabel,
+        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, raters=rater, x_min=xmin, x_max=xmax,
+                                     y_max=1, x_obs_data=xobsdata, y_obs_data=yobsdata, items=item, y_label=ylabel,
                                      graph_title=graphtitle, obs=obs, thresh_lines=thresh_lines, plot_style=plot_style,
                                      central_diff=central_diff, cat_highlight=cat_highlight, black=black, font=font,
                                      save_title=save_title, title_font_size=title_font_size, labelsize=labelsize,
@@ -15816,7 +16013,7 @@ class MFRM(Rasch):
                         title=True,
                         thresh_lines=False,
                   	    central_diff=False,
-                        cat_highlight=-1,
+                        cat_highlight=None,
                         plot_style='colorblind',
                         black=False,
                         font='Times',
@@ -15839,35 +16036,22 @@ class MFRM(Rasch):
                 return
 
         if anchor:
-            y_difficulties = self.anchor_diffs_thresholds
-            y_thresholds = self.anchor_thresholds_thresholds
+            difficulties = self.anchor_diffs_thresholds
+            thresholds = self.anchor_thresholds_thresholds
             severities = self.anchor_severities_thresholds
 
-            if rater is None:
-                y_severities = {'dummy_rater': np.zeros(self.max_score + 1)}
-                y_rater = 'dummy_rater'
-
-            else:
-                y_severities = self.anchor_severities_thresholds
-                y_rater = rater
-
         else:
-            y_difficulties = self.diffs
-            y_thresholds = self.thresholds_thresholds
+            difficulties = self.diffs
+            thresholds = self.thresholds
             severities = self.severities_thresholds
 
-            if rater is None:
-                y_severities = {'dummy_rater': np.zeros(self.max_score + 1)}
-                y_rater = 'dummy_rater'
-
-            else:
-                y_severities = self.severities_thresholds
-                y_rater = rater
+        if rater is None:
+            severities = {'dummy_rater': np.zeros(self.max_score + 1)}
+            rater = 'dummy_rater'
 
         if obs is not None:
             if rater is not None:
-                abilities = {person: self.abil_thresholds(person, difficulties=y_difficulties, thresholds=y_thresholds,
-                                                          raters=[rater], severities=severities)
+                abilities = {person: self.abil_thresholds(person, raters=[rater])
                              for person in self.persons}
                 abilities = pd.Series(abilities)
 
@@ -15897,7 +16081,7 @@ class MFRM(Rasch):
 
         abilities = np.arange(-20, 20, 0.1)
 
-        y = np.array([[self.cat_prob_thresholds(ability, y_difficulties[item], y_rater, y_severities, category, y_thresholds)
+        y = np.array([[self.cat_prob_thresholds(ability, item, difficulties, rater, severities, category, thresholds)
                        for category in range(self.max_score + 1)]
                       for ability in abilities])
 
@@ -15911,8 +16095,8 @@ class MFRM(Rasch):
 
         ylabel = 'Probability'
 
-        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, rater=rater, x_min=xmin, x_max=xmax,
-                                     y_max=1, x_obs_data=xobsdata, y_obs_data=yobsdata, item=item, y_label=ylabel,
+        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, raters=rater, x_min=xmin, x_max=xmax,
+                                     y_max=1, x_obs_data=xobsdata, y_obs_data=yobsdata, items=item, y_label=ylabel,
                                      graph_title=graphtitle, obs=obs, thresh_lines=thresh_lines, plot_style=plot_style,
                                      central_diff=central_diff, cat_highlight=cat_highlight, black=black, font=font,
                                      save_title=save_title, title_font_size=title_font_size, labelsize=labelsize,
@@ -15931,7 +16115,7 @@ class MFRM(Rasch):
                     title=True,
                     thresh_lines=False,
                   	central_diff=False,
-                    cat_highlight=-1,
+                    cat_highlight=None,
                     plot_style='colorblind',
                     black=False,
                     font='Times',
@@ -15954,35 +16138,22 @@ class MFRM(Rasch):
                 return
 
         if anchor:
-            y_difficulties = self.anchor_diffs_matrix
-            y_thresholds = self.anchor_thresholds_matrix
+            difficulties = self.anchor_diffs_matrix
+            thresholds = self.anchor_thresholds_matrix
             severities = self.anchor_severities_matrix
 
-            if rater is None:
-                y_severities = {'dummy_rater': {item: np.zeros(self.max_score + 1)}}
-                y_rater = 'dummy_rater'
-
-            else:
-                y_severities = self.anchor_severities_matrix
-                y_rater = rater
-
         else:
-            y_difficulties = self.diffs
-            y_thresholds = self.thresholds_matrix
+            difficulties = self.diffs
+            thresholds = self.thresholds
             severities = self.severities_matrix
 
-            if rater is None:
-                y_severities = {'dummy_rater': {item: np.zeros(self.max_score + 1)}}
-                y_rater = 'dummy_rater'
-
-            else:
-                y_severities = self.severities_matrix
-                y_rater = rater
+        if rater is None:
+            severities = {'dummy_rater': {item: np.zeros(self.max_score + 1)}}
+            rater = 'dummy_rater'
 
         if obs is not None:
             if rater is not None:
-                abilities = {person: self.abil_matrix(person, difficulties=y_difficulties, thresholds=y_thresholds,
-                                                      raters=[rater], severities=severities)
+                abilities = {person: self.abil_matrix(person, raters=[rater])
                              for person in self.persons}
                 abilities = pd.Series(abilities)
 
@@ -16011,7 +16182,7 @@ class MFRM(Rasch):
             yobsdata = np.array(np.nan)
 
         abilities = np.arange(-20, 20, 0.1)
-        y = np.array([[self.cat_prob_matrix(ability, item, y_difficulties, y_rater, y_severities, category, y_thresholds)
+        y = np.array([[self.cat_prob_matrix(ability, item, difficulties, rater, severities, category, thresholds)
                        for category in range(self.max_score + 1)]
                       for ability in abilities])
 
@@ -16025,8 +16196,8 @@ class MFRM(Rasch):
 
         ylabel = 'Probability'
 
-        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, rater=rater, x_min=xmin, x_max=xmax,
-                                     y_max=1, x_obs_data=xobsdata, y_obs_data=yobsdata, item=item, y_label=ylabel,
+        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, raters=rater, x_min=xmin, x_max=xmax,
+                                     y_max=1, x_obs_data=xobsdata, y_obs_data=yobsdata, items=item, y_label=ylabel,
                                      graph_title=graphtitle, obs=obs, thresh_lines=thresh_lines, plot_style=plot_style,
                                      central_diff=central_diff, cat_highlight=cat_highlight, black=black, font=font,
                                      save_title=save_title, title_font_size=title_font_size, labelsize=labelsize,
@@ -16046,7 +16217,7 @@ class MFRM(Rasch):
                              title=True,
                              thresh_lines=False,
                              central_diff=False,
-                             cat_highlight=-1,
+                             cat_highlight=None,
                              plot_style='colorblind',
                              black=False,
                              font='Times',
@@ -16075,14 +16246,8 @@ class MFRM(Rasch):
 
         else:
             difficulties = self.diffs
-            thresholds = self.thresholds_global
+            thresholds = self.thresholds
             severities = self.severities_global
-
-        if rater is None:
-            severity = 0
-
-        else:
-            severity = severities[rater]
 
         if item is None:
             items = self.dataframe.columns
@@ -16090,43 +16255,22 @@ class MFRM(Rasch):
         else: items = [item]
 
         if obs is not None:
-            if rater is not None:
-                abilities = {person: self.abil_global(person, difficulties=difficulties, thresholds=thresholds,
-                                                      raters=[rater], severities=severities)
-                             for person in self.persons}
-                abilities = pd.Series(abilities)
+
+            if anchor:
+                if hasattr(self, 'anchor_abils_global') == False:
+                    self.person_abils_global(anchor=True)
+                abilities = self.anchor_abils_global
 
             else:
-                if anchor:
-                    if hasattr(self, 'anchor_abils_global') == False:
-                        self.person_abils_global(anchor=True)
-                    abilities = self.anchor_abils_global
+                if hasattr(self, 'abils_global') == False:
+                    self.person_abils_global()
+                abilities = self.abils_global
 
-                else:
-                    if hasattr(self, 'abils_global') == False:
-                        self.person_abils_global()
-                    abilities = self.abils_global
+            xobsdata, yobsdata = self.class_intervals_thresholds(abilities, item=item, rater=rater, anchor=anchor,
+                                                                 no_of_classes=no_of_classes)
 
-            _, _, _, xobsdata, yobsdata = self.class_intervals_thresholds(abilities, items, difficulties=difficulties,
-                                                                          no_of_classes=no_of_classes)
-
-            xobsdata -= severities.mean()
-            if rater is not None:
-                xobsdata += severities[rater]
-            if item is not None:
-                xobsdata += difficulties[item]
-
-            yobsdata = yobsdata.T
-
-            if obs != 'all':
-                try:
-                    obs = [ob - 1 for ob in obs]
-                except:
-                    print("Invalid 'obs'. Valid values are 'None', 'all' and list of categories.")
-                    return
-
-                xobsdata = xobsdata[obs]
-                yobsdata = yobsdata[obs]
+            if obs == 'all':
+                obs = [i + 1 for i in range(self.max_score)]
 
         else:
             xobsdata = np.array(np.nan)
@@ -16166,8 +16310,8 @@ class MFRM(Rasch):
 
         ylabel = 'Probability'
 
-        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, rater=rater, y_max=1, x_min=xmin,
-                                     x_max=xmax, item=item, warm=warm, x_obs_data=xobsdata, y_obs_data=yobsdata,
+        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, raters=rater, y_max=1, x_min=xmin,
+                                     x_max=xmax, items=item, warm=warm, x_obs_data=xobsdata, y_obs_data=yobsdata,
                                      graph_title=graphtitle, y_label=ylabel, thresh_obs=obs, thresh_lines=thresh_lines,
                                      central_diff=central_diff, cat_highlight=cat_highlight, plot_style=plot_style,
                                      black=black, font=font, title_font_size=title_font_size,
@@ -16188,7 +16332,7 @@ class MFRM(Rasch):
                             title=True,
                             thresh_lines=False,
                             central_diff=False,
-                            cat_highlight=-1,
+                            cat_highlight=None,
                             plot_style='colorblind',
                             black=False,
                             font='Times',
@@ -16217,7 +16361,7 @@ class MFRM(Rasch):
 
         else:
             difficulties = self.diffs
-            thresholds = self.thresholds_items
+            thresholds = self.thresholds
             severities = self.severities_items
 
         if item is None:
@@ -16227,8 +16371,7 @@ class MFRM(Rasch):
 
         if obs is not None:
             if rater is not None:
-                abilities = {person: self.abil_items(person, difficulties=difficulties, thresholds=thresholds,
-                                                     raters=[rater], severities=severities)
+                abilities = {person: self.abil_items(person, raters=[rater])
                              for person in self.persons}
                 abilities = pd.Series(abilities)
 
@@ -16303,8 +16446,8 @@ class MFRM(Rasch):
 
         ylabel = 'Probability'
 
-        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, rater=rater, y_max=1, x_min=xmin,
-                                     x_max=xmax, item=item, warm=warm, x_obs_data=xobsdata, y_obs_data=yobsdata,
+        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, raters=rater, y_max=1, x_min=xmin,
+                                     x_max=xmax, items=item, warm=warm, x_obs_data=xobsdata, y_obs_data=yobsdata,
                                      graph_title=graphtitle, y_label=ylabel, thresh_obs=obs, thresh_lines=thresh_lines,
                                      central_diff=central_diff, cat_highlight=cat_highlight, plot_style=plot_style,
                                      black=black, font=font, title_font_size=title_font_size, labelsize=labelsize,
@@ -16325,7 +16468,7 @@ class MFRM(Rasch):
                                  title=True,
                                  thresh_lines=False,
                                  central_diff=False,
-                                 cat_highlight=-1,
+                                 cat_highlight=None,
                                  plot_style='colorblind',
                                  black=False,
                                  font='Times',
@@ -16354,7 +16497,7 @@ class MFRM(Rasch):
 
         else:
             difficulties = self.diffs
-            thresholds = self.thresholds_thresholds
+            thresholds = self.thresholds
             severities = self.severities_thresholds
 
         if item is None:
@@ -16364,8 +16507,7 @@ class MFRM(Rasch):
 
         if obs is not None:
             if rater is not None:
-                abilities = {person: self.abil_thresholds(person, difficulties=difficulties, thresholds=thresholds,
-                                                          raters=[rater], severities=severities)
+                abilities = {person: self.abil_thresholds(person, raters=[rater])
                              for person in self.persons}
                 abilities = pd.Series(abilities)
 
@@ -16433,8 +16575,8 @@ class MFRM(Rasch):
 
         ylabel = 'Probability'
 
-        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, rater=rater, y_max=1, x_min=xmin,
-                                     x_max=xmax, item=item, warm=warm, x_obs_data=xobsdata, y_obs_data=yobsdata,
+        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, raters=rater, y_max=1, x_min=xmin,
+                                     x_max=xmax, items=item, warm=warm, x_obs_data=xobsdata, y_obs_data=yobsdata,
                                      graph_title=graphtitle, y_label=ylabel, thresh_obs=obs, thresh_lines=thresh_lines,
                                      central_diff=central_diff, cat_highlight=cat_highlight, plot_style=plot_style,
                                      black=black, font=font, title_font_size=title_font_size, labelsize=labelsize,
@@ -16455,7 +16597,7 @@ class MFRM(Rasch):
                              title=True,
                              thresh_lines=False,
                              central_diff=False,
-                             cat_highlight=-1,
+                             cat_highlight=None,
                              plot_style='colorblind',
                              black=False,
                              font='Times',
@@ -16484,7 +16626,7 @@ class MFRM(Rasch):
 
         else:
             difficulties = self.diffs
-            thresholds = self.thresholds_matrix
+            thresholds = self.thresholds
             severities = self.severities_matrix
 
         if item is None:
@@ -16494,8 +16636,7 @@ class MFRM(Rasch):
 
         if obs is not None:
             if rater is not None:
-                abilities = {person: self.abil_matrix(person, difficulties=difficulties, thresholds=thresholds,
-                                                      raters=[rater], severities=severities)
+                abilities = {person: self.abil_matrix(person, raters=[rater])
                              for person in self.persons}
                 abilities = pd.Series(abilities)
 
@@ -16566,8 +16707,8 @@ class MFRM(Rasch):
 
         ylabel = 'Probability'
 
-        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, rater=rater, y_max=1, x_min=xmin,
-                                     x_max=xmax, item=item, warm=warm, x_obs_data=xobsdata, y_obs_data=yobsdata,
+        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, raters=rater, y_max=1, x_min=xmin,
+                                     x_max=xmax, items=item, warm=warm, x_obs_data=xobsdata, y_obs_data=yobsdata,
                                      graph_title=graphtitle, y_label=ylabel, thresh_obs=obs, thresh_lines=thresh_lines,
                                      central_diff=central_diff, cat_highlight=cat_highlight, plot_style=plot_style,
                                      black=black, font=font, title_font_size=title_font_size, labelsize=labelsize,
@@ -16584,9 +16725,9 @@ class MFRM(Rasch):
                    xmax=10,
                    central_diff=False,
                    thresh_lines=False,
-                   point_info_lines=[],
+                   point_info_lines=None,
                    point_info_labels=False,
-                   cat_highlight=-1,
+                   cat_highlight=None,
                    title=True,
                    plot_style='colorblind',
                    black=False,
@@ -16609,25 +16750,22 @@ class MFRM(Rasch):
                 return
 
         if anchor:
-            y_difficulties = self.anchor_diffs_global
-            y_thresholds = self.anchor_thresholds_global
-
-            if rater is None:
-                y_severity = 0
-            else:
-                y_severity = self.anchor_severities_global[rater]
+            difficulties = self.anchor_diffs_global
+            thresholds = self.anchor_thresholds_global
+            severities = self.anchor_severities_global
 
         else:
-            y_difficulties = self.diffs
-            y_thresholds = self.thresholds_global
+            difficulties = self.diffs
+            thresholds = self.thresholds
+            severities = self.severities_global
 
-            if rater is None:
-                y_severity = 0
-            else:
-                y_severity = self.severities_global[rater]
+        if rater is None:
+            severities = {'dummy_rater': 0}
+            severities = pd.Series(severities)
+            rater = 'dummy_rater'
 
         abilities = np.arange(-20, 20, 0.1)
-        y = [self.variance(ability, y_difficulties[item], y_severity, y_thresholds)
+        y = [self.variance_global(ability, item, difficulties, rater, severities, thresholds)
              for ability in abilities]
         y = np.array(y).reshape(len(abilities), 1)
 
@@ -16638,8 +16776,8 @@ class MFRM(Rasch):
 
         ylabel = 'Fisher information'
 
-        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, rater=rater, x_min=xmin, x_max=xmax,
-                                     y_max=max(y) * 1.1, item=item, thresh_lines=thresh_lines,  plot_style=plot_style,
+        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, raters=rater, x_min=xmin, x_max=xmax,
+                                     y_max=max(y) * 1.1, items=item, thresh_lines=thresh_lines,  plot_style=plot_style,
                                      point_info_lines_item=[item, point_info_lines], score_labels=point_info_labels,
                                      cat_highlight=cat_highlight, central_diff=central_diff, graph_title=graphtitle,
                                      y_label=ylabel, black=black, font=font, title_font_size=title_font_size,
@@ -16656,9 +16794,9 @@ class MFRM(Rasch):
                    xmax=10,
                    central_diff=False,
                    thresh_lines=False,
-                   point_info_lines=[],
+                   point_info_lines=None,
                    point_info_labels=False,
-                   cat_highlight=-1,
+                   cat_highlight=None,
                    title=True,
                    plot_style='colorblind',
                    black=False,
@@ -16681,31 +16819,21 @@ class MFRM(Rasch):
                 return
 
         if anchor:
-            y_difficulties = self.anchor_diffs_items
-            y_thresholds = self.anchor_thresholds_items
-
-            if rater is None:
-                y_severities = {'dummy_rater': {item: 0}}
-                y_rater = 'dummy_rater'
-
-            else:
-                y_severities = self.anchor_severities_items
-                y_rater = rater
+            difficulties = self.anchor_diffs_items
+            thresholds = self.anchor_thresholds_items
+            severities = self.anchor_severities_items
 
         else:
-            y_difficulties = self.diffs
-            y_thresholds = self.thresholds_items
+            difficulties = self.diffs
+            thresholds = self.thresholds
+            severities = self.severities_items
 
-            if rater is None:
-                y_severities = {'dummy_rater': {item: 0}}
-                y_rater = 'dummy_rater'
-
-            else:
-                y_severities = self.severities_items
-                y_rater = rater
+        if rater is None:
+            severities = {'dummy_rater': {item: 0}}
+            rater = 'dummy_rater'
 
         abilities = np.arange(-20, 20, 0.1)
-        y = [self.variance_items(ability, item, y_difficulties, y_rater, y_severities, y_thresholds)
+        y = [self.variance_items(ability, item, difficulties, rater, severities, thresholds)
              for ability in abilities]
         y = np.array(y).reshape(len(abilities), 1)
 
@@ -16716,8 +16844,8 @@ class MFRM(Rasch):
 
         ylabel = 'Fisher information'
 
-        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, rater=rater, x_min=xmin, x_max=xmax,
-                                     y_max=max(y) * 1.1, item=item, thresh_lines=thresh_lines,  plot_style=plot_style,
+        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, raters=rater, x_min=xmin, x_max=xmax,
+                                     y_max=max(y) * 1.1, items=item, thresh_lines=thresh_lines,  plot_style=plot_style,
                                      point_info_lines_item=[item, point_info_lines], score_labels=point_info_labels,
                                      cat_highlight=cat_highlight, central_diff=central_diff, graph_title=graphtitle,
                                      y_label=ylabel, black=black, font=font, title_font_size=title_font_size,
@@ -16734,9 +16862,9 @@ class MFRM(Rasch):
                        xmax=10,
                        central_diff=False,
                        thresh_lines=False,
-                       point_info_lines=[],
+                       point_info_lines=None,
                        point_info_labels=False,
-                       cat_highlight=-1,
+                       cat_highlight=None,
                        title=True,
                        plot_style='colorblind',
                        black=False,
@@ -16759,31 +16887,21 @@ class MFRM(Rasch):
                 return
 
         if anchor:
-            y_difficulties = self.anchor_diffs_thresholds
-            y_thresholds = self.anchor_thresholds_thresholds
-
-            if rater is None:
-                y_severities = {'dummy_rater': np.zeros(self.max_score + 1)}
-                y_rater = 'dummy_rater'
-
-            else:
-                y_severities = self.anchor_severities_thresholds
-                y_rater = rater
+            difficulties = self.anchor_diffs_thresholds
+            thresholds = self.anchor_thresholds_thresholds
+            severities = self.anchor_severities_thresholds
 
         else:
-            y_difficulties = self.diffs
-            y_thresholds = self.thresholds_thresholds
+            difficulties = self.diffs
+            thresholds = self.thresholds
+            severities = self.severities_thresholds
 
-            if rater is None:
-                y_severities = {'dummy_rater': np.zeros(self.max_score + 1)}
-                y_rater = 'dummy_rater'
-
-            else:
-                y_severities = self.severities_thresholds
-                y_rater = rater
+        if rater is None:
+            severities = {'dummy_rater': np.zeros(self.max_score + 1)}
+            rater = 'dummy_rater'
 
         abilities = np.arange(-20, 20, 0.1)
-        y = [self.variance_thresholds(ability, y_difficulties[item], y_rater, y_severities, y_thresholds)
+        y = [self.variance_thresholds(ability, item, difficulties, rater, severities, thresholds)
              for ability in abilities]
         y = np.array(y).reshape(len(abilities), 1)
 
@@ -16794,8 +16912,8 @@ class MFRM(Rasch):
 
         ylabel = 'Fisher information'
 
-        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, rater=rater, x_min=xmin, x_max=xmax,
-                                     y_max=max(y) * 1.1, item=item, thresh_lines=thresh_lines,  plot_style=plot_style,
+        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, raters=rater, x_min=xmin, x_max=xmax,
+                                     y_max=max(y) * 1.1, items=item, thresh_lines=thresh_lines,  plot_style=plot_style,
                                      point_info_lines_item=[item, point_info_lines], score_labels=point_info_labels,
                                      cat_highlight=cat_highlight, central_diff=central_diff, graph_title=graphtitle,
                                      y_label=ylabel, black=black, font=font, title_font_size=title_font_size,
@@ -16812,9 +16930,9 @@ class MFRM(Rasch):
                    xmax=10,
                    central_diff=False,
                    thresh_lines=False,
-                   point_info_lines=[],
+                   point_info_lines=None,
                    point_info_labels=False,
-                   cat_highlight=-1,
+                   cat_highlight=None,
                    title=True,
                    plot_style='colorblind',
                    black=False,
@@ -16837,31 +16955,22 @@ class MFRM(Rasch):
                 return
 
         if anchor:
-            y_difficulties = self.anchor_diffs_matrix
-            y_thresholds = self.anchor_thresholds_matrix
-
-            if rater is None:
-                y_severities = {'dummy_rater': {item: np.zeros(self.max_score + 1) for item in self.dataframe.columns}}
-                y_rater = 'dummy_rater'
-
-            else:
-                y_severities = self.anchor_severities_matrix
-                y_rater = rater
+            difficulties = self.anchor_diffs_matrix
+            thresholds = self.anchor_thresholds_matrix
+            severities = self.anchor_severities_matrix
 
         else:
-            y_difficulties = self.diffs
-            y_thresholds = self.thresholds_matrix
+            difficulties = self.diffs
+            thresholds = self.thresholds
+            severities = self.severities_matrix
 
-            if rater is None:
-                y_severities = {'dummy_rater': {item: np.zeros(self.max_score + 1) for item in self.dataframe.columns}}
-                y_rater = 'dummy_rater'
-
-            else:
-                y_severities = self.severities_matrix
-                y_rater = rater
+        if rater is None:
+            severities = {'dummy_rater': {item: np.zeros(self.max_score + 1)
+                                          for item in self.dataframe.columns}}
+            rater = 'dummy_rater'
 
         abilities = np.arange(-20, 20, 0.1)
-        y = [self.variance_matrix(ability, item, y_difficulties, y_rater, y_severities, y_thresholds)
+        y = [self.variance_matrix(ability, item, difficulties, rater, severities, thresholds)
              for ability in abilities]
         y = np.array(y).reshape(len(abilities), 1)
 
@@ -16872,8 +16981,8 @@ class MFRM(Rasch):
 
         ylabel = 'Fisher information'
 
-        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, rater=rater, x_min=xmin, x_max=xmax,
-                                     y_max=max(y) * 1.1, item=item, thresh_lines=thresh_lines,  plot_style=plot_style,
+        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, raters=rater, x_min=xmin, x_max=xmax,
+                                     y_max=max(y) * 1.1, items=item, thresh_lines=thresh_lines,  plot_style=plot_style,
                                      point_info_lines_item=[item, point_info_lines], score_labels=point_info_labels,
                                      cat_highlight=cat_highlight, central_diff=central_diff, graph_title=graphtitle,
                                      y_label=ylabel, black=black, font=font, title_font_size=title_font_size,
@@ -16884,7 +16993,8 @@ class MFRM(Rasch):
 
     def tcc_global(self,
                    anchor=False,
-                   rater=None,
+                   items='all',
+                   raters='zero',
                    obs=False,
                    xmin=-10,
                    xmax=10,
@@ -16907,31 +17017,33 @@ class MFRM(Rasch):
         of observed data, threshold lines and expected score threshold lines.
         '''
 
+        if items == 'all':
+            items = self.dataframe.columns.tolist()
+
+        if raters == 'all':
+            raters = self.raters.tolist()
+
+        if raters == 'none':
+            raters = None
+
+        if raters == 'zero':
+            raters = None
+
         if anchor:
             if hasattr(self, 'anchor_thresholds_global') == False:
                 print('Anchor calibration required')
                 print('Run self.calibrate_global_anchor()')
                 return
 
-        if anchor:
-            y_difficulties = self.anchor_diffs_global
-            y_thresholds = self.anchor_thresholds_global
-            severities = self.anchor_severities_global
-
-            if rater is None:
-                y_severity = 0
             else:
-                y_severity = severities[rater]
+                difficulties = self.anchor_diffs_global
+                thresholds = self.anchor_thresholds_global
+                severities = self.anchor_severities_global
 
         else:
-            y_difficulties = self.diffs
-            y_thresholds = self.thresholds_global
+            difficulties = self.diffs
+            thresholds = self.thresholds
             severities = self.severities_global
-
-            if rater is None:
-                y_severity = 0
-            else:
-                y_severity = severities[rater]
 
         if obs:
             if anchor:
@@ -16944,12 +17056,8 @@ class MFRM(Rasch):
                     self.person_abils_global()
                 abilities = self.abils_global
 
-            _, _, _, xobsdata, yobsdata = self.class_intervals(abilities, self.dataframe.columns,
+            _, _, _, xobsdata, yobsdata = self.class_intervals(abilities, items=items, raters=raters,
                                                                no_of_classes=no_of_classes)
-
-            xobsdata -= severities.mean()
-            if rater is not None:
-                xobsdata += severities[rater]
 
             yobsdata = np.array(yobsdata).reshape((-1, 1))
 
@@ -16958,10 +17066,75 @@ class MFRM(Rasch):
             yobsdata = np.array(np.nan)
 
         abilities = np.arange(-20, 20, 0.1)
-        y = [sum(self.exp_score(ability, difficulty, y_severity, y_thresholds)
-                 for difficulty in y_difficulties)
-             for ability in abilities]
+
+        if items is None:
+            if raters is None:
+                y = [sum(self.exp_score_global(ability, item, difficulties, 'dummy_rater',
+                                               pd.Series({'dummy_rater': 0}), thresholds)
+                         for item in self.dataframe.columns)
+                     for ability in abilities]
+
+            elif isinstance(raters, list):
+                y = [sum(self.exp_score_global(ability, item, difficulties, rater, severities, thresholds)
+                         for item in self.dataframe.columns for rater in raters)
+                     for ability in abilities]
+
+            else:
+                y = [sum(self.exp_score_global(ability, item, difficulties, raters, severities, thresholds)
+                         for item in self.dataframe.columns)
+                     for ability in abilities]
+
+        if isinstance(items, list):
+            if raters is None:
+                y = [sum(self.exp_score_global(ability, item, difficulties, 'dummy_rater',
+                                               pd.Series({'dummy_rater': 0}), thresholds)
+                         for item in items)
+                     for ability in abilities]
+
+            elif isinstance(raters, list):
+                y = [sum(self.exp_score_global(ability, item, difficulties, rater, severities, thresholds)
+                         for item in items for rater in raters)
+                     for ability in abilities]
+
+            else:
+                y = [sum(self.exp_score_global(ability, item, difficulties, raters, severities, thresholds)
+                         for item in items)
+                     for ability in abilities]
+
+        if isinstance(items, str):
+            if raters is None:
+                y = [self.exp_score_global(ability, items, difficulties, 'dummy_rater',
+                                           pd.Series({'dummy_rater': 0}), thresholds)
+                     for ability in abilities]
+
+            elif isinstance(raters, list):
+                y = [sum(self.exp_score_global(ability, items, difficulties, rater, severities, thresholds)
+                         for rater in raters)
+                     for ability in abilities]
+
+            else:
+                y = [self.exp_score_global(ability, items, difficulties, raters, severities, thresholds)
+                     for ability in abilities]
+
         y = np.array(y).reshape(len(abilities), 1)
+
+        if isinstance(raters, list):
+            no_of_raters = len(raters)
+            
+        else:
+            no_of_raters = 1
+        
+        if items is None:
+            no_of_items = self.no_of_items
+
+        else:
+            if isinstance(items, list):
+                no_of_items = len(items)
+                
+            else:
+                no_of_items = 1
+
+        y_max = self.max_score * no_of_items * no_of_raters
 
         if title:
             graphtitle = 'Test characteristic curve'
@@ -16970,8 +17143,8 @@ class MFRM(Rasch):
 
         ylabel = 'Expected score'
 
-        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, rater=rater, x_obs_data=xobsdata,
-                                     y_obs_data=yobsdata, x_min=xmin, x_max=xmax, y_max=self.max_score * self.no_of_items,
+        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, raters=raters, x_obs_data=xobsdata,
+                                     y_obs_data=yobsdata, x_min=xmin, x_max=xmax, y_max=y_max, items=items,
                                      score_lines_test=score_lines, score_labels=score_labels, graph_title=graphtitle,
                                      y_label=ylabel, obs=obs, plot_style=plot_style, black=black, font=font,
                                      title_font_size=title_font_size, axis_font_size=axis_font_size, labelsize=labelsize,
@@ -17010,30 +17183,18 @@ class MFRM(Rasch):
                 return
 
         if anchor:
-            y_difficulties = self.anchor_diffs_items
-            y_thresholds = self.anchor_thresholds_items
+            difficulties = self.anchor_diffs_items
+            thresholds = self.anchor_thresholds_items
             severities = self.anchor_severities_items
 
-            if rater is None:
-                y_severities = {'dummy_rater': {item: 0 for item in self.dataframe.columns}}
-                y_rater = 'dummy_rater'
-
-            else:
-                y_severities = self.anchor_severities_items
-                y_rater = rater
-
         else:
-            y_difficulties = self.diffs
-            y_thresholds = self.thresholds_items
+            difficulties = self.diffs
+            thresholds = self.thresholds
             severities = self.severities_items
 
-            if rater is None:
-                y_severities = {'dummy_rater': {item: 0 for item in self.dataframe.columns}}
-                y_rater = 'dummy_rater'
-
-            else:
-                y_severities = self.severities_items
-                y_rater = rater
+        if rater is None:
+            severities = {'dummy_rater': {item: 0 for item in self.dataframe.columns}}
+            rater = 'dummy_rater'
 
         if obs:
             if anchor:
@@ -17061,10 +17222,12 @@ class MFRM(Rasch):
             yobsdata = np.array(np.nan)
 
         abilities = np.arange(-20, 20, 0.1)
-        y = [sum(self.exp_score_items(ability, item, y_difficulties, y_rater, y_severities, y_thresholds)
+        y = [sum(self.exp_score_items(ability, item, difficulties, rater, severities, thresholds)
                  for item in self.dataframe.columns)
              for ability in abilities]
         y = np.array(y).reshape(len(abilities), 1)
+
+        y_max = self.max_score * len(items) * len(raters)
 
         if title:
             graphtitle = 'Test characteristic curve'
@@ -17073,8 +17236,8 @@ class MFRM(Rasch):
 
         ylabel = 'Expected score'
 
-        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, rater=rater, x_obs_data=xobsdata,
-                                     y_obs_data=yobsdata, x_min=xmin, x_max=xmax, y_max=self.max_score * self.no_of_items,
+        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, raters=rater, x_obs_data=xobsdata,
+                                     items=items, y_obs_data=yobsdata, x_min=xmin, x_max=xmax, y_max=y_max,
                                      score_lines_test=score_lines, score_labels=score_labels, graph_title=graphtitle,
                                      y_label=ylabel, obs=obs, plot_style=plot_style, black=black, font=font,
                                      title_font_size=title_font_size, axis_font_size=axis_font_size, labelsize=labelsize,
@@ -17113,30 +17276,18 @@ class MFRM(Rasch):
                 return
 
         if anchor:
-            y_difficulties = self.anchor_diffs_thresholds
-            y_thresholds = self.anchor_thresholds_thresholds
+            difficulties = self.anchor_diffs_thresholds
+            thresholds = self.anchor_thresholds_thresholds
             severities = self.anchor_severities_thresholds
 
-            if rater is None:
-                y_severities = {'dummy_rater': np.zeros(self.max_score + 1)}
-                y_rater = 'dummy_rater'
-
-            else:
-                y_severities = self.anchor_severities_thresholds
-                y_rater = rater
-
         else:
-            y_difficulties = self.diffs
-            y_thresholds = self.thresholds_thresholds
+            difficulties = self.diffs
+            thresholds = self.thresholds
             severities = self.severities_thresholds
 
-            if rater is None:
-                y_severities = {'dummy_rater': np.zeros(self.max_score + 1)}
-                y_rater = 'dummy_rater'
-
-            else:
-                y_severities = self.severities_thresholds
-                y_rater = rater
+        if rater is None:
+            severities = {'dummy_rater': np.zeros(self.max_score + 1)}
+            rater = 'dummy_rater'
 
         if obs:
             if anchor:
@@ -17163,10 +17314,12 @@ class MFRM(Rasch):
             yobsdata = np.array(np.nan)
 
         abilities = np.arange(-20, 20, 0.1)
-        y = [sum(self.exp_score_thresholds(ability, difficulty, y_rater, y_severities, y_thresholds)
-                 for difficulty in y_difficulties)
+        y = [sum(self.exp_score_thresholds(ability, item, difficulties, rater, severities, thresholds)
+                 for item in difficulties.keys())
              for ability in abilities]
         y = np.array(y).reshape(len(abilities), 1)
+
+        y_max = self.max_score * len(items) * len(raters)
 
         if title:
             graphtitle = 'Test characteristic curve'
@@ -17175,8 +17328,8 @@ class MFRM(Rasch):
 
         ylabel = 'Expected score'
 
-        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, rater=rater, x_obs_data=xobsdata,
-                                     y_obs_data=yobsdata, x_min=xmin, x_max=xmax, y_max=self.max_score * self.no_of_items,
+        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, raters=rater, x_obs_data=xobsdata,
+                                     y_obs_data=yobsdata, x_min=xmin, x_max=xmax, y_max=y_max, items=items,
                                      score_lines_test=score_lines, score_labels=score_labels, graph_title=graphtitle,
                                      y_label=ylabel, obs=obs, plot_style=plot_style, black=black, font=font,
                                      title_font_size=title_font_size, axis_font_size=axis_font_size, labelsize=labelsize,
@@ -17215,32 +17368,19 @@ class MFRM(Rasch):
                 return
 
         if anchor:
-            y_difficulties = self.anchor_diffs_matrix
-            y_thresholds = self.anchor_thresholds_matrix
+            difficulties = self.anchor_diffs_matrix
+            thresholds = self.anchor_thresholds_matrix
             severities = self.anchor_severities_matrix
 
-            if rater is None:
-                y_severities = {'dummy_rater': {item: np.zeros(self.max_score + 1)
-                                                for item in self.dataframe.columns}}
-                y_rater = 'dummy_rater'
-
-            else:
-                y_severities = self.anchor_severities_matrix
-                y_rater = rater
-
         else:
-            y_difficulties = self.diffs
-            y_thresholds = self.thresholds_matrix
+            difficulties = self.diffs
+            thresholds = self.thresholds
             severities = self.severities_matrix
 
-            if rater is None:
-                y_severities = {'dummy_rater': {item: np.zeros(self.max_score + 1)
-                                                for item in self.dataframe.columns}}
-                y_rater = 'dummy_rater'
-
-            else:
-                y_severities = self.severities_matrix
-                y_rater = rater
+        if rater is None:
+            severities = {'dummy_rater': {item: np.zeros(self.max_score + 1)
+                                            for item in self.dataframe.columns}}
+            rater = 'dummy_rater'
 
         if obs:
             if anchor:
@@ -17268,10 +17408,12 @@ class MFRM(Rasch):
             yobsdata = np.array(np.nan)
 
         abilities = np.arange(-20, 20, 0.1)
-        y = [sum(self.exp_score_matrix(ability, item, y_difficulties, y_rater, y_severities, y_thresholds)
-                 for item in y_difficulties.keys())
+        y = [sum(self.exp_score_matrix(ability, item, difficulties, rater, severities, thresholds)
+                 for item in difficulties.keys())
              for ability in abilities]
         y = np.array(y).reshape(len(abilities), 1)
+
+        y_max = self.max_score * len(items) * len(raters)
 
         if title:
             graphtitle = 'Test characteristic curve'
@@ -17280,8 +17422,8 @@ class MFRM(Rasch):
 
         ylabel = 'Expected score'
 
-        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, rater=rater, x_obs_data=xobsdata,
-                                     y_obs_data=yobsdata, x_min=xmin, x_max=xmax, y_max=self.max_score * self.no_of_items,
+        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, raters=rater, x_obs_data=xobsdata,
+                                     y_obs_data=yobsdata, x_min=xmin, x_max=xmax, y_max=y_max, items=items,
                                      score_lines_test=score_lines, score_labels=score_labels, graph_title=graphtitle,
                                      y_label=ylabel, obs=obs, plot_style=plot_style, black=black, font=font,
                                      title_font_size=title_font_size, axis_font_size=axis_font_size, labelsize=labelsize,
@@ -17291,8 +17433,9 @@ class MFRM(Rasch):
 
     def test_info_global(self,
                          anchor=False,
-                         rater=None,
-                         point_info_lines=[],
+                         items=None,
+                         raters=None,
+                         point_info_lines=None,
                          point_info_labels=False,
                          xmin=-10,
                          xmax=10,
@@ -17309,7 +17452,7 @@ class MFRM(Rasch):
                          dpi=300):
 
         '''
-        Plots Test Information Curve for RSM.
+        Plots Test Information Curve for global MFRM.
         '''
 
         if anchor:
@@ -17319,27 +17462,59 @@ class MFRM(Rasch):
                 return
 
         if anchor:
-            y_difficulties = self.anchor_diffs_global
-            y_thresholds = self.anchor_thresholds_global
-
-            if rater is None:
-                y_severity = 0
-            else:
-                y_severity = self.anchor_severities_global[rater]
+            difficulties = self.anchor_diffs_global
+            thresholds = self.anchor_thresholds_global
+            severities = self.anchor_severities_global
 
         else:
-            y_difficulties = self.diffs
-            y_thresholds = self.thresholds_global
+            difficulties = self.diffs
+            thresholds = self.thresholds
+            severities = self.severities_global
 
-            if rater is None:
-                y_severity = 0
-            else:
-                y_severity = self.severities_global[rater]
+        if raters == 'all':
+            raters = self.raters
+
+        if raters == 'none':
+            raters = None
+
+        if isinstance(raters, str):
+            raters = [raters]
+
+        if items == 'all':
+            items = self.dataframe.columns
+
+        if items == 'none':
+            items = None
+
+        if isinstance(items, str):
+            items = [items]
 
         abilities = np.arange(-20, 20, 0.1)
-        y = [sum(self.variance(ability, y_difficulties[item], y_severity, y_thresholds)
-                 for item in self.dataframe.columns)
-             for ability in abilities]
+
+        if items is None:
+            if raters is None:
+                y = [sum(self.variance_global(ability, item, difficulties, 'dummy_rater',
+                                              pd.Series({'dummy_rater': 0}), thresholds)
+                         for item in self.dataframe.columns)
+                     for ability in abilities]
+    
+            else:
+                y = [sum(self.variance_global(ability, item, difficulties, rater, severities, thresholds)
+                         for item in self.dataframe.columns for rater in raters)
+                     for ability in abilities]
+                
+        else:
+            if raters is None:
+                y = [sum(self.variance_global(ability, item, difficulties, 'dummy_rater',
+                                              pd.Series({'dummy_rater': 0}), thresholds)
+                         for item in items)
+                     for ability in abilities]
+    
+            else:
+                y = [sum(self.variance_global(ability, item, difficulties, rater, severities, thresholds)
+                         for item in items for rater in raters)
+                     for ability in abilities]
+
         y = np.array(y).reshape(len(abilities), 1)
 
         if ymax is None:
@@ -17352,19 +17527,20 @@ class MFRM(Rasch):
 
         ylabel = 'Fisher information'
 
-        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, rater=rater, x_min=xmin, x_max=xmax,
-                                     y_max=ymax, point_info_lines_test=point_info_lines, score_labels=point_info_labels,
-                                     graph_title=graphtitle, y_label=ylabel, plot_style=plot_style, black=black,
-                                     font=font, title_font_size=title_font_size, axis_font_size=axis_font_size,
-                                     labelsize=labelsize, save_title=save_title, plot_density=dpi,
-                                     file_format=file_format)
+        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, items=items, raters=raters, x_min=xmin,
+                                     x_max=xmax, y_max=ymax, point_info_lines_test=point_info_lines,
+                                     score_labels=point_info_labels, graph_title=graphtitle, y_label=ylabel,
+                                     plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
+                                     axis_font_size=axis_font_size, labelsize=labelsize, save_title=save_title,
+                                     plot_density=dpi, file_format=file_format)
 
         return plot
 
     def test_info_items(self,
                         anchor=False,
-                        rater=None,
-                        point_info_lines=[],
+                        items=None,
+                        raters=None,
+                        point_info_lines=None,
                         point_info_labels=False,
                         xmin=-10,
                         xmax=10,
@@ -17391,33 +17567,19 @@ class MFRM(Rasch):
                 return
 
         if anchor:
-            y_difficulties = self.anchor_diffs_items
-            y_thresholds = self.anchor_thresholds_items
-
-            if rater is None:
-                y_severities = {'dummy_rater': {item: 0 for item in self.dataframe.columns}}
-                y_rater = 'dummy_rater'
-
-            else:
-                y_severities = self.anchor_severities_items
-                y_rater = rater
+            difficulties = self.anchor_diffs_items
+            thresholds = self.anchor_thresholds_items
+            severities = self.anchor_severities_items
 
         else:
-            y_difficulties = self.diffs
-            y_thresholds = self.thresholds_items
-
-            if rater is None:
-                y_severities = {'dummy_rater': {item: 0 for item in self.dataframe.columns}}
-                y_rater = 'dummy_rater'
-
-            else:
-                y_severities = self.severities_items
-                y_rater = rater
+            difficulties = self.diffs
+            thresholds = self.thresholds
+            severities = self.severities_items
 
         abilities = np.arange(-20, 20, 0.1)
 
-        y = [sum(self.variance_items(ability, item, y_difficulties, y_rater, y_severities, y_thresholds)
-                 for item in self.dataframe.columns)
+        y = [sum(self.variance_items(ability, item, difficulties, rater, severities, thresholds)
+                 for item in items for rater in raters)
              for ability in abilities]
         y = np.array(y).reshape(len(abilities), 1)
 
@@ -17431,19 +17593,20 @@ class MFRM(Rasch):
 
         ylabel = 'Fisher information'
 
-        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, rater=rater, x_min=xmin, x_max=xmax,
-                                     y_max=ymax, point_info_lines_test=point_info_lines, score_labels=point_info_labels,
-                                     graph_title=graphtitle, y_label=ylabel, plot_style=plot_style, black=black,
-                                     font=font, title_font_size=title_font_size, axis_font_size=axis_font_size,
-                                     labelsize=labelsize, save_title=save_title, plot_density=dpi,
-                                     file_format=file_format)
+        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, items=items, raters=raters, x_min=xmin,
+                                     x_max=xmax, y_max=ymax, point_info_lines_test=point_info_lines,
+                                     score_labels=point_info_labels, graph_title=graphtitle, y_label=ylabel,
+                                     plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
+                                     axis_font_size=axis_font_size, labelsize=labelsize, save_title=save_title,
+                                     plot_density=dpi, file_format=file_format)
 
         return plot
 
     def test_info_thresholds(self,
                              anchor=False,
-                             rater=None,
-                             point_info_lines=[],
+                             items=None,
+                             raters=None,
+                             point_info_lines=None,
                              point_info_labels=False,
                              xmin=-10,
                              xmax=10,
@@ -17470,33 +17633,19 @@ class MFRM(Rasch):
                 return
 
         if anchor:
-            y_difficulties = self.anchor_diffs_thresholds
-            y_thresholds = self.anchor_thresholds_thresholds
-
-            if rater is None:
-                y_severities = {'dummy_rater': np.zeros(self.max_score + 1)}
-                y_rater = 'dummy_rater'
-
-            else:
-                y_severities = self.anchor_severities_thresholds
-                y_rater = rater
+            difficulties = self.anchor_diffs_thresholds
+            thresholds = self.anchor_thresholds_thresholds
+            severities = self.anchor_severities_thresholds
 
         else:
-            y_difficulties = self.diffs
-            y_thresholds = self.thresholds_thresholds
-
-            if rater is None:
-                y_severities = {'dummy_rater': np.zeros(self.max_score + 1)}
-                y_rater = 'dummy_rater'
-
-            else:
-                y_severities = self.severities_thresholds
-                y_rater = rater
+            difficulties = self.diffs
+            thresholds = self.thresholds
+            severities = self.severities_thresholds
 
         abilities = np.arange(-20, 20, 0.1)
 
-        y = [sum(self.variance_thresholds(ability, y_difficulties[item], y_rater, y_severities, y_thresholds)
-                 for item in self.dataframe.columns)
+        y = [sum(self.variance_thresholds(ability, item, difficulties, rater, severities, thresholds)
+                 for item in items for rater in raters)
              for ability in abilities]
         y = np.array(y).reshape(len(abilities), 1)
 
@@ -17510,19 +17659,20 @@ class MFRM(Rasch):
 
         ylabel = 'Fisher information'
 
-        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, rater=rater, x_min=xmin, x_max=xmax,
-                                     y_max=ymax, point_info_lines_test=point_info_lines, score_labels=point_info_labels,
-                                     graph_title=graphtitle, y_label=ylabel, plot_style=plot_style, black=black,
-                                     font=font, title_font_size=title_font_size, axis_font_size=axis_font_size,
-                                     labelsize=labelsize, save_title=save_title, plot_density=dpi,
-                                     file_format=file_format)
+        plot = self.plot_data_thresholds(x_data=abilities, y_data=y, anchor=anchor, items=items, raters=raters,
+                                         x_min=xmin, x_max=xmax, y_max=ymax, point_info_lines_test=point_info_lines,
+                                         score_labels=point_info_labels, graph_title=graphtitle, y_label=ylabel,
+                                         plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
+                                         axis_font_size=axis_font_size, labelsize=labelsize, save_title=save_title,
+                                         plot_density=dpi, file_format=file_format)
 
         return plot
 
     def test_info_matrix(self,
                          anchor=False,
-                         rater=None,
-                         point_info_lines=[],
+                         items=None,
+                         raters=None,
+                         point_info_lines=None,
                          point_info_labels=False,
                          xmin=-10,
                          xmax=10,
@@ -17549,35 +17699,19 @@ class MFRM(Rasch):
                 return
 
         if anchor:
-            y_difficulties = self.anchor_diffs_matrix
-            y_thresholds = self.anchor_thresholds_matrix
-
-            if rater is None:
-                y_severities = {'dummy_rater': {item: np.zeros(self.max_score + 1)
-                                                for item in self.dataframe.columns}}
-                y_rater = 'dummy_rater'
-
-            else:
-                y_severities = self.anchor_severities_matrix
-                y_rater = rater
+            difficulties = self.anchor_diffs_matrix
+            thresholds = self.anchor_thresholds_matrix
+            severities = self.anchor_severities_matrix
 
         else:
-            y_difficulties = self.diffs
-            y_thresholds = self.thresholds_matrix
-
-            if rater is None:
-                y_severities = {'dummy_rater': {item: np.zeros(self.max_score + 1)
-                                                for item in self.dataframe.columns}}
-                y_rater = 'dummy_rater'
-
-            else:
-                y_severities = self.severities_matrix
-                y_rater = rater
+            difficulties = self.diffs
+            thresholds = self.thresholds
+            severities = self.severities_matrix
 
         abilities = np.arange(-20, 20, 0.1)
 
-        y = [sum(self.variance_matrix(ability, item, y_difficulties, y_rater, y_severities, y_thresholds)
-                 for item in self.dataframe.columns)
+        y = [sum(self.variance_matrix(ability, item, difficulties, rater, severities, thresholds)
+                 for item in items for rater in raters)
              for ability in abilities]
         y = np.array(y)
         y = y.reshape(len(abilities), 1)
@@ -17592,19 +17726,20 @@ class MFRM(Rasch):
 
         ylabel = 'Fisher information'
 
-        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, rater=rater, x_min=xmin, x_max=xmax,
-                                     y_max=ymax, point_info_lines_test=point_info_lines, score_labels=point_info_labels,
-                                     graph_title=graphtitle, y_label=ylabel, plot_style=plot_style, black=black,
-                                     font=font, title_font_size=title_font_size, axis_font_size=axis_font_size,
-                                     labelsize=labelsize, save_title=save_title, plot_density=dpi,
-                                     file_format=file_format)
+        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, items=items, raters=raters, x_min=xmin,
+                                     x_max=xmax, y_max=ymax, point_info_lines_test=point_info_lines,
+                                     score_labels=point_info_labels, graph_title=graphtitle, y_label=ylabel,
+                                     plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
+                                     axis_font_size=axis_font_size, labelsize=labelsize, save_title=save_title,
+                                     plot_density=dpi, file_format=file_format)
 
         return plot
 
     def test_csem_global(self,
                          anchor=False,
-                         rater=None,
-                         point_csem_lines=[],
+                         items=None,
+                         raters=None,
+                         point_csem_lines=None,
                          point_csem_labels=False,
                          xmin=-10,
                          xmax=10,
@@ -17631,27 +17766,60 @@ class MFRM(Rasch):
                 return
 
         if anchor:
-            y_difficulties = self.anchor_diffs_global
-            y_thresholds = self.anchor_thresholds_global
-
-            if rater is None:
-                y_severity = 0
-            else:
-                y_severity = self.anchor_severities_global[rater]
+            difficulties = self.anchor_diffs_global
+            thresholds = self.anchor_thresholds_global
+            severities = self.anchor_severities_global
 
         else:
-            y_difficulties = self.diffs
-            y_thresholds = self.thresholds_global
+            difficulties = self.diffs
+            thresholds = self.thresholds
+            severities = self.severities_global
 
-            if rater is None:
-                y_severity = 0
-            else:
-                y_severity = self.severities_global[rater]
+        if raters == 'all':
+            raters = self.raters
+
+        if raters == 'none':
+            raters = None
+
+        if isinstance(raters, str):
+            raters = [raters]
+
+        if items == 'all':
+            items = self.dataframe.columns
+
+        if items == 'none':
+            items = None
+
+        if isinstance(items, str):
+            items = [items]
 
         abilities = np.arange(-20, 20, 0.1)
-        y = np.array([sum(self.variance(ability, y_difficulties[item], y_severity, y_thresholds)
-                          for item in self.dataframe.columns)
-                      for ability in abilities])
+
+        if items is None:
+            if raters is None:
+                y = [sum(self.variance_global(ability, item, difficulties, 'dummy_rater',
+                                              pd.Series({'dummy_rater': 0}), thresholds)
+                         for item in self.dataframe.columns)
+                     for ability in abilities]
+
+            else:
+                y = [sum(self.variance_global(ability, item, difficulties, rater, severities, thresholds)
+                         for item in self.dataframe.columns for rater in raters)
+                     for ability in abilities]
+
+        else:
+            if raters is None:
+                y = [sum(self.variance_global(ability, item, difficulties, 'dummy_rater',
+                                              pd.Series({'dummy_rater': 0}), thresholds)
+                         for item in items)
+                     for ability in abilities]
+
+            else:
+                y = [sum(self.variance_global(ability, item, difficulties, rater, severities, thresholds)
+                         for item in items for rater in raters)
+                     for ability in abilities]
+
+        y = np.array(y)
         y = 1 / np.sqrt(y)
         y = y.reshape(len(abilities), 1)
 
@@ -17662,19 +17830,20 @@ class MFRM(Rasch):
 
         ylabel = 'Conditional SEM'
 
-        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, rater=rater, x_min=xmin, x_max=xmax,
-                                     y_max=ymax, point_csem_lines=point_csem_lines, score_labels=point_csem_labels,
-                                     graph_title=graphtitle, y_label=ylabel, plot_style=plot_style, black=black,
-                                     font=font, title_font_size=title_font_size, axis_font_size=axis_font_size,
-                                     labelsize=labelsize, save_title=save_title, plot_density=dpi,
-                                     file_format=file_format)
+        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, items=items, raters=raters,
+                                     x_min=xmin, x_max=xmax, y_max=ymax, point_csem_lines=point_csem_lines,
+                                     score_labels=point_csem_labels, graph_title=graphtitle, y_label=ylabel,
+                                     plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
+                                     axis_font_size=axis_font_size, labelsize=labelsize, save_title=save_title,
+                                     plot_density=dpi, file_format=file_format)
 
         return plot
 
     def test_csem_items(self,
                         anchor=False,
-                        rater=None,
-                        point_csem_lines=[],
+                        items=None,
+                        raters=None,
+                        point_csem_lines=None,
                         point_csem_labels=False,
                         xmin=-10,
                         xmax=10,
@@ -17701,33 +17870,23 @@ class MFRM(Rasch):
                 return
 
         if anchor:
-            y_difficulties = self.anchor_diffs_items
-            y_thresholds = self.anchor_thresholds_items
-
-            if rater is None:
-                y_severities = {'dummy_rater': {item: 0 for item in self.dataframe.columns}}
-                y_rater = 'dummy_rater'
-
-            else:
-                y_severities = self.anchor_severities_items
-                y_rater = rater
+            difficulties = self.anchor_diffs_items
+            thresholds = self.anchor_thresholds_items
+            severities = self.anchor_severities_items
 
         else:
-            y_difficulties = self.diffs
-            y_thresholds = self.thresholds_items
+            difficulties = self.diffs
+            thresholds = self.thresholds
+            severities = self.severities_items
 
-            if rater is None:
-                y_severities = {'dummy_rater': {item: 0 for item in self.dataframe.columns}}
-                y_rater = 'dummy_rater'
-
-            else:
-                y_severities = self.severities_items
-                y_rater = rater
+        if rater is None:
+            severities = {'dummy_rater': {item: 0 for item in self.dataframe.columns}}
+            rater = 'dummy_rater'
 
         abilities = np.arange(-20, 20, 0.1)
-        y = np.array([sum(self.variance_items(ability, item, y_difficulties, y_rater, y_severities, y_thresholds)
-                 for item in self.dataframe.columns)
-             for ability in abilities])
+        y = np.array([sum(self.variance_items(ability, item, difficulties, rater, severities, thresholds)
+                          for item in items for rater in raters)
+                      for ability in abilities])
         y = 1 / np.sqrt(y)
         y = y.reshape(len(abilities), 1)
 
@@ -17738,19 +17897,20 @@ class MFRM(Rasch):
 
         ylabel = 'Conditional SEM'
 
-        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, rater=rater, x_min=xmin, x_max=xmax,
-                                     y_max=ymax, point_csem_lines=point_csem_lines, score_labels=point_csem_labels,
-                                     graph_title=graphtitle, y_label=ylabel, plot_style=plot_style, black=black,
-                                     font=font, title_font_size=title_font_size, axis_font_size=axis_font_size,
-                                     labelsize=labelsize, save_title=save_title, plot_density=dpi,
-                                     file_format=file_format)
+        plot = self.plot_data_items(x_data=abilities, y_data=y, anchor=anchor, items=items, raters=raters,
+                                    x_min=xmin, x_max=xmax, y_max=ymax, point_csem_lines=point_csem_lines,
+                                    score_labels=point_csem_labels, graph_title=graphtitle, y_label=ylabel,
+                                    plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
+                                    axis_font_size=axis_font_size, labelsize=labelsize, save_title=save_title,
+                                    plot_density=dpi, file_format=file_format)
 
         return plot
 
     def test_csem_thresholds(self,
                              anchor=False,
-                             rater=None,
-                             point_csem_lines=[],
+                             items=None,
+                             raters=None,
+                             point_csem_lines=None,
                              point_csem_labels=False,
                              xmin=-10,
                              xmax=10,
@@ -17777,32 +17937,22 @@ class MFRM(Rasch):
                 return
 
         if anchor:
-            y_difficulties = self.anchor_diffs_thresholds
-            y_thresholds = self.anchor_thresholds_thresholds
-
-            if rater is None:
-                y_severities = {'dummy_rater': np.zeros(self.max_score + 1)}
-                y_rater = 'dummy_rater'
-
-            else:
-                y_severities = self.anchor_severities_thresholds
-                y_rater = rater
+            difficulties = self.anchor_diffs_thresholds
+            thresholds = self.anchor_thresholds_thresholds
+            severities = self.anchor_severities_thresholds
 
         else:
-            y_difficulties = self.diffs
-            y_thresholds = self.thresholds_thresholds
+            difficulties = self.diffs
+            thresholds = self.thresholds
+            severities = self.severities_thresholds
 
-            if rater is None:
-                y_severities = {'dummy_rater': np.zeros(self.max_score + 1)}
-                y_rater = 'dummy_rater'
-
-            else:
-                y_severities = self.severities_thresholds
-                y_rater = rater
+        if rater is None:
+            severities = {'dummy_rater': np.zeros(self.max_score + 1)}
+            rater = 'dummy_rater'
 
         abilities = np.arange(-20, 20, 0.1)
-        y = np.array([sum(self.variance_thresholds(ability, y_difficulties[item], y_rater, y_severities, y_thresholds)
-                          for item in self.dataframe.columns)
+        y = np.array([sum(self.variance_thresholds(ability, item, difficulties, rater, severities, thresholds)
+                          for item in items for rater in raters)
                       for ability in abilities])
         y = 1 / np.sqrt(y)
         y = y.reshape(len(abilities), 1)
@@ -17814,19 +17964,20 @@ class MFRM(Rasch):
 
         ylabel = 'Conditional SEM'
 
-        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, rater=rater, x_min=xmin, x_max=xmax,
-                                     y_max=ymax, point_csem_lines=point_csem_lines, score_labels=point_csem_labels,
-                                     graph_title=graphtitle, y_label=ylabel, plot_style=plot_style, black=black,
-                                     font=font, title_font_size=title_font_size, axis_font_size=axis_font_size,
-                                     labelsize=labelsize, save_title=save_title, plot_density=dpi,
-                                     file_format=file_format)
+        plot = self.plot_data_thresholds(x_data=abilities, y_data=y, anchor=anchor, items=items, raters=raters,
+                                         x_min=xmin, x_max=xmax, y_max=ymax, point_csem_lines=point_csem_lines,
+                                         score_labels=point_csem_labels, graph_title=graphtitle, y_label=ylabel,
+                                         plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
+                                         axis_font_size=axis_font_size, labelsize=labelsize, save_title=save_title,
+                                         plot_density=dpi, file_format=file_format)
 
         return plot
 
     def test_csem_matrix(self,
                          anchor=False,
-                         rater=None,
-                         point_csem_lines=[],
+                         items=None,
+                         raters=None,
+                         point_csem_lines=None,
                          point_csem_labels=False,
                          xmin=-10,
                          xmax=10,
@@ -17853,34 +18004,23 @@ class MFRM(Rasch):
                 return
 
         if anchor:
-            y_difficulties = self.anchor_diffs_matrix
-            y_thresholds = self.anchor_thresholds_matrix
-
-            if rater is None:
-                y_severities = {'dummy_rater': {item: np.zeros(self.max_score + 1)
-                                                for item in self.dataframe.columns}}
-                y_rater = 'dummy_rater'
-
-            else:
-                y_severities = self.anchor_severities_matrix
-                y_rater = rater
+            difficulties = self.anchor_diffs_matrix
+            thresholds = self.anchor_thresholds_matrix
+            severities = self.anchor_severities_matrix
 
         else:
-            y_difficulties = self.diffs
-            y_thresholds = self.thresholds_matrix
+            difficulties = self.diffs
+            thresholds = self.thresholds
+            severities = self.severities_matrix
 
-            if rater is None:
-                y_severities = {'dummy_rater': {item: np.zeros(self.max_score + 1)
-                                                for item in self.dataframe.columns}}
-                y_rater = 'dummy_rater'
-
-            else:
-                y_severities = self.severities_matrix
-                y_rater = rater
+        if rater is None:
+            severities = {'dummy_rater': {item: np.zeros(self.max_score + 1)
+                                            for item in self.dataframe.columns}}
+            rater = 'dummy_rater'
 
         abilities = np.arange(-20, 20, 0.1)
-        y = np.array([sum(self.variance_matrix(ability, item, y_difficulties, y_rater, y_severities, y_thresholds)
-                          for item in self.dataframe.columns)
+        y = np.array([sum(self.variance_matrix(ability, item, difficulties, rater, severities, thresholds)
+                          for item in items for rater in raters)
                       for ability in abilities])
         y = 1 / np.sqrt(y)
         y = y.reshape(len(abilities), 1)
@@ -17892,17 +18032,18 @@ class MFRM(Rasch):
 
         ylabel = 'Conditional SEM'
 
-        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, rater=rater, x_min=xmin, x_max=xmax,
-                                     y_max=ymax, point_csem_lines=point_csem_lines, score_labels=point_csem_labels,
-                                     graph_title=graphtitle, y_label=ylabel, plot_style=plot_style, black=black,
-                                     font=font, title_font_size=title_font_size, axis_font_size=axis_font_size,
-                                     labelsize=labelsize, save_title=save_title, plot_density=dpi,
-                                     file_format=file_format)
+        plot = self.plot_data_matrix(x_data=abilities, y_data=y, anchor=anchor, items=items, raters=raters,
+                                     x_min=xmin, x_max=xmax, y_max=ymax, point_csem_lines=point_csem_lines,
+                                     score_labels=point_csem_labels, graph_title=graphtitle, y_label=ylabel,
+                                     plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
+                                     axis_font_size=axis_font_size, labelsize=labelsize, save_title=save_title,
+                                     plot_density=dpi, file_format=file_format)
 
         return plot
 
     def std_residuals_plot_global(self,
-                                  rater=None,
+                                  items=None,
+                                  raters=None,
                                   bin_width=0.5,
                                   x_min=-6,
                                   x_max=6,
@@ -17913,25 +18054,32 @@ class MFRM(Rasch):
                                   title_font_size=15,
                                   axis_font_size=12,
                                   labelsize=12,
-                                  save_title='',
+                                  filename=None,
                                   file_format='png',
-                                  tex=True,
                                   plot_density=300):
 
         '''
         Plots histogram of standardised residuals for SLM, with optional overplotting of Standard Normal Distribution.
         '''
 
-        if rater is None:
-            std_residual_list = self.std_residual_df_global.unstack().unstack()
+        if items is None:
+            if raters is None:
+                std_residual_list = self.std_residual_df_global.unstack().unstack()
+
+            else:
+                std_residual_list = self.std_residual_df_global.loc[raters].unstack().unstack()
 
         else:
-            std_residual_list = self.std_residual_df_global.xs(rater).unstack()
+            if raters is None:
+                std_residual_list = self.std_residual_df_global[items].unstack().unstack()
+
+            else:
+                std_residual_list = self.std_residual_df_global[items].loc[raters].unstack().unstack()
 
         plot = self.std_residuals_hist(std_residual_list, bin_width=bin_width, x_min=x_min, x_max=x_max, normal=normal,
                                        title=title, plot_style=plot_style, font=font, title_font_size=title_font_size,
-                                       axis_font_size=axis_font_size, labelsize=labelsize, save_title=save_title,
-                                       file_format=file_format, tex=tex, plot_density=plot_density)
+                                       axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
+                                       file_format=file_format, plot_density=plot_density)
 
         return plot
 
@@ -18059,6 +18207,9 @@ class Rasch_Sim:
         if old not in self.scores.columns:
             print(f'Old item name "{old}" not found in data. Please check')
 
+        if isinstance(new, str) == False:
+            print('Item names must be strings')
+
         else:
             self.scores.rename(columns={old: new}, inplace=True)
 
@@ -18072,6 +18223,9 @@ class Rasch_Sim:
 
         elif list_length != self.no_of_items:
             print(f'Incorrect number of item names. {list_length} in list, {self.no_of_items} items in data.')
+
+        if all(isinstance(name, str) for name in new_names) == False:
+            print('Item names must be strings')
 
         else:
             self.scores.rename(columns={old: new for old, new in zip(self.scores.columns, new_names)}, inplace=True)
@@ -18089,6 +18243,9 @@ class Rasch_Sim:
         if old not in self.scores.index:
             print(f'Old person name "{old}" not found in data. Please check.')
 
+        if isinstance(new, str) == False:
+            print('Item names must be strings')
+
         else:
             self.scores.rename(index={old: new}, inplace=True)
 
@@ -18102,6 +18259,9 @@ class Rasch_Sim:
 
         elif list_length != self.no_of_persons:
             print(f'Incorrect number of person names. {list_length} in list, {self.no_of_persons} persons in data.')
+
+        if all(isinstance(name, str) for name in new_names) == False:
+            print('Person names must be strings')
 
         else:
             self.scores.rename(index={old: new for old, new in zip(self.scores.index, new_names)}, inplace=True)
@@ -18511,6 +18671,9 @@ class MFRM_Sim(Rasch_Sim):
         if old not in self.raters:
             print(f'Old item name "{old}" not found in data. Please check')
 
+        if isinstance(new, str) == False:
+            print('Rater names must be strings')
+
         else:
             new_names = [new if rater == old else rater for rater in self.raters]
             self.rename_raters_all(new_names)
@@ -18525,6 +18688,9 @@ class MFRM_Sim(Rasch_Sim):
 
         elif list_length != self.no_of_raters:
             print(f'Incorrect number of rater names. {list_length} in list, {self.no_of_raters} raters in data.')
+
+        if all(isinstance(name, str) for name in new_names) == False:
+            print('Rater names must be strings')
 
         else:
             df_dict = {new: self.scores.xs(old) for old, new in zip(self.raters, new_names)}
@@ -18544,6 +18710,9 @@ class MFRM_Sim(Rasch_Sim):
         if old not in self.scores.index.get_level_values(1):
             print(f'Old person name "{old}" not found in data. Please check')
 
+        if isinstance(new, str) == False:
+            print('Person names must be strings')
+
         else:
             self.scores.rename(index={old: new},
                                inplace=True)
@@ -18559,6 +18728,9 @@ class MFRM_Sim(Rasch_Sim):
 
         elif list_length != self.no_of_persons:
             print(f'Incorrect number of rater names. {list_length} in list, {self.no_of_persons} raters in data.')
+
+        if all(isinstance(name, str) for name in new_names) == False:
+            print('Person names must be strings')
 
         else:
             self.scores.rename(index={old: new for old, new in zip(old_names, new_names)},
@@ -18666,20 +18838,21 @@ class MFRM_Sim_Global(MFRM_Sim):
             self.severities = np.array(self.severities)
             self.severities = {f'Rater_{rater + 1}': severity for rater, severity in enumerate(self.severities)}
             self.severities = pd.Series(self.severities)
+
+        self.items = [f'Item_{item + 1}' for item in range(self.no_of_items)]
+        self.raters = [f'Rater_{rater + 1}' for rater in range(self.no_of_raters)]
+        self.persons = [f'Person_{person + 1}' for person in range(self.no_of_persons)]
         
         '''
         Calculates probability of a response in each category
         for each person on each item
         '''
 
-        self.cat_probs = [[[[self.mfrm.cat_prob(ability,
-                                                difficulty,
-                                                severity,
-                                                category,
-                                                self.thresholds)
+        self.cat_probs = [[[[self.mfrm.cat_prob_global(ability, item, self.diffs, rater, self.severities, category,
+                                                       self.thresholds)
                              for category in range(self.max_score + 1)]
-                            for severity in self.severities]
-                           for difficulty in self.diffs]
+                            for rater in self.raters]
+                           for item in self.items]
                           for ability in self.abilities]
 
         self.cat_probs = np.array(self.cat_probs)
@@ -18724,6 +18897,7 @@ class MFRM_Sim_Global(MFRM_Sim):
             self.scores.rename(index={person: f'Person_{person + 1}'},
                                inplace=True)
 
+        self.items = self.scores.columns
         self.raters = self.scores.index.get_level_values(0).unique()
         self.persons = self.scores.index.get_level_values(1).unique()
 
@@ -18838,8 +19012,9 @@ class MFRM_Sim_Items(MFRM_Sim):
                                                       for item in range(self.no_of_items)}
                                for rater in range(self.no_of_raters)}
 
+        self.items = [f'Item_{item + 1}' for item in range(self.no_of_items)]
         self.raters = [f'Rater_{rater + 1}' for rater in range(self.no_of_raters)]
-        self.persons = [f'Person_{item + 1}' for item in range(self.no_of_persons)]
+        self.persons = [f'Person_{item + 1}' for person in range(self.no_of_persons)]
         
         '''
         Calculates probability of a response in each category
@@ -19011,23 +19186,20 @@ class MFRM_Sim_Thresholds(MFRM_Sim):
             self.severities = {f'Rater_{rater + 1}': np.array(severities[rater][:])
                                for rater in range(self.no_of_raters)}
 
+        self.items = [f'Item_{item + 1}' for item in range(self.no_of_items)]
         self.raters = [f'Rater_{rater + 1}' for rater in range(self.no_of_raters)]
-        self.persons = [f'Person_{item + 1}' for item in range(self.no_of_persons)]
+        self.persons = [f'Person_{item + 1}' for person in range(self.no_of_persons)]
         
         '''
         Calculates probability of a response in each category
         for each person on each item
         '''
 
-        cat_probs = [[[[self.mfrm.cat_prob_thresholds(ability,
-                                                      difficulty,
-                                                      rater,
-                                                      self.severities,
-                                                      category,
+        cat_probs = [[[[self.mfrm.cat_prob_thresholds(ability, item, difficulties, rater, self.severities, category,
                                                       self.thresholds)
                         for category in range(self.max_score + 1)]
                        for rater in self.raters]
-                      for difficulty in self.diffs]
+                      for item in self.dataframe.columns]
                      for ability in self.abilities]
 
         self.cat_probs = np.array(cat_probs)
@@ -19188,8 +19360,9 @@ class MFRM_Sim_Matrix(MFRM_Sim):
                                                       for item in range(self.no_of_items)}
                                for rater in range(self.no_of_raters)}
 
+        self.items = [f'Item_{item + 1}' for item in range(self.no_of_items)]
         self.raters = [f'Rater_{rater + 1}' for rater in range(self.no_of_raters)]
-        self.persons = [f'Person_{item + 1}' for item in range(self.no_of_persons)]
+        self.persons = [f'Person_{item + 1}' for person in range(self.no_of_persons)]
 
         '''
         Calculates probability of a response in each category
