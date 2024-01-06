@@ -807,6 +807,7 @@ class SLM(Rasch):
             mat_pow += 1
 
             if mat_pow == matrix_power + 5:
+                mat += constant
                 break
 
         self.diffs = self.priority_vector(mat, method=method, log_lik_tol=log_lik_tol)
@@ -2501,6 +2502,7 @@ class PCM(Rasch):
             mat_pow += 1
 
             if mat_pow == matrix_power + 5:
+                mat += constant
                 break
 
         threshold_vector = self.priority_vector(mat, method=method, log_lik_tol=log_lik_tol, pcm=True)
@@ -4820,6 +4822,7 @@ class RSM(Rasch):
             mat_pow += 1
 
             if mat_pow == matrix_power + 5:
+                mat += constant
                 break
 
         self.diffs = self.priority_vector(mat, method=method, log_lik_tol=log_lik_tol)
@@ -7241,6 +7244,7 @@ class MFRM(Rasch):
             mat_pow += 1
 
             if mat_pow == matrix_power + 5:
+                mat += constant
                 break
 
         self.diffs = self.priority_vector(mat, method=method, log_lik_tol=log_lik_tol)
@@ -7281,6 +7285,7 @@ class MFRM(Rasch):
             mat_pow += 1
 
             if mat_pow == matrix_power + 5:
+                mat += constant
                 break
 
         self.severities_global = self.priority_vector(mat, method=method, log_lik_tol=log_lik_tol, raters=True)
@@ -7322,6 +7327,7 @@ class MFRM(Rasch):
             mat_pow += 1
 
             if mat_pow == matrix_power + 5:
+                mat += constant
                 break
         rater_element = self.priority_vector(mat, method=method, log_lik_tol=log_lik_tol, raters=True)
 
@@ -7388,6 +7394,7 @@ class MFRM(Rasch):
             mat_pow += 1
 
             if mat_pow == matrix_power + 5:
+                mat += constant
                 break
 
         raters = self.priority_vector(mat, method=method, log_lik_tol=log_lik_tol, raters=True)
@@ -7453,6 +7460,7 @@ class MFRM(Rasch):
             mat_pow += 1
 
             if mat_pow == matrix_power + 5:
+                mat += constant
                 break
 
         raters = self.priority_vector(mat, method=method, log_lik_tol=log_lik_tol, raters=True)
@@ -7749,7 +7757,7 @@ class MFRM(Rasch):
             threshold_low = None
             threshold_high = None
 
-        cat_widths = {cat + 1: threshold_ests[:,cat + 2] - threshold_ests[:,cat + 1]
+        cat_widths = {cat + 1: threshold_ests[:,cat + 2] - threshold_ests[:, cat + 1]
                       for cat in range(self.max_score - 1)}
         cat_width_se = {cat: np.nanstd(estimates)
                         for cat, estimates in cat_widths.items()}
@@ -7781,7 +7789,7 @@ class MFRM(Rasch):
             rater_low = None
             rater_high = None
 
-        if anchor_raters != []:
+        if anchor_raters is not None:
             self.anchor_item_bootstrap_global = item_ests
             self.anchor_item_se_global = item_se
             self.anchor_item_low_global = item_low
@@ -7934,7 +7942,7 @@ class MFRM(Rasch):
             rater_low = None
             rater_high = None
 
-        if anchor_raters != []:
+        if anchor_raters is not None:
             self.anchor_item_bootstrap_items = item_ests
             self.anchor_item_se_items = item_se
             self.anchor_item_low_items = item_low
@@ -8045,7 +8053,7 @@ class MFRM(Rasch):
             threshold_low = None
             threshold_high = None
 
-        cat_widths = {cat + 1: threshold_ests[:,cat + 2] - threshold_ests[:,cat + 1]
+        cat_widths = {cat + 1: threshold_ests[:,cat + 2] - threshold_ests[:, cat + 1]
                       for cat in range(self.max_score - 1)}
         cat_width_se = {cat: np.nanstd(estimates)
                         for cat, estimates in cat_widths.items()}
@@ -8074,7 +8082,7 @@ class MFRM(Rasch):
             rater_low = None
             rater_high = None
 
-        if anchor_raters != []:
+        if anchor_raters is not None:
             self.anchor_item_bootstrap_thresholds = item_ests
             self.anchor_item_se_thresholds = item_se
             self.anchor_item_low_thresholds = item_low
@@ -8292,7 +8300,7 @@ class MFRM(Rasch):
             rater_high_marginal_items = None
             rater_high_marginal_thresholds = None
 
-        if anchor_raters != []:
+        if anchor_raters is not None:
             self.anchor_item_bootstrap_matrix = item_ests
             self.anchor_item_se_matrix = item_se
             self.anchor_item_low_matrix = item_low
@@ -8714,6 +8722,7 @@ class MFRM(Rasch):
                                       tolerance=tolerance, max_iters=max_iters,
                                       ext_score_adjustment=ext_score_adjustment)
                      for person in self.persons]
+
         estimates = {person: estimate for person, estimate in zip(self.persons, estimates)}
 
         if anchor:
@@ -9324,10 +9333,14 @@ class MFRM(Rasch):
             thresholds = self.thresholds
             severities = self.severities_thresholds
 
-        difficulties = difficulties.loc[items]
-        severities = severities[raters]
+        if isinstance(raters, list):
+            person_data = [self.dataframe[items].xs(rater).loc[person].to_numpy()
+                           for rater in raters]
+            person_data = np.array(person_data)
 
-        person_data = self.dataframe[items].loc[raters].xs(person, level=1, drop_level=False).to_numpy()
+        else:
+            person_data = self.dataframe[items].xs(raters).loc[person].to_numpy()
+
         person_filter = (person_data + 1) / (person_data + 1)
         score = np.nansum(person_data)
 
@@ -9380,10 +9393,8 @@ class MFRM(Rasch):
 
     def person_abils_thresholds(self,
                                 anchor=False,
-                                difficulties=None,
-                                thresholds=None,
+                                items=None,
                                 raters=None,
-                                severities=None,
                                 warm_corr=True,
                                 tolerance=0.0000001,
                                 max_iters=100,
@@ -9395,31 +9406,19 @@ class MFRM(Rasch):
         '''
 
         if items is None:
-            items = self.dataframe.columns
+            items = self.dataframe.columns.tolist()
 
         if raters is None:
-            raters = self.raters
+            raters = self.raters.tolist()
 
         if anchor:
-            if hasattr(self, 'anchor_diffs_thresholds'):
-                difficulties = self.anchor_diffs_thresholds
-                thresholds = self.anchor_thresholds_thresholds
-                severities = self.anchor_severities_thresholds
-
-            else:
+            if hasattr(self, 'anchor_diffs_thresholds') == False:
                 print('Anchor calibration required')
                 return
 
-        else:
-            difficulties = self.diffs
-            thresholds = self.thresholds
-            severities = self.severities_thresholds
-
-        difficulties = difficulties.loc[items]
-        severities = severities[raters]
-
-        estimates = [self.abil_thresholds(person, items=items, raters=raters, warm_corr=warm_corr, tolerance=tolerance,
-                                          max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
+        estimates = [self.abil_thresholds(person, anchor=anchor, items=items, raters=raters, warm_corr=warm_corr,
+                                          tolerance=tolerance, max_iters=max_iters,
+                                          ext_score_adjustment=ext_score_adjustment)
                      for person in self.persons]
 
         estimates = {person: estimate for person, estimate in zip(self.persons, estimates)}
@@ -9441,10 +9440,10 @@ class MFRM(Rasch):
                               ext_score_adjustment=0.5):
 
         if items is None:
-            items = self.dataframe.columns
+            items = self.dataframe.columns.tolist()
 
-        if raters is None:
-            raters = self.raters
+        if raters == 'all':
+            raters = self.raters.tolist()
 
         if anchor:
             if hasattr(self, 'anchor_diffs_thresholds'):
@@ -9461,7 +9460,18 @@ class MFRM(Rasch):
             thresholds = self.thresholds
             severities = self.severities_thresholds
 
-        person_filter = np.array([[1 for item in items] for rater in raters])
+        if isinstance(raters, str):
+            raters = [raters]
+
+        if isinstance(items, str):
+            items = [items]
+
+        if raters is None:
+            person_filter = np.array([1 for item in items])
+
+        else:
+            person_filter = np.array([[1 for item in items]
+                                      for rater in raters])
 
         ext_score = person_filter.sum() * self.max_score
 
@@ -9478,15 +9488,27 @@ class MFRM(Rasch):
 
         while (abs(change) > tolerance) & (iters <= max_iters):
 
-            exp_list = [self.exp_score_thresholds(estimate, item, difficulties, rater, severities, thresholds)
-                        for item in difficulties.keys()
-                        for rater in raters]
+            if raters is None:
+                dummy_sevs = {'dummy_rater': np.zeros(self.max_score + 1)}
+
+                exp_list = [self.exp_score_thresholds(estimate, item, difficulties, 'dummy_rater',
+                                                      dummy_sevs, thresholds)
+                            for item in items]
+
+                info_list = [self.variance_thresholds(estimate, item, difficulties, 'dummy_rater',
+                                                      dummy_sevs, thresholds)
+                             for item in items]
+
+            else:
+                exp_list = [self.exp_score_thresholds(estimate, item, difficulties, rater, severities, thresholds)
+                            for item in items for rater in raters]
+
+                info_list = [self.variance_thresholds(estimate, item, difficulties, rater, severities, thresholds)
+                             for item in items for rater in raters]
+
             exp_list = np.array(exp_list)
             result = exp_list.sum()
 
-            info_list = [self.variance_thresholds(estimate, item, difficulties, rater, severities, thresholds)
-                         for item in difficulties.keys()
-                         for rater in raters]
             info_list = np.array(info_list)
             info = info_list.sum()
 
@@ -9505,58 +9527,37 @@ class MFRM(Rasch):
 
     def abil_lookup_table_thresholds(self,
                                      anchor=False,
-                                     raters=[],
-                                     difficulties=None,
-                                     thresholds=None,
-                                     severities=None,
+                                     items=None,
+                                     raters=None,
                                      warm_corr=True,
                                      tolerance=0.0000001,
                                      max_iters=100,
                                      ext_score_adjustment=0.5):
 
-        if anchor:
-            if hasattr(self, 'anchor_diffs_thresholds') == False:
-                print('Anchor calibration required')
-                return None
+        if items is None:
+            if raters is None:
+                person_filter = np.array([1 for item in self.dataframe.columns])
 
-        if (raters == []) | (raters == 'none'):
-            raters = ['dummy_rater']
-            severities = None
-
-        if raters == 'all':
-            raters = list(self.raters)
-
-            if anchor:
-                severities = self.anchor_severities_thresholds
             else:
-                severities = self.severities_thresholds
+                person_filter = np.array([[1 for item in self.dataframe.columns]
+                                          for rater in raters])
 
-        if difficulties is None:
-            difficulties = self.diffs
+        else:
+            if raters is None:
+                person_filter = np.array([1 for item in items])
 
-        if thresholds is None:
-            thresholds = self.thresholds
-
-        if severities is None:
-            if raters == ['dummy_rater']:
-                severities = {'dummy_rater': np.zeros(self.max_score + 1)}
             else:
+                person_filter = np.array([[1 for item in items]
+                                          for rater in raters])
 
-                if anchor:
-                    severities = self.anchor_severities_thresholds
-                else:
-                    severities = self.severities_thresholds
+        ext_score = person_filter.sum() * self.max_score
 
-        ext_score = len(difficulties) * self.max_score
-
-        abil_table = {score: self.score_abil_thresholds(score, anchor=anchor, raters=raters, difficulties=difficulties,
-                                                        thresholds=thresholds, severities=severities, warm_corr=warm_corr,
-                                                        tolerance=tolerance, max_iters=max_iters,
+        abil_table = {score: self.score_abil_thresholds(score, anchor=anchor, items=items, raters=raters,
+                                                        warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                                         ext_score_adjustment=ext_score_adjustment)
                       for score in range(ext_score + 1)}
-        abil_table = pd.Series(abil_table)
 
-        self.abil_table_thresholds = abil_table
+        self.abil_table_thresholds = pd.Series(abil_table)
 
     def warm_thresholds(self,
                         estimate,
@@ -9659,10 +9660,10 @@ class MFRM(Rasch):
                     ext_score_adjustment=0.5):
 
         if items is None:
-            items = self.dataframe.columns
+            items = self.dataframe.columns.tolist()
 
         if raters is None:
-            raters = self.raters
+            raters = self.raters.tolist()
 
         if anchor:
             if hasattr(self, 'anchor_diffs_global'):
@@ -9679,10 +9680,14 @@ class MFRM(Rasch):
             thresholds = self.thresholds
             severities = self.severities_matrix
 
-        difficulties = difficulties.loc[items]
-        severities = severities[raters]
+        if isinstance(raters, list):
+            person_data = [self.dataframe[items].xs(rater).loc[person].to_numpy()
+                           for rater in raters]
+            person_data = np.array(person_data)
 
-        person_data = self.dataframe[items].loc[raters].xs(person, level=1, drop_level=False).to_numpy()
+        else:
+            person_data = self.dataframe[items].xs(raters).loc[person].to_numpy()
+
         person_filter = (person_data + 1) / (person_data + 1)
         score = np.nansum(person_data)
 
@@ -9746,31 +9751,19 @@ class MFRM(Rasch):
         '''
 
         if items is None:
-            items = self.dataframe.columns
+            items = self.dataframe.columns.tolist()
 
         if raters is None:
-            raters = self.raters
+            raters = self.raters.tolist()
 
         if anchor:
-            if hasattr(self, 'anchor_diffs_matrix'):
-                difficulties = self.anchor_diffs_matrix
-                thresholds = self.anchor_thresholds_matrix
-                severities = self.anchor_severities_matrix
-
-            else:
+            if hasattr(self, 'anchor_diffs_matrix') == False:
                 print('Anchor calibration required')
                 return
 
-        else:
-            difficulties = self.diffs
-            thresholds = self.thresholds
-            severities = self.severities_matrix
-
-            difficulties = difficulties.loc[items]
-            severities = severities[raters]
-
-        estimates = [self.abil_matrix(person, items=items, raters=raters, warm_corr=warm_corr, tolerance=tolerance,
-                                      max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
+        estimates = [self.abil_matrix(person, anchor=anchor, items=items, raters=raters, warm_corr=warm_corr,
+                                      tolerance=tolerance, max_iters=max_iters,
+                                      ext_score_adjustment=ext_score_adjustment)
                      for person in self.persons]
 
         estimates = {person: estimate for person, estimate in zip(self.persons, estimates)}
@@ -9792,10 +9785,10 @@ class MFRM(Rasch):
                           ext_score_adjustment=0.5):
 
         if items is None:
-            items = self.dataframe.columns
+            items = self.dataframe.columns.tolist()
 
-        if raters is None:
-            raters = self.raters
+        if raters == 'all':
+            raters = self.raters.tolist()
 
         if anchor:
             if hasattr(self, 'anchor_diffs_matrix'):
@@ -9812,7 +9805,18 @@ class MFRM(Rasch):
             thresholds = self.thresholds
             severities = self.severities_matrix
 
-        person_filter = np.array([[1 for item in items] for rater in raters])
+        if isinstance(raters, str):
+            raters = [raters]
+
+        if isinstance(items, str):
+            items = [items]
+
+        if raters is None:
+            person_filter = np.array([1 for item in items])
+
+        else:
+            person_filter = np.array([[1 for item in items]
+                                      for rater in raters])
 
         ext_score = person_filter.sum() * self.max_score
 
@@ -9856,59 +9860,37 @@ class MFRM(Rasch):
 
     def abil_lookup_table_matrix(self,
                                  anchor=False,
-                                 raters=[],
-                                 difficulties=None,
-                                 thresholds=None,
-                                 severities=None,
+                                 items=None,
+                                 raters=None,
                                  warm_corr=True,
                                  tolerance=0.0000001,
                                  max_iters=100,
                                  ext_score_adjustment=0.5):
 
-        if anchor:
-            if hasattr(self, 'anchor_diffs_matrix') == False:
-                print('Anchor calibration required')
-                return None
+        if items is None:
+            if raters is None:
+                person_filter = np.array([1 for item in self.dataframe.columns])
 
-        if (raters == []) | (raters == 'none'):
-            raters = ['dummy_rater']
-            severities = None
-
-        if raters == 'all':
-            raters = list(self.raters)
-
-            if anchor:
-                severities = self.anchor_severities_matrix
             else:
-                severities = self.severities_matrix
+                person_filter = np.array([[1 for item in self.dataframe.columns]
+                                          for rater in raters])
 
-        if difficulties is None:
-            difficulties = self.diffs
+        else:
+            if raters is None:
+                person_filter = np.array([1 for item in items])
 
-        if thresholds is None:
-            thresholds = self.thresholds
-
-        if severities is None:
-            if raters == ['dummy_rater']:
-                severities = {'dummy_rater': {item: np.zeros(self.max_score + 1)
-                							  for item in self.dataframe.columns}}
             else:
+                person_filter = np.array([[1 for item in items]
+                                          for rater in raters])
 
-                if anchor:
-                    severities = self.anchor_severities_matrix
-                else:
-                    severities = self.severities_matrix
+        ext_score = person_filter.sum() * self.max_score
 
-        ext_score = len(difficulties) * self.max_score
-
-        abil_table = {score: self.score_abil_matrix(score, anchor=anchor, raters=raters, difficulties=difficulties,
-                                                    thresholds=thresholds, severities=severities, warm_corr=warm_corr,
-                                                    tolerance=tolerance, max_iters=max_iters,
+        abil_table = {score: self.score_abil_matrix(score, anchor=anchor, items=items, raters=raters,
+                                                    warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                                     ext_score_adjustment=ext_score_adjustment)
                       for score in range(ext_score + 1)}
-        abil_table = pd.Series(abil_table)
 
-        self.abil_table_matrix = abil_table
+        self.abil_table_matrix = pd.Series(abil_table)
 
     def warm_matrix(self,
                     estimate,
@@ -10069,6 +10051,8 @@ class MFRM(Rasch):
                              ext_score_adjustment=0.5,
                              method='cos',
                              constant=0.1,
+                             matrix_power=3,
+                             log_lik_tol=0.000001,
                              no_of_samples=100,
                              interval=None):
 
@@ -10081,27 +10065,32 @@ class MFRM(Rasch):
 
         if anchor_raters is not None:
             if (hasattr(self, 'anchor_severites_global') == False) or (self.anchor_raters_global != anchor_raters):
-                self.calibrate_global_anchor(anchor_raters, constant=constant, method=method)
+                self.calibrate_global_anchor(anchor_raters, constant=constant, method=method, matrix_power=matrix_power,
+                                             log_lik_tol=log_lik_tol)
                 self.std_errors_global(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                       constant=constant, method=method)
+                                       constant=constant, method=method, matrix_power=matrix_power,
+                                       log_lik_tol=log_lik_tol)
 
             elif (self.anchor_item_low_global is None) and (interval is not None):
                 self.std_errors_global(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                       constant=constant, method=method)
+                                       constant=constant, method=method, matrix_power=matrix_power,
+                                       log_lik_tol=log_lik_tol)
+
         else:
-            if hasattr(self, 'anchor_item_se_global') == False:
+            if hasattr(self, 'item_se_global') == False:
                 self.std_errors_global(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                       constant=constant, method=method)
+                                       constant=constant, method=method, matrix_power=matrix_power,
+                                       log_lik_tol=log_lik_tol)
 
             elif (self.item_low is None) and (interval is not None):
                 self.std_errors_global(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                       constant=constant, method=method)
+                                       constant=constant, method=method, matrix_power=matrix_power,
+                                       log_lik_tol=log_lik_tol)
 
         if hasattr(self, 'item_outfit_ms_global') == False:
-            self.item_fit_statistics_global(anchor_raters=anchor_raters, warm_corr=warm_corr, tolerance=tolerance,
-                                            max_iters=max_iters, ext_score_adjustment=ext_score_adjustment,
-                                            method=method, constant=constant, no_of_samples=no_of_samples,
-                                            interval=interval)
+            self.item_fit_statistics_global(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
+                                            ext_score_adjustment=ext_score_adjustment, method=method,
+                                            constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         if anchor_raters is not None:
             difficulties = self.anchor_diffs_global
@@ -10154,6 +10143,8 @@ class MFRM(Rasch):
                                   ext_score_adjustment=0.5,
                                   method='cos',
                                   constant=0.1,
+                                  matrix_power=3,
+                                  log_lik_tol=0.000001,
                                   no_of_samples=100,
                                   interval=None):
 
@@ -10167,26 +10158,32 @@ class MFRM(Rasch):
 
         if anchor_raters is not None:
             if (hasattr(self, 'anchor_severites_global') == False) or (self.anchor_raters_global != anchor_raters):
-                self.calibrate_global_anchor(anchor_raters, constant=constant, method=method)
+                self.calibrate_global_anchor(anchor_raters, constant=constant, method=method, matrix_power=matrix_power,
+                                             log_lik_tol=log_lik_tol)
                 self.std_errors_global(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                       constant=constant, method=method)
+                                       constant=constant, method=method, matrix_power=matrix_power,
+                                       log_lik_tol=log_lik_tol)
 
             elif (self.anchor_item_low_global is None) and (interval is not None):
                 self.std_errors_global(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                       constant=constant, method=method)
+                                       constant=constant, method=method, matrix_power=matrix_power,
+                                       log_lik_tol=log_lik_tol)
         else:
-            if hasattr(self, 'anchor_item_se_global') == False:
+            if hasattr(self, 'item_se_global') == False:
                 self.std_errors_global(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                       constant=constant, method=method)
+                                       constant=constant, method=method, matrix_power=matrix_power,
+                                       log_lik_tol=log_lik_tol)
 
             elif (self.item_low is None) and (interval is not None):
                 self.std_errors_global(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                       constant=constant, method=method)
+                                       constant=constant, method=method, matrix_power=matrix_power,
+                                       log_lik_tol=log_lik_tol)
 
         if (hasattr(self, 'threshold_outfit_ms_global') == False) or (self.anchor_raters_global != anchor_raters):
             self.threshold_fit_statistics_global(anchor_raters=anchor_raters, warm_corr=warm_corr, tolerance=tolerance,
                                                  max_iters=max_iters, ext_score_adjustment=ext_score_adjustment,
-                                                 method=method, constant=constant)
+                                                 method=method, constant=constant, matrix_power=matrix_power,
+                                                 log_lik_tol=log_lik_tol)
 
         if anchor_raters is not None:
             thresholds = self.anchor_thresholds_global
@@ -10196,7 +10193,12 @@ class MFRM(Rasch):
         self.threshold_stats_global = pd.DataFrame()
 
         self.threshold_stats_global['Estimate'] = thresholds[1:].round(dp)
-        self.threshold_stats_global['SE'] = self.threshold_se_global[1:].round(dp)
+
+        if anchor_raters is not None:
+            self.threshold_stats_global['SE'] = self.anchor_threshold_se_global[1:].round(dp)
+
+        else:
+            self.threshold_stats_global['SE'] = self.threshold_se_global[1:].round(dp)
 
         if interval is not None:
             if anchor_raters is not None:
@@ -10234,6 +10236,8 @@ class MFRM(Rasch):
                               ext_score_adjustment=0.5,
                               method='cos',
                               constant=0.1,
+                              matrix_power=3,
+                              log_lik_tol=0.000001,
                               no_of_samples=100,
                               interval=None):
 
@@ -10247,17 +10251,20 @@ class MFRM(Rasch):
             if (hasattr(self, 'anchor_severites_global') == False) or (self.anchor_raters_global != anchor_raters):
                 self.calibrate_global_anchor(anchor_raters, constant=constant, method=method)
                 self.std_errors_global(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                       constant=constant, method=method)
+                                       constant=constant, method=method, matrix_power=matrix_power,
+                                       log_lik_tol=log_lik_tol)
 
         else:
-            if hasattr(self, 'anchor_item_se_global') == False:
+            if hasattr(self, 'item_se_global') == False:
                 self.std_errors_global(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                       constant=constant, method=method)
+                                       constant=constant, method=method, matrix_power=matrix_power,
+                                       log_lik_tol=log_lik_tol)
 
         if (hasattr(self, 'rater_outfit_ms_global') == False) or (self.anchor_raters_global != anchor_raters):
             self.rater_fit_statistics_global(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                              ext_score_adjustment=ext_score_adjustment, method=method,
-                                             constant=constant, no_of_samples=no_of_samples, interval=interval)
+                                             constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol,
+                                             no_of_samples=no_of_samples, interval=interval)
 
         if anchor_raters is not None:
             severities = self.anchor_severities_global
@@ -10305,7 +10312,9 @@ class MFRM(Rasch):
                                max_iters=100,
                                ext_score_adjustment=0.5,
                                method='cos',
-                               constant=0.1):
+                               constant=0.1,
+                               matrix_power=3,
+                               log_lik_tol=0.000001,):
 
         '''
         Produces a person stats dataframe with raw score, ability estimate,
@@ -10314,14 +10323,16 @@ class MFRM(Rasch):
 
         if anchor_raters is not None:
             if (hasattr(self, 'anchor_severites_global') == False) or (self.anchor_raters_global != anchor_raters):
-                self.calibrate_global_anchor(anchor_raters, constant=constant, method=method)
+                self.calibrate_global_anchor(anchor_raters, constant=constant, method=method, matrix_power=matrix_power,
+                                             log_lik_tol=log_lik_tol)
                 self.std_errors_global(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                       constant=constant, method=method)
+                                       constant=constant, method=method, matrix_power=matrix_power,
+                                       log_lik_tol=log_lik_tol)
 
         if hasattr(self, 'person_outfit_ms_global') == False:
             self.person_fit_statistics_global(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                               ext_score_adjustment=ext_score_adjustment, method=method,
-                                              constant=constant)
+                                              constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         if full:
             rsem = True
@@ -10375,12 +10386,14 @@ class MFRM(Rasch):
                              max_iters=100,
                              ext_score_adjustment=0.5,
                              method='cos',
-                             constant=0.1):
+                             constant=0.1,
+                             matrix_power=3,
+                             log_lik_tol=0.000001):
 
         if hasattr(self, 'psi_global') == False:
             self.test_fit_statistics_global(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                             ext_score_adjustment=ext_score_adjustment, method=method,
-                                            constant=constant)
+                                            constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         self.test_stats_global = pd.DataFrame()
 
@@ -10409,31 +10422,38 @@ class MFRM(Rasch):
                           ext_score_adjustment=0.5,
                           method='cos',
                           constant=0.1,
+                          matrix_power=3,
+                          log_lik_tol=0.000001,
                           no_of_samples=100,
                           interval=None):
 
         if hasattr(self, 'item_stats_global') == False:
             self.item_stats_df_global(dp=dp, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                       ext_score_adjustment=ext_score_adjustment, method=method, constant=constant,
+                                      matrix_power=matrix_power, log_lik_tol=log_lik_tol,
                                       no_of_samples=no_of_samples, interval=interval)
 
         if hasattr(self, 'threshold_stats_global') == False:
             self.threshold_stats_df_global(dp=dp, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                            ext_score_adjustment=ext_score_adjustment, method=method, constant=constant,
+                                           matrix_power=matrix_power, log_lik_tol=log_lik_tol,
                                            no_of_samples=no_of_samples, interval=interval)
 
         if hasattr(self, 'rater_stats_global') == False:
             self.rater_stats_df_global(dp=dp, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                        ext_score_adjustment=ext_score_adjustment, method=method, constant=constant,
+                                       matrix_power=matrix_power, log_lik_tol=log_lik_tol,
                                        no_of_samples=no_of_samples, interval=interval)
 
         if hasattr(self, 'person_stats_global') == False:
             self.person_stats_df_global(dp=dp, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
-                                        ext_score_adjustment=ext_score_adjustment, method=method, constant=constant)
+                                        ext_score_adjustment=ext_score_adjustment, method=method, constant=constant,
+                                        matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         if hasattr(self, 'test_stats_global') == False:
             self.test_stats_df_global(dp=dp, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
-                                      ext_score_adjustment=ext_score_adjustment, method=method, constant=constant)
+                                      ext_score_adjustment=ext_score_adjustment, method=method, constant=constant,
+                                      matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         if format == 'xlsx':
 
@@ -10472,6 +10492,8 @@ class MFRM(Rasch):
                             ext_score_adjustment=0.5,
                             method='cos',
                             constant=0.1,
+                            matrix_power=3,
+                            log_lik_tol=0.000001,
                             no_of_samples=100,
                             interval=None):
 
@@ -10486,25 +10508,29 @@ class MFRM(Rasch):
             if (hasattr(self, 'anchor_severites_items') == False) or (self.anchor_raters_items != anchor_raters):
                 self.calibrate_items_anchor(anchor_raters, constant=constant, method=method)
                 self.std_errors_items(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                      constant=constant, method=method)
+                                      constant=constant, method=method, matrix_power=matrix_power,
+                                      log_lik_tol=log_lik_tol)
 
             elif (self.anchor_item_low_items is None) and (interval is not None):
                 self.std_errors_items(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                       constant=constant, method=method)
+                                      constant=constant, method=method, matrix_power=matrix_power,
+                                      log_lik_tol=log_lik_tol)
 
         else:
-            if hasattr(self, 'anchor_item_se_items') == False:
+            if hasattr(self, 'item_se_items') == False:
                 self.std_errors_items(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                      constant=constant, method=method)
+                                      constant=constant, method=method, matrix_power=matrix_power,
+                                      log_lik_tol=log_lik_tol)
 
             elif (self.item_low is None) and (interval is not None):
                 self.std_errors_items(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                      constant=constant, method=method)
+                                      constant=constant, method=method, matrix_power=matrix_power,
+                                      log_lik_tol=log_lik_tol)
 
         if hasattr(self, 'item_outfit_ms_items') == False:
-            self.item_fit_statistics_items(anchor_raters=anchor_raters, warm_corr=warm_corr, tolerance=tolerance,
+            self.item_fit_statistics_items(warm_corr=warm_corr, tolerance=tolerance,
                                            max_iters=max_iters, ext_score_adjustment=ext_score_adjustment, method=method,
-                                           constant=constant, no_of_samples=no_of_samples, interval=interval)
+                                           constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         if anchor_raters is not None:
             difficulties = self.anchor_diffs_items
@@ -10554,6 +10580,8 @@ class MFRM(Rasch):
                                  ext_score_adjustment=0.5,
                                  method='cos',
                                  constant=0.1,
+                                 matrix_power=3,
+                                 log_lik_tol=0.000001,
                                  no_of_samples=100,
                                  interval=None):
 
@@ -10567,22 +10595,27 @@ class MFRM(Rasch):
 
         if anchor_raters is not None:
             if (hasattr(self, 'anchor_severites_items') == False) or (self.anchor_raters_items != anchor_raters):
-                self.calibrate_items_anchor(anchor_raters, constant=constant, method=method)
+                self.calibrate_items_anchor(anchor_raters, constant=constant, method=method, matrix_power=matrix_power,
+                                            log_lik_tol=log_lik_tol)
                 self.std_errors_items(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                      constant=constant, method=method)
+                                      constant=constant, method=method, matrix_power=matrix_power,
+                                      log_lik_tol=log_lik_tol)
 
             elif (self.anchor_item_low_items is None) and (interval is not None):
                 self.std_errors_items(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                       constant=constant, method=method)
+                                      constant=constant, method=method, matrix_power=matrix_power,
+                                      log_lik_tol=log_lik_tol)
 
         else:
-            if hasattr(self, 'anchor_item_se_items') == False:
+            if hasattr(self, 'item_se_items') == False:
                 self.std_errors_items(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                      constant=constant, method=method)
+                                      constant=constant, method=method, matrix_power=matrix_power,
+                                      log_lik_tol=log_lik_tol)
 
             elif (self.item_low is None) and (interval is not None):
                 self.std_errors_items(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                      constant=constant, method=method)
+                                      constant=constant, method=method, matrix_power=matrix_power,
+                                      log_lik_tol=log_lik_tol)
 
         if hasattr(self, 'threshold_outfit_ms_items') == False:
             self.threshold_fit_statistics_items(anchor_raters=anchor_raters, warm_corr=warm_corr, tolerance=tolerance,
@@ -10597,10 +10630,15 @@ class MFRM(Rasch):
         self.threshold_stats_items = pd.DataFrame()
 
         self.threshold_stats_items['Estimate'] = thresholds[1:].round(dp)
-        self.threshold_stats_items['SE'] = self.threshold_se_items[1:].round(dp)
+
+        if anchor_raters is not None:
+            self.threshold_stats_items['SE'] = self.anchor_threshold_se_items[1:].round(dp)
+
+        else:
+            self.threshold_stats_items['SE'] = self.threshold_se_items[1:].round(dp)
 
         if interval is not None:
-            if anchor_raters != []:
+            if anchor_raters is not None:
                 self.threshold_stats_items[f'{round((1 - interval) * 50, 1)}%'] = self.anchor_threshold_low_items[1:].round(dp)
                 self.threshold_stats_items[f'{round((1 + interval) * 50, 1)}%'] = self.anchor_threshold_high_items[1:].round(dp)
 
@@ -10635,6 +10673,8 @@ class MFRM(Rasch):
                              ext_score_adjustment=0.5,
                              method='cos',
                              constant=0.1,
+                             matrix_power=3,
+                             log_lik_tol=0.000001,
                              no_of_samples=100,
                              interval=None):
 
@@ -10648,17 +10688,20 @@ class MFRM(Rasch):
             if (hasattr(self, 'anchor_severites_items') == False) or (self.anchor_raters_items != anchor_raters):
                 self.calibrate_items_anchor(anchor_raters, constant=constant, method=method)
                 self.std_errors_items(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                      constant=constant, method=method)
+                                      constant=constant, method=method, matrix_power=matrix_power,
+                                      log_lik_tol=log_lik_tol)
 
         else:
-            if hasattr(self, 'anchor_item_se_items') == False:
+            if hasattr(self, 'item_se_items') == False:
                 self.std_errors_items(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                      constant=constant, method=method)
+                                      constant=constant, method=method, matrix_power=matrix_power,
+                                      log_lik_tol=log_lik_tol)
 
         if hasattr(self, 'rater_outfit_ms_items') == False:
             self.rater_fit_statistics_items(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                             ext_score_adjustment=ext_score_adjustment, method=method,
-                                            constant=constant, no_of_samples=no_of_samples, interval=interval)
+                                            constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol,
+                                            no_of_samples=no_of_samples, interval=interval)
 
         if anchor_raters is not None:
             severities = self.anchor_severities_items
@@ -10718,7 +10761,9 @@ class MFRM(Rasch):
                               max_iters=100,
                               ext_score_adjustment=0.5,
                               method='cos',
-                              constant=0.1):
+                              constant=0.1,
+                              matrix_power=3,
+                              log_lik_tol=0.000001,):
 
         '''
         Produces a person stats dataframe with raw score, ability estimate,
@@ -10728,7 +10773,7 @@ class MFRM(Rasch):
         if hasattr(self, 'person_outfit_ms_items') == False:
             self.person_fit_statistics_items(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                              ext_score_adjustment=ext_score_adjustment, method=method,
-                                             constant=constant)
+                                             constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         if full:
             rsem = True
@@ -10782,11 +10827,14 @@ class MFRM(Rasch):
                             max_iters=100,
                             ext_score_adjustment=0.5,
                             method='cos',
-                            constant=0.1):
+                            constant=0.1,
+                            matrix_power=3,
+                            log_lik_tol=0.000001):
 
         if hasattr(self, 'psi_items') == False:
             self.test_fit_statistics_items(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
-                                           ext_score_adjustment=ext_score_adjustment, method=method, constant=constant)
+                                           ext_score_adjustment=ext_score_adjustment, method=method, constant=constant,
+                                           matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         self.test_stats_items = pd.DataFrame()
 
@@ -10815,31 +10863,38 @@ class MFRM(Rasch):
                          ext_score_adjustment=0.5,
                          method='cos',
                          constant=0.1,
+                         matrix_power=3,
+                         log_lik_tol=0.000001,
                          no_of_samples=100,
                          interval=None):
 
         if hasattr(self, 'item_stats_items') == False:
             self.item_stats_df_items(dp=dp, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                      ext_score_adjustment=ext_score_adjustment, method=method, constant=constant,
+                                     matrix_power=matrix_power, log_lik_tol=log_lik_tol,
                                      no_of_samples=no_of_samples, interval=interval)
 
         if hasattr(self, 'threshold_stats_items') == False:
             self.threshold_stats_df_items(dp=dp, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                           ext_score_adjustment=ext_score_adjustment, method=method, constant=constant,
+                                          matrix_power=matrix_power, log_lik_tol=log_lik_tol,
                                           no_of_samples=no_of_samples, interval=interval)
 
         if hasattr(self, 'rater_stats_items') == False:
             self.rater_stats_df_items(dp=dp, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                       ext_score_adjustment=ext_score_adjustment, method=method, constant=constant,
+                                      matrix_power=matrix_power, log_lik_tol=log_lik_tol,
                                       no_of_samples=no_of_samples, interval=interval)
 
         if hasattr(self, 'person_stats_items') == False:
             self.person_stats_df_items(dp=dp, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
-                                       ext_score_adjustment=ext_score_adjustment, method=method, constant=constant)
+                                       ext_score_adjustment=ext_score_adjustment, method=method, constant=constant,
+                                       matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         if hasattr(self, 'test_stats_items') == False:
             self.test_stats_df_items(dp=dp, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
-                                     ext_score_adjustment=ext_score_adjustment, method=method, constant=constant)
+                                     ext_score_adjustment=ext_score_adjustment, method=method, constant=constant,
+                                     matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         if format == 'xlsx':
 
@@ -10878,6 +10933,8 @@ class MFRM(Rasch):
                                  ext_score_adjustment=0.5,
                                  method='cos',
                                  constant=0.1,
+                                 matrix_power=3,
+                                 log_lik_tol=0.000001,
                                  no_of_samples=100,
                                  interval=None):
 
@@ -10889,29 +10946,36 @@ class MFRM(Rasch):
                 interval = 0.95
 
         if anchor_raters is not None:
-            if (hasattr(self, 'anchor_severites_thresholds') == False) or (self.anchor_raters_thresholds != anchor_raters):
-                self.calibrate_thresholds_anchor(anchor_raters, constant=constant, method=method)
+            if ((hasattr(self, 'anchor_severites_thresholds') == False) or
+                (self.anchor_raters_thresholds != anchor_raters)):
+
+                self.calibrate_thresholds_anchor(anchor_raters, constant=constant, method=method,
+                                                 matrix_power=matrix_power, log_lik_tol=log_lik_tol)
                 self.std_errors_thresholds(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                           constant=constant, method=method)
+                                           constant=constant, method=method, matrix_power=matrix_power,
+                                           log_lik_tol=log_lik_tol)
 
             elif (self.anchor_item_low_thresholds is None) and (interval is not None):
                 self.std_errors_thresholds(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                           constant=constant, method=method)
+                                           constant=constant, method=method, matrix_power=matrix_power,
+                                           log_lik_tol=log_lik_tol)
 
         else:
-            if hasattr(self, 'anchor_item_se_thresholds') == False:
+            if hasattr(self, 'item_se_thresholds') == False:
                 self.std_errors_thresholds(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                           constant=constant, method=method)
+                                           constant=constant, method=method, matrix_power=matrix_power,
+                                           log_lik_tol=log_lik_tol)
 
             elif (self.item_low is None) and (interval is not None):
                 self.std_errors_thresholds(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                           constant=constant, method=method)
+                                           constant=constant, method=method, matrix_power=matrix_power,
+                                           log_lik_tol=log_lik_tol)
 
         if hasattr(self, 'item_outfit_ms_thresholds') == False:
-            self.item_fit_statistics_thresholds(anchor_raters=anchor_raters, warm_corr=warm_corr, tolerance=tolerance,
+            self.item_fit_statistics_thresholds(warm_corr=warm_corr, tolerance=tolerance,
                                                 max_iters=max_iters, ext_score_adjustment=ext_score_adjustment,
-                                                method=method, constant=constant, no_of_samples=no_of_samples,
-                                                interval=interval)
+                                                method=method, constant=constant, matrix_power=matrix_power,
+                                                log_lik_tol=log_lik_tol)
 
         if anchor_raters is not None:
             difficulties = self.anchor_diffs_thresholds
@@ -10962,6 +11026,8 @@ class MFRM(Rasch):
                                       ext_score_adjustment=0.5,
                                       method='cos',
                                       constant=0.1,
+                                      matrix_power=3,
+                                      log_lik_tol=0.000001,
                                       no_of_samples=100,
                                       interval=None):
 
@@ -10975,28 +11041,32 @@ class MFRM(Rasch):
 
         if anchor_raters is not None:
             if (hasattr(self, 'anchor_severites_thresholds') == False) or (self.anchor_raters_thresholds != anchor_raters):
-                self.calibrate_thresholds_anchor(anchor_raters, constant=constant, method=method)
+                self.calibrate_thresholds_anchor(anchor_raters, constant=constant, method=method, matrix_power=matrix_power,
+                                                 log_lik_tol=log_lik_tol)
                 self.std_errors_thresholds(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                           constant=constant, method=method)
+                                           constant=constant, method=method, matrix_power=matrix_power,
+                                           log_lik_tol=log_lik_tol)
 
             elif (self.anchor_item_low_thresholds is None) and (interval is not None):
                 self.std_errors_thresholds(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                           constant=constant, method=method)
-
+                                           constant=constant, method=method, matrix_power=matrix_power,
+                                           log_lik_tol=log_lik_tol)
+                
         else:
-            if hasattr(self, 'anchor_item_se_thresholds') == False:
+            if hasattr(self, 'item_se_thresholds') == False:
                 self.std_errors_thresholds(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                           constant=constant, method=method)
+                                           constant=constant, method=method, matrix_power=matrix_power,
+                                           log_lik_tol=log_lik_tol)
 
             elif (self.item_low is None) and (interval is not None):
                 self.std_errors_thresholds(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                           constant=constant, method=method)
+                                           constant=constant, method=method, matrix_power=matrix_power,
+                                           log_lik_tol=log_lik_tol)
 
         if hasattr(self, 'threshold_outfit_ms_thresholds') == False:
-            self.threshold_fit_statistics_thresholds(anchor_raters=anchor_raters, warm_corr=warm_corr,
-                                                     tolerance=tolerance, max_iters=max_iters,
-                                                     ext_score_adjustment=ext_score_adjustment, method=method,
-                                                     constant=constant)
+            self.threshold_fit_statistics_thresholds(anchor_raters=anchor_raters, warm_corr=warm_corr, tolerance=tolerance,
+                                                     max_iters=max_iters, ext_score_adjustment=ext_score_adjustment,
+                                                     method=method, constant=constant)
 
         if anchor_raters is not None:
             thresholds = self.anchor_thresholds_thresholds
@@ -11006,10 +11076,15 @@ class MFRM(Rasch):
         self.threshold_stats_thresholds = pd.DataFrame()
 
         self.threshold_stats_thresholds['Estimate'] = thresholds[1:].round(dp)
-        self.threshold_stats_thresholds['SE'] = self.threshold_se_thresholds[1:].round(dp)
+
+        if anchor_raters is not None:
+            self.threshold_stats_thresholds['SE'] = self.anchor_threshold_se_thresholds[1:].round(dp)
+
+        else:
+            self.threshold_stats_thresholds['SE'] = self.threshold_se_thresholds[1:].round(dp)
 
         if interval is not None:
-            if anchor_raters != []:
+            if anchor_raters is not None:
                 self.threshold_stats_thresholds[f'{round((1 - interval) * 50, 1)}%'] = self.anchor_threshold_low_thresholds[1:].round(dp)
                 self.threshold_stats_thresholds[f'{round((1 + interval) * 50, 1)}%'] = self.anchor_threshold_high_thresholds[1:].round(dp)
 
@@ -11044,6 +11119,8 @@ class MFRM(Rasch):
                                   ext_score_adjustment=0.5,
                                   method='cos',
                                   constant=0.1,
+                                  matrix_power=3,
+                                  log_lik_tol=0.000001,
                                   no_of_samples=100,
                                   interval=None):
 
@@ -11054,20 +11131,26 @@ class MFRM(Rasch):
                 interval = 0.95
 
         if anchor_raters is not None:
-            if (hasattr(self, 'anchor_severites_thresholds') == False) or (self.anchor_raters_thresholds != anchor_raters):
-                self.calibrate_thresholds_anchor(anchor_raters, constant=constant, method=method)
+            if ((hasattr(self, 'anchor_severites_thresholds') == False) or
+                (self.anchor_raters_thresholds != anchor_raters)):
+
+                self.calibrate_thresholds_anchor(anchor_raters, constant=constant, method=method,
+                                                 matrix_power=matrix_power, log_lik_tol=log_lik_tol)
                 self.std_errors_thresholds(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                           constant=constant, method=method)
+                                           constant=constant, method=method, matrix_power=matrix_power,
+                                           log_lik_tol=log_lik_tol)
 
         else:
-            if hasattr(self, 'anchor_item_se_thresholds') == False:
+            if hasattr(self, 'item_se_thresholds') == False:
                 self.std_errors_thresholds(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                           constant=constant, method=method)
+                                           constant=constant, method=method, matrix_power=matrix_power,
+                                           log_lik_tol=log_lik_tol)
 
         if hasattr(self, 'rater_outfit_ms_thresholds') == False:
             self.rater_fit_statistics_thresholds(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                                  ext_score_adjustment=ext_score_adjustment, method=method,
-                                                 constant=constant, no_of_samples=no_of_samples, interval=interval)
+                                                 constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol,
+                                                 no_of_samples=no_of_samples, interval=interval)
 
         if anchor_raters is not None:
             severities = self.anchor_severities_thresholds
@@ -11128,7 +11211,9 @@ class MFRM(Rasch):
                                    max_iters=100,
                                    ext_score_adjustment=0.5,
                                    method='cos',
-                                   constant=0.1):
+                                   constant=0.1,
+                                   matrix_power=3,
+                                   log_lik_tol=0.000001):
 
         '''
         Produces a person stats dataframe with raw score, ability estimate,
@@ -11138,7 +11223,7 @@ class MFRM(Rasch):
         if hasattr(self, 'person_outfit_ms_thresholds') == False:
             self.person_fit_statistics_thresholds(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                                   ext_score_adjustment=ext_score_adjustment, method=method,
-                                                  constant=constant)
+                                                  constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         if full:
             rsem = True
@@ -11192,12 +11277,14 @@ class MFRM(Rasch):
                                  max_iters=100,
                                  ext_score_adjustment=0.5,
                                  method='cos',
-                                 constant=0.1):
+                                 constant=0.1,
+                                 matrix_power=3,
+                                 log_lik_tol=0.000001):
 
         if hasattr(self, 'psi_thresholds') == False:
             self.test_fit_statistics_thresholds(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                                 ext_score_adjustment=ext_score_adjustment, method=method,
-                                                constant=constant)
+                                                constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         self.test_stats_thresholds = pd.DataFrame()
 
@@ -11226,31 +11313,38 @@ class MFRM(Rasch):
                               ext_score_adjustment=0.5,
                               method='cos',
                               constant=0.1,
+                              matrix_power=3,
+                              log_lik_tol=0.000001,
                               no_of_samples=100,
                               interval=None):
 
         if hasattr(self, 'item_stats_thresholds') == False:
             self.item_stats_df_thresholds(dp=dp, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                           ext_score_adjustment=ext_score_adjustment, method=method, constant=constant,
+                                          matrix_power=matrix_power, log_lik_tol=log_lik_tol,
                                           no_of_samples=no_of_samples, interval=interval)
 
         if hasattr(self, 'threshold_stats_thresholds') == False:
             self.threshold_stats_df_thresholds(dp=dp, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                                ext_score_adjustment=ext_score_adjustment, method=method,
-                                               constant=constant, no_of_samples=no_of_samples, interval=interval)
+                                               constant=constant, matrix_power=matrix_power,
+                                       log_lik_tol=log_lik_tol, no_of_samples=no_of_samples, interval=interval)
 
         if hasattr(self, 'rater_stats_thresholds') == False:
             self.rater_stats_df_thresholds(dp=dp, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                            ext_score_adjustment=ext_score_adjustment, method=method, constant=constant,
+                                           matrix_power=matrix_power, log_lik_tol=log_lik_tol,
                                            no_of_samples=no_of_samples, interval=interval)
 
         if hasattr(self, 'person_stats_thresholds') == False:
             self.person_stats_df_thresholds(dp=dp, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
-                                            ext_score_adjustment=ext_score_adjustment, method=method, constant=constant)
+                                            ext_score_adjustment=ext_score_adjustment, method=method, constant=constant,
+                                            matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         if hasattr(self, 'test_stats_thresholds') == False:
             self.test_stats_df_thresholds(dp=dp, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
-                                          ext_score_adjustment=ext_score_adjustment, method=method, constant=constant)
+                                          ext_score_adjustment=ext_score_adjustment, method=method, constant=constant,
+                                          matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         if format == 'xlsx':
 
@@ -11289,6 +11383,8 @@ class MFRM(Rasch):
                              ext_score_adjustment=0.5,
                              method='cos',
                              constant=0.1,
+                             matrix_power=3,
+                             log_lik_tol=0.000001,
                              no_of_samples=100,
                              interval=None):
 
@@ -11301,27 +11397,32 @@ class MFRM(Rasch):
 
         if anchor_raters is not None:
             if (hasattr(self, 'anchor_severites_matrix') == False) or (self.anchor_raters_matrix != anchor_raters):
-                self.calibrate_matrix_anchor(anchor_raters, constant=constant, method=method)
+                self.calibrate_matrix_anchor(anchor_raters, constant=constant, method=method, matrix_power=matrix_power,
+                                             log_lik_tol=log_lik_tol)
                 self.std_errors_matrix(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                       constant=constant, method=method)
+                                       constant=constant, method=method, matrix_power=matrix_power,
+                                       log_lik_tol=log_lik_tol)
 
             elif (self.anchor_item_low_matrix is None) and (interval is not None):
-                self.std_errors_global(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                       constant=constant, method=method)
+                self.std_errors_matrix(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
+                                       constant=constant, method=method, matrix_power=matrix_power,
+                                       log_lik_tol=log_lik_tol)
 
         else:
-            if hasattr(self, 'anchor_item_se_matrix') == False:
+            if hasattr(self, 'item_se_matrix') == False:
                 self.std_errors_matrix(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                       constant=constant, method=method)
+                                       constant=constant, method=method, matrix_power=matrix_power,
+                                       log_lik_tol=log_lik_tol)
 
             elif (self.item_low is None) and (interval is not None):
                 self.std_errors_matrix(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                       constant=constant, method=method)
+                                       constant=constant, method=method, matrix_power=matrix_power,
+                                       log_lik_tol=log_lik_tol)
 
         if hasattr(self, 'item_outfit_ms_matrix') == False:
-            self.item_fit_statistics_matrix(anchor_raters=anchor_raters, warm_corr=warm_corr, tolerance=tolerance,
-                                            max_iters=max_iters, ext_score_adjustment=ext_score_adjustment, method=method,
-                                            constant=constant, no_of_samples=no_of_samples, interval=interval)
+            self.item_fit_statistics_matrix(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
+                                            ext_score_adjustment=ext_score_adjustment, method=method,
+                                            constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         if anchor_raters is not None:
             difficulties = self.anchor_diffs_matrix
@@ -11373,6 +11474,8 @@ class MFRM(Rasch):
                                   ext_score_adjustment=0.5,
                                   method='cos',
                                   constant=0.1,
+                                  matrix_power=3,
+                                  log_lik_tol=0.000001,
                                   no_of_samples=100,
                                   interval=None):
 
@@ -11386,27 +11489,33 @@ class MFRM(Rasch):
 
         if anchor_raters is not None:
             if (hasattr(self, 'anchor_severites_matrix') == False) or (self.anchor_raters_matrix != anchor_raters):
-                self.calibrate_matrix_anchor(anchor_raters, constant=constant, method=method)
+                self.calibrate_matrix_anchor(anchor_raters, constant=constant, method=method, matrix_power=matrix_power,
+                                             log_lik_tol=log_lik_tol)
                 self.std_errors_matrix(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                       constant=constant, method=method)
+                                       constant=constant, method=method, matrix_power=matrix_power,
+                                       log_lik_tol=log_lik_tol)
 
             elif (self.anchor_item_low_matrix is None) and (interval is not None):
                 self.std_errors_global(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                       constant=constant, method=method)
+                                       constant=constant, method=method, matrix_power=matrix_power,
+                                       log_lik_tol=log_lik_tol)
 
         else:
-            if hasattr(self, 'anchor_item_se_matrix') == False:
+            if hasattr(self, 'item_se_matrix') == False:
                 self.std_errors_matrix(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                       constant=constant, method=method)
+                                       constant=constant, method=method, matrix_power=matrix_power,
+                                       log_lik_tol=log_lik_tol)
 
             elif (self.item_low is None) and (interval is not None):
                 self.std_errors_matrix(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                       constant=constant, method=method)
+                                       constant=constant, method=method, matrix_power=matrix_power,
+                                       log_lik_tol=log_lik_tol)
 
         if hasattr(self, 'threshold_outfit_ms_matrix') == False:
             self.threshold_fit_statistics_matrix(anchor_raters=anchor_raters, warm_corr=warm_corr, tolerance=tolerance,
                                                  max_iters=max_iters, ext_score_adjustment=ext_score_adjustment,
-                                                 method=method, constant=constant)
+                                                 method=method, constant=constant, matrix_power=matrix_power,
+                                                 log_lik_tol=log_lik_tol)
 
         if anchor_raters is not None:
             thresholds = self.anchor_thresholds_matrix
@@ -11416,10 +11525,15 @@ class MFRM(Rasch):
         self.threshold_stats_matrix = pd.DataFrame()
 
         self.threshold_stats_matrix['Estimate'] = thresholds[1:].round(dp)
-        self.threshold_stats_matrix['SE'] = self.threshold_se_matrix[1:].round(dp)
+
+        if anchor_raters is not None:
+            self.threshold_stats_matrix['SE'] = self.anchor_threshold_se_matrix[1:].round(dp)
+
+        else:
+            self.threshold_stats_matrix['SE'] = self.threshold_se_matrix[1:].round(dp)
 
         if interval is not None:
-            if anchor_raters != []:
+            if anchor_raters is not None:
                 self.threshold_stats_matrix[f'{round((1 - interval) * 50, 1)}%'] = self.anchor_threshold_low_matrix[1:].round(dp)
                 self.threshold_stats_matrix[f'{round((1 + interval) * 50, 1)}%'] = self.anchor_threshold_high_matrix[1:].round(dp)
 
@@ -11455,6 +11569,8 @@ class MFRM(Rasch):
                               ext_score_adjustment=0.5,
                               method='cos',
                               constant=0.1,
+                              matrix_power=3,
+                              log_lik_tol=0.000001,
                               no_of_samples=100,
                               interval=None):
 
@@ -11466,19 +11582,23 @@ class MFRM(Rasch):
 
         if anchor_raters is not None:
             if (hasattr(self, 'anchor_severites_matrix') == False) or (self.anchor_raters_matrix != anchor_raters):
-                self.calibrate_matrix_anchor(anchor_raters, constant=constant, method=method)
+                self.calibrate_matrix_anchor(anchor_raters, constant=constant, method=method, matrix_power=matrix_power,
+                                             log_lik_tol=log_lik_tol)
                 self.std_errors_matrix(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                       constant=constant, method=method)
+                                       constant=constant, method=method, matrix_power=matrix_power,
+                                       log_lik_tol=log_lik_tol)
 
         else:
-            if hasattr(self, 'anchor_item_se_matrix') == False:
+            if hasattr(self, 'item_se_matrix') == False:
                 self.std_errors_matrix(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                       constant=constant, method=method)
+                                       constant=constant, method=method, matrix_power=matrix_power,
+                                       log_lik_tol=log_lik_tol)
 
         if hasattr(self, 'rater_outfit_ms_matrix') == False:
             self.rater_fit_statistics_matrix(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                              ext_score_adjustment=ext_score_adjustment, method=method,
-                                             constant=constant, no_of_samples=no_of_samples, interval=interval)
+                                             constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol,
+                                             no_of_samples=no_of_samples, interval=interval)
 
         if anchor_raters is not None:
             severities = self.anchor_severities_matrix
@@ -11508,7 +11628,7 @@ class MFRM(Rasch):
                 item_stats['Estimate'] = np.array([marginal_items[rater][item]
                                                    for rater in self.raters]).round(dp)
 
-                if anchor_raters != []:
+                if anchor_raters is not None:
                     item_stats['SE'] = np.array([self.anchor_rater_se_marginal_items[rater][item]
                                                 for rater in self.raters]).round(dp)
                 else:
@@ -11516,7 +11636,7 @@ class MFRM(Rasch):
                                                 for rater in self.raters]).round(dp)
 
                 if interval is not None:
-                    if anchor_raters != []:
+                    if anchor_raters is not None:
                         item_stats[f'{round((1 - interval) * 50, 1)}%'] = np.array([self.anchor_rater_low_marginal_items[rater][item]
                                                                                     for rater in self.raters]).round(dp)
                         item_stats[f'{round((1 + interval) * 50, 1)}%'] = np.array([self.anchor_rater_high_marginal_items[rater][item]
@@ -11538,7 +11658,7 @@ class MFRM(Rasch):
                 item_stats['Estimate'] = np.array([marginal_thresholds[rater][threshold + 1]
                                                    for rater in self.raters]).round(dp)
 
-                if anchor_raters != []:
+                if anchor_raters is not None:
                     item_stats['SE'] = np.array([self.anchor_rater_se_marginal_thresholds[rater][threshold + 1]
                                                  for rater in self.raters]).round(dp)
                 else:
@@ -11546,7 +11666,7 @@ class MFRM(Rasch):
                                                  for rater in self.raters]).round(dp)
 
                 if interval is not None:
-                    if anchor_raters != []:
+                    if anchor_raters is not None:
                         item_stats[ f'{round((1 - interval) * 50, 1)}%'] = np.array([self.anchor_rater_low_marginal_thresholds[rater][threshold + 1]
                                                                                      for rater in self.raters]).round(dp)
                         item_stats[f'{round((1 + interval) * 50, 1)}%'] = np.array([self.anchor_rater_high_marginal_thresholds[rater][threshold + 1]
@@ -11624,7 +11744,9 @@ class MFRM(Rasch):
                                max_iters=100,
                                ext_score_adjustment=0.5,
                                method='cos',
-                               constant=0.1):
+                               constant=0.1,
+                               matrix_power=3,
+                               log_lik_tol=0.000001):
 
         '''
         Produces a person stats dataframe with raw score, ability estimate,
@@ -11634,7 +11756,7 @@ class MFRM(Rasch):
         if hasattr(self, 'person_outfit_ms_matrix') == False:
             self.person_fit_statistics_matrix(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                               ext_score_adjustment=ext_score_adjustment, method=method,
-                                              constant=constant)
+                                              constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         if full:
             rsem = True
@@ -11688,7 +11810,9 @@ class MFRM(Rasch):
                              max_iters=100,
                              ext_score_adjustment=0.5,
                              method='cos',
-                             constant=0.1):
+                             constant=0.1,
+                             matrix_power=3,
+                             log_lik_tol=0.000001):
 
         '''
         Produces a test statistics dataframe with raw score, ability estimate,
@@ -11698,7 +11822,7 @@ class MFRM(Rasch):
         if hasattr(self, 'psi_matrix') == False:
             self.test_fit_statistics_matrix(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                             ext_score_adjustment=ext_score_adjustment, method=method,
-                                            constant=constant)
+                                            constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         self.test_stats_matrix = pd.DataFrame()
 
@@ -11719,40 +11843,47 @@ class MFRM(Rasch):
         self.test_stats_matrix = round(self.test_stats_matrix, dp)
 
     def save_stats_matrix(self,
-                         filename,
-                         format='csv',
-                         dp=3,
-                         warm_corr=True,
-                         tolerance=0.0000001,
-                         max_iters=100,
-                         ext_score_adjustment=0.5,
-                         method='cos',
-                         constant=0.1,
-                         no_of_samples=100,
-                         interval=None):
+                          filename,
+                          format='csv',
+                          dp=3,
+                          warm_corr=True,
+                          tolerance=0.0000001,
+                          max_iters=100,
+                          ext_score_adjustment=0.5,
+                          method='cos',
+                          constant=0.1,
+                          matrix_power=3,
+                          log_lik_tol=0.000001,
+                          no_of_samples=100,
+                          interval=None):
 
         if hasattr(self, 'item_stats_matrix') == False:
             self.item_stats_df_matrix(dp=dp, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                       ext_score_adjustment=ext_score_adjustment, method=method, constant=constant,
+                                      matrix_power=matrix_power, log_lik_tol=log_lik_tol,
                                       no_of_samples=no_of_samples, interval=interval)
 
         if hasattr(self, 'threshold_stats_matrix') == False:
             self.threshold_stats_df_matrix(dp=dp, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                            ext_score_adjustment=ext_score_adjustment, method=method, constant=constant,
+                                           matrix_power=matrix_power, log_lik_tol=log_lik_tol,
                                            no_of_samples=no_of_samples, interval=interval)
 
         if hasattr(self, 'rater_stats_matrix') == False:
             self.rater_stats_df_matrix(dp=dp, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                        ext_score_adjustment=ext_score_adjustment, method=method, constant=constant,
+                                       matrix_power=matrix_power, log_lik_tol=log_lik_tol,
                                        no_of_samples=no_of_samples, interval=interval)
 
         if hasattr(self, 'person_stats_matrix') == False:
             self.person_stats_df_matrix(dp=dp, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
-                                        ext_score_adjustment=ext_score_adjustment, method=method, constant=constant)
+                                        ext_score_adjustment=ext_score_adjustment, method=method, constant=constant,
+                                        matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         if hasattr(self, 'test_stats_matrix') == False:
             self.test_stats_df_matrix(dp=dp, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
-                                      ext_score_adjustment=ext_score_adjustment, method=method, constant=constant)
+                                      ext_score_adjustment=ext_score_adjustment, method=method, constant=constant,
+                                      matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         if format == 'xlsx':
 
@@ -11780,36 +11911,25 @@ class MFRM(Rasch):
             self.test_stats_matrix.to_csv(f'{filename}_test_stats.csv')
 
     def category_probability_dict_global(self,
-                                         anchor_raters=[],
                                          warm_corr=True,
                                          tolerance=0.0000001,
                                          max_iters=100,
                                          ext_score_adjustment=0.5,
                                          method='cos',
                                          constant=0.1,
-                                         no_of_samples=100,
-                                         interval=None):
+                                         matrix_power=3,
+                                         log_lik_tol=0.000001):
 
         if hasattr(self, 'thresholds_global') == False:
-            self.calibrate_global(constant, method)
-
-        if hasattr(self, 'threshold_se_global') == False:
-            self.std_errors_global(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                   constant=constant, method=method)
+            self.calibrate_global(constant=constant, method=method, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         if hasattr(self, 'abils_global') == False:
-            self.person_abils_global(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
+            self.person_abils_global(anchor=False, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                      ext_score_adjustment=ext_score_adjustment)
 
-        if anchor_raters != []:
-            difficulties = self.anchor_diffs_global
-            thresholds = self.anchor_thresholds_global
-            severities = self.anchor_severities_global
-
-        else:
-            difficulties = self.diffs
-            thresholds = self.thresholds
-            severities = self.severities_global
+        difficulties = self.diffs
+        thresholds = self.thresholds
+        severities = self.severities_global
 
         cat_prob_dict = {cat: {rater: {item: {person: self.cat_prob_global(abil, item, difficulties, rater, severities,
                                                                            cat, thresholds)
@@ -11829,46 +11949,25 @@ class MFRM(Rasch):
         self.cat_prob_dict_global = cat_prob_dict
 
     def category_probability_dict_items(self,
-                                        anchor_raters=[],
                                         warm_corr=True,
                                         tolerance=0.0000001,
                                         max_iters=100,
                                         ext_score_adjustment=0.5,
                                         method='cos',
                                         constant=0.1,
-                                        no_of_samples=100,
-                                        interval=None):
+                                        matrix_power=3,
+                                        log_lik_tol=0.000001):
 
         if hasattr(self, 'thresholds_items') == False:
-            self.calibrate_items(constant, method)
-
-        if anchor_raters != []:
-            if hasattr(self, 'anchor_thresholds_items') == False:
-                self.calibrate_items_anchor(anchor_raters, constant=constant, method=method)
-
-        if hasattr(self, 'threshold_se_items') == False:
-            self.std_errors_items(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                  constant=constant, method=method)
+            self.calibrate_items(constant=constant, method=method, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         if hasattr(self, 'abils_items') == False:
-
-            if anchor_raters == []:
-                anchor = False
-            else:
-                anchor = True
-
-            self.person_abils_items(anchor=anchor, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
+            self.person_abils_items(anchor=False, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                     ext_score_adjustment=ext_score_adjustment)
 
-        if anchor_raters != []:
-            difficulties = self.anchor_diffs_items
-            thresholds = self.anchor_thresholds_items
-            severities = self.anchor_severities_items
-
-        else:
-            difficulties = self.diffs
-            thresholds = self.thresholds
-            severities = self.severities_items
+        difficulties = self.diffs
+        thresholds = self.thresholds
+        severities = self.severities_items
 
         cat_prob_dict = {cat: {rater: {item: {person: self.cat_prob_items(abil, item, difficulties, rater,
                                                              severities, cat, thresholds)
@@ -11888,46 +11987,26 @@ class MFRM(Rasch):
         self.cat_prob_dict_items = cat_prob_dict
 
     def category_probability_dict_thresholds(self,
-                                             anchor_raters=[],
                                              warm_corr=True,
                                              tolerance=0.0000001,
                                              max_iters=100,
                                              ext_score_adjustment=0.5,
                                              method='cos',
                                              constant=0.1,
-                                             no_of_samples=100,
-                                             interval=None):
+                                             matrix_power=3,
+                                             log_lik_tol=0.000001):
 
         if hasattr(self, 'thresholds_thresholds') == False:
-            self.calibrate_thresholds(constant, method)
-
-        if anchor_raters != []:
-            if hasattr(self, 'anchor_thresholds_thresholds') == False:
-                self.calibrate_thresholds_anchor(anchor_raters, constant=constant, method=method)
-
-        if hasattr(self, 'threshold_se_thresholds') == False:
-            self.std_errors_thresholds(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                       constant=constant, method=method)
+            self.calibrate_thresholds(constant=constant, method=method, matrix_power=matrix_power,
+                                      log_lik_tol=log_lik_tol)
 
         if hasattr(self, 'abils_thresholds') == False:
-
-            if anchor_raters == []:
-                anchor = False
-            else:
-                anchor = True
-
-            self.person_abils_thresholds(anchor=anchor, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
+            self.person_abils_thresholds(anchor=False, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                          ext_score_adjustment=ext_score_adjustment)
 
-        if anchor_raters != []:
-            difficulties = self.anchor_diffs_thresholds
-            thresholds = self.anchor_thresholds_thresholds
-            severities = self.anchor_severities_thresholds
-
-        else:
-            difficulties = self.diffs
-            thresholds = self.thresholds
-            severities = self.severities_thresholds
+        difficulties = self.diffs
+        thresholds = self.thresholds
+        severities = self.severities_thresholds
 
         cat_prob_dict = {cat: {rater: {item: {person: self.cat_prob_thresholds(abil, item, difficulties, rater,
                                                                                severities, cat, thresholds)
@@ -11947,53 +12026,32 @@ class MFRM(Rasch):
         self.cat_prob_dict_thresholds = cat_prob_dict
 
     def category_probability_dict_matrix(self,
-                                         anchor_raters=[],
                                          warm_corr=True,
                                          tolerance=0.0000001,
                                          max_iters=100,
                                          ext_score_adjustment=0.5,
                                          method='cos',
                                          constant=0.1,
-                                         no_of_samples=100,
-                                         interval=None):
+                                         matrix_power=3,
+                                         log_lik_tol=0.000001):
 
         if hasattr(self, 'thresholds_matrix') == False:
-            self.calibrate_matrix(constant, method)
-
-        if anchor_raters != []:
-            if hasattr(self, 'anchor_thresholds_matrix') == False:
-                self.calibrate_matrix_anchor(anchor_raters, constant=constant, method=method)
-
-        if hasattr(self, 'threshold_se_matrix') == False:
-            self.std_errors_matrix(anchor_raters=anchor_raters, interval=interval, no_of_samples=no_of_samples,
-                                   constant=constant, method=method)
+            self.calibrate_matrix(constant=constant, method=method, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         if hasattr(self, 'abils_matrix') == False:
-
-            if anchor_raters == []:
-                anchor = False
-            else:
-                anchor = True
-
-            self.person_abils_matrix(anchor=anchor, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
+            self.person_abils_matrix(anchor=False, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                      ext_score_adjustment=ext_score_adjustment)
 
         '''
         Create matrices of expected scores, variances, kurtosis, residuals etc. to generate fit statistics
         '''
 
-        if anchor_raters != []:
-            difficulties = self.anchor_diffs_matrix
-            thresholds = self.anchor_thresholds_matrix
-            severities = self.anchor_severities_matrix
+        difficulties = self.diffs
+        thresholds = self.thresholds
+        severities = self.severities_matrix
 
-        else:
-            difficulties = self.diffs
-            thresholds = self.thresholds
-            severities = self.severities_matrix
-
-        cat_prob_dict = {cat: {rater: {item: {person: self.cat_prob_matrix(abil, item, difficulties, rater,
-                                                                           severities, cat, thresholds)
+        cat_prob_dict = {cat: {rater: {item: {person: self.cat_prob_matrix(abil, item, difficulties, rater, severities,
+                                                                           cat, thresholds)
                                               for person, abil in self.abils_matrix.items()}
                                        for item in self.dataframe.columns}
                                for rater in self.raters}
@@ -12047,20 +12105,19 @@ class MFRM(Rasch):
         return exp_score_df, info_df, kurtosis_df, residual_df, std_residual_df
 
     def fit_matrices_global(self,
-                            anchor_raters=[],
                             warm_corr=True,
                             tolerance=0.0000001,
                             max_iters=100,
                             ext_score_adjustment=0.5,
                             method='cos',
                             constant=0.1,
-                            no_of_samples=100,
-                            interval=None):
+                            matrix_power=3,
+                            log_lik_tol=0.000001):
 
         if hasattr(self, 'cat_prob_dict_global') == False:
             self.category_probability_dict_global(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                                   ext_score_adjustment=ext_score_adjustment, method=method,
-                                                  constant=constant, no_of_samples=no_of_samples, interval=interval)
+                                                  constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         (self.exp_score_df_global,
          self.info_df_global,
@@ -12069,20 +12126,19 @@ class MFRM(Rasch):
          self.std_residual_df_global) = self.fit_matrices(self.cat_prob_dict_global)
 
     def fit_matrices_items(self,
-                           anchor_raters=[],
                            warm_corr=True,
                            tolerance=0.0000001,
                            max_iters=100,
                            ext_score_adjustment=0.5,
                            method='cos',
                            constant=0.1,
-                           no_of_samples=100,
-                           interval=None):
+                           matrix_power=3,
+                           log_lik_tol=0.000001):
 
         if hasattr(self, 'cat_prob_dict_items') == False:
             self.category_probability_dict_items(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                                  ext_score_adjustment=ext_score_adjustment, method=method,
-                                                 constant=constant, no_of_samples=no_of_samples, interval=interval)
+                                                 constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         (self.exp_score_df_items,
          self.info_df_items,
@@ -12091,20 +12147,20 @@ class MFRM(Rasch):
          self.std_residual_df_items) = self.fit_matrices(self.cat_prob_dict_items)
 
     def fit_matrices_thresholds(self,
-                                anchor_raters=[],
-                           	    warm_corr=True,
-                           		tolerance=0.0000001,
-                           		max_iters=100,
-                           		ext_score_adjustment=0.5,
-                           		method='cos',
-                           		constant=0.1,
-                           		no_of_samples=100,
-                           		interval=None):
+                                warm_corr=True,
+                                tolerance=0.0000001,
+                                max_iters=100,
+                                ext_score_adjustment=0.5,
+                                method='cos',
+                                constant=0.1,
+                                matrix_power=3,
+                                log_lik_tol=0.000001):
 
         if hasattr(self, 'cat_prob_dict_thresholds') == False:
             self.category_probability_dict_thresholds(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
-                                                 	  ext_score_adjustment=ext_score_adjustment, method=method,
-                                                 	  constant=constant, no_of_samples=no_of_samples, interval=interval)
+                                                      ext_score_adjustment=ext_score_adjustment, method=method,
+                                                      constant=constant, matrix_power=matrix_power,
+                                                      log_lik_tol=log_lik_tol)
 
         (self.exp_score_df_thresholds,
          self.info_df_thresholds,
@@ -12113,21 +12169,19 @@ class MFRM(Rasch):
          self.std_residual_df_thresholds) = self.fit_matrices(self.cat_prob_dict_thresholds)
 
     def fit_matrices_matrix(self,
-                            anchor_raters=[],
                             warm_corr=True,
                             tolerance=0.0000001,
                             max_iters=100,
                             ext_score_adjustment=0.5,
                             method='cos',
                             constant=0.1,
-                            no_of_samples=100,
-                            interval=None):
+                            matrix_power=3,
+                            log_lik_tol=0.000001):
 
         if hasattr(self, 'cat_prob_dict_matrix') == False:
-            self.category_probability_dict_matrix(anchor_raters=[], warm_corr=warm_corr, tolerance=tolerance,
-                                                  max_iters=max_iters, ext_score_adjustment=ext_score_adjustment,
-                                                  method=method, constant=constant, no_of_samples=no_of_samples,
-                                                  interval=interval)
+            self.category_probability_dict_matrix(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
+                                                  ext_score_adjustment=ext_score_adjustment, method=method,
+                                                  constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         (self.exp_score_df_matrix,
          self.info_df_matrix,
@@ -12141,15 +12195,7 @@ class MFRM(Rasch):
                             kurtosis_df,
                             residual_df,
                             std_residual_df,
-                            abilities,
-                            warm_corr=True,
-                            tolerance=0.0000001,
-                            max_iters=100,
-                            ext_score_adjustment=0.5,
-                            method='cos',
-                            constant=0.1,
-                            no_of_samples=100,
-                            interval=None):
+                            abilities):
 
         '''
         Item fit statistics
@@ -12200,20 +12246,19 @@ class MFRM(Rasch):
                 item_exp_point_measure)
 
     def item_fit_statistics_global(self,
-                                   anchor_raters=[],
                                    warm_corr=True,
                                    tolerance=0.0000001,
                                    max_iters=100,
                                    ext_score_adjustment=0.5,
                                    method='cos',
                                    constant=0.1,
-                                   no_of_samples=100,
-                                   interval=None):
+                                   matrix_power=3,
+                                   log_lik_tol=0.000001):
 
         if hasattr(self, 'exp_score_df_global') == False:
-            self.fit_matrices_global(anchor_raters=anchor_raters, warm_corr=warm_corr, tolerance=tolerance,
-                                     max_iters=max_iters, ext_score_adjustment=ext_score_adjustment, method=method,
-                                     constant=constant, no_of_samples=no_of_samples, interval=interval)
+            self.fit_matrices_global(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
+                                     ext_score_adjustment=ext_score_adjustment, method=method, constant=constant,
+                                     matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         (self.item_outfit_ms_global,
          self.item_outfit_zstd_global,
@@ -12222,29 +12267,22 @@ class MFRM(Rasch):
          self.point_measure_global,
          self.exp_point_measure_global) = self.item_fit_statistics(self.exp_score_df_global, self.info_df_global,
                                                                    self.kurtosis_df_global, self.residual_df_global,
-                                                                   self.std_residual_df_global, self.abils_global,
-                                                                   warm_corr=warm_corr, tolerance=tolerance,
-                                                                   max_iters=max_iters,
-                                                                   ext_score_adjustment=ext_score_adjustment,
-                                                                   method=method, constant=constant,
-                                                                   no_of_samples=no_of_samples,
-                                                                   interval=interval)
+                                                                   self.std_residual_df_global, self.abils_global)
 
     def item_fit_statistics_items(self,
-                                  anchor_raters=[],
                                   warm_corr=True,
                                   tolerance=0.0000001,
                                   max_iters=100,
                                   ext_score_adjustment=0.5,
                                   method='cos',
                                   constant=0.1,
-                                  no_of_samples=100,
-                                  interval=None):
+                                  matrix_power=3,
+                                  log_lik_tol=0.000001):
 
         if hasattr(self, 'exp_score_df_items') == False:
-            self.fit_matrices_items(anchor_raters=anchor_raters, warm_corr=warm_corr, tolerance=tolerance,
-                                    max_iters=max_iters, ext_score_adjustment=ext_score_adjustment, method=method,
-                                    constant=constant, no_of_samples=no_of_samples, interval=interval)
+            self.fit_matrices_items(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
+                                    ext_score_adjustment=ext_score_adjustment, method=method, constant=constant,
+                                    matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
             (self.item_outfit_ms_items,
              self.item_outfit_zstd_items,
@@ -12253,29 +12291,22 @@ class MFRM(Rasch):
              self.point_measure_items,
              self.exp_point_measure_items) = self.item_fit_statistics(self.exp_score_df_items, self.info_df_items,
                                                                       self.kurtosis_df_items, self.residual_df_items,
-                                                                      self.std_residual_df_items, self.abils_items,
-                                                                      warm_corr=warm_corr, tolerance=tolerance,
-                                                                      max_iters=max_iters,
-                                                                      ext_score_adjustment=ext_score_adjustment,
-                                                                      method=method, constant=constant,
-                                                                      no_of_samples=no_of_samples,
-                                                                      interval=interval)
+                                                                      self.std_residual_df_items, self.abils_items)
 
     def item_fit_statistics_thresholds(self,
-                                       anchor_raters=[],
                                        warm_corr=True,
                                        tolerance=0.0000001,
                                        max_iters=100,
                                        ext_score_adjustment=0.5,
                                        method='cos',
                                        constant=0.1,
-                                       no_of_samples=100,
-                                       interval=None):
+                                       matrix_power=3,
+                                       log_lik_tol=0.000001):
 
         if hasattr(self, 'exp_score_df_thresholds') == False:
-            self.fit_matrices_thresholds(anchor_raters=anchor_raters, warm_corr=warm_corr, tolerance=tolerance,
-                                         max_iters=max_iters, ext_score_adjustment=ext_score_adjustment, method=method,
-                                         constant=constant, no_of_samples=no_of_samples, interval=interval)
+            self.fit_matrices_thresholds(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
+                                         ext_score_adjustment=ext_score_adjustment, method=method, constant=constant,
+                                         matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         (self.item_outfit_ms_thresholds,
          self.item_outfit_zstd_thresholds,
@@ -12287,28 +12318,22 @@ class MFRM(Rasch):
                                                                        self.kurtosis_df_thresholds,
                                                                        self.residual_df_thresholds,
                                                                        self.std_residual_df_thresholds,
-                                                                       self.abils_thresholds, warm_corr=warm_corr,
-                                                                       tolerance=tolerance, max_iters=max_iters,
-                                                                       ext_score_adjustment=ext_score_adjustment,
-                                                                       method=method, constant=constant,
-                                                                       no_of_samples=no_of_samples,
-                                                                       interval=interval)
+                                                                       self.abils_thresholds)
 
     def item_fit_statistics_matrix(self,
-                                   anchor_raters=[],
                                    warm_corr=True,
                                    tolerance=0.0000001,
                                    max_iters=100,
                                    ext_score_adjustment=0.5,
                                    method='cos',
                                    constant=0.1,
-                                   no_of_samples=100,
-                                   interval=None):
+                                   matrix_power=3,
+                                   log_lik_tol=0.000001):
 
         if hasattr(self, 'exp_score_df_matrix') == False:
-            self.fit_matrices_matrix(anchor_raters=anchor_raters, warm_corr=warm_corr, tolerance=tolerance,
-                                     max_iters=max_iters, ext_score_adjustment=ext_score_adjustment, method=method,
-                                     constant=constant, no_of_samples=no_of_samples, interval=interval)
+            self.fit_matrices_matrix(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
+                                     ext_score_adjustment=ext_score_adjustment, method=method, constant=constant,
+                                     matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         (self.item_outfit_ms_matrix,
          self.item_outfit_zstd_matrix,
@@ -12317,12 +12342,7 @@ class MFRM(Rasch):
          self.point_measure_matrix,
          self.exp_point_measure_matrix) = self.item_fit_statistics(self.exp_score_df_matrix, self.info_df_matrix,
                                                                    self.kurtosis_df_matrix, self.residual_df_matrix,
-                                                                   self.std_residual_df_matrix, self.abils_matrix,
-                                                                   warm_corr=warm_corr, tolerance=tolerance,
-                                                                   max_iters=max_iters,
-                                                                   ext_score_adjustment=ext_score_adjustment,
-                                                                   method=method, constant=constant,
-                                                                   no_of_samples=no_of_samples, interval=interval)
+                                                                   self.std_residual_df_matrix, self.abils_matrix)
 
     def item_res_corr_analysis(self,
                                std_residual_df):
@@ -12640,26 +12660,29 @@ class MFRM(Rasch):
                 threshold_discrimination)
 
     def threshold_fit_statistics_global(self,
-                                        anchor_raters=[],
+                                        anchor_raters=None,
                                         warm_corr=True,
                                         tolerance=0.0000001,
                                         max_iters=100,
                                         ext_score_adjustment=0.5,
                                         method='cos',
-                                        constant=0.1):
+                                        constant=0.1,
+                                        matrix_power=3,
+                                        log_lik_tol=0.000001):
 
         if hasattr(self, 'abils_global') == False:
             self.person_abils_global(anchor=False, warm_corr=warm_corr, tolerance=tolerance,
                                      max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
 
-        if anchor_raters != []:
+        if anchor_raters is not None:
             if hasattr(self, 'anchor_thresholds_global') == False:
-                self.calibrate_global_anchor(anchor_raters, constant=constant, method=method)
+                self.calibrate_global_anchor(anchor_raters, constant=constant, method=method, matrix_power=matrix_power,
+                                             log_lik_tol=log_lik_tol)
 
                 self.person_abils_global(anchor=False, warm_corr=warm_corr, tolerance=tolerance,
                                          max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
 
-        if anchor_raters != []:
+        if anchor_raters is not None:
             difficulties = self.anchor_diffs_global
             thresholds = self.anchor_thresholds_global
             severities = self.anchor_severities_global
@@ -12693,26 +12716,29 @@ class MFRM(Rasch):
          self.threshold_discrimination_global) = self.threshold_fit_statistics(self.abils_global, diff_df_dict)
 
     def threshold_fit_statistics_items(self,
-                                       anchor_raters=[],
+                                       anchor_raters=None,
                                        warm_corr=True,
                                        tolerance=0.0000001,
                                        max_iters=100,
                                        ext_score_adjustment=0.5,
                                        method='cos',
-                                       constant=0.1):
+                                       constant=0.1,
+                                       matrix_power=3,
+                                       log_lik_tol=0.000001):
 
         if hasattr(self, 'abils_items') == False:
             self.person_abils_items(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                     ext_score_adjustment=ext_score_adjustment)
 
-        if anchor_raters != []:
+        if anchor_raters is not None:
             if hasattr(self, 'anchor_thresholds_items') == False:
-                self.calibrateitems_anchor(anchor_raters, constant=constant, method=method)
+                self.calibrateitems_anchor(anchor_raters, constant=constant, method=method, matrix_power=matrix_power,
+                                           log_lik_tol=log_lik_tol)
 
                 self.person_abils_items(anchor_raters=anchor_raters, warm_corr=warm_corr, tolerance=tolerance,
                                         max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
 
-        if anchor_raters != []:
+        if anchor_raters is not None:
             difficulties = self.anchor_diffs_items
             thresholds = self.anchor_thresholds_items
             severities = self.anchor_severities_items
@@ -12747,26 +12773,33 @@ class MFRM(Rasch):
          self.threshold_discrimination_items) = self.threshold_fit_statistics(self.abils_items, diff_df_dict)
 
     def threshold_fit_statistics_thresholds(self,
-                                            anchor_raters=[],
+                                            anchor_raters=None,
                                             warm_corr=True,
                                             tolerance=0.0000001,
                                             max_iters=100,
                                             ext_score_adjustment=0.5,
                                             method='cos',
-                                            constant=0.1):
+                                            constant=0.1,
+                                            matrix_power=3,
+                                            log_lik_tol=0.000001):
 
-        if hasattr(self, 'abils_thresholds') == False:
-            self.person_abils_thresholds(anchor_raters=anchor_raters, warm_corr=warm_corr, tolerance=tolerance,
-                                         max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
+        if anchor_raters is not None:
+            if ((hasattr(self, 'anchor_thresholds_thresholds') == False) or
+                (self.anchor_raters_thresholds != anchor_raters)):
+                self.calibrate_thresholds_anchor(anchor_raters, constant=constant, method=method,
+                                                 matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
-        if anchor_raters != []:
-            if hasattr(self, 'anchor_thresholds_thresholds') == False:
-                self.calibrate_thresholds_anchor(anchor_raters, constant=constant, method=method)
+                self.person_abils_thresholds(anchor=True, items=None, raters=None,warm_corr=warm_corr,
+                                             tolerance=tolerance, max_iters=max_iters,
+                                             ext_score_adjustment=ext_score_adjustment)
 
-                self.person_abils_thresholds(anchor_raters=anchor_raters, warm_corr=warm_corr, tolerance=tolerance,
-                                             max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
+        else:
+            if hasattr(self, 'thresholds_thresholds') == False:
+                self.person_abils_thresholds(anchor=False, items=None, raters=None,warm_corr=warm_corr,
+                                             tolerance=tolerance, max_iters=max_iters,
+                                             ext_score_adjustment=ext_score_adjustment)
 
-        if anchor_raters != []:
+        if anchor_raters is not None:
             difficulties = self.anchor_diffs_thresholds
             thresholds = self.anchor_thresholds_thresholds
             severities = self.anchor_severities_thresholds
@@ -12802,26 +12835,29 @@ class MFRM(Rasch):
                                                                                    diff_df_dict)
 
     def threshold_fit_statistics_matrix(self,
-                                        anchor_raters=[],
+                                        anchor_raters=None,
                                         warm_corr=True,
                                         tolerance=0.0000001,
                                         max_iters=100,
                                         ext_score_adjustment=0.5,
                                         method='cos',
-                                        constant=0.1):
+                                        constant=0.1,
+                                        matrix_power=3,
+                                        log_lik_tol=0.000001):
 
         if hasattr(self, 'abils_matrix') == False:
             self.person_abils_matrix(anchor_raters=anchor_raters, warm_corr=warm_corr, tolerance=tolerance,
                                      max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
 
-        if anchor_raters != []:
+        if anchor_raters is not None:
             if hasattr(self, 'anchor_thresholds_matrix') == False:
-                self.calibrate_matrix_anchor(anchor_raters, constant=constant, method=method)
+                self.calibrate_matrix_anchor(anchor_raters, constant=constant, method=method, matrix_power=matrix_power,
+                                             log_lik_tol=log_lik_tol)
 
                 self.person_abils_matrix(anchor_raters=anchor_raters, warm_corr=warm_corr, tolerance=tolerance,
                                          max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
 
-        if anchor_raters != []:
+        if anchor_raters is not None:
             difficulties = self.anchor_diffs_matrix
             thresholds = self.anchor_thresholds_matrix
             severities = self.anchor_severities_matrix
@@ -12912,13 +12948,16 @@ class MFRM(Rasch):
                                     ext_score_adjustment=0.5,
                                     method='cos',
                                     constant=0.1,
+                                    matrix_power=3,
+                                    log_lik_tol=0.000001,
                                     no_of_samples=100,
                                     interval=None):
 
         if hasattr(self, 'exp_score_df_global') == False:
             self.fit_matrices_global(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                      ext_score_adjustment=ext_score_adjustment, method=method,
-                                     constant=constant, no_of_samples=no_of_samples, interval=interval)
+                                     constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol,
+                                     no_of_samples=no_of_samples, interval=interval)
 
         (self.rater_outfit_ms_global,
          self.rater_outfit_zstd_global,
@@ -12933,13 +12972,16 @@ class MFRM(Rasch):
                                    ext_score_adjustment=0.5,
                                    method='cos',
                                    constant=0.1,
+                                   matrix_power=3,
+                                   log_lik_tol=0.000001,
                                    no_of_samples=100,
                                    interval=None):
 
         if hasattr(self, 'exp_score_df_items') == False:
             self.fit_matrices_items(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                     ext_score_adjustment=ext_score_adjustment, method=method,
-                                    constant=constant, no_of_samples=no_of_samples, interval=interval)
+                                    constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol,
+                                    no_of_samples=no_of_samples, interval=interval)
 
         (self.rater_outfit_ms_items,
          self.rater_outfit_zstd_items,
@@ -12954,13 +12996,16 @@ class MFRM(Rasch):
                                         ext_score_adjustment=0.5,
                                         method='cos',
                                         constant=0.1,
+                                        matrix_power=3,
+                                        log_lik_tol=0.000001,
                                         no_of_samples=100,
                                         interval=None):
 
         if hasattr(self, 'exp_score_df_thresholds') == False:
             self.fit_matrices_thresholds(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                          ext_score_adjustment=ext_score_adjustment, method=method,
-                                         constant=constant, no_of_samples=no_of_samples, interval=interval)
+                                         constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol,
+                                         no_of_samples=no_of_samples, interval=interval)
 
         (self.rater_outfit_ms_thresholds,
          self.rater_outfit_zstd_thresholds,
@@ -12977,13 +13022,16 @@ class MFRM(Rasch):
                                     ext_score_adjustment=0.5,
                                     method='cos',
                                     constant=0.1,
+                                    matrix_power=3,
+                                    log_lik_tol=0.000001,
                                     no_of_samples=100,
                                     interval=None):
 
         if hasattr(self, 'exp_score_df_matrix') == False:
             self.fit_matrices_matrix(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                      ext_score_adjustment=ext_score_adjustment, method=method,
-                                     constant=constant, no_of_samples=no_of_samples, interval=interval)
+                                     constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol,
+                                     no_of_samples=no_of_samples, interval=interval)
 
         (self.rater_outfit_ms_matrix,
          self.rater_outfit_zstd_matrix,
@@ -13077,13 +13125,10 @@ class MFRM(Rasch):
                               ext_score_adjustment=0.5,
                               method='cos',
                               constant=0.1,
+                              matrix_power=3,
+                              log_lik_tol=0.000001,
                               no_of_samples=100,
                               interval=None):
-
-        if hasattr(self, 'exp_score_df_global') == False:
-            self.fit_matrices_global(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
-                                     ext_score_adjustment=ext_score_adjustment, method=method, constant=constant,
-                                     no_of_samples=no_of_samples, interval=interval)
 
         '''
         Person fit statistics
@@ -13127,11 +13172,14 @@ class MFRM(Rasch):
                                      max_iters=100,
                                      ext_score_adjustment=0.5,
                                      method='cos',
-                                     constant=0.1):
+                                     constant=0.1,
+                                     matrix_power=3,
+                                     log_lik_tol=0.000001):
 
         if hasattr(self, 'exp_score_df_global') == False:
             self.fit_matrices_global(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
-                                     ext_score_adjustment=ext_score_adjustment, method=method, constant=constant)
+                                     ext_score_adjustment=ext_score_adjustment, method=method, constant=constant,
+                                     matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         (self.csem_vector_global,
          self.rsem_vector_global,
@@ -13146,8 +13194,8 @@ class MFRM(Rasch):
                                                                      tolerance=tolerance,
                                                                      max_iters=max_iters,
                                                                      ext_score_adjustment=ext_score_adjustment,
-                                                                     method=method, constant=constant)
-
+                                                                     method=method, constant=constant,
+                                                                     matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
     def person_fit_statistics_items(self,
                                     warm_corr=True,
@@ -13155,11 +13203,14 @@ class MFRM(Rasch):
                                     max_iters=100,
                                     ext_score_adjustment=0.5,
                                     method='cos',
-                                    constant=0.1):
+                                    constant=0.1,
+                                    matrix_power=3,
+                                    log_lik_tol=0.000001):
 
         if hasattr(self, 'exp_score_df_items') == False:
             self.fit_matrices_items(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
-                                    ext_score_adjustment=ext_score_adjustment, method=method, constant=constant)
+                                    ext_score_adjustment=ext_score_adjustment, method=method, constant=constant,
+                                    matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         (self.csem_vector_items,
          self.rsem_vector_items,
@@ -13173,8 +13224,8 @@ class MFRM(Rasch):
                                                                     tolerance=tolerance,
                                                                     max_iters=max_iters,
                                                                     ext_score_adjustment=ext_score_adjustment,
-                                                                    method=method, constant=constant)
-
+                                                                    method=method, constant=constant,
+                                                                    matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
     def person_fit_statistics_thresholds(self,
                                          warm_corr=True,
@@ -13182,11 +13233,14 @@ class MFRM(Rasch):
                                          max_iters=100,
                                          ext_score_adjustment=0.5,
                                          method='cos',
-                                         constant=0.1):
+                                         constant=0.1,
+                                         matrix_power=3,
+                                         log_lik_tol=0.000001):
 
         if hasattr(self, 'exp_score_df_thresholds') == False:
             self.fit_matrices_thresholds(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
-                                         ext_score_adjustment=ext_score_adjustment, method=method, constant=constant)
+                                         ext_score_adjustment=ext_score_adjustment, method=method, constant=constant,
+                                         matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         (self.csem_vector_thresholds,
          self.rsem_vector_thresholds,
@@ -13201,7 +13255,9 @@ class MFRM(Rasch):
                                                                          tolerance=tolerance,
                                                                          max_iters=max_iters,
                                                                          ext_score_adjustment=ext_score_adjustment,
-                                                                         method=method, constant=constant)
+                                                                         method=method, constant=constant,
+                                                                         matrix_power=matrix_power,
+                                                                         log_lik_tol=log_lik_tol)
 
     def person_fit_statistics_matrix(self,
                                      warm_corr=True,
@@ -13209,11 +13265,14 @@ class MFRM(Rasch):
                                      max_iters=100,
                                      ext_score_adjustment=0.5,
                                      method='cos',
-                                     constant=0.1):
+                                     constant=0.1,
+                                     matrix_power=3,
+                                     log_lik_tol=0.000001):
 
         if hasattr(self, 'exp_score_df_matrix') == False:
             self.fit_matrices_matrix(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
-                                     ext_score_adjustment=ext_score_adjustment, method=method, constant=constant)
+                                     ext_score_adjustment=ext_score_adjustment, method=method, constant=constant,
+                                     matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         (self.csem_vector_matrix,
          self.rsem_vector_matrix,
@@ -13259,11 +13318,19 @@ class MFRM(Rasch):
                                    max_iters=100,
                                    ext_score_adjustment=0.5,
                                    method='cos',
-                                   constant=0.1):
+                                   constant=0.1,
+                                   matrix_power=3,
+                                   log_lik_tol=0.000001,
+                                   no_of_samples=100):
 
-        if hasattr(self, 'self.csem_vector_global') == False:
+        if hasattr(self, 'item_se') == False:
+            self.std_errors_global(anchor_raters=None, interval=None, no_of_samples=no_of_samples, constant=constant,
+                                   method=method, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
+
+        if hasattr(self, 'csem_vector_global') == False:
             self.person_fit_statistics_global(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
-                                              ext_score_adjustment=ext_score_adjustment, method=method, constant=constant)
+                                              ext_score_adjustment=ext_score_adjustment, method=method,
+                                              constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         (self.isi_global,
          self.item_strata_global,
@@ -13279,11 +13346,19 @@ class MFRM(Rasch):
                                   max_iters=100,
                                   ext_score_adjustment=0.5,
                                   method='cos',
-                                  constant=0.1):
+                                  constant=0.1,
+                                  matrix_power=3,
+                                  log_lik_tol=0.000001,
+                                  no_of_samples=100):
 
-        if hasattr(self, 'self.csem_vector_items') == False:
+        if hasattr(self, 'item_se') == False:
+            self.std_errors_items(anchor_raters=None, interval=None, no_of_samples=no_of_samples, constant=constant,
+                                  method=method, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
+
+        if hasattr(self, 'csem_vector_items') == False:
             self.person_fit_statistics_items(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
-                                             ext_score_adjustment=ext_score_adjustment, method=method, constant=constant)
+                                             ext_score_adjustment=ext_score_adjustment, method=method,
+                                             constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         (self.isi_items,
          self.item_strata_items,
@@ -13299,18 +13374,28 @@ class MFRM(Rasch):
                                        max_iters=100,
                                        ext_score_adjustment=0.5,
                                        method='cos',
-                                       constant=0.1):
+                                       constant=0.1,
+                                       matrix_power=3,
+                                       log_lik_tol=0.000001,
+                                       no_of_samples=100):
 
-        if hasattr(self, 'self.csem_vector_thresholds') == False:
+        if hasattr(self, 'item_se') == False:
+            self.std_errors_thresholds(anchor_raters=None, interval=None, no_of_samples=no_of_samples,
+                                       constant=constant, method=method, matrix_power=matrix_power,
+                                       log_lik_tol=log_lik_tol)
+
+        if hasattr(self, 'csem_vector_thresholds') == False:
             self.person_fit_statistics_thresholds(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
-                                                  ext_score_adjustment=ext_score_adjustment, method=method, constant=constant)
+                                                  ext_score_adjustment=ext_score_adjustment, method=method,
+                                                  constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         (self.isi_thresholds,
          self.item_strata_thresholds,
          self.item_reliability_thresholds,
          self.psi_thresholds,
          self.person_strata_thresholds,
-         self.person_reliability_thresholds) = self.test_fit_statistics(self.abils_thresholds, self.rsem_vector_thresholds)
+         self.person_reliability_thresholds) = self.test_fit_statistics(self.abils_thresholds,
+                                                                        self.rsem_vector_thresholds)
 
 
     def test_fit_statistics_matrix(self,
@@ -13319,11 +13404,19 @@ class MFRM(Rasch):
                                    max_iters=100,
                                    ext_score_adjustment=0.5,
                                    method='cos',
-                                   constant=0.1):
+                                   constant=0.1,
+                                   matrix_power=3,
+                                   log_lik_tol=0.000001,
+                                   no_of_samples=100):
 
-        if hasattr(self, 'self.csem_vector_matrix') == False:
+        if hasattr(self, 'item_se') == False:
+            self.std_errors_matrix(anchor_raters=None, interval=None, no_of_samples=no_of_samples, constant=constant,
+                                   method=method, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
+
+        if hasattr(self, 'csem_vector_matrix') == False:
             self.person_fit_statistics_matrix(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
-                                              ext_score_adjustment=ext_score_adjustment, method=method, constant=constant)
+                                              ext_score_adjustment=ext_score_adjustment, method=method,
+                                              constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         (self.isi_matrix,
          self.item_strata_matrix,
@@ -13339,6 +13432,8 @@ class MFRM(Rasch):
                               ext_score_adjustment=0.5,
                               method='cos',
                               constant=0.1,
+                              matrix_power=3,
+                              log_lik_tol=0.000001,
                               no_of_samples=100,
                               interval=None):
 
@@ -13347,10 +13442,11 @@ class MFRM(Rasch):
         '''
 
         if hasattr(self, 'thresholds_global') == False:
-            self.calibrate_global(constant, method)
+            self.calibrate_global(constant=constant, method=method, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         if hasattr(self, 'threshold_se_global') == False:
-            self.std_errors_global(interval, no_of_samples, constant, method)
+            self.std_errors_global(interval=interval, no_of_samples=no_of_samples, constant=constant, method=method,
+                                   matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         if hasattr(self, 'abils_global') == False:
             self.person_abils_global(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
@@ -13358,7 +13454,7 @@ class MFRM(Rasch):
 
         self.category_probability_dict_global(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                               ext_score_adjustment=ext_score_adjustment, method=method,
-                                              constant=constant, no_of_samples=no_of_samples, interval=interval)
+                                              constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         self.fit_matrices_global()
         self.item_fit_statistics_global()
@@ -13375,6 +13471,8 @@ class MFRM(Rasch):
                              ext_score_adjustment=0.5,
                              method='cos',
                              constant=0.1,
+                             matrix_power=3,
+                             log_lik_tol=0.000001,
                              no_of_samples=100,
                              interval=None):
         '''
@@ -13382,18 +13480,19 @@ class MFRM(Rasch):
         '''
 
         if hasattr(self, 'thresholds_items') == False:
-            self.calibrate_items(constant, method)
+            self.calibrate_items(constant=constant, method=method, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         if hasattr(self, 'threshold_se_items') == False:
-            self.std_errors_items(interval, no_of_samples, constant, method)
+            self.std_errors_items(interval=interval, no_of_samples=no_of_samples, constant=constant, method=method,
+                                   matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         if hasattr(self, 'abils_items') == False:
             self.person_abils_items(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                     ext_score_adjustment=ext_score_adjustment)
 
         self.category_probability_dict_items(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
-                                             ext_score_adjustment=ext_score_adjustment, method=method,
-                                             constant=constant, no_of_samples=no_of_samples, interval=interval)
+                                              ext_score_adjustment=ext_score_adjustment, method=method,
+                                              constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         self.fit_matrices_items()
         self.item_fit_statistics_items()
@@ -13428,7 +13527,7 @@ class MFRM(Rasch):
 
         self.category_probability_dict_thresholds(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                                   ext_score_adjustment=ext_score_adjustment, method=method,
-                                                  constant=constant, no_of_samples=no_of_samples, interval=interval)
+                                                  constant=constant)
 
         self.fit_matrices_thresholds()
         self.item_fit_statistics_thresholds()
@@ -13463,7 +13562,7 @@ class MFRM(Rasch):
 
         self.category_probability_dict_matrix(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                               ext_score_adjustment=ext_score_adjustment, method=method,
-                                              constant=constant, no_of_samples=no_of_samples, interval=interval)
+                                              constant=constant)
 
         self.fit_matrices_matrix()
         self.item_fit_statistics_matrix()
@@ -19096,18 +19195,18 @@ class MFRM_Sim_Thresholds(MFRM_Sim):
 
         self.items = [f'Item_{item + 1}' for item in range(self.no_of_items)]
         self.raters = [f'Rater_{rater + 1}' for rater in range(self.no_of_raters)]
-        self.persons = [f'Person_{item + 1}' for person in range(self.no_of_persons)]
+        self.persons = [f'Person_{person + 1}' for person in range(self.no_of_persons)]
         
         '''
         Calculates probability of a response in each category
         for each person on each item
         '''
 
-        cat_probs = [[[[self.mfrm.cat_prob_thresholds(ability, item, difficulties, rater, self.severities, category,
+        cat_probs = [[[[self.mfrm.cat_prob_thresholds(ability, item, self.diffs, rater, self.severities, category,
                                                       self.thresholds)
                         for category in range(self.max_score + 1)]
                        for rater in self.raters]
-                      for item in self.dataframe.columns]
+                      for item in self.items]
                      for ability in self.abilities]
 
         self.cat_probs = np.array(cat_probs)
@@ -19270,7 +19369,7 @@ class MFRM_Sim_Matrix(MFRM_Sim):
 
         self.items = [f'Item_{item + 1}' for item in range(self.no_of_items)]
         self.raters = [f'Rater_{rater + 1}' for rater in range(self.no_of_raters)]
-        self.persons = [f'Person_{item + 1}' for person in range(self.no_of_persons)]
+        self.persons = [f'Person_{person + 1}' for person in range(self.no_of_persons)]
 
         '''
         Calculates probability of a response in each category
