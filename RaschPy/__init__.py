@@ -8614,10 +8614,10 @@ class MFRM(Rasch):
                     max_iters=100,
                     ext_score_adjustment=0.5):
 
-        if items is None:
+        if (items is None) or (items == 'all'):
             items = self.dataframe.columns.tolist()
 
-        if raters is None:
+        if (raters == 'all') or (raters is None):
             raters = self.raters.tolist()
 
         if anchor:
@@ -8741,7 +8741,7 @@ class MFRM(Rasch):
                           max_iters=100,
                           ext_score_adjustment=0.5):
 
-        if items is None:
+        if (items is None) or (items == 'all'):
             items = self.dataframe.columns.tolist()
 
         if raters == 'all':
@@ -8761,6 +8761,9 @@ class MFRM(Rasch):
             difficulties = self.diffs
             thresholds = self.thresholds
             severities = self.severities_global
+
+        if raters is None:
+            dummy_sevs = pd.Series({'dummy_rater': 0})
 
         if isinstance(raters, str):
             raters = [raters]
@@ -8791,7 +8794,6 @@ class MFRM(Rasch):
         while (abs(change) > tolerance) & (iters <= max_iters):
 
             if raters is None:
-                dummy_sevs = pd.Series({'dummy_rater': 0})
 
                 exp_list = [self.exp_score_global(estimate, item, difficulties, 'dummy_rater',
                                                   dummy_sevs, thresholds)
@@ -8961,10 +8963,10 @@ class MFRM(Rasch):
                    max_iters=100,
                    ext_score_adjustment=0.5):
 
-        if items is None:
+        if (items is None) or (items == 'all'):
             items = self.dataframe.columns.tolist()
 
-        if raters is None:
+        if (raters == 'all') or (raters is None):
             raters = self.raters.tolist()
 
         if anchor:
@@ -9087,8 +9089,8 @@ class MFRM(Rasch):
                          max_iters=100,
                          ext_score_adjustment=0.5):
 
-        if items is None:
-            items = self.dataframe.columns
+        if (items is None) or (items == 'all'):
+            items = self.dataframe.columns.tolist()
 
         if raters == 'all':
             raters = self.raters.tolist()
@@ -9107,6 +9109,10 @@ class MFRM(Rasch):
             difficulties = self.diffs
             thresholds = self.thresholds
             severities = self.severities_items
+
+        if raters is None:
+            raters = 'dummy_rater'
+            severities = {'dummy_rater': {item: 0 for item in self.dataframe.columns}}
 
         if isinstance(raters, str):
             raters = [raters]
@@ -9312,14 +9318,14 @@ class MFRM(Rasch):
                         max_iters=100,
                         ext_score_adjustment=0.5):
 
-        if items is None:
-            items = self.dataframe.columns
+        if (items is None) or (items == 'all'):
+            items = self.dataframe.columns.tolist()
 
-        if raters is None:
-            raters = self.raters
+        if (raters == 'all') or (raters is None):
+            raters = self.raters.tolist()
 
         if anchor:
-            if hasattr(self, 'anchor_diffs_global'):
+            if hasattr(self, 'anchor_diffs_thresholds'):
                 difficulties = self.anchor_diffs_thresholds
                 thresholds = self.anchor_thresholds_thresholds
                 severities = self.anchor_severities_thresholds
@@ -9439,7 +9445,7 @@ class MFRM(Rasch):
                               max_iters=100,
                               ext_score_adjustment=0.5):
 
-        if items is None:
+        if (items is None) or (items == 'all'):
             items = self.dataframe.columns.tolist()
 
         if raters == 'all':
@@ -9459,6 +9465,10 @@ class MFRM(Rasch):
             difficulties = self.diffs
             thresholds = self.thresholds
             severities = self.severities_thresholds
+
+        if raters is None:
+            raters = 'dummy_rater'
+            severities = {'dummy_rater': np.zeros(self.max_score + 1)}
 
         if isinstance(raters, str):
             raters = [raters]
@@ -9659,14 +9669,14 @@ class MFRM(Rasch):
                     max_iters=100,
                     ext_score_adjustment=0.5):
 
-        if items is None:
+        if (items is None) or (items == 'all'):
             items = self.dataframe.columns.tolist()
 
-        if raters is None:
+        if (raters == 'all') or (raters is None):
             raters = self.raters.tolist()
 
         if anchor:
-            if hasattr(self, 'anchor_diffs_global'):
+            if hasattr(self, 'anchor_diffs_matrix'):
                 difficulties = self.anchor_diffs_matrix
                 thresholds = self.anchor_thresholds_matrix
                 severities = self.anchor_severities_matrix
@@ -9784,7 +9794,7 @@ class MFRM(Rasch):
                           max_iters=100,
                           ext_score_adjustment=0.5):
 
-        if items is None:
+        if (items is None) or (items == 'all'):
             items = self.dataframe.columns.tolist()
 
         if raters == 'all':
@@ -9804,6 +9814,10 @@ class MFRM(Rasch):
             difficulties = self.diffs
             thresholds = self.thresholds
             severities = self.severities_matrix
+
+        if raters is None:
+            raters = 'dummy_rater'
+            severities = {'dummy_rater': {item: np.zeros(self.max_score + 1) for item in self.dataframe.columns}}
 
         if isinstance(raters, str):
             raters = [raters]
@@ -9834,14 +9848,12 @@ class MFRM(Rasch):
         while (abs(change) > tolerance) & (iters <= max_iters):
 
             exp_list = [self.exp_score_matrix(estimate, item, difficulties, rater, severities, thresholds)
-                        for item in difficulties.keys()
-                        for rater in raters]
+                        for item in items for rater in raters]
             exp_list = np.array(exp_list)
             result = exp_list.sum()
 
             info_list = [self.variance_matrix(estimate, item, difficulties, rater, severities, thresholds)
-                         for item in difficulties.keys()
-                         for rater in raters]
+                         for item in items for rater in raters]
             info_list = np.array(info_list)
             info = info_list.sum()
 
@@ -13931,7 +13943,7 @@ class MFRM(Rasch):
                        for class_group in class_groups}
 
             elif isinstance(raters, list):
-                obs = {class_group: sum(df.loc[df_mask_dict[class_group]].mean()
+                obs = {class_group: sum(df.loc[df_mask_dict[class_group]].xs(rater).mean()
                                         for rater in raters)
                        for class_group in class_groups}
 
@@ -13941,7 +13953,7 @@ class MFRM(Rasch):
 
         if isinstance(items, list):
             if raters is None:
-                obs = {class_group: sum(df.loc[df_mask_dict[class_group]].xs(rater).mean().sum()
+                obs = {class_group: sum(df.loc[df_mask_dict[class_group]].mean().sum()
                                         for rater in self.raters.tolist()) / self.no_of_raters
                        for class_group in class_groups}
 
@@ -14387,11 +14399,12 @@ class MFRM(Rasch):
 
         return mean_abilities, obs_props
 
-    def class_intervals_thresholds(self,
+    def class_intervals_thr_global(self,
                                    abilities,
+                                   difficulties,
+                                   severities,
                                    item=None,
                                    rater=None,
-                                   anchor=False,
                                    no_of_classes=5):
 
         if rater == 'none':
@@ -14399,14 +14412,6 @@ class MFRM(Rasch):
 
         if rater == 'zero':
             rater = None
-            
-        if anchor:
-            difficulties = self.anchor_diffs_global
-            severities = self.anchor_severities_global
-        
-        else:
-            difficulties = self.diffs
-            severities = self.severities_global
 
         class_groups = [f'class_{class_no + 1}' for class_no in range(no_of_classes)]
 
@@ -14445,6 +14450,365 @@ class MFRM(Rasch):
                 df = df[item].unstack(level=0)
                 abil_df = abil_df[item].unstack(level=0)
     
+            else:
+                df = df[item].xs(rater)
+                abil_df = abil_df[item].xs(rater)
+
+        def class_masks(abils):
+            mask_dict = {}
+
+            quantiles = (abils.quantile([(i + 1) / no_of_classes
+                                         for i in range(no_of_classes - 1)]))
+
+            mask_dict['class_1'] = (abils < quantiles.values[0])
+            mask_dict[f'class_{no_of_classes}'] = (abils >= quantiles.values[no_of_classes - 2])
+            for class_group in range(no_of_classes - 2):
+                mask_dict[f'class_{class_group + 2}'] = ((abils >= quantiles.values[class_group]) &
+                                                         (abils < quantiles.values[class_group + 1]))
+
+            for class_group in class_groups:
+                mask_dict[class_group] = mask_dict[class_group][mask_dict[class_group]].index
+
+            return mask_dict
+
+        mean_abilities = []
+        obs_props = []
+
+        for threshold in range(self.max_score):
+            cond_df = df[df.isin([threshold, threshold + 1])]
+            cond_df -= threshold
+
+            cond_df_mask = (cond_df + 1) / (cond_df + 1)
+
+            cond_abils = abil_df * cond_df_mask
+
+            obs_data_df = pd.DataFrame()
+
+            if item is None:
+                if rater is None:
+                    obs_data_df['ability'] = cond_abils.stack()
+                    obs_data_df['score'] = cond_df.stack()
+                    obs_data_df = obs_data_df.droplevel(level=[0, 2])
+
+                else:
+                    obs_data_df['ability'] = cond_abils.stack()
+                    obs_data_df['score'] = cond_df.stack()
+                    obs_data_df = obs_data_df.droplevel(level=1)
+
+            else:
+                if rater is None:
+                    obs_data_df['ability'] = cond_abils.stack()
+                    obs_data_df['score'] = cond_df.stack()
+                    obs_data_df = obs_data_df.droplevel(level=1)
+
+                else:
+                    obs_data_df['ability'] = cond_abils
+                    obs_data_df['score'] = cond_df
+
+            mask_dict = class_masks(obs_data_df['ability'])
+
+            mean_abilities.append([obs_data_df.loc[mask_dict[class_group]]['ability'].mean()
+                                   for class_group in class_groups])
+
+            obs_props.append([obs_data_df.loc[mask_dict[class_group]]['score'].mean()
+                              for class_group in class_groups])
+
+        mean_abilities = np.array(mean_abilities)
+        obs_props = np.array(obs_props)
+
+        return mean_abilities, obs_props
+
+    def class_intervals_thr_items(self,
+                                  abilities,
+                                  difficulties,
+                                  severities,
+                                  item=None,
+                                  rater=None,
+                                  no_of_classes=5):
+
+        if rater == 'none':
+            rater = None
+
+        if rater == 'zero':
+            rater = None
+
+        class_groups = [f'class_{class_no + 1}' for class_no in range(no_of_classes)]
+
+        df = self.dataframe.copy()
+
+        abil_df = pd.DataFrame()
+
+        for item_ in self.dataframe.columns:
+            abil_df[item_] = abilities
+
+        if item is None:
+            for item_ in self.dataframe.columns:
+                abil_df.loc[:, item_] -= difficulties[item_]
+
+        abil_dict = {}
+
+        for rater_ in self.raters:
+            abil_dict[rater_] = abil_df.copy()
+
+            if rater is None:
+                for item_ in self.dataframe.columns:
+                    abil_dict[rater_].loc[:, item_] -= severities[rater_][item_]
+
+        abil_df = pd.concat(abil_dict.values(), keys=abil_dict.keys())
+
+        if item is None:
+            if rater is None:
+                df = df
+                abil_df = abil_df
+
+            else:
+                df = df.xs(rater)
+                abil_df = abil_df.xs(rater)
+
+        else:
+            if rater is None:
+                df = df[item].unstack(level=0)
+                abil_df = abil_df[item].unstack(level=0)
+
+            else:
+                df = df[item].xs(rater)
+                abil_df = abil_df[item].xs(rater)
+
+        def class_masks(abils):
+            mask_dict = {}
+
+            quantiles = (abils.quantile([(i + 1) / no_of_classes
+                                         for i in range(no_of_classes - 1)]))
+
+            mask_dict['class_1'] = (abils < quantiles.values[0])
+            mask_dict[f'class_{no_of_classes}'] = (abils >= quantiles.values[no_of_classes - 2])
+            for class_group in range(no_of_classes - 2):
+                mask_dict[f'class_{class_group + 2}'] = ((abils >= quantiles.values[class_group]) &
+                                                         (abils < quantiles.values[class_group + 1]))
+
+            for class_group in class_groups:
+                mask_dict[class_group] = mask_dict[class_group][mask_dict[class_group]].index
+
+            return mask_dict
+
+        mean_abilities = []
+        obs_props = []
+
+        for threshold in range(self.max_score):
+            cond_df = df[df.isin([threshold, threshold + 1])]
+            cond_df -= threshold
+
+            cond_df_mask = (cond_df + 1) / (cond_df + 1)
+
+            cond_abils = abil_df * cond_df_mask
+
+            obs_data_df = pd.DataFrame()
+
+            if item is None:
+                if rater is None:
+                    obs_data_df['ability'] = cond_abils.stack()
+                    obs_data_df['score'] = cond_df.stack()
+                    obs_data_df = obs_data_df.droplevel(level=[0, 2])
+
+                else:
+                    obs_data_df['ability'] = cond_abils.stack()
+                    obs_data_df['score'] = cond_df.stack()
+                    obs_data_df = obs_data_df.droplevel(level=1)
+
+            else:
+                if rater is None:
+                    obs_data_df['ability'] = cond_abils.stack()
+                    obs_data_df['score'] = cond_df.stack()
+                    obs_data_df = obs_data_df.droplevel(level=1)
+
+                else:
+                    obs_data_df['ability'] = cond_abils
+                    obs_data_df['score'] = cond_df
+
+            mask_dict = class_masks(obs_data_df['ability'])
+
+            mean_abilities.append([obs_data_df.loc[mask_dict[class_group]]['ability'].mean()
+                                   for class_group in class_groups])
+
+            obs_props.append([obs_data_df.loc[mask_dict[class_group]]['score'].mean()
+                              for class_group in class_groups])
+
+        mean_abilities = np.array(mean_abilities)
+        obs_props = np.array(obs_props)
+
+        return mean_abilities, obs_props
+
+    def class_intervals_thr_thresholds(self,
+                                       abilities,
+                                       difficulties,
+                                       severities,
+                                       item=None,
+                                       rater=None,
+                                       no_of_classes=5):
+
+        if rater == 'none':
+            rater = None
+
+        if rater == 'zero':
+            rater = None
+
+        class_groups = [f'class_{class_no + 1}' for class_no in range(no_of_classes)]
+
+        df = self.dataframe.copy()
+
+        abil_df = pd.DataFrame()
+
+        for item_ in self.dataframe.columns:
+            abil_df[item_] = abilities
+
+        if item is None:
+            for item_ in self.dataframe.columns:
+                abil_df.loc[:, item_] -= difficulties[item_]
+
+        abil_dict = {}
+
+        for rater_ in self.raters:
+            abil_dict[rater_] = abil_df.copy()
+
+            if rater is None:
+                abil_dict[rater_] -= severities[rater_][1:].mean()
+
+        abil_df = pd.concat(abil_dict.values(), keys=abil_dict.keys())
+
+        if item is None:
+            if rater is None:
+                df = df
+                abil_df = abil_df
+
+            else:
+                df = df.xs(rater)
+                abil_df = abil_df.xs(rater)
+
+        else:
+            if rater is None:
+                df = df[item].unstack(level=0)
+                abil_df = abil_df[item].unstack(level=0)
+
+            else:
+                df = df[item].xs(rater)
+                abil_df = abil_df[item].xs(rater)
+
+        def class_masks(abils):
+            mask_dict = {}
+
+            quantiles = (abils.quantile([(i + 1) / no_of_classes
+                                         for i in range(no_of_classes - 1)]))
+
+            mask_dict['class_1'] = (abils < quantiles.values[0])
+            mask_dict[f'class_{no_of_classes}'] = (abils >= quantiles.values[no_of_classes - 2])
+            for class_group in range(no_of_classes - 2):
+                mask_dict[f'class_{class_group + 2}'] = ((abils >= quantiles.values[class_group]) &
+                                                         (abils < quantiles.values[class_group + 1]))
+
+            for class_group in class_groups:
+                mask_dict[class_group] = mask_dict[class_group][mask_dict[class_group]].index
+
+            return mask_dict
+
+        mean_abilities = []
+        obs_props = []
+
+        for threshold in range(self.max_score):
+            cond_df = df[df.isin([threshold, threshold + 1])]
+            cond_df -= threshold
+
+            cond_df_mask = (cond_df + 1) / (cond_df + 1)
+
+            cond_abils = abil_df * cond_df_mask
+
+            obs_data_df = pd.DataFrame()
+
+            if item is None:
+                if rater is None:
+                    obs_data_df['ability'] = cond_abils.stack()
+                    obs_data_df['score'] = cond_df.stack()
+                    obs_data_df = obs_data_df.droplevel(level=[0, 2])
+
+                else:
+                    obs_data_df['ability'] = cond_abils.stack()
+                    obs_data_df['score'] = cond_df.stack()
+                    obs_data_df = obs_data_df.droplevel(level=1)
+
+            else:
+                if rater is None:
+                    obs_data_df['ability'] = cond_abils.stack()
+                    obs_data_df['score'] = cond_df.stack()
+                    obs_data_df = obs_data_df.droplevel(level=1)
+
+                else:
+                    obs_data_df['ability'] = cond_abils
+                    obs_data_df['score'] = cond_df
+
+            mask_dict = class_masks(obs_data_df['ability'])
+
+            mean_abilities.append([obs_data_df.loc[mask_dict[class_group]]['ability'].mean()
+                                   for class_group in class_groups])
+
+            obs_props.append([obs_data_df.loc[mask_dict[class_group]]['score'].mean()
+                              for class_group in class_groups])
+
+        mean_abilities = np.array(mean_abilities)
+        obs_props = np.array(obs_props)
+
+        return mean_abilities, obs_props
+
+    def class_intervals_thr_matrix(self,
+                                   abilities,
+                                   difficulties,
+                                   severities,
+                                   item=None,
+                                   rater=None,
+                                   no_of_classes=5):
+
+        if rater == 'none':
+            rater = None
+
+        if rater == 'zero':
+            rater = None
+
+        class_groups = [f'class_{class_no + 1}' for class_no in range(no_of_classes)]
+
+        df = self.dataframe.copy()
+
+        abil_df = pd.DataFrame()
+
+        for item_ in self.dataframe.columns:
+            abil_df[item_] = abilities
+
+        if item is None:
+            for item_ in self.dataframe.columns:
+                abil_df.loc[:, item_] -= difficulties[item_]
+
+        abil_dict = {}
+
+        for rater_ in self.raters:
+            abil_dict[rater_] = abil_df.copy()
+
+            if rater is None:
+                for item_ in self.dataframe.columns:
+                    abil_dict[rater_][item_] -= severities[rater_][item_][1:].mean()
+
+        abil_df = pd.concat(abil_dict.values(), keys=abil_dict.keys())
+
+        if item is None:
+            if rater is None:
+                df = df
+                abil_df = abil_df
+
+            else:
+                df = df.xs(rater)
+                abil_df = abil_df.xs(rater)
+
+        else:
+            if rater is None:
+                df = df[item].unstack(level=0)
+                abil_df = abil_df[item].unstack(level=0)
+
             else:
                 df = df[item].xs(rater)
                 abil_df = abil_df[item].xs(rater)
@@ -15469,7 +15833,7 @@ class MFRM(Rasch):
                                                         warm_corr=False)
                              for score in score_lines_test]
 
-                for thresh, abil in zip(score_lines_item[1], abils_set):
+                for thresh, abil in zip(score_lines_test, abils_set):
                     plt.vlines(x=abil, ymin=-100, ymax=thresh, color='black', linestyles='dashed')
                     if score_labels:
                         plt.text(abil + (x_max - x_min) / 100, y_max / 50, str(round(abil, 2)))
@@ -16493,9 +16857,14 @@ class MFRM(Rasch):
             difficulties = self.diffs
             thresholds = self.thresholds
             severities = self.severities_global
+
+        dummy_sevs = pd.Series({'dummy_rater': 0})
             
         if obs == 'none':
             obs = None
+
+        if obs == 'all':
+            obs = np.arange(self.max_score + 1)
 
         if obs is not None:
             if anchor:
@@ -16525,31 +16894,33 @@ class MFRM(Rasch):
 
         if rater is None:
             if item is None:
-                y = np.array([[self.cat_prob_global(ability + difficulties.values[0], difficulties.index[0],
-                                                    difficulties, 'dummy_rater', pd.Series({'dummy_rater': 0}),
-                                                    category, thresholds)
-                               for category in range(self.max_score + 1)]
-                              for ability in abilities])
+                y = [[self.cat_prob_global(ability + difficulties.values[0], difficulties.index[0],
+                                           difficulties, 'dummy_rater', dummy_sevs, category, thresholds)
+                      for category in range(self.max_score + 1)]
+                     for ability in abilities]
 
 
             else:
-                y = np.array([[self.cat_prob_global(ability, item, difficulties, 'dummy_rater',
-                                                    pd.Series({'dummy_rater': 0}), category, thresholds)
-                               for category in range(self.max_score + 1)]
-                              for ability in abilities])
+                y = [[self.cat_prob_global(ability, item, difficulties, 'dummy_rater', dummy_sevs,
+                                           category, thresholds)
+                      for category in range(self.max_score + 1)]
+                     for ability in abilities]
 
         else:
             if item is None:
-                y = np.array([[self.cat_prob_global(ability + difficulties.values[0], difficulties.index[0],
-                                                    difficulties, rater, severities, category, thresholds)
-                               for category in range(self.max_score + 1)]
-                              for ability in abilities])
+                y = [[self.cat_prob_global(ability + difficulties.values[0], difficulties.index[0],
+                                           difficulties, rater, severities, category, thresholds)
+                      for category in range(self.max_score + 1)]
+                     for ability in abilities]
 
 
             else:
-                y = np.array([[self.cat_prob_global(ability, item, difficulties, rater, severities, category, thresholds)
-                               for category in range(self.max_score + 1)]
-                              for ability in abilities])
+                y = [[self.cat_prob_global(ability, item, difficulties, rater, severities, category,
+                                           thresholds)
+                      for category in range(self.max_score + 1)]
+                     for ability in abilities]
+
+        y = np.array(y)
 
         if title is not None:
             graphtitle = title
@@ -16617,6 +16988,9 @@ class MFRM(Rasch):
         if obs == 'none':
             obs = None
 
+        if obs == 'all':
+            obs = np.arange(self.max_score + 1)
+
         if obs is not None:
             if anchor:
                 if hasattr(self, 'anchor_abils_items') == False:
@@ -16645,30 +17019,33 @@ class MFRM(Rasch):
 
         if rater is None:
             if item is None:
-                y = np.array([[self.cat_prob_items(ability + difficulties.values[0], difficulties.index[0],
-                                                   difficulties, 'dummy_rater', dummy_sevs, category, thresholds)
-                               for category in range(self.max_score + 1)]
-                              for ability in abilities])
+                y = [[self.cat_prob_items(ability + difficulties.values[0], difficulties.index[0],
+                                          difficulties, 'dummy_rater', dummy_sevs, category, thresholds)
+                      for category in range(self.max_score + 1)]
+                     for ability in abilities]
 
 
             else:
-                y = np.array([[self.cat_prob_items(ability, item, difficulties, 'dummy_rater', dummy_sevs, category,
-                                                   thresholds)
-                               for category in range(self.max_score + 1)]
-                              for ability in abilities])
+                y = [[self.cat_prob_items(ability, item, difficulties, 'dummy_rater', dummy_sevs,
+                                          category, thresholds)
+                      for category in range(self.max_score + 1)]
+                     for ability in abilities]
 
         else:
             if item is None:
-                y = np.array([[self.cat_prob_items(ability + difficulties.values[0], difficulties.index[0],
-                                                   difficulties, rater, severities, category, thresholds)
-                               for category in range(self.max_score + 1)]
-                              for ability in abilities])
+                y = [[self.cat_prob_items(ability + difficulties.values[0], difficulties.index[0],
+                                          difficulties, rater, severities, category, thresholds)
+                      for category in range(self.max_score + 1)]
+                     for ability in abilities]
 
 
             else:
-                y = np.array([[self.cat_prob_items(ability, item, difficulties, rater, severities, category, thresholds)
-                               for category in range(self.max_score + 1)]
-                              for ability in abilities])
+                y = [[self.cat_prob_items(ability, item, difficulties, rater, severities, category,
+                                          thresholds)
+                      for category in range(self.max_score + 1)]
+                     for ability in abilities]
+
+        y = np.array(y)
 
         if title is not None:
             graphtitle = title
@@ -16735,6 +17112,9 @@ class MFRM(Rasch):
         if obs == 'none':
             obs = None
 
+        if obs == 'all':
+            obs = np.arange(self.max_score + 1)
+
         if obs is not None:
             if anchor:
                 if hasattr(self, 'anchor_abils_thresholds') == False:
@@ -16764,31 +17144,33 @@ class MFRM(Rasch):
 
         if rater is None:
             if item is None:
-                y = np.array([[self.cat_prob_thresholds(ability + difficulties.values[0], difficulties.index[0],
-                                                        difficulties, 'dummy_rater', dummy_sevs, category, thresholds)
-                               for category in range(self.max_score + 1)]
-                              for ability in abilities])
+                y = [[self.cat_prob_thresholds(ability + difficulties.values[0], difficulties.index[0],
+                                               difficulties, 'dummy_rater', dummy_sevs, category, thresholds)
+                      for category in range(self.max_score + 1)]
+                     for ability in abilities]
 
 
             else:
-                y = np.array([[self.cat_prob_thresholds(ability, item, difficulties, 'dummy_rater', dummy_sevs,
-                                                        category, thresholds)
-                               for category in range(self.max_score + 1)]
-                              for ability in abilities])
+                y = [[self.cat_prob_thresholds(ability, item, difficulties, 'dummy_rater', dummy_sevs,
+                                               category, thresholds)
+                      for category in range(self.max_score + 1)]
+                     for ability in abilities]
 
         else:
             if item is None:
-                y = np.array([[self.cat_prob_thresholds(ability + difficulties.values[0], difficulties.index[0],
-                                                        difficulties, rater, severities, category, thresholds)
-                               for category in range(self.max_score + 1)]
-                              for ability in abilities])
+                y = [[self.cat_prob_thresholds(ability + difficulties.values[0], difficulties.index[0],
+                                               difficulties, rater, severities, category, thresholds)
+                      for category in range(self.max_score + 1)]
+                     for ability in abilities]
 
 
             else:
-                y = np.array([[self.cat_prob_thresholds(ability, item, difficulties, rater, severities, category,
-                                                        thresholds)
-                               for category in range(self.max_score + 1)]
-                              for ability in abilities])
+                y = [[self.cat_prob_thresholds(ability, item, difficulties, rater, severities, category,
+                                               thresholds)
+                      for category in range(self.max_score + 1)]
+                     for ability in abilities]
+
+        y = np.array(y)
 
         if title is not None:
             graphtitle = title
@@ -16850,10 +17232,18 @@ class MFRM(Rasch):
             difficulties = self.diffs
             thresholds = self.thresholds
             severities = self.severities_matrix
+        
+        
+        dummy_sevs = {'dummy_rater': {item: np.zeros(self.max_score + 1)} for item in self.dataframe.columns}
+        
+        dummy_diffs = pd.Series({'dummy_item': 0})
+        dummy_sevs_no_item = {'dummy_rater': {'dummy_item': np.zeros(self.max_score + 1)}}
 
-        if rater is None:
-            severities = {'dummy_rater': {item: np.zeros(self.max_score + 1)}}
-            rater = 'dummy_rater'
+        if obs == 'none':
+            obs = None
+
+        if obs == 'all':
+            obs = np.arange(self.max_score + 1)
 
         if obs is not None:
             if rater is not None:
@@ -16875,10 +17265,6 @@ class MFRM(Rasch):
             xobsdata, yobsdata = self.class_intervals_cats_matrix(abilities, difficulties, thresholds, severities,
                                                                   item=item, rater=rater, no_of_classes=no_of_classes)
 
-            xobsdata -= np.mean([severities[rater][item][1:].mean() for rater in self.raters])
-            if rater is not None:
-                xobsdata += severities[rater][item][1:].mean()
-
             if obs != 'all':
                 yobsdata = yobsdata[obs].T
 
@@ -16887,9 +17273,32 @@ class MFRM(Rasch):
             yobsdata = np.array(np.nan)
 
         abilities = np.arange(-20, 20, 0.1)
-        y = np.array([[self.cat_prob_matrix(ability, item, difficulties, rater, severities, category, thresholds)
-                       for category in range(self.max_score + 1)]
-                      for ability in abilities])
+
+        if rater is None:
+            if item is None:
+                y = [[self.cat_prob_matrix(ability, 'dummy_item', dummy_diffs, 'dummy_rater', dummy_sevs_no_item, category,
+                                           thresholds)
+                      for category in range(self.max_score + 1)]
+                     for ability in abilities]
+
+            else:
+                y = [[self.cat_prob_matrix(ability, item, difficulties, 'dummy_rater', dummy_sevs, category, thresholds)
+                      for category in range(self.max_score + 1)]
+                     for ability in abilities]
+
+        else:
+            if item is None:
+                y = [[self.cat_prob_matrix(ability, 'dummy_item', dummy_diffs, rater, severities, category, thresholds)
+                      for category in range(self.max_score + 1)]
+                     for ability in abilities]
+
+
+            else:
+                y = [[self.cat_prob_matrix(ability, item, difficulties, rater, severities, category, thresholds)
+                      for category in range(self.max_score + 1)]
+                     for ability in abilities]
+
+        y = np.array(y)
 
         if title is not None:
             graphtitle = title
@@ -16937,6 +17346,9 @@ class MFRM(Rasch):
         overplotting of observed data and threshold lines.
         '''
 
+        if (rater == 'none') or (rater == 'zero'):
+            rater = None
+
         if anchor:
             if hasattr(self, 'anchor_thresholds_global') == False:
                 print('Anchor calibration required')
@@ -16953,11 +17365,6 @@ class MFRM(Rasch):
             thresholds = self.thresholds
             severities = self.severities_global
 
-        if item is None:
-            items = self.dataframe.columns
-
-        else: items = [item]
-
         if obs is not None:
 
             if anchor:
@@ -16970,8 +17377,8 @@ class MFRM(Rasch):
                     self.person_abils_global()
                 abilities = self.abils_global
 
-            xobsdata, yobsdata = self.class_intervals_thresholds(abilities, item=item, rater=rater, anchor=anchor,
-                                                                 no_of_classes=no_of_classes)
+            xobsdata, yobsdata = self.class_intervals_thr_global(abilities, difficulties, severities, item=item,
+                                                                 rater=rater, no_of_classes=no_of_classes)
 
             if obs == 'all':
                 obs = [i + 1 for i in range(self.max_score)]
@@ -17046,6 +17453,9 @@ class MFRM(Rasch):
         overplotting of observed data and threshold lines.
         '''
 
+        if (rater == 'none') or (rater == 'zero'):
+            rater = None
+
         if anchor:
             if hasattr(self, 'anchor_thresholds_items') == False:
                 print('Anchor calibration required')
@@ -17062,45 +17472,23 @@ class MFRM(Rasch):
             thresholds = self.thresholds
             severities = self.severities_items
 
-        if item is None:
-            items = self.dataframe.columns
-
-        else: items = [item]
-
         if obs is not None:
-            if rater is not None:
-                abilities = {person: self.abil_items(person, raters=[rater])
-                             for person in self.persons}
-                abilities = pd.Series(abilities)
+
+            if anchor:
+                if hasattr(self, 'anchor_abils_items') == False:
+                    self.person_abils_items(anchor=True)
+                abilities = self.anchor_abils_items
 
             else:
-                if anchor:
-                    if hasattr(self, 'anchor_abils_items') == False:
-                        self.person_abils_items(anchor=True)
-                    abilities = self.anchor_abils_items
+                if hasattr(self, 'abils_items') == False:
+                    self.person_abils_items()
+                abilities = self.abils_items
 
-                else:
-                    if hasattr(self, 'abils_items') == False:
-                        self.person_abils_items()
-                    abilities = self.abils_items
-
-            xobsdata, yobsdata = self.class_intervals_thresholds(abilities, items, difficulties=difficulties,
-                                                                          no_of_classes=no_of_classes)
-
-            if item is not None:
-                xobsdata += difficulties[item]
-
-            yobsdata = yobsdata.T
+            xobsdata, yobsdata = self.class_intervals_thr_items(abilities, difficulties, severities, item=item,
+                                                                rater=rater, no_of_classes=no_of_classes)
 
             if obs != 'all':
-                try:
-                    obs = [ob - 1 for ob in obs]
-                except:
-                    print("Invalid 'obs'. Valid values are 'None', 'all' and list of categories.")
-                    return
-
-                xobsdata = xobsdata[obs]
-                yobsdata = yobsdata[obs]
+                obs = [i + 1 for i in range(self.max_score)]
 
         else:
             xobsdata = np.array(np.nan)
@@ -17134,13 +17522,13 @@ class MFRM(Rasch):
 
         ylabel = 'Probability'
 
-        plot = self.plot_data_items(x_data=abilities, y_data=y, anchor=anchor, raters=rater, y_max=1, x_min=xmin,
-                                    x_max=xmax, items=item, warm=warm, x_obs_data=xobsdata, y_obs_data=yobsdata,
+        plot = self.plot_data_items(x_data=abilities, y_data=y, anchor=anchor, items=item, raters=rater, y_max=1,
+                                    x_min=xmin, x_max=xmax, warm=warm, x_obs_data=xobsdata, y_obs_data=yobsdata,
                                     graph_title=graphtitle, y_label=ylabel, thresh_obs=obs, thresh_lines=thresh_lines,
                                     central_diff=central_diff, cat_highlight=cat_highlight, plot_style=plot_style,
-                                    black=black, font=font, title_font_size=title_font_size, labelsize=labelsize,
-                                    axis_font_size=axis_font_size, filename=filename, file_format=file_format,
-                                    plot_density=dpi)
+                                    black=black, font=font, title_font_size=title_font_size,
+                                    axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
+                                    file_format=file_format, plot_density=dpi)
 
         return plot
 
@@ -17172,6 +17560,9 @@ class MFRM(Rasch):
         overplotting of observed data and threshold lines.
         '''
 
+        if (rater == 'none') or (rater == 'zero'):
+            rater = None
+
         if anchor:
             if hasattr(self, 'anchor_thresholds_thresholds') == False:
                 print('Anchor calibration required')
@@ -17188,42 +17579,23 @@ class MFRM(Rasch):
             thresholds = self.thresholds
             severities = self.severities_thresholds
 
-        if item is None:
-            items = self.dataframe.columns
-
-        else: items = [item]
-
         if obs is not None:
-            if rater is not None:
-                abilities = {person: self.abil_thresholds(person, raters=[rater])
-                             for person in self.persons}
-                abilities = pd.Series(abilities)
+
+            if anchor:
+                if hasattr(self, 'anchor_abils_thresholds') == False:
+                    self.person_abils_thresholds(anchor=True)
+                abilities = self.anchor_abils_thresholds
 
             else:
-                if anchor:
-                    if hasattr(self, 'anchor_abils_thresholds') == False:
-                        self.person_abils_thresholds(anchor=True)
-                    abilities = self.anchor_abils_thresholds
+                if hasattr(self, 'abils_thresholds') == False:
+                    self.person_abils_thresholds()
+                abilities = self.abils_thresholds
 
-                else:
-                    if hasattr(self, 'abils_thresholds') == False:
-                        self.person_abils_thresholds()
-                    abilities = self.abils_thresholds
+            xobsdata, yobsdata = self.class_intervals_thr_thresholds(abilities, difficulties, severities, item=item,
+                                                                     rater=rater, no_of_classes=no_of_classes)
 
-            xobsdata, yobsdata = self.class_intervals_thresholds(abilities, items, difficulties=difficulties,
-                                                                          no_of_classes=no_of_classes)
-
-            yobsdata = yobsdata.T
-
-            if obs != 'all':
-                try:
-                    obs = [ob - 1 for ob in obs]
-                except:
-                    print("Invalid 'obs'. Valid values are 'None', 'all' and list of categories.")
-                    return
-
-                xobsdata = xobsdata[obs]
-                yobsdata = yobsdata[obs]
+            if obs == 'all':
+                obs = [i + 1 for i in range(self.max_score)]
 
         else:
             xobsdata = np.array(np.nan)
@@ -17296,6 +17668,9 @@ class MFRM(Rasch):
         overplotting of observed data and threshold lines.
         '''
 
+        if (rater == 'none') or (rater == 'zero'):
+            rater = None
+
         if anchor:
             if hasattr(self, 'anchor_thresholds_matrix') == False:
                 print('Anchor calibration required')
@@ -17312,42 +17687,23 @@ class MFRM(Rasch):
             thresholds = self.thresholds
             severities = self.severities_matrix
 
-        if item is None:
-            items = self.dataframe.columns
-
-        else: items = [item]
-
         if obs is not None:
-            if rater is not None:
-                abilities = {person: self.abil_matrix(person, raters=[rater])
-                             for person in self.persons}
-                abilities = pd.Series(abilities)
+
+            if anchor:
+                if hasattr(self, 'anchor_abils_matrix') == False:
+                    self.person_abils_matrix(anchor=True)
+                abilities = self.anchor_abils_matrix
 
             else:
-                if anchor:
-                    if hasattr(self, 'anchor_abils_matrix') == False:
-                        self.person_abils_matrix(anchor=True)
-                    abilities = self.anchor_abils_matrix
+                if hasattr(self, 'abils_matrix') == False:
+                    self.person_abils_matrix()
+                abilities = self.abils_matrix
 
-                else:
-                    if hasattr(self, 'abils_matrix') == False:
-                        self.person_abils_matrix()
-                    abilities = self.abils_matrix
+            xobsdata, yobsdata = self.class_intervals_thr_matrix(abilities, difficulties, severities,item=item,
+                                                                 rater=rater, no_of_classes=no_of_classes)
 
-            xobsdata, yobsdata = self.class_intervals_thresholds(abilities, items, difficulties=difficulties,
-                                                                          no_of_classes=no_of_classes)
-
-            yobsdata = yobsdata.T
-
-            if obs != 'all':
-                try:
-                    obs = [ob - 1 for ob in obs]
-                except:
-                    print("Invalid 'obs'. Valid values are 'None', 'all' and list of categories.")
-                    return
-
-                xobsdata = xobsdata[obs]
-                yobsdata = yobsdata[obs]
+            if obs == 'all':
+                obs = [i + 1 for i in range(self.max_score)]
 
         else:
             xobsdata = np.array(np.nan)
@@ -17450,6 +17806,8 @@ class MFRM(Rasch):
         else:
             y = [self.variance_global(ability, item, difficulties, rater, severities, thresholds)
                  for ability in abilities]
+
+        y = np.array(y).reshape(len(abilities), 1)
         
         if title is not None:
             graphtitle = title
@@ -17820,21 +18178,20 @@ class MFRM(Rasch):
 
         y = np.array(y).reshape(len(abilities), 1)
 
-        if isinstance(raters, list):
-            no_of_raters = len(raters)
-            
-        else:
-            no_of_raters = 1
-        
         if items is None:
             no_of_items = self.no_of_items
 
+        if isinstance(items, str):
+            no_of_items = 1
+
         else:
-            if isinstance(items, list):
-                no_of_items = len(items)
-                
-            else:
-                no_of_items = 1
+            no_of_items = len(items)
+
+        if (raters is None) or (isinstance(raters, str)):
+            no_of_raters = 1
+
+        else:
+            no_of_raters = len(items)
 
         y_max = self.max_score * no_of_items * no_of_raters
 
@@ -17846,8 +18203,8 @@ class MFRM(Rasch):
 
         ylabel = 'Expected score'
 
-        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, raters=raters, x_obs_data=xobsdata,
-                                     y_obs_data=yobsdata, x_min=xmin, x_max=xmax, y_max=y_max, items=items,
+        plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor,  items=items, raters=raters,
+                                     x_obs_data=xobsdata, y_obs_data=yobsdata, x_min=xmin, x_max=xmax, y_max=y_max,
                                      score_lines_test=score_lines, score_labels=score_labels, graph_title=graphtitle,
                                      y_label=ylabel, obs=obs, plot_style=plot_style, black=black, font=font,
                                      title_font_size=title_font_size, axis_font_size=axis_font_size, labelsize=labelsize,
@@ -17857,7 +18214,8 @@ class MFRM(Rasch):
 
     def tcc_items(self,
                   anchor=False,
-                  rater=None,
+                  items='all',
+                  raters='zero',
                   obs=False,
                   xmin=-10,
                   xmax=10,
@@ -17879,6 +18237,18 @@ class MFRM(Rasch):
         Plots Test Characteristic Curve.
         '''
 
+        if items == 'all':
+            items = self.dataframe.columns.tolist()
+
+        if raters == 'all':
+            raters = self.raters.tolist()
+
+        if raters == 'none':
+            raters = None
+
+        if raters == 'zero':
+            raters = None
+
         if anchor:
             if hasattr(self, 'anchor_thresholds_items') == False:
                 print('Anchor calibration required')
@@ -17895,9 +18265,7 @@ class MFRM(Rasch):
             thresholds = self.thresholds
             severities = self.severities_items
 
-        if rater is None:
-            severities = {'dummy_rater': {item: 0 for item in self.dataframe.columns}}
-            rater = 'dummy_rater'
+        dummy_sevs = {'dummy_rater': {item: 0 for item in self.dataframe.columns}}
 
         if obs:
             if anchor:
@@ -17910,13 +18278,8 @@ class MFRM(Rasch):
                     self.person_abils_items()
                 abilities = self.abils_items
 
-            xobsdata, yobsdata = self.class_intervals(abilities, self.dataframe.columns,
-                                                               no_of_classes=no_of_classes)
-
-            xobsdata -= np.mean([np.mean([severities[rater][item] for rater in self.raters])
-                                 for item in self.dataframe.columns])
-            if rater is not None:
-                xobsdata += np.mean([severities[rater][item] for item in self.dataframe.columns])
+            xobsdata, yobsdata = self.class_intervals(abilities, items=items, raters=raters,
+                                                      no_of_classes=no_of_classes)
 
             yobsdata = np.array(yobsdata).reshape((-1, 1))
 
@@ -17925,12 +18288,71 @@ class MFRM(Rasch):
             yobsdata = np.array(np.nan)
 
         abilities = np.arange(-20, 20, 0.1)
-        y = [sum(self.exp_score_items(ability, item, difficulties, rater, severities, thresholds)
-                 for item in self.dataframe.columns)
-             for ability in abilities]
+
+        if items is None:
+            if raters is None:
+                y = [sum(self.exp_score_items(ability, item, difficulties, 'dummy_rater', dummy_sevs, thresholds)
+                         for item in self.dataframe.columns)
+                     for ability in abilities]
+
+            elif isinstance(raters, list):
+                y = [sum(self.exp_score_items(ability, item, difficulties, rater, severities, thresholds)
+                         for item in self.dataframe.columns for rater in raters)
+                     for ability in abilities]
+
+            else:
+                y = [sum(self.exp_score_items(ability, item, difficulties, raters, severities, thresholds)
+                         for item in self.dataframe.columns)
+                     for ability in abilities]
+
+        if isinstance(items, list):
+            if raters is None:
+                y = [sum(self.exp_score_items(ability, item, difficulties, 'dummy_rater', dummy_sevs, thresholds)
+                         for item in items)
+                     for ability in abilities]
+
+            elif isinstance(raters, list):
+                y = [sum(self.exp_score_items(ability, item, difficulties, rater, severities, thresholds)
+                         for item in items for rater in raters)
+                     for ability in abilities]
+
+            else:
+                y = [sum(self.exp_score_items(ability, item, difficulties, raters, severities, thresholds)
+                         for item in items)
+                     for ability in abilities]
+
+        if isinstance(items, str):
+            if raters is None:
+                y = [self.exp_score_items(ability, items, difficulties, 'dummy_rater', dummy_sevs, thresholds)
+                     for ability in abilities]
+
+            elif isinstance(raters, list):
+                y = [sum(self.exp_score_items(ability, items, difficulties, rater, severities, thresholds)
+                         for rater in raters)
+                     for ability in abilities]
+
+            else:
+                y = [self.exp_score_items(ability, items, difficulties, raters, severities, thresholds)
+                     for ability in abilities]
+
         y = np.array(y).reshape(len(abilities), 1)
 
-        y_max = self.max_score * len(items) * len(raters)
+        if items is None:
+            no_of_items = self.no_of_items
+
+        if isinstance(items, str):
+            no_of_items = 1
+
+        else:
+            no_of_items = len(items)
+
+        if (raters is None) or (isinstance(raters, str)):
+            no_of_raters = 1
+
+        else:
+            no_of_raters = len(items)
+
+        y_max = self.max_score * no_of_items * no_of_raters
 
         if title is not None:
             graphtitle = title
@@ -17940,18 +18362,18 @@ class MFRM(Rasch):
 
         ylabel = 'Expected score'
 
-        plot = self.plot_data_items(x_data=abilities, y_data=y, anchor=anchor, raters=rater, x_obs_data=xobsdata,
-                                    items=items, y_obs_data=yobsdata, x_min=xmin, x_max=xmax, y_max=y_max,
+        plot = self.plot_data_items(x_data=abilities, y_data=y, anchor=anchor,  items=items, raters=raters,
+                                    x_obs_data=xobsdata, y_obs_data=yobsdata, x_min=xmin, x_max=xmax, y_max=y_max,
                                     score_lines_test=score_lines, score_labels=score_labels, graph_title=graphtitle,
                                     y_label=ylabel, obs=obs, plot_style=plot_style, black=black, font=font,
                                     title_font_size=title_font_size, axis_font_size=axis_font_size, labelsize=labelsize,
                                     filename=filename, plot_density=dpi, file_format=file_format)
-
         return plot
 
     def tcc_thresholds(self,
                        anchor=False,
-                       rater=None,
+                       items='all',
+                       raters='zero',
                        obs=False,
                        xmin=-10,
                        xmax=10,
@@ -17970,8 +18392,20 @@ class MFRM(Rasch):
                        dpi=300):
 
         '''
-        Plots Test Characteristic Curve for RSM.
+        Plots Test Characteristic Curve.
         '''
+
+        if items == 'all':
+            items = self.dataframe.columns.tolist()
+
+        if raters == 'all':
+            raters = self.raters.tolist()
+
+        if raters == 'none':
+            raters = None
+
+        if raters == 'zero':
+            raters = None
 
         if anchor:
             if hasattr(self, 'anchor_thresholds_thresholds') == False:
@@ -17989,9 +18423,7 @@ class MFRM(Rasch):
             thresholds = self.thresholds
             severities = self.severities_thresholds
 
-        if rater is None:
-            severities = {'dummy_rater': np.zeros(self.max_score + 1)}
-            rater = 'dummy_rater'
+        dummy_sevs = {'dummy_rater': np.zeros(self.max_score + 1)}
 
         if obs:
             if anchor:
@@ -18004,12 +18436,8 @@ class MFRM(Rasch):
                     self.person_abils_thresholds()
                 abilities = self.abils_thresholds
 
-            xobsdata, yobsdata = self.class_intervals(abilities, self.dataframe.columns,
-                                                               no_of_classes=no_of_classes)
-
-            xobsdata -= np.mean([severities[rater][1:].mean() for rater in self.raters])
-            if rater is not None:
-                xobsdata += severities[rater][1:].mean()
+            xobsdata, yobsdata = self.class_intervals(abilities, items=items, raters=raters,
+                                                      no_of_classes=no_of_classes)
 
             yobsdata = np.array(yobsdata).reshape((-1, 1))
 
@@ -18018,12 +18446,71 @@ class MFRM(Rasch):
             yobsdata = np.array(np.nan)
 
         abilities = np.arange(-20, 20, 0.1)
-        y = [sum(self.exp_score_thresholds(ability, item, difficulties, rater, severities, thresholds)
-                 for item in difficulties.keys())
-             for ability in abilities]
+
+        if items is None:
+            if raters is None:
+                y = [sum(self.exp_score_thresholds(ability, item, difficulties, 'dummy_rater', dummy_sevs, thresholds)
+                         for item in self.dataframe.columns)
+                     for ability in abilities]
+
+            elif isinstance(raters, list):
+                y = [sum(self.exp_score_thresholds(ability, item, difficulties, rater, severities, thresholds)
+                         for item in self.dataframe.columns for rater in raters)
+                     for ability in abilities]
+
+            else:
+                y = [sum(self.exp_score_thresholds(ability, item, difficulties, raters, severities, thresholds)
+                         for item in self.dataframe.columns)
+                     for ability in abilities]
+
+        if isinstance(items, list):
+            if raters is None:
+                y = [sum(self.exp_score_thresholds(ability, item, difficulties, 'dummy_rater', dummy_sevs, thresholds)
+                         for item in items)
+                     for ability in abilities]
+
+            elif isinstance(raters, list):
+                y = [sum(self.exp_score_thresholds(ability, item, difficulties, rater, severities, thresholds)
+                         for item in items for rater in raters)
+                     for ability in abilities]
+
+            else:
+                y = [sum(self.exp_score_thresholds(ability, item, difficulties, raters, severities, thresholds)
+                         for item in items)
+                     for ability in abilities]
+
+        if isinstance(items, str):
+            if raters is None:
+                y = [self.exp_score_thresholds(ability, items, difficulties, 'dummy_rater', dummy_sevs, thresholds)
+                     for ability in abilities]
+
+            elif isinstance(raters, list):
+                y = [sum(self.exp_score_thresholds(ability, items, difficulties, rater, severities, thresholds)
+                         for rater in raters)
+                     for ability in abilities]
+
+            else:
+                y = [self.exp_score_thresholds(ability, items, difficulties, raters, severities, thresholds)
+                     for ability in abilities]
+
         y = np.array(y).reshape(len(abilities), 1)
 
-        y_max = self.max_score * len(items) * len(raters)
+        if items is None:
+            no_of_items = self.no_of_items
+
+        if isinstance(items, str):
+            no_of_items = 1
+
+        else:
+            no_of_items = len(items)
+
+        if (raters is None) or (isinstance(raters, str)):
+            no_of_raters = 1
+
+        else:
+            no_of_raters = len(items)
+
+        y_max = self.max_score * no_of_items * no_of_raters
 
         if title is not None:
             graphtitle = title
@@ -18033,19 +18520,19 @@ class MFRM(Rasch):
 
         ylabel = 'Expected score'
 
-        plot = self.plot_data_thresholds(x_data=abilities, y_data=y, anchor=anchor, raters=rater, x_obs_data=xobsdata,
-                                         y_obs_data=yobsdata, x_min=xmin, x_max=xmax, y_max=y_max, items=items,
+        plot = self.plot_data_thresholds(x_data=abilities, y_data=y, anchor=anchor,  items=items, raters=raters,
+                                         x_obs_data=xobsdata, y_obs_data=yobsdata, x_min=xmin, x_max=xmax, y_max=y_max,
                                          score_lines_test=score_lines, score_labels=score_labels,
                                          graph_title=graphtitle, y_label=ylabel, obs=obs, plot_style=plot_style,
                                          black=black, font=font, title_font_size=title_font_size,
                                          axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
                                          plot_density=dpi, file_format=file_format)
-
         return plot
 
     def tcc_matrix(self,
                    anchor=False,
-                   rater=None,
+                   items='all',
+                   raters='zero',
                    obs=False,
                    xmin=-10,
                    xmax=10,
@@ -18067,6 +18554,18 @@ class MFRM(Rasch):
         Plots Test Characteristic Curve.
         '''
 
+        if items == 'all':
+            items = self.dataframe.columns.tolist()
+
+        if raters == 'all':
+            raters = self.raters.tolist()
+
+        if raters == 'none':
+            raters = None
+
+        if raters == 'zero':
+            raters = None
+
         if anchor:
             if hasattr(self, 'anchor_thresholds_matrix') == False:
                 print('Anchor calibration required')
@@ -18083,10 +18582,8 @@ class MFRM(Rasch):
             thresholds = self.thresholds
             severities = self.severities_matrix
 
-        if rater is None:
-            severities = {'dummy_rater': {item: np.zeros(self.max_score + 1)
-                                            for item in self.dataframe.columns}}
-            rater = 'dummy_rater'
+        dummy_sevs = {'dummy_rater': {item: np.zeros(self.max_score + 1)
+                                      for item in self.dataframe.columns}}
 
         if obs:
             if anchor:
@@ -18099,13 +18596,8 @@ class MFRM(Rasch):
                     self.person_abils_matrix()
                 abilities = self.abils_matrix
 
-            xobsdata, yobsdata = self.class_intervals(abilities, self.dataframe.columns,
-                                                               no_of_classes=no_of_classes)
-
-            xobsdata -= np.mean([np.mean([severities[rater][item][1:].mean() for rater in self.raters])
-                                 for item in self.dataframe.columns])
-            if rater is not None:
-                xobsdata += np.mean([severities[rater][item][1:].mean() for item in self.dataframe.columns])
+            xobsdata, yobsdata = self.class_intervals(abilities, items=items, raters=raters,
+                                                      no_of_classes=no_of_classes)
 
             yobsdata = np.array(yobsdata).reshape((-1, 1))
 
@@ -18114,12 +18606,71 @@ class MFRM(Rasch):
             yobsdata = np.array(np.nan)
 
         abilities = np.arange(-20, 20, 0.1)
-        y = [sum(self.exp_score_matrix(ability, item, difficulties, rater, severities, thresholds)
-                 for item in difficulties.keys())
-             for ability in abilities]
+
+        if items is None:
+            if raters is None:
+                y = [sum(self.exp_score_matrix(ability, item, difficulties, 'dummy_rater', dummy_sevs, thresholds)
+                         for item in self.dataframe.columns)
+                     for ability in abilities]
+
+            elif isinstance(raters, list):
+                y = [sum(self.exp_score_matrix(ability, item, difficulties, rater, severities, thresholds)
+                         for item in self.dataframe.columns for rater in raters)
+                     for ability in abilities]
+
+            else:
+                y = [sum(self.exp_score_matrix(ability, item, difficulties, raters, severities, thresholds)
+                         for item in self.dataframe.columns)
+                     for ability in abilities]
+
+        if isinstance(items, list):
+            if raters is None:
+                y = [sum(self.exp_score_matrix(ability, item, difficulties, 'dummy_rater', dummy_sevs, thresholds)
+                         for item in items)
+                     for ability in abilities]
+
+            elif isinstance(raters, list):
+                y = [sum(self.exp_score_matrix(ability, item, difficulties, rater, severities, thresholds)
+                         for item in items for rater in raters)
+                     for ability in abilities]
+
+            else:
+                y = [sum(self.exp_score_matrix(ability, item, difficulties, raters, severities, thresholds)
+                         for item in items)
+                     for ability in abilities]
+
+        if isinstance(items, str):
+            if raters is None:
+                y = [self.exp_score_matrix(ability, items, difficulties, 'dummy_rater', dummy_sevs, thresholds)
+                     for ability in abilities]
+
+            elif isinstance(raters, list):
+                y = [sum(self.exp_score_matrix(ability, items, difficulties, rater, severities, thresholds)
+                         for rater in raters)
+                     for ability in abilities]
+
+            else:
+                y = [self.exp_score_matrix(ability, items, difficulties, raters, severities, thresholds)
+                     for ability in abilities]
+
         y = np.array(y).reshape(len(abilities), 1)
 
-        y_max = self.max_score * len(items) * len(raters)
+        if items is None:
+            no_of_items = self.no_of_items
+
+        if isinstance(items, str):
+            no_of_items = 1
+
+        else:
+            no_of_items = len(items)
+
+        if (raters is None) or (isinstance(raters, str)):
+            no_of_raters = 1
+
+        else:
+            no_of_raters = len(items)
+
+        y_max = self.max_score * no_of_items * no_of_raters
 
         if title is not None:
             graphtitle = title
@@ -18129,13 +18680,12 @@ class MFRM(Rasch):
 
         ylabel = 'Expected score'
 
-        plot = self.plot_data_matrix(x_data=abilities, y_data=y, anchor=anchor, raters=rater, x_obs_data=xobsdata,
-                                     y_obs_data=yobsdata, x_min=xmin, x_max=xmax, y_max=y_max, items=items,
+        plot = self.plot_data_matrix(x_data=abilities, y_data=y, anchor=anchor,  items=items, raters=raters,
+                                     x_obs_data=xobsdata, y_obs_data=yobsdata, x_min=xmin, x_max=xmax, y_max=y_max,
                                      score_lines_test=score_lines, score_labels=score_labels, graph_title=graphtitle,
                                      y_label=ylabel, obs=obs, plot_style=plot_style, black=black, font=font,
                                      title_font_size=title_font_size, axis_font_size=axis_font_size, labelsize=labelsize,
                                      filename=filename, plot_density=dpi, file_format=file_format)
-
         return plot
 
     def test_info_global(self,
@@ -18265,7 +18815,7 @@ class MFRM(Rasch):
                         dpi=300):
 
         '''
-        Plots Test Information Curve for RSM.
+        Plots Test Information Curve.
         '''
 
         if anchor:
@@ -18284,11 +18834,50 @@ class MFRM(Rasch):
             thresholds = self.thresholds
             severities = self.severities_items
 
+        if raters == 'all':
+            raters = self.raters
+
+        if raters == 'none':
+            raters = None
+
+        if isinstance(raters, str):
+            raters = [raters]
+
+        if items == 'all':
+            items = self.dataframe.columns
+
+        if items == 'none':
+            items = None
+
+        if isinstance(items, str):
+            items = [items]
+
+        dummy_sevs = {'dummy_rater': {item: 0 for item in self.dataframe.columns}}
+
         abilities = np.arange(-20, 20, 0.1)
 
-        y = [sum(self.variance_items(ability, item, difficulties, rater, severities, thresholds)
-                 for item in items for rater in raters)
-             for ability in abilities]
+        if items is None:
+            if raters is None:
+                y = [sum(self.variance_items(ability, item, difficulties, 'dummy_rater', dummy_sevs, thresholds)
+                         for item in self.dataframe.columns)
+                     for ability in abilities]
+
+            else:
+                y = [sum(self.variance_items(ability, item, difficulties, rater, severities, thresholds)
+                         for item in self.dataframe.columns for rater in raters)
+                     for ability in abilities]
+
+        else:
+            if raters is None:
+                y = [sum(self.variance_items(ability, item, difficulties, 'dummy_rater', dummy_sevs, thresholds)
+                         for item in items)
+                     for ability in abilities]
+
+            else:
+                y = [sum(self.variance_items(ability, item, difficulties, rater, severities, thresholds)
+                         for item in items for rater in raters)
+                     for ability in abilities]
+
         y = np.array(y).reshape(len(abilities), 1)
 
         if ymax is None:
@@ -18332,7 +18921,7 @@ class MFRM(Rasch):
                              dpi=300):
 
         '''
-        Plots Test Information Curve for RSM.
+        Plots Test Information Curve.
         '''
 
         if anchor:
@@ -18351,11 +18940,50 @@ class MFRM(Rasch):
             thresholds = self.thresholds
             severities = self.severities_thresholds
 
+        if raters == 'all':
+            raters = self.raters
+
+        if raters == 'none':
+            raters = None
+
+        if isinstance(raters, str):
+            raters = [raters]
+
+        if items == 'all':
+            items = self.dataframe.columns
+
+        if items == 'none':
+            items = None
+
+        if isinstance(items, str):
+            items = [items]
+
+        dummy_sevs = {'dummy_rater': np.zeros(self.max_score + 1)}
+
         abilities = np.arange(-20, 20, 0.1)
 
-        y = [sum(self.variance_thresholds(ability, item, difficulties, rater, severities, thresholds)
-                 for item in items for rater in raters)
-             for ability in abilities]
+        if items is None:
+            if raters is None:
+                y = [sum(self.variance_thresholds(ability, item, difficulties, 'dummy_rater', dummy_sevs, thresholds)
+                         for item in self.dataframe.columns)
+                     for ability in abilities]
+
+            else:
+                y = [sum(self.variance_thresholds(ability, item, difficulties, rater, severities, thresholds)
+                         for item in self.dataframe.columns for rater in raters)
+                     for ability in abilities]
+
+        else:
+            if raters is None:
+                y = [sum(self.variance_thresholds(ability, item, difficulties, 'dummy_rater', dummy_sevs, thresholds)
+                         for item in items)
+                     for ability in abilities]
+
+            else:
+                y = [sum(self.variance_thresholds(ability, item, difficulties, rater, severities, thresholds)
+                         for item in items for rater in raters)
+                     for ability in abilities]
+
         y = np.array(y).reshape(len(abilities), 1)
 
         if ymax is None:
@@ -18399,7 +19027,7 @@ class MFRM(Rasch):
                          dpi=300):
 
         '''
-        Plots Test Information Curve for RSM.
+        Plots Test Information Curve.
         '''
 
         if anchor:
@@ -18418,13 +19046,52 @@ class MFRM(Rasch):
             thresholds = self.thresholds
             severities = self.severities_matrix
 
+        if raters == 'all':
+            raters = self.raters
+
+        if raters == 'none':
+            raters = None
+
+        if isinstance(raters, str):
+            raters = [raters]
+
+        if items == 'all':
+            items = self.dataframe.columns
+
+        if items == 'none':
+            items = None
+
+        if isinstance(items, str):
+            items = [items]
+
+        dummy_sevs = {'dummy_rater': {item: np.zeros(self.max_score + 1)
+                                      for item in self.dataframe.columns}}
+
         abilities = np.arange(-20, 20, 0.1)
 
-        y = [sum(self.variance_matrix(ability, item, difficulties, rater, severities, thresholds)
-                 for item in items for rater in raters)
-             for ability in abilities]
-        y = np.array(y)
-        y = y.reshape(len(abilities), 1)
+        if items is None:
+            if raters is None:
+                y = [sum(self.variance_matrix(ability, item, difficulties, 'dummy_rater', dummy_sevs, thresholds)
+                         for item in self.dataframe.columns)
+                     for ability in abilities]
+
+            else:
+                y = [sum(self.variance_matrix(ability, item, difficulties, rater, severities, thresholds)
+                         for item in self.dataframe.columns for rater in raters)
+                     for ability in abilities]
+
+        else:
+            if raters is None:
+                y = [sum(self.variance_matrix(ability, item, difficulties, 'dummy_rater', dummy_sevs, thresholds)
+                         for item in items)
+                     for ability in abilities]
+
+            else:
+                y = [sum(self.variance_matrix(ability, item, difficulties, rater, severities, thresholds)
+                         for item in items for rater in raters)
+                     for ability in abilities]
+
+        y = np.array(y).reshape(len(abilities), 1)
 
         if ymax is None:
             ymax = max(y) * 1.1
@@ -18434,6 +19101,8 @@ class MFRM(Rasch):
 
         else:
             graphtitle = ''
+
+        ylabel = 'Fisher information'
 
         plot = self.plot_data_matrix(x_data=abilities, y_data=y, anchor=anchor, items=items, raters=raters, x_min=xmin,
                                      x_max=xmax, y_max=ymax, point_info_lines_test=point_info_lines,
@@ -18589,14 +19258,51 @@ class MFRM(Rasch):
             thresholds = self.thresholds
             severities = self.severities_items
 
-        if rater is None:
-            severities = {'dummy_rater': {item: 0 for item in self.dataframe.columns}}
-            rater = 'dummy_rater'
+        if raters == 'all':
+            raters = self.raters
+
+        if raters == 'none':
+            raters = None
+
+        if isinstance(raters, str):
+            raters = [raters]
+
+        if items == 'all':
+            items = self.dataframe.columns
+
+        if items == 'none':
+            items = None
+
+        if isinstance(items, str):
+            items = [items]
+
+        dummy_sevs = {'dummy_rater': {item: 0 for item in self.dataframe.columns}}
 
         abilities = np.arange(-20, 20, 0.1)
-        y = np.array([sum(self.variance_items(ability, item, difficulties, rater, severities, thresholds)
-                          for item in items for rater in raters)
-                      for ability in abilities])
+
+        if items is None:
+            if raters is None:
+                y = [sum(self.variance_items(ability, item, difficulties, 'dummy_rater', dummy_sevs, thresholds)
+                         for item in self.dataframe.columns)
+                     for ability in abilities]
+
+            else:
+                y = [sum(self.variance_items(ability, item, difficulties, rater, severities, thresholds)
+                         for item in self.dataframe.columns for rater in raters)
+                     for ability in abilities]
+
+        else:
+            if raters is None:
+                y = [sum(self.variance_items(ability, item, difficulties, 'dummy_rater', dummy_sevs, thresholds)
+                         for item in items)
+                     for ability in abilities]
+
+            else:
+                y = [sum(self.variance_items(ability, item, difficulties, rater, severities, thresholds)
+                         for item in items for rater in raters)
+                     for ability in abilities]
+
+        y = np.array(y)
         y = 1 / np.sqrt(y)
         y = y.reshape(len(abilities), 1)
 
@@ -18657,14 +19363,51 @@ class MFRM(Rasch):
             thresholds = self.thresholds
             severities = self.severities_thresholds
 
-        if rater is None:
-            severities = {'dummy_rater': np.zeros(self.max_score + 1)}
-            rater = 'dummy_rater'
+        if raters == 'all':
+            raters = self.raters
+
+        if raters == 'none':
+            raters = None
+
+        if isinstance(raters, str):
+            raters = [raters]
+
+        if items == 'all':
+            items = self.dataframe.columns
+
+        if items == 'none':
+            items = None
+
+        if isinstance(items, str):
+            items = [items]
+
+        dummy_sevs = {'dummy_rater': np.zeros(self.max_score + 1)}
 
         abilities = np.arange(-20, 20, 0.1)
-        y = np.array([sum(self.variance_thresholds(ability, item, difficulties, rater, severities, thresholds)
-                          for item in items for rater in raters)
-                      for ability in abilities])
+
+        if items is None:
+            if raters is None:
+                y = [sum(self.variance_thresholds(ability, item, difficulties, 'dummy_rater', dummy_sevs, thresholds)
+                         for item in self.dataframe.columns)
+                     for ability in abilities]
+
+            else:
+                y = [sum(self.variance_thresholds(ability, item, difficulties, rater, severities, thresholds)
+                         for item in self.dataframe.columns for rater in raters)
+                     for ability in abilities]
+
+        else:
+            if raters is None:
+                y = [sum(self.variance_thresholds(ability, item, difficulties, 'dummy_rater', dummy_sevs, thresholds)
+                         for item in items)
+                     for ability in abilities]
+
+            else:
+                y = [sum(self.variance_thresholds(ability, item, difficulties, rater, severities, thresholds)
+                         for item in items for rater in raters)
+                     for ability in abilities]
+
+        y = np.array(y)
         y = 1 / np.sqrt(y)
         y = y.reshape(len(abilities), 1)
 
@@ -18725,15 +19468,52 @@ class MFRM(Rasch):
             thresholds = self.thresholds
             severities = self.severities_matrix
 
-        if rater is None:
-            severities = {'dummy_rater': {item: np.zeros(self.max_score + 1)
-                                            for item in self.dataframe.columns}}
-            rater = 'dummy_rater'
+        if raters == 'all':
+            raters = self.raters
 
+        if raters == 'none':
+            raters = None
+
+        if isinstance(raters, str):
+            raters = [raters]
+
+        if items == 'all':
+            items = self.dataframe.columns
+
+        if items == 'none':
+            items = None
+
+        if isinstance(items, str):
+            items = [items]
+
+        dummy_sevs = {'dummy_rater': {item: np.zeros(self.max_score + 1)
+                                      for item in self.dataframe.columns}}
+        
         abilities = np.arange(-20, 20, 0.1)
-        y = np.array([sum(self.variance_matrix(ability, item, difficulties, rater, severities, thresholds)
-                          for item in items for rater in raters)
-                      for ability in abilities])
+
+        if items is None:
+            if raters is None:
+                y = [sum(self.variance_matrix(ability, item, difficulties, 'dummy_rater', dummy_sevs, thresholds)
+                         for item in self.dataframe.columns)
+                     for ability in abilities]
+
+            else:
+                y = [sum(self.variance_matrix(ability, item, difficulties, rater, severities, thresholds)
+                         for item in self.dataframe.columns for rater in raters)
+                     for ability in abilities]
+
+        else:
+            if raters is None:
+                y = [sum(self.variance_matrix(ability, item, difficulties, 'dummy_rater', dummy_sevs, thresholds)
+                         for item in items)
+                     for ability in abilities]
+
+            else:
+                y = [sum(self.variance_matrix(ability, item, difficulties, rater, severities, thresholds)
+                         for item in items for rater in raters)
+                     for ability in abilities]
+
+        y = np.array(y)
         y = 1 / np.sqrt(y)
         y = y.reshape(len(abilities), 1)
 
