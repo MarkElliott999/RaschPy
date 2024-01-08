@@ -19703,6 +19703,8 @@ class Rasch_Sim:
         else:
             self.scores.rename(columns={old: new}, inplace=True)
 
+        self.items = self.scores.columns.tolist()
+
     def rename_items_all(self,
                          new_names):
 
@@ -19719,6 +19721,8 @@ class Rasch_Sim:
 
         else:
             self.scores.rename(columns={old: new for old, new in zip(self.scores.columns, new_names)}, inplace=True)
+
+        self.items = self.scores.columns.tolist()
 
     def rename_person(self,
                       old,
@@ -19739,6 +19743,8 @@ class Rasch_Sim:
         else:
             self.scores.rename(index={old: new}, inplace=True)
 
+        self.persons = self.scores.index.tolist()
+
     def rename_persons_all(self,
                            new_names):
 
@@ -19755,6 +19761,8 @@ class Rasch_Sim:
 
         else:
             self.scores.rename(index={old: new for old, new in zip(self.scores.index, new_names)}, inplace=True)
+
+        self.persons = self.scores.index.tolist()
 
     def produce_df(self,
                    rows,
@@ -19785,7 +19793,9 @@ class SLM_Sim(Rasch_Sim):
                  offset=0,
                  missing=0,
                  manual_abilities=None,
-                 manual_diffs=None):
+                 manual_diffs=None,
+                 manual_person_names=None,
+                 manual_item_names=None):
         
         self.no_of_items = int(no_of_items)
         self.no_of_persons = int(no_of_persons)
@@ -19795,13 +19805,21 @@ class SLM_Sim(Rasch_Sim):
         self.missing = missing
         self.abilities = manual_abilities
         self.diffs = manual_diffs
+        self.persons = manual_person_names
+        self.items = manual_item_names
         self.dataframe = pd.DataFrame([1])
         self.slm = SLM(self.dataframe)
         
         '''
         Generates person and item parameters.
         '''
-        
+
+        if self.persons is not None:
+            assert len(self.persons) == self.no_of_persons, 'Length of person names must match number of persons.'
+
+        if self.items is not None:
+            assert len(self.items) == self.no_of_items, 'Length of item names must match number of items.'
+
         if self.abilities is None:
             self.abilities = np.random.normal(0, self.person_sd, self.no_of_persons)
             self.abilities -= np.mean(self.abilities)
@@ -19849,12 +19867,22 @@ class SLM_Sim(Rasch_Sim):
         
         self.scores = pd.DataFrame(self.scores)
 
-        for person in range(self.no_of_persons):
-            self.scores.rename(index={person: f'Person_{person + 1}'},
-                               inplace=True)
-        for item in range(self.no_of_items):
-            self.scores.rename(columns={item: f'Item_{item + 1}'},
-                               inplace=True)
+        if manual_person_names is not None:
+            self.scores.index = manual_person_names
+
+        else:
+            for person in range(self.no_of_persons):
+                self.scores.rename(index={person: f'Person_{person + 1}'}, inplace=True)
+
+        if manual_person_names is not None:
+            self.scores.index = manual_person_names
+
+        else:
+            for item in range(self.no_of_items):
+                self.scores.rename(columns={item: f'Item_{item + 1}'}, inplace=True)
+
+        self.persons = self.scores.index.tolist()
+        self.items = self.scores.columns.tolist()
 
 class PCM_Sim(Rasch_Sim):
     
@@ -19867,7 +19895,7 @@ class PCM_Sim(Rasch_Sim):
                  no_of_persons,
                  max_score_vector,
                  item_range=3,
-                 category_mean=1,
+                 category_base=1,
                  person_sd=1.5,
                  max_disorder=0,
                  offset=0,
@@ -19880,7 +19908,7 @@ class PCM_Sim(Rasch_Sim):
         self.no_of_persons = int(no_of_persons)
         self.item_range = item_range
         self.max_score_vector = max_score_vector
-        self.category_mean = category_mean
+        self.category_base = category_base
         self.person_sd = person_sd
         self.max_disorder = max_disorder
         self.offset = offset
@@ -19926,7 +19954,7 @@ class PCM_Sim(Rasch_Sim):
             
             category_widths = {f'Item_{item + 1}':
                                np.random.uniform(self.max_disorder,
-                                                 2 * self.category_mean - self.max_disorder,
+                                                 2 * self.category_base - self.max_disorder,
                                                  value - 1)
                                for item, value in enumerate(self.max_score_vector)}
             
@@ -20026,20 +20054,22 @@ class RSM_Sim(Rasch_Sim):
                  no_of_persons,
                  max_score,
                  item_range=3,
-                 category_mean=1,
+                 category_base=1,
                  person_sd=1.5,
                  max_disorder=0,
                  offset=0,
                  missing=0 ,
                  manual_abilities=None,
                  manual_diffs=None,
-                 manual_thresholds=None):
+                 manual_thresholds=None,
+                 manual_person_names=None,
+                 manual_item_names=None):
 
         self.no_of_items = int(no_of_items)
         self.no_of_persons = int(no_of_persons)
         self.item_range = item_range
         self.max_score = max_score
-        self.category_mean = category_mean
+        self.category_base = category_base
         self.person_sd = person_sd
         self.max_disorder = max_disorder
         self.offset = offset
@@ -20047,12 +20077,20 @@ class RSM_Sim(Rasch_Sim):
         self.abilities = manual_abilities
         self.diffs = manual_diffs
         self.thresholds = manual_thresholds
+        self.persons = manual_person_names
+        self.items = manual_item_names
         self.dataframe = pd.DataFrame([self.max_score])
         self.rsm = RSM(self.dataframe, self.max_score)
 
         '''
         Generates person, item and threshold parameters.
         '''
+
+        if self.persons is not None:
+            assert len(self.persons) == self.no_of_persons, 'Length of person names must match number of persons.'
+
+        if self.items is not None:
+            assert len(self.items) == self.no_of_items, 'Length of item names must match number of items.'
         
         if self.abilities is None:
             self.abilities = np.random.normal(0, self.person_sd, self.no_of_persons)
@@ -20083,7 +20121,7 @@ class RSM_Sim(Rasch_Sim):
 
         if self.thresholds is None:
             category_widths = np.random.uniform(self.max_disorder,
-                                                2 * self.category_mean - self.max_disorder,
+                                                2 * self.category_base - self.max_disorder,
                                                 self.max_score)       
             self.thresholds = [np.sum(category_widths[:category])
                                for category in range(self.max_score)]
@@ -20135,12 +20173,23 @@ class RSM_Sim(Rasch_Sim):
         
         self.scores = pd.DataFrame(self.scores.T)
 
-        for person in range(self.no_of_persons):
-            self.scores.rename(index={person: f'Person_{person + 1}'},
-                               inplace=True)
-        for item in range(self.no_of_items):
-            self.scores.rename(columns={item: f'Item_{item + 1}'},
-                               inplace=True)
+        if manual_person_names is not None:
+            self.scores.index = manual_person_names
+
+        else:
+            for person in range(self.no_of_persons):
+                self.scores.rename(index={person: f'Person_{person + 1}'}, inplace=True)
+
+        if manual_person_names is not None:
+            self.scores.index = manual_person_names
+
+        else:
+            for item in range(self.no_of_items):
+                self.scores.rename(columns={item: f'Item_{item + 1}'}, inplace=True)
+
+        self.persons = self.scores.index.tolist()
+        self.items = self.scores.columns.tolist()
+
 
 class MFRM_Sim(Rasch_Sim):
 
@@ -20168,6 +20217,8 @@ class MFRM_Sim(Rasch_Sim):
             new_names = [new if rater == old else rater for rater in self.raters]
             self.rename_raters_all(new_names)
 
+        self.raters = self.scores.index.get_level_values(0).unique().tolist()
+
     def rename_raters_all(self,
                           new_names):
 
@@ -20185,7 +20236,8 @@ class MFRM_Sim(Rasch_Sim):
         else:
             df_dict = {new: self.scores.xs(old) for old, new in zip(self.raters, new_names)}
             self.scores = pd.concat(df_dict.values(), keys = df_dict.keys())
-            self.raters = self.scores.index.get_level_values(0).unique()
+
+        self.raters = self.scores.index.get_level_values(0).unique().tolist()
 
     def rename_person(self,
                       old,
@@ -20207,6 +20259,8 @@ class MFRM_Sim(Rasch_Sim):
             self.scores.rename(index={old: new},
                                inplace=True)
 
+        self.persons = self.scores.index.get_level_values(1).unique().tolist()
+
     def rename_persons_all(self,
                            new_names):
 
@@ -20226,6 +20280,8 @@ class MFRM_Sim(Rasch_Sim):
             self.scores.rename(index={old: new for old, new in zip(old_names, new_names)},
                                inplace=True)
 
+        self.persons = self.scores.index.get_level_values(1).unique().tolist()
+
 class MFRM_Sim_Global(MFRM_Sim):
     
     '''
@@ -20240,7 +20296,7 @@ class MFRM_Sim_Global(MFRM_Sim):
                  max_score,
                  item_range=2,
                  rater_range=2,
-                 category_mean=1,
+                 category_base=1,
                  person_sd=1.5,
                  max_disorder=0,
                  offset=0,
@@ -20248,7 +20304,10 @@ class MFRM_Sim_Global(MFRM_Sim):
                  manual_abilities=None,
                  manual_diffs=None,
                  manual_thresholds=None,
-                 manual_severities=None):
+                 manual_severities=None,
+                 manual_person_names=None,
+                 manual_item_names=None,
+                 manual_rater_names=None):
 
         self.no_of_items = int(no_of_items)
         self.no_of_persons = int(no_of_persons)
@@ -20256,7 +20315,7 @@ class MFRM_Sim_Global(MFRM_Sim):
         self.item_range = item_range
         self.rater_range = rater_range
         self.max_score = max_score
-        self.category_mean = category_mean
+        self.category_base = category_base
         self.person_sd = person_sd
         self.max_disorder = max_disorder
         self.offset = offset
@@ -20265,6 +20324,9 @@ class MFRM_Sim_Global(MFRM_Sim):
         self.diffs = manual_diffs
         self.thresholds = manual_thresholds
         self.severities = manual_severities
+        self.persons = manual_person_names
+        self.items = manual_item_names
+        self.raters = manual_rater_names
         self.dataframe = self.produce_df([[0], [1]], [[0]])
         self.dataframe.loc[0].iloc[0, 0] = self.max_score
         self.mfrm = MFRM(self.dataframe, self.max_score)
@@ -20272,6 +20334,15 @@ class MFRM_Sim_Global(MFRM_Sim):
         '''
         Generates person, item and threshold parameters.
         '''
+
+        if self.persons is not None:
+            assert len(self.persons) == self.no_of_persons, 'Length of person names must match number of persons.'
+
+        if self.items is not None:
+            assert len(self.items) == self.no_of_items, 'Length of item names must match number of items.'
+
+        if self.raters is not None:
+            assert len(self.raters) == self.no_of_raters, 'Length of rater names must match number of raters.'
 
         if self.abilities is None:
             self.abilities = np.random.normal(0, self.person_sd, self.no_of_persons)
@@ -20301,7 +20372,7 @@ class MFRM_Sim_Global(MFRM_Sim):
 
         if self.thresholds is None:
             category_widths = np.random.uniform(self.max_disorder,
-                                                2 * self.category_mean - self.max_disorder,
+                                                2 * self.category_base - self.max_disorder,
                                                 self.max_score)
             self.thresholds = [np.sum(category_widths[:category])
                                for category in range(self.max_score)]
@@ -20328,15 +20399,15 @@ class MFRM_Sim_Global(MFRM_Sim):
             self.severities = np.array(self.severities)
             self.severities = {f'Rater_{rater + 1}': severity for rater, severity in enumerate(self.severities)}
             self.severities = pd.Series(self.severities)
-
-        self.items = [f'Item_{item + 1}' for item in range(self.no_of_items)]
-        self.raters = [f'Rater_{rater + 1}' for rater in range(self.no_of_raters)]
-        self.persons = [f'Person_{person + 1}' for person in range(self.no_of_persons)]
         
         '''
         Calculates probability of a response in each category
         for each person on each item
         '''
+
+        self.persons = self.abilities.index.tolist()
+        self.items = self.diffs.index.tolist()
+        self.raters = self.severities.index.tolist()
 
         self.cat_probs = [[[[self.mfrm.cat_prob_global(ability, item, self.diffs, rater, self.severities, category,
                                                        self.thresholds)
@@ -20366,9 +20437,9 @@ class MFRM_Sim_Global(MFRM_Sim):
             
                 cat_scores[:, :, rater, cat] = (scoring_randoms[:, :, rater] >
                                                 np.sum(self.cat_probs[:, :, rater, :cat + 1],
-                                                       axis = 2)).astype(np.float64)
+                                                       axis=2)).astype(np.float64)
         
-        self.scores = np.sum(cat_scores, axis = 3)
+        self.scores = np.sum(cat_scores, axis=3)
         
         missing_randoms = self.randoms()
         
@@ -20376,20 +20447,37 @@ class MFRM_Sim_Global(MFRM_Sim):
         
         cols = [f'Item_{item + 1}' for item in range(self.no_of_items)]
         
-        final = {f'Rater_{rater + 1}': pd.DataFrame(self.scores[:, :, rater],
-                                                    columns = cols)
+        final = {f'Rater_{rater + 1}': pd.DataFrame(self.scores[:, :, rater], columns=cols)
                  for rater in range(self.no_of_raters)}
         
-        self.scores = pd.concat(final.values(),
-                          keys = final.keys())
+        self.scores = pd.concat(final.values(), keys=final.keys())
 
-        for person in range(self.no_of_persons):
-            self.scores.rename(index={person: f'Person_{person + 1}'},
+        if manual_person_names is not None:
+            self.scores.index = self.scores.index.set_levels(manual_person_names, level=1)
+
+        else:
+            person_list = [f'Person_{person + 1}' for person in range(self.no_of_persons)]
+            self.scores.index = self.scores.index.set_levels(person_list, level=1)
+
+        if manual_item_names is not None:
+            self.scores.rename(columns={old: new for old, new in zip(self.dataframe.columns, manual_item_names)},
                                inplace=True)
 
-        self.items = self.scores.columns
-        self.raters = self.scores.index.get_level_values(0).unique()
-        self.persons = self.scores.index.get_level_values(1).unique()
+        else:
+            for item in range(self.no_of_items):
+                self.scores.rename(columns={item: f'Item_{item + 1}'},
+                                   inplace=True)
+
+        if manual_rater_names is not None:
+            self.scores.index = self.scores.index.set_levels(manual_rater_names, level=0)
+
+        else:
+            rater_list = [f'Rater_{rater + 1}' for rater in range(self.no_of_raters)]
+            self.scores.index = self.scores.index.set_levels(rater_list, level=0)
+
+        self.raters = self.scores.index.get_level_values(0).unique().tolist()
+        self.persons = self.scores.index.get_level_values(1).unique().tolist()
+        self.items = self.scores.columns.tolist()
 
 class MFRM_Sim_Items(MFRM_Sim):
     
@@ -20405,15 +20493,18 @@ class MFRM_Sim_Items(MFRM_Sim):
                  max_score,
                  item_range=2,
                  rater_range=2,
-                 category_mean=1,
+                 category_base=1,
                  person_sd=1.5,
-                 max_disorder = 0,
-                 offset = 0,
-                 missing = 0,
+                 max_disorder=0,
+                 offset=0,
+                 missing=0,
                  manual_abilities=None,
                  manual_diffs=None,
                  manual_thresholds=None,
-                 manual_severities=None):
+                 manual_severities=None,
+                 manual_person_names=None,
+                 manual_item_names=None,
+                 manual_rater_names=None):
 
         self.no_of_items = int(no_of_items)
         self.no_of_persons = int(no_of_persons)
@@ -20421,7 +20512,7 @@ class MFRM_Sim_Items(MFRM_Sim):
         self.item_range = item_range
         self.rater_range = rater_range
         self.max_score = max_score
-        self.category_mean = category_mean
+        self.category_base = category_base
         self.person_sd = person_sd
         self.max_disorder = max_disorder
         self.offset = offset
@@ -20430,6 +20521,9 @@ class MFRM_Sim_Items(MFRM_Sim):
         self.diffs = manual_diffs
         self.thresholds = manual_thresholds
         self.severities = manual_severities
+        self.persons = manual_person_names
+        self.items = manual_item_names
+        self.raters = manual_rater_names
         self.dataframe = self.produce_df([[0], [1]], [[0]])
         self.dataframe.loc[0].iloc[0, 0] = self.max_score
         self.mfrm = MFRM(self.dataframe, self.max_score)
@@ -20437,6 +20531,15 @@ class MFRM_Sim_Items(MFRM_Sim):
         '''
         Generates person, item and threshold parameters.
         '''
+
+        if self.persons is not None:
+            assert len(self.persons) == self.no_of_persons, 'Length of person names must match number of persons.'
+
+        if self.items is not None:
+            assert len(self.items) == self.no_of_items, 'Length of item names must match number of items.'
+
+        if self.raters is not None:
+            assert len(self.raters) == self.no_of_raters, 'Length of rater names must match number of raters.'
 
         if self.abilities is None:
             self.abilities = np.random.normal(0, self.person_sd, self.no_of_persons)
@@ -20466,7 +20569,7 @@ class MFRM_Sim_Items(MFRM_Sim):
 
         if self.thresholds is None:
             category_widths = np.random.uniform(self.max_disorder,
-                                                2 * self.category_mean - self.max_disorder,
+                                                2 * self.category_base - self.max_disorder,
                                                 self.max_score)
             self.thresholds = [np.sum(category_widths[:category])
                           for category in range(self.max_score)]
@@ -20501,15 +20604,15 @@ class MFRM_Sim_Items(MFRM_Sim):
             self.severities = {f'Rater_{rater + 1}': {f'Item_{item + 1}': severities[rater, item]
                                                       for item in range(self.no_of_items)}
                                for rater in range(self.no_of_raters)}
-
-        self.items = [f'Item_{item + 1}' for item in range(self.no_of_items)]
-        self.raters = [f'Rater_{rater + 1}' for rater in range(self.no_of_raters)]
-        self.persons = [f'Person_{person + 1}' for person in range(self.no_of_persons)]
         
         '''
         Calculates probability of a response in each category
         for each person on each item
         '''
+
+        self.persons = self.abilities.index.tolist()
+        self.items = self.diffs.index.tolist()
+        self.raters = list(self.severities.keys())
 
         items =[f'Item_{item + 1}' for item in range(self.no_of_items)]
 
@@ -20546,9 +20649,9 @@ class MFRM_Sim_Items(MFRM_Sim):
             
                 cat_scores[:, :, rater, cat] = (scoring_randoms[:, :, rater] >
                                                 np.sum(self.cat_probs[:, :, rater, :cat + 1],
-                                                       axis = 2)).astype(np.float64)
+                                                       axis=2)).astype(np.float64)
 
-        self.scores = np.sum(cat_scores, axis = 3)
+        self.scores = np.sum(cat_scores, axis=3)
         
         missing_randoms = self.randoms()
         
@@ -20560,7 +20663,34 @@ class MFRM_Sim_Items(MFRM_Sim):
                                      columns=cols, index=self.persons)
                  for i, rater in enumerate(self.raters)}
         
-        self.scores = pd.concat(final.values(), keys = final.keys())
+        self.scores = pd.concat(final.values(), keys=final.keys())
+
+        if manual_person_names is not None:
+            self.scores.index = self.scores.index.set_levels(manual_person_names, level=1)
+
+        else:
+            person_list = [f'Person_{person + 1}' for person in range(self.no_of_persons)]
+            self.scores.index = self.scores.index.set_levels(person_list, level=1)
+
+        if manual_item_names is not None:
+            self.scores.rename(columns={old: new for old, new in zip(self.dataframe.columns, manual_item_names)},
+                               inplace=True)
+
+        else:
+            for item in range(self.no_of_items):
+                self.scores.rename(columns={item: f'Item_{item + 1}'},
+                                   inplace=True)
+
+        if manual_rater_names is not None:
+            self.scores.index = self.scores.index.set_levels(manual_rater_names, level=0)
+
+        else:
+            rater_list = [f'Rater_{rater + 1}' for rater in range(self.no_of_raters)]
+            self.scores.index = self.scores.index.set_levels(rater_list, level=0)
+
+        self.raters = self.scores.index.get_level_values(0).unique().tolist()
+        self.persons = self.scores.index.get_level_values(1).unique().tolist()
+        self.items = self.scores.columns.tolist()
     
 class MFRM_Sim_Thresholds(MFRM_Sim):
     
@@ -20576,7 +20706,7 @@ class MFRM_Sim_Thresholds(MFRM_Sim):
                  max_score,
                  item_range=2,
                  rater_range=2,
-                 category_mean=1,
+                 category_base=1,
                  person_sd=1.5,
                  max_disorder=0,
                  offset=0,
@@ -20584,7 +20714,10 @@ class MFRM_Sim_Thresholds(MFRM_Sim):
                  manual_abilities=None,
                  manual_diffs=None,
                  manual_thresholds=None,
-                 manual_severities=None):
+                 manual_severities=None,
+                 manual_person_names=None,
+                 manual_item_names=None,
+                 manual_rater_names=None):
 
         self.no_of_items = int(no_of_items)
         self.no_of_persons = int(no_of_persons)
@@ -20592,7 +20725,7 @@ class MFRM_Sim_Thresholds(MFRM_Sim):
         self.item_range = item_range
         self.rater_range = rater_range
         self.max_score = max_score
-        self.category_mean = category_mean
+        self.category_base = category_base
         self.person_sd = person_sd
         self.max_disorder = max_disorder
         self.offset = offset
@@ -20601,6 +20734,9 @@ class MFRM_Sim_Thresholds(MFRM_Sim):
         self.diffs = manual_diffs
         self.thresholds = manual_thresholds
         self.severities = manual_severities
+        self.persons = manual_person_names
+        self.items = manual_item_names
+        self.raters = manual_rater_names
         self.dataframe = self.produce_df([[0], [1]], [[0]])
         self.dataframe.loc[0].iloc[0, 0] = 0
         self.mfrm = MFRM(self.dataframe, self.max_score)
@@ -20608,6 +20744,15 @@ class MFRM_Sim_Thresholds(MFRM_Sim):
         '''
         Generates person, item and threshold parameters.
         '''
+
+        if self.persons is not None:
+            assert len(self.persons) == self.no_of_persons, 'Length of person names must match number of persons.'
+
+        if self.items is not None:
+            assert len(self.items) == self.no_of_items, 'Length of item names must match number of items.'
+
+        if self.raters is not None:
+            assert len(self.raters) == self.no_of_raters, 'Length of rater names must match number of raters.'
 
         if self.abilities is None:
             self.abilities = np.random.normal(0, self.person_sd, self.no_of_persons)
@@ -20638,7 +20783,7 @@ class MFRM_Sim_Thresholds(MFRM_Sim):
 
         if self.thresholds is None:
             category_widths = np.random.uniform(self.max_disorder,
-                                                2 * self.category_mean - self.max_disorder,
+                                                2 * self.category_base - self.max_disorder,
                                                 self.max_score)
             self.thresholds = [np.sum(category_widths[:category])
                                for category in range(self.max_score)]
@@ -20675,15 +20820,15 @@ class MFRM_Sim_Thresholds(MFRM_Sim):
 
             self.severities = {f'Rater_{rater + 1}': np.array(severities[rater][:])
                                for rater in range(self.no_of_raters)}
-
-        self.items = [f'Item_{item + 1}' for item in range(self.no_of_items)]
-        self.raters = [f'Rater_{rater + 1}' for rater in range(self.no_of_raters)]
-        self.persons = [f'Person_{person + 1}' for person in range(self.no_of_persons)]
         
         '''
         Calculates probability of a response in each category
         for each person on each item
         '''
+
+        self.persons = self.abilities.index.tolist()
+        self.items = self.diffs.index.tolist()
+        self.raters = list(self.severities.keys())
 
         cat_probs = [[[[self.mfrm.cat_prob_thresholds(ability, item, self.diffs, rater, self.severities, category,
                                                       self.thresholds)
@@ -20713,9 +20858,9 @@ class MFRM_Sim_Thresholds(MFRM_Sim):
             
                 cat_scores[:, :, rater, cat] = (scoring_randoms[:, :, rater] >
                                                 np.sum(self.cat_probs[:, :, rater, :cat + 1],
-                                                       axis = 2)).astype(np.float64)
+                                                       axis=2)).astype(np.float64)
         
-        self.scores = np.sum(cat_scores, axis = 3)
+        self.scores = np.sum(cat_scores, axis=3)
         
         missing_randoms = self.randoms()
         
@@ -20727,7 +20872,34 @@ class MFRM_Sim_Thresholds(MFRM_Sim):
                                      columns=cols, index=self.persons)
                  for i, rater in enumerate(self.raters)}
         
-        self.scores = pd.concat(final.values(), keys = final.keys())
+        self.scores = pd.concat(final.values(), keys=final.keys())
+
+        if manual_person_names is not None:
+            self.scores.index = self.scores.index.set_levels(manual_person_names, level=1)
+
+        else:
+            person_list = [f'Person_{person + 1}' for person in range(self.no_of_persons)]
+            self.scores.index = self.scores.index.set_levels(person_list, level=1)
+
+        if manual_item_names is not None:
+            self.scores.rename(columns={old: new for old, new in zip(self.dataframe.columns, manual_item_names)},
+                               inplace=True)
+
+        else:
+            for item in range(self.no_of_items):
+                self.scores.rename(columns={item: f'Item_{item + 1}'},
+                                   inplace=True)
+
+        if manual_rater_names is not None:
+            self.scores.index = self.scores.index.set_levels(manual_rater_names, level=0)
+
+        else:
+            rater_list = [f'Rater_{rater + 1}' for rater in range(self.no_of_raters)]
+            self.scores.index = self.scores.index.set_levels(rater_list, level=0)
+
+        self.raters = self.scores.index.get_level_values(0).unique().tolist()
+        self.persons = self.scores.index.get_level_values(1).unique().tolist()
+        self.items = self.scores.columns.tolist()
 
 class MFRM_Sim_Matrix(MFRM_Sim):
     
@@ -20743,15 +20915,18 @@ class MFRM_Sim_Matrix(MFRM_Sim):
                  max_score,
                  item_range=2,
                  rater_range=2,
-                 category_mean=1,
+                 category_base=1,
                  person_sd=1.5,
-                 max_disorder = 0,
-                 offset = 0,
-                 missing = 0,
+                 max_disorder=0,
+                 offset=0,
+                 missing=0,
                  manual_abilities=None,
                  manual_diffs=None,
                  manual_thresholds=None,
-                 manual_severities=None):
+                 manual_severities=None,
+                 manual_person_names=None,
+                 manual_item_names=None,
+                 manual_rater_names=None):
 
         self.no_of_items = int(no_of_items)
         self.no_of_persons = int(no_of_persons)
@@ -20759,7 +20934,7 @@ class MFRM_Sim_Matrix(MFRM_Sim):
         self.item_range = item_range
         self.rater_range = rater_range
         self.max_score = max_score
-        self.category_mean = category_mean
+        self.category_base = category_base
         self.person_sd = person_sd
         self.max_disorder = max_disorder
         self.offset = offset
@@ -20768,6 +20943,9 @@ class MFRM_Sim_Matrix(MFRM_Sim):
         self.diffs = manual_diffs
         self.thresholds = manual_thresholds
         self.severities = manual_severities
+        self.persons = manual_person_names
+        self.items = manual_item_names
+        self.raters = manual_rater_names
         self.dataframe = self.produce_df([[0], [1]], [[0]])
         self.dataframe.loc[0].iloc[0, 0] = 0
         self.mfrm = MFRM(self.dataframe, self.max_score)
@@ -20775,6 +20953,15 @@ class MFRM_Sim_Matrix(MFRM_Sim):
         '''
         Generates person, item and threshold parameters.
         '''
+
+        if self.persons is not None:
+            assert len(self.persons) == self.no_of_persons, 'Length of person names must match number of persons.'
+
+        if self.items is not None:
+            assert len(self.items) == self.no_of_items, 'Length of item names must match number of items.'
+
+        if self.raters is not None:
+            assert len(self.raters) == self.no_of_raters, 'Length of rater names must match number of raters.'
 
         if self.abilities is None:
             self.abilities = np.random.normal(0, self.person_sd, self.no_of_persons)
@@ -20805,7 +20992,7 @@ class MFRM_Sim_Matrix(MFRM_Sim):
 
         if self.thresholds is None:
             category_widths = np.random.uniform(self.max_disorder,
-                                                2 * self.category_mean - self.max_disorder,
+                                                2 * self.category_base - self.max_disorder,
                                                 self.max_score)
             self.thresholds = [np.sum(category_widths[:category])
                                for category in range(self.max_score)]
@@ -20850,14 +21037,14 @@ class MFRM_Sim_Matrix(MFRM_Sim):
                                                       for item in range(self.no_of_items)}
                                for rater in range(self.no_of_raters)}
 
-        self.items = [f'Item_{item + 1}' for item in range(self.no_of_items)]
-        self.raters = [f'Rater_{rater + 1}' for rater in range(self.no_of_raters)]
-        self.persons = [f'Person_{person + 1}' for person in range(self.no_of_persons)]
-
         '''
         Calculates probability of a response in each category
         for each person on each item
         '''
+
+        self.persons = self.abilities.index.tolist()
+        self.items = self.diffs.index.tolist()
+        self.raters = list(self.severities.keys())
 
         cat_probs = [[[[self.mfrm.cat_prob_matrix(ability,
                                                   item,
@@ -20893,9 +21080,9 @@ class MFRM_Sim_Matrix(MFRM_Sim):
             
                 cat_scores[:, :, rater, cat] = (scoring_randoms[:, :, rater] >
                                                 np.sum(self.cat_probs[:, :, rater, :cat + 1],
-                                                       axis = 2)).astype(np.float64)
+                                                       axis=2)).astype(np.float64)
         
-        self.scores = np.sum(cat_scores, axis = 3)
+        self.scores = np.sum(cat_scores, axis=3)
         
         missing_randoms = self.randoms()
         
@@ -20907,4 +21094,31 @@ class MFRM_Sim_Matrix(MFRM_Sim):
                                      columns=cols, index=self.persons)
                  for i, rater in enumerate(self.raters)}
 
-        self.scores = pd.concat(final.values(), keys = final.keys())
+        self.scores = pd.concat(final.values(), keys=final.keys())
+
+        if manual_person_names is not None:
+            self.scores.index = self.scores.index.set_levels(manual_person_names, level=1)
+
+        else:
+            person_list = [f'Person_{person + 1}' for person in range(self.no_of_persons)]
+            self.scores.index = self.scores.index.set_levels(person_list, level=1)
+
+        if manual_item_names is not None:
+            self.scores.rename(columns={old: new for old, new in zip(self.dataframe.columns, manual_item_names)},
+                               inplace=True)
+
+        else:
+            for item in range(self.no_of_items):
+                self.scores.rename(columns={item: f'Item_{item + 1}'},
+                                   inplace=True)
+
+        if manual_rater_names is not None:
+            self.scores.index = self.scores.index.set_levels(manual_rater_names, level=0)
+
+        else:
+            rater_list = [f'Rater_{rater + 1}' for rater in range(self.no_of_raters)]
+            self.scores.index = self.scores.index.set_levels(rater_list, level=0)
+
+        self.raters = self.scores.index.get_level_values(0).unique().tolist()
+        self.persons = self.scores.index.get_level_values(1).unique().tolist()
+        self.items = self.scores.columns.tolist()
