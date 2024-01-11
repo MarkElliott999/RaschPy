@@ -869,6 +869,10 @@ class SLM(Rasch):
         if items is None:
             items = self.dataframe.columns
 
+        if isinstance(items, str):
+            if items == 'all':
+                items = self.dataframe.columns
+
         difficulties = self.diffs.loc[items]
 
         person_data = self.dataframe.loc[person, items]
@@ -999,6 +1003,10 @@ class SLM(Rasch):
 
         if items is None:
             items = self.dataframe.columns
+
+        if isinstance(items, str):
+            if items == 'all':
+                items = self.dataframe.columns
             
         if ext_scores:
             score_range = range(len(items) + 1)
@@ -1829,14 +1837,14 @@ class SLM(Rasch):
     def icc(self,
             item,
             obs=False,
-            xmin=-5,
-            xmax=5,
             no_of_classes=5,
             title=None,
             thresh_line=False,
             score_lines=None,
             score_labels=False,
             cat_highlight=None,
+            xmin=-5,
+            xmax=5,
             plot_style='dark-palette',
             black=False,
             font='Times',
@@ -1891,12 +1899,12 @@ class SLM(Rasch):
     def crcs(self,
              item,
              obs=None,
-             xmin=-5,
-             xmax=5,
              no_of_classes=5,
              title=None,
              thresh_line=False,
              cat_highlight=None,
+             xmin=-5,
+             xmax=5,
              plot_style='colorblind',
              black=False,
              font='Times',
@@ -1957,16 +1965,16 @@ class SLM(Rasch):
 
     def iic(self,
             item,
-            xmin=-5,
-            xmax=5,
-            ymax=None,
-            title=None,
             thresh_line=False,
             point_info_lines=None,
             point_info_labels=False,
             cat_highlight=None,
+            xmin=-5,
+            xmax=5,
+            ymax=None,
             plot_style='colorblind',
             black=False,
+            title=None,
             font='Times',
             title_font_size=15,
             axis_font_size=12,
@@ -2008,12 +2016,12 @@ class SLM(Rasch):
     def tcc(self,
             items=None,
             obs=False,
-            xmin=-5,
-            xmax=5,
             no_of_classes=5,
             title=None,
             score_lines=None,
             score_labels=False,
+            xmin=-5,
+            xmax=5,
             plot_style='colorblind',
             black=False,
             font='Times',
@@ -2242,6 +2250,7 @@ class PCM(Rasch):
             self.dataframe = dataframe[(scores > 0) & (scores < max_scores)]
 
         self.no_of_items = self.dataframe.shape[1]
+        self.items = self.dataframe.columns
         self.no_of_persons = self.dataframe.shape[0]
         self.persons = self.dataframe.index
         self.no_of_classes = no_of_classes
@@ -2669,10 +2678,36 @@ class PCM(Rasch):
             sample.calibrate(constant=constant, method=method, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         for item in self.dataframe.columns:
-            calibrations_thresholds[item] = np.stack((samples[sample].thresholds_uncentred[item]
-                                                      for sample in range(no_of_samples)))
+            calibrations_thresholds[item] = np.stack([samples[sample].thresholds_uncentred[item]
+                                                      for sample in range(no_of_samples)])
             calibrations_central[item] = np.array([samples[sample].central_diffs[item]
                                              for sample in range(no_of_samples)])
+
+        central_bootstrap = pd.DataFrame(calibrations_central)
+        central_bootstrap.index = [f'Sample {i + 1}' for i in range (no_of_samples)]
+        self.central_bootstrap = central_bootstrap
+
+        threshold_bootstrap = {item: pd.DataFrame(calibrations_thresholds[item])
+                               for item in self.items}
+
+        for item in self.items:
+            threshold_bootstrap[item].index = [f'Sample {i + 1}' for i in range(no_of_samples)]
+            threshold_bootstrap[item].columns = np.arange(1, threshold_bootstrap[item].shape[1] + 1)
+
+        self.threshold_bootstrap = threshold_bootstrap
+
+        cat_width_bootstrap = {}
+        for item in self.items:
+            if self.max_score_vector[item] > 1:
+                cat_width_bootstrap[item] = pd.DataFrame()
+    
+                for score in range(self.max_score_vector[item] - 1):
+                    cat_width_bootstrap[item][score + 1] = (self.threshold_bootstrap[item][score + 2] -
+                                                            self.threshold_bootstrap[item][score + 1])
+    
+                cat_width_bootstrap[item].index = [f'Sample {i + 1}' for i in range(no_of_samples)]
+
+        self.cat_width_bootstrap = cat_width_bootstrap
 
         self.threshold_se = {item: np.std(calibrations_thresholds[item], axis=0)
                              for item in self.dataframe.columns}
@@ -2687,6 +2722,21 @@ class PCM(Rasch):
         else:
             self.threshold_low = None
             self.threshold_high = None
+        
+
+        self.cat_width_se = {item: np.std(self.cat_width_bootstrap[item], axis=0)
+                             for item in self.dataframe.columns}
+
+        if interval is not None:
+            self.cat_width_low = {item: np.percentile(self.cat_width_bootstrap[item], (1 - interval) * 50, axis=0)
+                                  for item in self.dataframe.columns}
+
+            self.cat_width_high = {item: np.percentile(self.cat_width_bootstrap[item], (1 + interval) * 50, axis=0)
+                                   for item in self.dataframe.columns}
+
+        else:
+            self.cat_width_low = None
+            self.cat_width_high = None
 
         self.central_se = pd.Series({item: np.std(calibrations_central[item], axis=0)
                                      for item in self.dataframe.columns})
@@ -2702,10 +2752,10 @@ class PCM(Rasch):
             self.threshold_low = None
             self.threshold_high = None
 
+
     def abil(self,
              person,
-             thresholds=None,
-             max_score_vector=None,
+             items=None,
              warm_corr=True,
              tolerance=0.0000001,
              max_iters=100,
@@ -2716,17 +2766,21 @@ class PCM(Rasch):
         Uses Newton-Raphson for ML with optional Warm (1989) bias correction.
         '''
 
-        if thresholds is None:
+        if items is None:
             thresholds = self.thresholds_uncentred
 
-        if max_score_vector is None:
-            max_score_vector = self.max_score_vector
+        elif isinstance(items, str):
+            if items == 'all':
+                thresholds = self.thresholds_uncentred
+
+        else:
+            thresholds = {item: self.thresholds_uncentred[item] for item in items}
 
         person_data = self.dataframe.loc[person]
         person_filter = (person_data + 1) / (person_data + 1)
         score = np.nansum(person_data)
 
-        ext_score = np.nansum(max_score_vector * person_filter)
+        ext_score = np.nansum(self.max_score_vector * person_filter)[items].sum()
 
         if score == 0:
             score = ext_score_adjustment
@@ -2781,19 +2835,21 @@ class PCM(Rasch):
 
         if items is None:
             items = self.dataframe.columns
-            difficulties = self.central_diffs
             thresholds = self.thresholds_uncentred
-            max_score_vector = self.max_score_vector
+
+        if isinstance(items, str):
+            if items == 'all':
+                items = self.dataframe.columns
+                thresholds = self.thresholds_uncentred
 
         else:
-            difficulties = self.central_diffs.loc[items]
             thresholds = {item: self.thresholds_uncentred[item] for item in items}
-            max_score_vector = self.max_score_vector.loc[items]
+
+        thresold_list = [threshold for item in items for threshold in thresholds[item]]
 
         person_filter_dict = {item: True for item in items}
 
-        max_score_vector = np.array(max_score_vector)
-        ext_score = np.nansum(max_score_vector)
+        ext_score = self.max_score_vector[items].sum()
 
         if score == 0:
             score = ext_score_adjustment
@@ -2803,7 +2859,7 @@ class PCM(Rasch):
 
         estimate = (log(score) -
                     log(ext_score - score) +
-                    np.mean(difficulties))
+                    np.mean(thresold_list))
 
         change = 1
         iters = 0
@@ -2830,6 +2886,7 @@ class PCM(Rasch):
 
     def abil_lookup_table(self,
                           items=None,
+                          ext_scores=True,
                           warm_corr=True,
                           tolerance=0.0000001,
                           max_iters=100,
@@ -2837,14 +2894,20 @@ class PCM(Rasch):
 
         if items is None:
             items = self.dataframe.columns
-            max_score_vector = self.max_score_vector
+
+        if isinstance(items, str):
+            if items == 'all':
+                items = self.dataframe.columns
+
+        if ext_scores:
+            score_range = range(self.max_score_vector[items].sum() + 1)
 
         else:
-            max_score_vector = self.max_score_vector.loc[items]
-
+            score_range = range(1, self.max_score_vector[items].sum())
+            
         abil_table = {score: self.score_abil(score, items=items, warm_corr=warm_corr, tolerance=tolerance,
                                              max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
-                      for score in range(max_score_vector.sum() + 1)}
+                      for score in score_range}
         abil_table = pd.Series(abil_table)
 
         self.abil_table = abil_table
@@ -2884,7 +2947,7 @@ class PCM(Rasch):
     def csem_uncentred(self,
                        person,
                        abilities=None,
-                       thresholds=None):
+                       items=None):
 
         '''
         Calculates conditional standard error of measurement for an ability.
@@ -2893,8 +2956,15 @@ class PCM(Rasch):
         if abilities is None:
             abilities = self.person_abilities
 
-        if thresholds is None:
+        if items is None:
             thresholds = self.thresholds_uncentred
+
+        if isinstance(items, str):
+            if items == 'all':
+                thresholds = self.thresholds_uncentred
+
+        else:
+            thresholds = {item: self.thresholds_uncentred[item] for item in items}
 
         person_data = self.dataframe.loc[person].to_numpy()
         person_filter = (person_data + 1) / (person_data + 1)
@@ -2936,8 +3006,7 @@ class PCM(Rasch):
         return cond_sem
 
     def person_abils(self,
-                     thresholds=None,
-                     max_score_vector=None,
+                     items=None,
                      warm_corr=True,
                      tolerance=0.0000001,
                      max_iters=100,
@@ -2948,15 +3017,18 @@ class PCM(Rasch):
         estimation, includes optional Warm (1989) bias correction.
         '''
 
-        if thresholds is None:
+        if items is None:
             thresholds = self.thresholds_uncentred
 
-        if max_score_vector is None:
-            max_score_vector = self.max_score_vector
+        elif isinstance(items, str):
+            if items == 'all':
+                thresholds = self.thresholds_uncentred
 
-        estimates = {person: self.abil(person, thresholds=thresholds, max_score_vector=max_score_vector,
-                                       warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
-                                       ext_score_adjustment=ext_score_adjustment)
+        else:
+            items = {item: self.thresholds_uncentred[item] for item in items}
+
+        estimates = {person: self.abil(person, items=items, warm_corr=warm_corr, tolerance=tolerance,
+                                       max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
                      for person in self.dataframe.index}
 
         self.person_abilities = pd.Series(estimates)
@@ -3482,6 +3554,7 @@ class PCM(Rasch):
 
     def threshold_stats_df(self,
                            full=False,
+                           zstd = True,
                            disc=False,
                            point_measure_corr=False,
                            dp=3,
@@ -3495,6 +3568,7 @@ class PCM(Rasch):
                            interval=None):
 
         if full:
+            zstd = True
             disc = True
             point_measure_corr = True
 
@@ -3524,9 +3598,11 @@ class PCM(Rasch):
             self.threshold_stats_uncentred[f'{round((1 + interval) * 50, 1)}%'] = high_array.round(dp)
 
         self.threshold_stats_uncentred['Infit MS'] = self.threshold_infit_ms.to_numpy().round(dp)
-        self.threshold_stats_uncentred['Infit Z'] = self.threshold_infit_zstd.to_numpy().round(dp)
+        if zstd:
+            self.threshold_stats_uncentred['Infit Z'] = self.threshold_infit_zstd.to_numpy().round(dp)
         self.threshold_stats_uncentred['Outfit MS'] = self.threshold_outfit_ms.to_numpy().round(dp)
-        self.threshold_stats_uncentred['Outfit Z'] = self.threshold_outfit_zstd.to_numpy().round(dp)
+        if zstd:
+            self.threshold_stats_uncentred['Outfit Z'] = self.threshold_outfit_zstd.to_numpy().round(dp)
 
         if disc:
             self.threshold_stats_uncentred['Discrim'] = self.threshold_discrimination.to_numpy().round(dp)
@@ -3589,7 +3665,6 @@ class PCM(Rasch):
 
         person_stats_df['Infit MS'] = [np.nan for person in self.dataframe.index]
         person_stats_df['Infit Z'] = [np.nan for person in self.dataframe.index]
-        person_stats_df['Outfit MS'] = [np.nan for person in self.dataframe.index]
         person_stats_df['Outfit MS'] = [np.nan for person in self.dataframe.index]
         person_stats_df['Outfit Z'] = [np.nan for person in self.dataframe.index]
 
@@ -3773,21 +3848,17 @@ class PCM(Rasch):
                 self.loadings.round(dp).to_csv(f'{filename}_principal_component_loadings.csv')
 
     def class_intervals(self,
+                        abilities,
                         items=None,
                         no_of_classes=5):
 
         class_groups = [f'class_{class_no + 1}' for class_no in range(no_of_classes)]
 
-        df = self.dataframe
+        if items is None:
+            items = self.dataframe.columns.tolist()
 
-        if items is not None:
-            df = df[items]
-            abils = self.person_abilities[df == df]
-
-        else:
-            abils = self.person_abilities[~df.isnull().all(axis=1)]
-
-        df = df.dropna(how='all')
+        df = self.dataframe[items].dropna(how='any')
+        abils = abilities.loc[df.index]
 
         quantiles = (abils.quantile([(i + 1) / no_of_classes
                                      for i in range(no_of_classes - 1)]))
@@ -3799,13 +3870,6 @@ class PCM(Rasch):
             mask_dict[f'class_{class_no + 2}'] = ((abils >= quantiles.values[class_no]) &
                                                   (abils < quantiles.values[class_no + 1]))
 
-        class_sizes = {class_group: sum(mask_dict[class_group])
-                       for class_group in class_groups}
-        class_sizes = pd.Series(class_sizes)
-
-        response_classes = {class_group: df.index[mask_dict[class_group]]
-                            for class_group in class_groups}
-
         mean_abilities = {class_group: abils[mask_dict[class_group]].mean()
                           for class_group in class_groups}
         mean_abilities = pd.Series(mean_abilities)
@@ -3816,13 +3880,9 @@ class PCM(Rasch):
         for class_group in class_groups:
             obs[class_group] = pd.Series(obs[class_group])
 
-        obs = pd.concat(obs, keys=obs_means.keys())
+        obs = pd.concat(obs, keys=obs.keys())
 
-        class_abilities = {class_group: abils[mask_dict[class_group]]
-                           for class_group in class_groups}
-        class_abilities = pd.concat(class_abilities, keys=class_abilities.keys())
-
-        return class_sizes, response_classes, class_abilities, mean_abilities, obs
+        return mean_abilities, obs
 
     def class_intervals_cats(self,
                         	 item,
@@ -3844,12 +3904,6 @@ class PCM(Rasch):
             mask_dict[f'class_{class_no + 2}'] = ((abils >= quantiles.values[class_no]) &
                                                   (abils < quantiles.values[class_no + 1]))
 
-        class_sizes = {class_group: sum(mask_dict[class_group]) for class_group in class_groups}
-        class_sizes = pd.Series(class_sizes)
-
-        response_classes = {class_group: df.index[mask_dict[class_group]]
-                            for class_group in class_groups}
-
         mean_abilities = {class_group: abils[mask_dict[class_group]].mean()
                           for class_group in class_groups}
         mean_abilities = pd.Series(mean_abilities)
@@ -3863,11 +3917,7 @@ class PCM(Rasch):
 
         obs_props = pd.DataFrame(obs_props).to_numpy().T
 
-        class_abilities = {class_group: abils[mask_dict[class_group]]
-                           for class_group in class_groups}
-        class_abilities = pd.concat(class_abilities, keys=class_abilities.keys())
-
-        return class_sizes, response_classes, class_abilities, mean_abilities, obs_props
+        return mean_abilities, obs_props
 
     def class_intervals_thresholds(self,
                                    item,
@@ -3899,8 +3949,6 @@ class PCM(Rasch):
 
         mean_abilities = []
         obs_props = []
-        class_sizes = []
-        response_classes = []
 
         for threshold in range(self.max_score_vector[item]):
 
@@ -3923,20 +3971,10 @@ class PCM(Rasch):
             obs_props.append([(cond_classes[class_group]['score'] - threshold).mean()
                               for class_group in class_groups])
 
-            sizes = {class_group: sum(masks[class_group]) for class_group in class_groups}
-            class_sizes.append(pd.Series(sizes))
-
-            response_classes.append({class_group: cond_df.index[masks[class_group]]
-                                     for class_group in class_groups})
-
         mean_abilities = np.array(mean_abilities).T
         obs_props = np.array(obs_props).T
 
-        class_abilities = {class_group: adj_abils[masks[class_group]]
-                           for class_group in class_groups}
-        class_abilities = pd.concat(class_abilities, keys=class_abilities.keys())
-
-        return class_sizes, response_classes, class_abilities, mean_abilities, obs_props
+        return mean_abilities, obs_props
 
     '''
     Plots
@@ -3945,8 +3983,8 @@ class PCM(Rasch):
     def plot_data(self,
                   x_data,
                   y_data,
-                  x_min=-10,
-                  x_max=10,
+                  x_min=-5,
+                  x_max=5,
                   y_max=0,
                   item=None,
                   obs=None,
@@ -3955,10 +3993,10 @@ class PCM(Rasch):
                   thresh_lines=False,
                   central_diff=False,
                   score_lines_item=[None, []],
-                  score_lines_test=[],
+                  score_lines_test=None,
                   point_info_lines_item=[None, []],
-                  point_info_lines_test=[],
-                  point_csem_lines=[],
+                  point_info_lines_test=None,
+                  point_csem_lines=None,
                   score_labels=False,
                   warm=True,
                   cat_highlight=None,
@@ -3971,10 +4009,9 @@ class PCM(Rasch):
                   title_font_size=15,
                   axis_font_size=12,
                   labelsize=12,
-                  graph_name='plot',
                   tex=True,
                   plot_density=300,
-                  save_title='',
+                  filename=None,
                   file_format='png'):
 
         '''
@@ -4049,7 +4086,7 @@ class PCM(Rasch):
             else:
                 print('Invalid score for score line.')
 
-        if score_lines_test != []:
+        if score_lines_test is not None:
 
             if (all(x > 0 for x in score_lines_test) &
                     all(x < sum(self.max_score_vector) for x in score_lines_test)):
@@ -4083,7 +4120,7 @@ class PCM(Rasch):
                 if score_labels:
                     plt.text(x_min + (x_max - x_min) / 100, info + y_max / 50, str(round(info, 3)))
 
-        if point_info_lines_test != []:
+        if point_info_lines_test is not None:
 
             info_set = [sum(self.variance_uncentred(ability, self.thresholds_uncentred[item])
             				for item in self.dataframe.columns)
@@ -4097,7 +4134,7 @@ class PCM(Rasch):
                 if score_labels:
                     plt.text(x_min + (x_max - x_min) / 100, info + y_max / 50, str(round(info, 3)))
 
-        if point_csem_lines != []:
+        if point_csem_lines is not None:
 
             info_set = [sum(self.variance_uncentred(ability, self.thresholds_uncentred[item])
             				for item in self.dataframe.columns)
@@ -4146,10 +4183,8 @@ class PCM(Rasch):
         plt.tick_params(axis="x", labelsize=labelsize)
         plt.tick_params(axis="y", labelsize=labelsize)
 
-        if save_title != '':
-            save_title = save_title.translate(str.maketrans('', '', string.punctuation))
-            save_title = save_title.translate({32: 95})
-            plt.savefig(f'{save_title}.{file_format}', dpi=plot_density)
+        if filename is not None:
+            plt.savefig(filename + f'.{file_format}', dpi=plot_density)
             
         plt.close()
 
@@ -4158,23 +4193,22 @@ class PCM(Rasch):
     def icc(self,
             item,
             obs=False,
-            xmin=-10,
-            xmax=10,
             no_of_classes=5,
-            title=True,
+            title=None,
             thresh_lines=False,
             central_diff=False,
-            score_lines=[],
+            score_lines=None,
             score_labels=False,
             cat_highlight=None,
+            xmin=-5,
+            xmax=5,
             plot_style='colorblind',
             black=False,
             font='Times',
             title_font_size=15,
             axis_font_size=12,
             labelsize=12,
-            save_title='',
-            use_save_title=False,
+            filename=None,
             file_format='png',
             dpi=300):
 
@@ -4192,7 +4226,7 @@ class PCM(Rasch):
             if hasattr(self, 'person_abiliites') == False:
                 self.person_abils(warm_corr=False)
 
-            _, _, _, mean_abilities, obs_means = self.class_intervals(item=item, no_of_classes=no_of_classes)
+            mean_abilities, obs_means = self.class_intervals(items=item, abilities=self.person_abilities, no_of_classes=no_of_classes)
 
             xobsdata = pd.Series(mean_abilities)
             yobsdata = obs_means
@@ -4202,25 +4236,20 @@ class PCM(Rasch):
             xobsdata = np.array(np.nan)
             yobsdata = np.array(np.nan)
 
-        ylabel = 'Expected score'
+        if title is not None:
+            graphtitle = title
 
-        if title:
-            if use_save_title:
-                if save_title != '':
-                    graphtitle = f'ICC: {save_title}'
-
-            else:
-                graphtitle = f'ICC: {item}'
-                
         else:
             graphtitle = ''
+
+        ylabel = 'Expected score'
 
         plot = self.plot_data(x_data=abilities, y_data=y, x_obs_data=xobsdata, y_obs_data=yobsdata, x_min=xmin,
                               x_max=xmax, y_max=self.max_score_vector[item], item=item, graph_title=graphtitle,
                               y_label=ylabel, obs=obs, thresh_lines=thresh_lines, central_diff=central_diff,
                               score_lines_item=[item, score_lines], score_labels=score_labels, plot_style=plot_style,
                               cat_highlight=cat_highlight, black=black, font=font, title_font_size=title_font_size,
-                              axis_font_size=axis_font_size, labelsize=labelsize, save_title=save_title,
+                              axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
                               plot_density=dpi, file_format=file_format)
         
         return plot
@@ -4228,20 +4257,20 @@ class PCM(Rasch):
     def crcs(self,
              item,
              obs=None,
-             xmin=-10,
-             xmax=10,
              no_of_classes=5,
-             title=True,
+             title=None,
              thresh_lines=False,
              central_diff=False,
              cat_highlight=None,
+             xmin=-5,
+             xmax=5,
              plot_style='colorblind',
              black=False,
              font='Times',
              title_font_size=15,
              axis_font_size=12,
              labelsize=12,
-             save_title='',
+             filename=None,
              file_format='png',
              dpi=300):
 
@@ -4260,7 +4289,7 @@ class PCM(Rasch):
             if hasattr(self, 'person_abiliites') == False:
                 self.person_abils(warm_corr=False)
 
-            _, _, _, mean_abilities, obs_props = self.class_intervals_cats(item=item, no_of_classes=no_of_classes)
+            mean_abilities, obs_props = self.class_intervals_cats(item=item, no_of_classes=no_of_classes)
 
             xobsdata = mean_abilities
             yobsdata = obs_props
@@ -4277,8 +4306,9 @@ class PCM(Rasch):
             xobsdata = np.array(np.nan)
             yobsdata = np.array(np.nan)
 
-        if title:
-            graphtitle = f'Category response curves for item {item}'
+        if title is not None:
+            graphtitle = title
+
         else:
             graphtitle = ''
 
@@ -4288,7 +4318,7 @@ class PCM(Rasch):
                               y_obs_data=yobsdata, item=item, graph_title=graphtitle, y_label=ylabel, obs=obs,
                               thresh_lines=thresh_lines, central_diff=central_diff, cat_highlight=cat_highlight,
                               plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
-                              axis_font_size=axis_font_size, labelsize=labelsize, save_title=save_title,
+                              axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
                               plot_density=dpi, file_format=file_format)
 
         return plot
@@ -4296,20 +4326,20 @@ class PCM(Rasch):
     def threshold_ccs(self,
                       item,
                       obs=None,
-                      xmin=-10,
-                      xmax=10,
                       no_of_classes=5,
-                      title=True,
+                      title=None,
                       thresh_lines=False,
                       central_diff=False,
                       cat_highlight=None,
+                      xmin=-5,
+                      xmax=5,
                       plot_style='colorblind',
                       black=False,
                       font='Times',
                       title_font_size=15,
                       axis_font_size=12,
                       labelsize=12,
-                      save_title='',
+                      filename=None,
                       file_format='png',
                       dpi=300):
 
@@ -4319,6 +4349,7 @@ class PCM(Rasch):
         '''
 
         abilities = np.arange(-20, 20, 0.1)
+
         y = np.array([[1 / (1 + np.exp(threshold - ability))
                        for threshold in self.thresholds_uncentred[item]]
                       for ability in abilities])
@@ -4327,7 +4358,7 @@ class PCM(Rasch):
             if hasattr(self, 'person_abiliites') == False:
                 self.person_abils(warm_corr=False)
 
-            _, _, _, mean_abilities, obs_props = self.class_intervals_thresholds(item, no_of_classes=no_of_classes)
+            mean_abilities, obs_props = self.class_intervals_thresholds(item, no_of_classes=no_of_classes)
 
             xobsdata = mean_abilities
             yobsdata = obs_props
@@ -4346,8 +4377,9 @@ class PCM(Rasch):
             xobsdata = np.array(np.nan)
             yobsdata = np.array(np.nan)
 
-        if title:
-            graphtitle = f'Threshold characteristic curves for item {item}'
+        if title is not None:
+            graphtitle = title
+
         else:
             graphtitle = ''
 
@@ -4358,28 +4390,28 @@ class PCM(Rasch):
                               obs=obs, thresh_lines=thresh_lines, central_diff=central_diff,
                               cat_highlight=cat_highlight, plot_style=plot_style, black=black, font=font,
                               title_font_size=title_font_size, axis_font_size=axis_font_size, labelsize=labelsize,
-                              save_title=save_title, plot_density=dpi, file_format=file_format)
+                              filename=filename, plot_density=dpi, file_format=file_format)
 
         return plot
 
     def iic(self,
             item,
-            xmin=-10,
-            xmax=10,
             ymax=None,
             thresh_lines=False,
             central_diff=False,
-            point_info_lines=[],
+            point_info_lines=None,
             point_info_labels=False,
             cat_highlight=None,
-            title=True,
+            title=None,
+            xmin=-5,
+            xmax=5,
             plot_style='colorblind',
             black=False,
             font='Times',
             title_font_size=15,
             axis_font_size=12,
             labelsize=12,
-            save_title='',
+            filename=None,
             file_format='png',
             dpi=300):
 
@@ -4395,8 +4427,9 @@ class PCM(Rasch):
         if ymax is None:
             ymax = max(y) * 1.1
 
-        if title:
-            graphtitle = f'Item information curve for item {item}'
+        if title is not None:
+            graphtitle = title
+
         else:
             graphtitle = ''
 
@@ -4407,17 +4440,18 @@ class PCM(Rasch):
                               score_labels=point_info_labels, cat_highlight=cat_highlight, graph_title=graphtitle,
                               y_label=ylabel, plot_style=plot_style, black=black, font=font,
                               title_font_size=title_font_size, axis_font_size=axis_font_size, labelsize=labelsize,
-                              save_title=save_title, file_format=file_format, plot_density=dpi)
+                              filename=filename, file_format=file_format, plot_density=dpi)
 
         return plot
 
     def tcc(self,
+            items=None,
             obs=False,
-            xmin=-10,
-            xmax=10,
+            xmin=-5,
+            xmax=5,
             no_of_classes=5,
-            title=True,
-            score_lines=[],
+            title=None,
+            score_lines=None,
             score_labels=False,
             warm=True,
             plot_style='colorblind',
@@ -4426,7 +4460,7 @@ class PCM(Rasch):
             title_font_size=15,
             axis_font_size=12,
             labelsize=12,
-            save_title='',
+            filename=None,
             file_format='png',
             dpi=300):
 
@@ -4444,7 +4478,7 @@ class PCM(Rasch):
             if hasattr(self, 'person_abiliites') == False:
                 self.person_abils(warm_corr=False)
 
-            _, _, _, mean_abilities, obs_means = self.class_intervals(no_of_classes=no_of_classes)
+            mean_abilities, obs_means = self.class_intervals(items=items, abilities=self.person_abilities, no_of_classes=no_of_classes)
 
             xobsdata = mean_abilities
             yobsdata = obs_means
@@ -4454,41 +4488,38 @@ class PCM(Rasch):
             xobsdata = np.array(np.nan)
             yobsdata = np.array(np.nan)
 
-        if title:
-            graphtitle = 'Test characteristic curve'
+        if title is not None:
+            graphtitle = title
+
         else:
             graphtitle = ''
 
         ylabel = 'Expected score'
 
-        if obs:
-            graphname = f'TCC_observed_categories'
-        else:
-            graphname = f'ICC'
-
         plot = self.plot_data(x_data=abilities, y_data=y, x_obs_data=xobsdata, y_obs_data=yobsdata, x_min=xmin,
                               x_max=xmax, y_max=sum(self.max_score_vector), score_lines_test=score_lines,
                               score_labels=score_labels, warm=warm, graph_title=graphtitle, y_label=ylabel, obs=obs,
                               plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
-                              axis_font_size=axis_font_size, labelsize=labelsize, save_title=save_title,
+                              axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
                               file_format=file_format, plot_density=dpi)
 
         return plot
 
     def test_info(self,
-                  point_info_lines=[],
+                  items=None,
+                  point_info_lines=None,
                   point_info_labels=False,
-                  xmin=-10,
-                  xmax=10,
+                  xmin=-5,
+                  xmax=5,
                   ymax=None,
-                  title=True,
+                  title=None,
                   plot_style='colorblind',
                   black=False,
                   font='Times',
                   title_font_size=15,
                   axis_font_size=12,
                   labelsize=12,
-                  save_title='',
+                  filename=None,
                   file_format='png',
                   dpi=300):
 
@@ -4496,17 +4527,25 @@ class PCM(Rasch):
         Plots Test Information Curve for PCM.
         '''
 
+        if items is None:
+            items = self.dataframe.columns
+
+        if isinstance(items, str):
+            if items == 'all':
+                items = self.dataframe.columns
+
         abilities = np.arange(-20, 20, 0.1)
         y = [sum(self.variance_uncentred(ability, self.thresholds_uncentred[item])
-                 for item in self.dataframe.columns)
+                 for item in items)
              for ability in abilities]
         y = np.array(y).reshape(len(abilities), 1)
 
         if ymax is None:
             ymax = max(y) * 1.1
 
-        if title:
-            graphtitle = 'Test information curve'
+        if title is not None:
+            graphtitle = title
+
         else:
             graphtitle = ''
 
@@ -4515,25 +4554,26 @@ class PCM(Rasch):
         plot = self.plot_data(x_data=abilities, y_data=y, x_min=xmin, x_max=xmax, y_max=ymax, graph_title=graphtitle,
                               point_info_lines_test=point_info_lines, score_labels=point_info_labels, y_label=ylabel,
                               plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
-                              axis_font_size=axis_font_size, labelsize=labelsize, save_title=save_title,
+                              axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
                               file_format=file_format, plot_density=dpi)
 
         return plot
 
     def test_csem(self,
-                  point_csem_lines=[],
+                  items=None,
+                  point_csem_lines=None,
                   point_csem_labels=False,
-                  xmin=-10,
-                  xmax=10,
+                  xmin=-5,
+                  xmax=5,
                   ymax=5,
-                  title=True,
+                  title=None,
                   plot_style='colorblind',
                   black=False,
                   font='Times',
                   title_font_size=15,
                   axis_font_size=12,
                   labelsize=12,
-                  save_title='',
+                  filename=None,
                   file_format='png',
                   dpi=300):
 
@@ -4541,15 +4581,25 @@ class PCM(Rasch):
         Plots Test Conditional Standard Error of Measurement Curve for PCM.
         '''
 
+        if items is None:
+            items = self.dataframe.columns
+
+        if isinstance(items, str):
+            if items == 'all':
+                items = self.dataframe.columns
+
         abilities = np.arange(-20, 20, 0.1)
+
         y = np.array([sum(self.variance_uncentred(ability, self.thresholds_uncentred[item])
-                 for item in self.dataframe.columns)
+                 for item in items)
              for ability in abilities])
+
         y = 1 / np.sqrt(y)
         y = y.reshape(len(abilities), 1)
 
-        if title:
-            graphtitle = 'Test conditional SEM curve'
+        if title is not None:
+            graphtitle = title
+
         else:
             graphtitle = ''
 
@@ -4558,37 +4608,45 @@ class PCM(Rasch):
         plot = self.plot_data(x_data=abilities, y_data=y, x_min=xmin, x_max=xmax, y_max=ymax, graph_title=graphtitle,
                               point_csem_lines=point_csem_lines, score_labels=point_csem_labels, y_label=ylabel,
                               plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
-                              axis_font_size=axis_font_size, labelsize=labelsize, save_title=save_title,
+                              axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
                               file_format=file_format, plot_density=dpi)
 
         return plot
 
     def std_residuals_plot(self,
+                           items=None,
                            bin_width=0.5,
                            x_min=-6,
                            x_max=6,
                            normal=False,
-                           title=True,
+                           title=None,
                            plot_style='colorblind',
                            font='Times',
                            title_font_size=15,
                            axis_font_size=12,
                            labelsize=12,
-                           save_title='',
+                           filename=None,
                            file_format='png',
-                           tex=True,
                            plot_density=300):
 
         '''
         Plots histogram of standardised residuals for SLM, with optional overplotting of Standard Normal Distribution.
         '''
 
-        std_residual_list = self.std_residual_df.unstack().dropna()
+        if items is None:
+            items = self.dataframe.columns
+
+        if isinstance(items, str):
+            if items == 'all':
+                items = self.dataframe.columns
+
+        std_residual_df = self.std_residual_df[items]
+        std_residual_list = std_residual_df.unstack().dropna()
 
         plot = self.std_residuals_hist(std_residual_list, bin_width=bin_width, x_min=x_min, x_max=x_max, normal=normal,
                                        title=title, plot_style=plot_style, font=font, title_font_size=title_font_size,
-                                       axis_font_size=axis_font_size, labelsize=labelsize, save_title=save_title,
-                                       file_format=file_format, tex=tex, plot_density=plot_density)
+                                       axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
+                                       file_format=file_format, plot_density=plot_density)
 
         return plot
 
@@ -5086,6 +5144,11 @@ class RSM(Rasch):
         if items is None:
             items = self.items
             difficulties = self.diffs
+
+        elif isinstance(items, str):
+            if items == 'all':
+                items = self.items
+                difficulties = self.diffs
 
         else:
             difficulties = self.diffs.loc[items]
@@ -5863,12 +5926,10 @@ class RSM(Rasch):
 
         class_groups = [f'class_{class_no + 1}' for class_no in range(no_of_classes)]
 
-        df = self.dataframe.copy()
-
         if items is None:
             items = self.dataframe.columns.tolist()
 
-        df = df[items].dropna()
+        df = self.dataframe[items].dropna(how='any')
         abils = abilities.loc[df.index]
 
         quantiles = (abils.quantile([(i + 1) / no_of_classes
@@ -6051,8 +6112,8 @@ class RSM(Rasch):
                   point_info_lines_test=None,
                   point_csem_lines=None,
                   score_labels=False,
-                  x_min=-10,
-                  x_max=10,
+                  x_min=-5,
+                  x_max=5,
                   y_max=0,
                   warm=True,
                   cat_highlight=None,
@@ -6264,15 +6325,15 @@ class RSM(Rasch):
     def icc(self,
             item,
             obs=False,
-            xmin=-10,
-            xmax=10,
             no_of_classes=5,
-            title=True,
+            title=None,
             thresh_lines=False,
             central_diff=False,
             score_lines=None,
             score_labels=False,
             cat_highlight=None,
+            xmin=-5,
+            xmax=5,
             plot_style='colorblind',
             black=False,
             font='Times',
@@ -6280,7 +6341,6 @@ class RSM(Rasch):
             axis_font_size=12,
             labelsize=12,
             filename=None,
-            use_save_title=False,
             file_format='png',
             dpi=300):
 
@@ -6309,13 +6369,8 @@ class RSM(Rasch):
             xobsdata = np.array(np.nan)
             yobsdata = np.array(np.nan)
 
-        if title:
-            if use_save_title:
-                if save_title != '':
-                    graphtitle = f'ICC: {save_title}'
-
-            else:
-                graphtitle = f'ICC: {item}'
+        if title is not None:
+            graphtitle = title
 
         else:
             graphtitle = ''
@@ -6335,13 +6390,13 @@ class RSM(Rasch):
     def crcs(self,
              item,
              obs=None,
-             xmin=-10,
-             xmax=10,
              no_of_classes=5,
-             title=True,
+             title=None,
              thresh_lines=False,
              central_diff=False,
              cat_highlight=None,
+             xmin=-5,
+             xmax=5,
              plot_style='colorblind',
              black=False,
              font='Times',
@@ -6385,8 +6440,9 @@ class RSM(Rasch):
             xobsdata = np.array(np.nan)
             yobsdata = np.array(np.nan)
 
-        if title:
-            graphtitle = f'Category response curves for item {item}'
+        if title is not None:
+            graphtitle = title
+
         else:
             graphtitle = ''
 
@@ -6404,13 +6460,13 @@ class RSM(Rasch):
     def threshold_ccs(self,
                       item=None,
                       obs=None,
-                      xmin=-10,
-                      xmax=10,
                       no_of_classes=5,
-                      title=True,
+                      title=None,
                       thresh_lines=False,
                       central_diff=False,
                       cat_highlight=None,
+                      xmin=-5,
+                      xmax=5,
                       plot_style='colorblind',
                       black=False,
                       font='Times',
@@ -6432,6 +6488,7 @@ class RSM(Rasch):
             abs_thresholds = self.thresholds[1:]
         else:
             abs_thresholds = self.thresholds[1:] + self.diffs[item]
+
         y = np.array([[1 / (1 + np.exp(threshold - ability))
                        for threshold in abs_thresholds]
                       for ability in abilities])
@@ -6459,11 +6516,9 @@ class RSM(Rasch):
             xobsdata = np.array(np.nan)
             yobsdata = np.array(np.nan)
 
-        if title:
-            if item is None:
-                graphtitle = f'Threshold characteristic curves'
-            else:
-                graphtitle = f'Threshold characteristic curves for item {item}'
+        if title is not None:
+            graphtitle = title
+
         else:
             graphtitle = ''
 
@@ -6480,15 +6535,15 @@ class RSM(Rasch):
 
     def iic(self,
             item,
-            xmin=-10,
-            xmax=10,
             ymax=None,
             thresh_lines=False,
             central_diff=False,
             point_info_lines=None,
             point_info_labels=False,
             cat_highlight=None,
-            title=True,
+            title=None,
+            xmin=-5,
+            xmax=5,
             plot_style='colorblind',
             black=False,
             font='Times',
@@ -6514,8 +6569,9 @@ class RSM(Rasch):
         if ymax is None:
             ymax = max(y) * 1.1
 
-        if title:
-            graphtitle = f'Item information curve for item {item}'
+        if title is not None:
+            graphtitle = title
+
         else:
             graphtitle = ''
 
@@ -6533,12 +6589,12 @@ class RSM(Rasch):
     def tcc(self,
             items=None,
             obs=False,
-            xmin=-10,
-            xmax=10,
             no_of_classes=5,
-            title=True,
+            title=None,
             score_lines=None,
             score_labels=False,
+            xmin=-5,
+            xmax=5,
             plot_style='colorblind',
             black=False,
             font='Times',
@@ -6603,10 +6659,10 @@ class RSM(Rasch):
                   items=None,
                   point_info_lines=None,
                   point_info_labels=False,
-                  xmin=-10,
-                  xmax=10,
+                  xmin=-5,
+                  xmax=5,
                   ymax=None,
-                  title=True,
+                  title=None,
                   plot_style='colorblind',
                   black=False,
                   font='Times',
@@ -6624,6 +6680,11 @@ class RSM(Rasch):
         if items is None:
             difficulties = self.diffs
             items = self.dataframe.columns
+
+        if isinstance(items, str):
+            if items == 'all':
+                difficulties = self.diffs
+                items = self.dataframe.columns
 
         else:
             difficulties = self.diffs.loc[items]
@@ -6657,10 +6718,10 @@ class RSM(Rasch):
                   items=None,
                   point_csem_lines=None,
                   point_csem_labels=False,
-                  xmin=-10,
-                  xmax=10,
+                  xmin=-5,
+                  xmax=5,
                   ymax=5,
-                  title=True,
+                  title=None,
                   plot_style='colorblind',
                   black=False,
                   font='Times',
@@ -8614,11 +8675,19 @@ class MFRM(Rasch):
                     max_iters=100,
                     ext_score_adjustment=0.5):
 
-        if (items is None) or (items == 'all'):
+        if items is None:
             items = self.dataframe.columns.tolist()
 
-        if (raters == 'all') or (raters is None):
+        if isinstance(items, str):
+            if items == 'all':
+                items = self.dataframe.columns.tolist()
+
+        if raters is None:
             raters = self.raters.tolist()
+
+        if isinstance(raters, str):
+            if raters == 'all':
+                raters = self.raters.tolist()
 
         if anchor:
             if hasattr(self, 'anchor_diffs_global'):
@@ -8741,11 +8810,16 @@ class MFRM(Rasch):
                           max_iters=100,
                           ext_score_adjustment=0.5):
 
-        if (items is None) or (items == 'all'):
+        if items is None:
             items = self.dataframe.columns.tolist()
 
-        if raters == 'all':
-            raters = self.raters.tolist()
+        if isinstance(items, str):
+            if items == 'all':
+                items = self.dataframe.columns.tolist()
+
+        if isinstance(raters, str):
+            if raters == 'all':
+                raters = self.raters.tolist()
 
         if anchor:
             if hasattr(self, 'anchor_diffs_global'):
@@ -8845,6 +8919,15 @@ class MFRM(Rasch):
             else:
                 person_filter = np.array([[1 for item in self.dataframe.columns]
                                           for rater in raters])
+
+        elif isinstance(items, str):
+            if items == 'all':
+                if raters is None:
+                    person_filter = np.array([1 for item in self.dataframe.columns])
+
+                else:
+                    person_filter = np.array([[1 for item in self.dataframe.columns]
+                                              for rater in raters])
 
         else:
             if raters is None:
@@ -8963,11 +9046,19 @@ class MFRM(Rasch):
                    max_iters=100,
                    ext_score_adjustment=0.5):
 
-        if (items is None) or (items == 'all'):
+        if items is None:
             items = self.dataframe.columns.tolist()
 
-        if (raters == 'all') or (raters is None):
+        if isinstance(items, str):
+            if items == 'all':
+                items = self.dataframe.columns.tolist()
+
+        if raters is None:
             raters = self.raters.tolist()
+
+        if isinstance(raters, str):
+            if raters == 'all':
+                raters = self.raters.tolist()
 
         if anchor:
             if hasattr(self, 'anchor_diffs_items'):
@@ -9089,11 +9180,16 @@ class MFRM(Rasch):
                          max_iters=100,
                          ext_score_adjustment=0.5):
 
-        if (items is None) or (items == 'all'):
+        if items is None:
             items = self.dataframe.columns.tolist()
 
-        if raters == 'all':
-            raters = self.raters.tolist()
+        if isinstance(items, str):
+            if items == 'all':
+                items = self.dataframe.columns.tolist()
+
+        if isinstance(raters, str):
+            if raters == 'all':
+                raters = self.raters.tolist()
 
         if anchor:
             if hasattr(self, 'anchor_diffs_items'):
@@ -9200,6 +9296,15 @@ class MFRM(Rasch):
             else:
                 person_filter = np.array([[1 for item in self.dataframe.columns]
                                           for rater in raters])
+
+        elif isinstance(items, str):
+            if items == 'all':
+                if raters is None:
+                    person_filter = np.array([1 for item in self.dataframe.columns])
+
+                else:
+                    person_filter = np.array([[1 for item in self.dataframe.columns]
+                                              for rater in raters])
 
         else:
             if raters is None:
@@ -9318,11 +9423,19 @@ class MFRM(Rasch):
                         max_iters=100,
                         ext_score_adjustment=0.5):
 
-        if (items is None) or (items == 'all'):
+        if items is None:
             items = self.dataframe.columns.tolist()
 
-        if (raters == 'all') or (raters is None):
+        if isinstance(items, str):
+            if items == 'all':
+                items = self.dataframe.columns.tolist()
+
+        if raters is None:
             raters = self.raters.tolist()
+
+        if isinstance(raters, str):
+            if raters == 'all':
+                raters = self.raters.tolist()
 
         if anchor:
             if hasattr(self, 'anchor_diffs_thresholds'):
@@ -9445,11 +9558,16 @@ class MFRM(Rasch):
                               max_iters=100,
                               ext_score_adjustment=0.5):
 
-        if (items is None) or (items == 'all'):
+        if items is None:
             items = self.dataframe.columns.tolist()
 
-        if raters == 'all':
-            raters = self.raters.tolist()
+        if isinstance(items, str):
+            if items == 'all':
+                items = self.dataframe.columns.tolist()
+
+        if isinstance(raters, str):
+            if raters == 'all':
+                raters = self.raters.tolist()
 
         if anchor:
             if hasattr(self, 'anchor_diffs_thresholds'):
@@ -9551,6 +9669,15 @@ class MFRM(Rasch):
             else:
                 person_filter = np.array([[1 for item in self.dataframe.columns]
                                           for rater in raters])
+
+        elif isinstance(items, str):
+            if items == 'all':
+                if raters is None:
+                    person_filter = np.array([1 for item in self.dataframe.columns])
+
+                else:
+                    person_filter = np.array([[1 for item in self.dataframe.columns]
+                                              for rater in raters])
 
         else:
             if raters is None:
@@ -9669,11 +9796,19 @@ class MFRM(Rasch):
                     max_iters=100,
                     ext_score_adjustment=0.5):
 
-        if (items is None) or (items == 'all'):
+        if items is None:
             items = self.dataframe.columns.tolist()
 
-        if (raters == 'all') or (raters is None):
+        if isinstance(items, str):
+            if items == 'all':
+                items = self.dataframe.columns.tolist()
+
+        if raters is None:
             raters = self.raters.tolist()
+
+        if isinstance(raters, str):
+            if raters == 'all':
+                raters = self.raters.tolist()
 
         if anchor:
             if hasattr(self, 'anchor_diffs_matrix'):
@@ -9794,11 +9929,16 @@ class MFRM(Rasch):
                           max_iters=100,
                           ext_score_adjustment=0.5):
 
-        if (items is None) or (items == 'all'):
+        if items is None:
             items = self.dataframe.columns.tolist()
 
-        if raters == 'all':
-            raters = self.raters.tolist()
+        if isinstance(items, str):
+            if items == 'all':
+                items = self.dataframe.columns.tolist()
+
+        if isinstance(raters, str):
+            if raters == 'all':
+                raters = self.raters.tolist()
 
         if anchor:
             if hasattr(self, 'anchor_diffs_matrix'):
@@ -9886,6 +10026,15 @@ class MFRM(Rasch):
             else:
                 person_filter = np.array([[1 for item in self.dataframe.columns]
                                           for rater in raters])
+
+        elif isinstance(items, str):
+            if items == 'all':
+                if raters is None:
+                    person_filter = np.array([1 for item in self.dataframe.columns])
+
+                else:
+                    person_filter = np.array([[1 for item in self.dataframe.columns]
+                                              for rater in raters])
 
         else:
             if raters is None:
@@ -13860,11 +14009,16 @@ class MFRM(Rasch):
                         raters=None,
                         no_of_classes=5):
 
-        if (items == 'all') | (items is None):
+        if items is None:
             items = self.dataframe.columns.tolist()
 
-        if raters == 'all':
-            raters = self.raters.tolist()
+        if isinstance(items, str):
+            if items == 'all':
+                items = self.dataframe.columns.tolist()
+
+        if isinstance(raters, str):
+            if raters == 'all':
+                raters = self.raters.tolist()
 
         if raters == 'none':
             raters = None
@@ -14900,8 +15054,8 @@ class MFRM(Rasch):
                          point_info_lines_test=None,
                          point_csem_lines=None,
                          score_labels=False,
-                         x_min=-10,
-                         x_max=10,
+                         x_min=-5,
+                         x_max=5,
                          y_max=0,
                          warm=True,
                          graph_title='',
@@ -14933,14 +15087,16 @@ class MFRM(Rasch):
             thresholds = self.thresholds
             severities = self.severities_global
 
-        if raters == 'all':
-            raters = self.raters
+        if isinstance(raters, str):
+            if raters == 'all':
+                raters = self.raters.tolist()
 
         if raters == 'none':
             raters = None
 
-        if items == 'all':
-            items = self.dataframe.columns
+        if isinstance(items, str):
+            if items == 'all':
+                items = self.dataframe.columns
 
         if items == 'none':
             items = None
@@ -15278,8 +15434,8 @@ class MFRM(Rasch):
                         point_info_lines_test=None,
                         point_csem_lines=None,
                         score_labels=False,
-                        x_min=-10,
-                        x_max=10,
+                        x_min=-5,
+                        x_max=5,
                         y_max=0,
                         warm=True,
                         graph_title='',
@@ -15311,14 +15467,16 @@ class MFRM(Rasch):
             thresholds = self.thresholds
             severities = self.severities_items
 
-        if raters == 'all':
-            raters = self.raters
+        if isinstance(raters, str):
+            if raters == 'all':
+                raters = self.raters
 
         if raters == 'none':
             raters = None
 
-        if items == 'all':
-            items = self.dataframe.columns
+        if isinstance(items, str):
+            if items == 'all':
+                items = self.dataframe.columns
 
         if items == 'none':
             items = None
@@ -15659,8 +15817,8 @@ class MFRM(Rasch):
                              point_info_lines_test=None,
                              point_csem_lines=None,
                              score_labels=False,
-                             x_min=-10,
-                             x_max=10,
+                             x_min=-5,
+                             x_max=5,
                              y_max=0,
                              warm=True,
                              graph_title='',
@@ -15692,14 +15850,16 @@ class MFRM(Rasch):
             thresholds = self.thresholds
             severities = self.severities_thresholds
 
-        if raters == 'all':
-            raters = self.raters
+        if isinstance(raters, str):
+            if raters == 'all':
+                raters = self.raters
 
         if raters == 'none':
             raters = None
 
-        if items == 'all':
-            items = self.dataframe.columns
+        if isinstance(items, str):
+            if items == 'all':
+                items = self.dataframe.columns
 
         if items == 'none':
             items = None
@@ -16045,8 +16205,8 @@ class MFRM(Rasch):
                          point_info_lines_test=None,
                          point_csem_lines=None,
                          score_labels=False,
-                         x_min=-10,
-                         x_max=10,
+                         x_min=-5,
+                         x_max=5,
                          y_max=0,
                          graph_title='',
                          y_label='',
@@ -16082,14 +16242,16 @@ class MFRM(Rasch):
             marginal_items = self.marginal_severities_items
             marginal_thresholds = self.marginal_severities_thresholds
 
-        if raters == 'all':
-            raters = self.raters
+        if isinstance(raters, str):
+            if raters == 'all':
+                raters = self.raters
 
         if raters == 'none':
             raters = None
 
-        if items == 'all':
-            items = self.dataframe.columns
+        if isinstance(items, str):
+            if items == 'all':
+                items = self.dataframe.columns
 
         if items == 'none':
             items = None
@@ -16422,8 +16584,8 @@ class MFRM(Rasch):
                    rater=None,
                    obs=None,
                    warm=True,
-                   xmin=-10,
-                   xmax=10,
+                   xmin=-5,
+                   xmax=5,
                    no_of_classes=5,
                    title=None,
                    thresh_lines=False,
@@ -16519,8 +16681,8 @@ class MFRM(Rasch):
                   rater=None,
                   obs=None,
                   warm=True,
-                  xmin=-10,
-                  xmax=10,
+                  xmin=-5,
+                  xmax=5,
                   no_of_classes=5,
                   title=True,
                   thresh_lines=False,
@@ -16618,8 +16780,8 @@ class MFRM(Rasch):
                        rater=None,
                        obs=None,
                        warm=True,
-                       xmin=-10,
-                       xmax=10,
+                       xmin=-5,
+                       xmax=5,
                        no_of_classes=5,
                        title=True,
                        thresh_lines=False,
@@ -16717,8 +16879,8 @@ class MFRM(Rasch):
                    rater=None,
                    obs=None,
                    warm=True,
-                   xmin=-10,
-                   xmax=10,
+                   xmin=-5,
+                   xmax=5,
                    no_of_classes=5,
                    title=True,
                    thresh_lines=False,
@@ -16820,8 +16982,8 @@ class MFRM(Rasch):
                     anchor=False,
                     rater=None,
                     obs=None,
-                    xmin=-10,
-                    xmax=10,
+                    xmin=-5,
+                    xmax=5,
                     no_of_classes=5,
                     title=None,
                     thresh_lines=False,
@@ -16880,8 +17042,7 @@ class MFRM(Rasch):
             xobsdata, yobsdata = self.class_intervals_cats_global(abilities, difficulties, thresholds, severities,
                                                                   item=item, rater=rater, no_of_classes=no_of_classes)
 
-            if obs != 'all':
-                yobsdata = yobsdata[obs].T
+            yobsdata = yobsdata[obs].T
 
             else:
                 yobsdata = yobsdata.T
@@ -16945,8 +17106,8 @@ class MFRM(Rasch):
                    anchor=False,
                    rater=None,
                    obs=None,
-                   xmin=-10,
-                   xmax=10,
+                   xmin=-5,
+                   xmax=5,
                    no_of_classes=5,
                    title=None,
                    thresh_lines=False,
@@ -17005,8 +17166,7 @@ class MFRM(Rasch):
             xobsdata, yobsdata = self.class_intervals_cats_items(abilities, difficulties, thresholds, severities,
                                                                  item=item, rater=rater, no_of_classes=no_of_classes)
 
-            if obs != 'all':
-                yobsdata = yobsdata[obs].T
+            yobsdata = yobsdata[obs].T
 
             else:
                 yobsdata = yobsdata.T
@@ -17069,8 +17229,8 @@ class MFRM(Rasch):
                         anchor=False,
                         rater=None,
                         obs=None,
-                        xmin=-10,
-                        xmax=10,
+                        xmin=-5,
+                        xmax=5,
                         no_of_classes=5,
                         title=None,
                         thresh_lines=False,
@@ -17130,8 +17290,7 @@ class MFRM(Rasch):
                                                                       severities, item=item, rater=rater,
                                                                       no_of_classes=no_of_classes)
 
-            if obs != 'all':
-                yobsdata = yobsdata[obs].T
+            yobsdata = yobsdata[obs].T
 
             else:
                 yobsdata = yobsdata.T
@@ -17195,8 +17354,8 @@ class MFRM(Rasch):
                     anchor=False,
                     rater=None,
                     obs=None,
-                    xmin=-10,
-                    xmax=10,
+                    xmin=-5,
+                    xmax=5,
                     no_of_classes=5,
                     title=None,
                     thresh_lines=False,
@@ -17265,8 +17424,7 @@ class MFRM(Rasch):
             xobsdata, yobsdata = self.class_intervals_cats_matrix(abilities, difficulties, thresholds, severities,
                                                                   item=item, rater=rater, no_of_classes=no_of_classes)
 
-            if obs != 'all':
-                yobsdata = yobsdata[obs].T
+            yobsdata = yobsdata[obs].T
 
         else:
             xobsdata = np.array(np.nan)
@@ -17324,8 +17482,8 @@ class MFRM(Rasch):
                              rater=None,
                              obs=None,
                              warm=True,
-                             xmin=-10,
-                             xmax=10,
+                             xmin=-5,
+                             xmax=5,
                              no_of_classes=5,
                              title=None,
                              thresh_lines=False,
@@ -17431,8 +17589,8 @@ class MFRM(Rasch):
                             rater=None,
                             obs=None,
                             warm=True,
-                            xmin=-10,
-                            xmax=10,
+                            xmin=-5,
+                            xmax=5,
                             no_of_classes=5,
                             title=None,
                             thresh_lines=False,
@@ -17538,8 +17696,8 @@ class MFRM(Rasch):
                                  rater=None,
                                  obs=None,
                                  warm=True,
-                                 xmin=-10,
-                                 xmax=10,
+                                 xmin=-5,
+                                 xmax=5,
                                  no_of_classes=5,
                                  title=None,
                                  thresh_lines=False,
@@ -17646,8 +17804,8 @@ class MFRM(Rasch):
                              rater=None,
                              obs=None,
                              warm=True,
-                             xmin=-10,
-                             xmax=10,
+                             xmin=-5,
+                             xmax=5,
                              no_of_classes=5,
                              title=None,
                              thresh_lines=False,
@@ -17754,8 +17912,8 @@ class MFRM(Rasch):
                    item,
                    anchor=False,
                    rater=None,
-                   xmin=-10,
-                   xmax=10,
+                   xmin=-5,
+                   xmax=5,
                    central_diff=False,
                    thresh_lines=False,
                    point_info_lines=None,
@@ -17831,8 +17989,8 @@ class MFRM(Rasch):
                    item,
                    anchor=False,
                    rater=None,
-                   xmin=-10,
-                   xmax=10,
+                   xmin=-5,
+                   xmax=5,
                    central_diff=False,
                    thresh_lines=False,
                    point_info_lines=None,
@@ -17905,8 +18063,8 @@ class MFRM(Rasch):
                        item,
                        anchor=False,
                        rater=None,
-                       xmin=-10,
-                       xmax=10,
+                       xmin=-5,
+                       xmax=5,
                        central_diff=False,
                        thresh_lines=False,
                        point_info_lines=None,
@@ -17980,8 +18138,8 @@ class MFRM(Rasch):
                    item,
                    anchor=False,
                    rater=None,
-                   xmin=-10,
-                   xmax=10,
+                   xmin=-5,
+                   xmax=5,
                    central_diff=False,
                    thresh_lines=False,
                    point_info_lines=None,
@@ -18056,8 +18214,8 @@ class MFRM(Rasch):
                    items='all',
                    raters='zero',
                    obs=False,
-                   xmin=-10,
-                   xmax=10,
+                   xmin=-5,
+                   xmax=5,
                    no_of_classes=5,
                    title=None,
                    score_lines=None,
@@ -18077,11 +18235,13 @@ class MFRM(Rasch):
         of observed data, threshold lines and expected score threshold lines.
         '''
 
-        if items == 'all':
-            items = self.dataframe.columns.tolist()
+        if isinstance(items, str):
+            if items == 'all':
+                items = self.dataframe.columns.tolist()
 
-        if raters == 'all':
-            raters = self.raters.tolist()
+        if isinstance(raters, str):
+            if raters == 'all':
+                raters = self.raters.tolist()
 
         if raters == 'none':
             raters = None
@@ -18217,8 +18377,8 @@ class MFRM(Rasch):
                   items='all',
                   raters='zero',
                   obs=False,
-                  xmin=-10,
-                  xmax=10,
+                  xmin=-5,
+                  xmax=5,
                   no_of_classes=5,
                   title=None,
                   score_lines=None,
@@ -18237,11 +18397,13 @@ class MFRM(Rasch):
         Plots Test Characteristic Curve.
         '''
 
-        if items == 'all':
-            items = self.dataframe.columns.tolist()
+        if isinstance(items, str):
+            if items == 'all':
+                items = self.dataframe.columns.tolist()
 
-        if raters == 'all':
-            raters = self.raters.tolist()
+        if isinstance(raters, str):
+            if raters == 'all':
+                raters = self.raters.tolist()
 
         if raters == 'none':
             raters = None
@@ -18375,8 +18537,8 @@ class MFRM(Rasch):
                        items='all',
                        raters='zero',
                        obs=False,
-                       xmin=-10,
-                       xmax=10,
+                       xmin=-5,
+                       xmax=5,
                        no_of_classes=5,
                        title=None,
                        score_lines=None,
@@ -18395,11 +18557,13 @@ class MFRM(Rasch):
         Plots Test Characteristic Curve.
         '''
 
-        if items == 'all':
-            items = self.dataframe.columns.tolist()
+        if isinstance(items, str):
+            if items == 'all':
+                items = self.dataframe.columns.tolist()
 
-        if raters == 'all':
-            raters = self.raters.tolist()
+        if isinstance(raters, str):
+            if raters == 'all':
+                raters = self.raters.tolist()
 
         if raters == 'none':
             raters = None
@@ -18534,8 +18698,8 @@ class MFRM(Rasch):
                    items='all',
                    raters='zero',
                    obs=False,
-                   xmin=-10,
-                   xmax=10,
+                   xmin=-5,
+                   xmax=5,
                    no_of_classes=5,
                    title=None,
                    score_lines=None,
@@ -18554,11 +18718,13 @@ class MFRM(Rasch):
         Plots Test Characteristic Curve.
         '''
 
-        if items == 'all':
-            items = self.dataframe.columns.tolist()
+        if isinstance(items, str):
+            if items == 'all':
+                items = self.dataframe.columns.tolist()
 
-        if raters == 'all':
-            raters = self.raters.tolist()
+        if isinstance(raters, str):
+            if raters == 'all':
+                raters = self.raters.tolist()
 
         if raters == 'none':
             raters = None
@@ -18694,8 +18860,8 @@ class MFRM(Rasch):
                          raters=None,
                          point_info_lines=None,
                          point_info_labels=False,
-                         xmin=-10,
-                         xmax=10,
+                         xmin=-5,
+                         xmax=5,
                          ymax=None,
                          title=None,
                          plot_style='colorblind',
@@ -18728,8 +18894,9 @@ class MFRM(Rasch):
             thresholds = self.thresholds
             severities = self.severities_global
 
-        if raters == 'all':
-            raters = self.raters
+        if isinstance(raters, str):
+            if raters == 'all':
+                raters = self.raters
 
         if raters == 'none':
             raters = None
@@ -18737,8 +18904,9 @@ class MFRM(Rasch):
         if isinstance(raters, str):
             raters = [raters]
 
-        if items == 'all':
-            items = self.dataframe.columns
+        if isinstance(items, str):
+            if items == 'all':
+                items = self.dataframe.columns
 
         if items == 'none':
             items = None
@@ -18800,8 +18968,8 @@ class MFRM(Rasch):
                         raters=None,
                         point_info_lines=None,
                         point_info_labels=False,
-                        xmin=-10,
-                        xmax=10,
+                        xmin=-5,
+                        xmax=5,
                         ymax=None,
                         title=None,
                         plot_style='colorblind',
@@ -18834,8 +19002,9 @@ class MFRM(Rasch):
             thresholds = self.thresholds
             severities = self.severities_items
 
-        if raters == 'all':
-            raters = self.raters
+        if isinstance(raters, str):
+            if raters == 'all':
+                raters = self.raters
 
         if raters == 'none':
             raters = None
@@ -18843,8 +19012,9 @@ class MFRM(Rasch):
         if isinstance(raters, str):
             raters = [raters]
 
-        if items == 'all':
-            items = self.dataframe.columns
+        if isinstance(items, str):
+            if items == 'all':
+                items = self.dataframe.columns
 
         if items == 'none':
             items = None
@@ -18906,8 +19076,8 @@ class MFRM(Rasch):
                              raters=None,
                              point_info_lines=None,
                              point_info_labels=False,
-                             xmin=-10,
-                             xmax=10,
+                             xmin=-5,
+                             xmax=5,
                              ymax=None,
                              title=None,
                              plot_style='colorblind',
@@ -18940,8 +19110,9 @@ class MFRM(Rasch):
             thresholds = self.thresholds
             severities = self.severities_thresholds
 
-        if raters == 'all':
-            raters = self.raters
+        if isinstance(raters, str):
+            if raters == 'all':
+                raters = self.raters
 
         if raters == 'none':
             raters = None
@@ -18949,8 +19120,9 @@ class MFRM(Rasch):
         if isinstance(raters, str):
             raters = [raters]
 
-        if items == 'all':
-            items = self.dataframe.columns
+        if isinstance(items, str):
+            if items == 'all':
+                items = self.dataframe.columns
 
         if items == 'none':
             items = None
@@ -19012,8 +19184,8 @@ class MFRM(Rasch):
                          raters=None,
                          point_info_lines=None,
                          point_info_labels=False,
-                         xmin=-10,
-                         xmax=10,
+                         xmin=-5,
+                         xmax=5,
                          ymax=None,
                          title=None,
                          plot_style='colorblind',
@@ -19046,8 +19218,9 @@ class MFRM(Rasch):
             thresholds = self.thresholds
             severities = self.severities_matrix
 
-        if raters == 'all':
-            raters = self.raters
+        if isinstance(raters, str):
+            if raters == 'all':
+                raters = self.raters
 
         if raters == 'none':
             raters = None
@@ -19055,8 +19228,9 @@ class MFRM(Rasch):
         if isinstance(raters, str):
             raters = [raters]
 
-        if items == 'all':
-            items = self.dataframe.columns
+        if isinstance(items, str):
+            if items == 'all':
+                items = self.dataframe.columns
 
         if items == 'none':
             items = None
@@ -19119,8 +19293,8 @@ class MFRM(Rasch):
                          raters=None,
                          point_csem_lines=None,
                          point_csem_labels=False,
-                         xmin=-10,
-                         xmax=10,
+                         xmin=-5,
+                         xmax=5,
                          ymax=5,
                          title=None,
                          plot_style='colorblind',
@@ -19153,8 +19327,9 @@ class MFRM(Rasch):
             thresholds = self.thresholds
             severities = self.severities_global
 
-        if raters == 'all':
-            raters = self.raters
+        if isinstance(raters, str):
+            if raters == 'all':
+                raters = self.raters
 
         if raters == 'none':
             raters = None
@@ -19162,8 +19337,9 @@ class MFRM(Rasch):
         if isinstance(raters, str):
             raters = [raters]
 
-        if items == 'all':
-            items = self.dataframe.columns
+        if isinstance(items, str):
+            if items == 'all':
+                items = self.dataframe.columns
 
         if items == 'none':
             items = None
@@ -19224,8 +19400,8 @@ class MFRM(Rasch):
                         raters=None,
                         point_csem_lines=None,
                         point_csem_labels=False,
-                        xmin=-10,
-                        xmax=10,
+                        xmin=-5,
+                        xmax=5,
                         ymax=5,
                         title=None,
                         plot_style='colorblind',
@@ -19258,8 +19434,9 @@ class MFRM(Rasch):
             thresholds = self.thresholds
             severities = self.severities_items
 
-        if raters == 'all':
-            raters = self.raters
+        if isinstance(raters, str):
+            if raters == 'all':
+                raters = self.raters
 
         if raters == 'none':
             raters = None
@@ -19267,8 +19444,9 @@ class MFRM(Rasch):
         if isinstance(raters, str):
             raters = [raters]
 
-        if items == 'all':
-            items = self.dataframe.columns
+        if isinstance(items, str):
+            if items == 'all':
+                items = self.dataframe.columns
 
         if items == 'none':
             items = None
@@ -19329,8 +19507,8 @@ class MFRM(Rasch):
                              raters=None,
                              point_csem_lines=None,
                              point_csem_labels=False,
-                             xmin=-10,
-                             xmax=10,
+                             xmin=-5,
+                             xmax=5,
                              ymax=5,
                              title=None,
                              plot_style='colorblind',
@@ -19363,8 +19541,9 @@ class MFRM(Rasch):
             thresholds = self.thresholds
             severities = self.severities_thresholds
 
-        if raters == 'all':
-            raters = self.raters
+        if isinstance(raters, str):
+            if raters == 'all':
+                raters = self.raters
 
         if raters == 'none':
             raters = None
@@ -19372,8 +19551,9 @@ class MFRM(Rasch):
         if isinstance(raters, str):
             raters = [raters]
 
-        if items == 'all':
-            items = self.dataframe.columns
+        if isinstance(items, str):
+            if items == 'all':
+                items = self.dataframe.columns
 
         if items == 'none':
             items = None
@@ -19434,8 +19614,8 @@ class MFRM(Rasch):
                          raters=None,
                          point_csem_lines=None,
                          point_csem_labels=False,
-                         xmin=-10,
-                         xmax=10,
+                         xmin=-5,
+                         xmax=5,
                          ymax=5,
                          title=None,
                          plot_style='colorblind',
@@ -19468,8 +19648,9 @@ class MFRM(Rasch):
             thresholds = self.thresholds
             severities = self.severities_matrix
 
-        if raters == 'all':
-            raters = self.raters
+        if isinstance(raters, str):
+            if raters == 'all':
+                raters = self.raters
 
         if raters == 'none':
             raters = None
@@ -19477,8 +19658,9 @@ class MFRM(Rasch):
         if isinstance(raters, str):
             raters = [raters]
 
-        if items == 'all':
-            items = self.dataframe.columns
+        if isinstance(items, str):
+            if items == 'all':
+                items = self.dataframe.columns
 
         if items == 'none':
             items = None
@@ -19902,7 +20084,9 @@ class PCM_Sim(Rasch_Sim):
                  missing=0,
                  manual_abilities=None,
                  manual_diffs=None,
-                 manual_thresholds=None):
+                 manual_thresholds=None,
+                 manual_person_names=None,
+                 manual_item_names=None):
 
         self.no_of_items = int(no_of_items)
         self.no_of_persons = int(no_of_persons)
@@ -19915,6 +20099,8 @@ class PCM_Sim(Rasch_Sim):
         self.missing = missing
         self.abilities = manual_abilities
         self.diffs = manual_diffs
+        self.persons = manual_person_names
+        self.items = manual_item_names
         self.dataframe = pd.DataFrame([1])
         self.pcm = PCM(self.dataframe, self.max_score_vector)
         
@@ -19923,7 +20109,13 @@ class PCM_Sim(Rasch_Sim):
         '''
 
         assert len(self.max_score_vector) == self.no_of_items, 'Length of max score vector must match number of items.'
-        
+
+        if self.persons is not None:
+            assert len(self.persons) == self.no_of_persons, 'Length of person names must match number of persons.'
+
+        if self.items is not None:
+            assert len(self.items) == self.no_of_items, 'Length of item names must match number of items.'
+
         if self.abilities is None:
             self.abilities = np.random.normal(0, self.person_sd, self.no_of_persons)
             self.abilities -= np.mean(self.abilities)
@@ -20036,12 +20228,22 @@ class PCM_Sim(Rasch_Sim):
 
         self.scores = pd.DataFrame(self.scores)
 
-        for person in range(self.no_of_persons):
-            self.scores.rename(index={person: f'Person_{person + 1}'},
-                               inplace=True)
-        for item in range(self.no_of_items):
-            self.scores.rename(columns={item: f'Item_{item + 1}'},
-                               inplace=True)
+        if manual_person_names is not None:
+            self.scores.index = manual_person_names
+
+        else:
+            for person in range(self.no_of_persons):
+                self.scores.rename(index={person: f'Person_{person + 1}'}, inplace=True)
+
+        if manual_person_names is not None:
+            self.scores.index = manual_person_names
+
+        else:
+            for item in range(self.no_of_items):
+                self.scores.rename(columns={item: f'Item_{item + 1}'}, inplace=True)
+
+        self.persons = self.scores.index.tolist()
+        self.items = self.scores.columns.tolist()
         
 class RSM_Sim(Rasch_Sim):
     
@@ -20104,8 +20306,7 @@ class RSM_Sim(Rasch_Sim):
             self.abilities = np.array(self.abilities)
             self.abilities = {f'Person_{person + 1}': ability for person, ability in enumerate(self.abilities)}
             self.abilities = pd.Series(self.abilities)
-            
-        
+
         if self.diffs is None:
             self.diffs = np.random.uniform(0, 1, self.no_of_items)
             self.diffs *= (self.item_range / (np.max(self.diffs) - np.min(self.diffs)))
