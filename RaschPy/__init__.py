@@ -622,6 +622,32 @@ class Rasch:
 
         return measures
 
+    def pt_meas(self,
+                abils,
+                exp_score_df,
+                info_df):
+
+        abil_dev_df = {item: abils - abils.mean()
+                       for item in self.dataframe.columns}
+        abil_dev_df = pd.DataFrame(abil_dev_df)
+        abil_dev_df *= ((self.dataframe + 1) / (self.dataframe + 1))
+
+        score_dev_df = self.dataframe - self.dataframe.mean(axis=0)
+        exp_score_dev_df = exp_score_df - self.dataframe.mean(axis=0)
+
+        pt_measure_num = (score_dev_df * abil_dev_df).sum(axis=0)
+        pt_measure_den = np.sqrt((score_dev_df ** 2).sum(axis=0) * (abil_dev_df ** 2).sum(axis=0))
+
+        pt_measure = pt_measure_num / pt_measure_den
+
+        exp_pt_measure_num = (exp_score_dev_df * abil_dev_df).sum(axis=0)
+        exp_pt_measure_den = np.sqrt((exp_score_dev_df ** 2 + info_df).sum(axis=0) *
+                                     (abil_dev_df ** 2).sum(axis=0))
+
+        exp_pt_measure = exp_pt_measure_num / exp_pt_measure_den
+
+        return pt_measure, exp_pt_measure
+
     def std_residuals_hist(self,
                            std_residual_list,
                            bin_width=0.5,
@@ -1180,31 +1206,8 @@ class SLM(Rasch):
         self.response_counts = self.dataframe.count(axis=0)
         self.item_facilities = self.dataframe.mean(axis=0)
 
-        self.point_measure = {item: self.dataframe[item].corr(self.person_abilities)
-                              for item in self.dataframe.columns}
-        self.point_measure = pd.Series(self.point_measure)
-
-        item_abil_dev = {item: self.person_abilities[self.dataframe[item] == self.dataframe[item]]
-                         for item in self.dataframe.columns}
-        for item in self.dataframe.columns:
-            item_abil_dev[item] -= item_abil_dev[item].mean()
-
-        exp_point_measure_df = self.exp_score_df - self.dataframe.mean()
-
-        exp_point_measure_num = [(exp_point_measure_df[item] * item_abil_dev[item]).sum()
-                                 for item in self.dataframe.columns]
-        exp_point_measure_num = pd.Series(exp_point_measure_num)
-        exp_point_measure_num.index = self.dataframe.columns
-
-        exp_point_measure_den = exp_point_measure_df ** 2 + self.info_df
-        exp_point_measure_den = exp_point_measure_den.sum()
-
-        for item in self.dataframe.columns:
-            exp_point_measure_den[item] *= (item_abil_dev[item] ** 2).sum()
-
-        exp_point_measure_den = np.sqrt(exp_point_measure_den)
-
-        self.exp_point_measure = exp_point_measure_num / exp_point_measure_den
+        (self.point_measure,
+         self.exp_point_measure) = self.pt_meas(self.person_abilities, self.exp_score_df, self.info_df)
 
         '''
         Person fit statistics
@@ -3151,32 +3154,8 @@ class PCM(Rasch):
         self.response_counts = self.dataframe.count(axis=0)
         self.item_facilities = self.dataframe.mean(axis=0) / self.max_score_vector
 
-        self.point_measure = [self.dataframe[item].corr(self.person_abilities)
-                              for item in self.dataframe.columns]
-        self.point_measure = pd.Series(self.point_measure)
-        self.point_measure.index = self.dataframe.columns
-
-        item_abil_dev = {item: self.person_abilities[self.dataframe[item] == self.dataframe[item]]
-                         for item in self.dataframe.columns}
-        for item in self.dataframe.columns:
-            item_abil_dev[item] -= item_abil_dev[item].mean()
-
-        exp_point_measure_df = self.exp_score_df - self.dataframe.mean()
-
-        exp_point_measure_num = [(exp_point_measure_df[item] * item_abil_dev[item]).sum()
-                                 for item in self.dataframe.columns]
-        exp_point_measure_num = pd.Series(exp_point_measure_num)
-        exp_point_measure_num.index = self.dataframe.columns
-
-        exp_point_measure_den = exp_point_measure_df ** 2 + self.info_df
-        exp_point_measure_den = exp_point_measure_den.sum()
-
-        for item in self.dataframe.columns:
-            exp_point_measure_den[item] *= (item_abil_dev[item] ** 2).sum()
-
-        exp_point_measure_den = np.sqrt(exp_point_measure_den)
-
-        self.exp_point_measure = exp_point_measure_num / exp_point_measure_den
+        (self.point_measure,
+         self.exp_point_measure) = self.pt_meas(self.person_abilities, self.exp_score_df, self.info_df)
 
         '''
         Threshold fit statistics
@@ -5342,32 +5321,9 @@ class RSM(Rasch):
         self.response_counts = self.dataframe.count(axis=0)
         self.item_facilities = self.dataframe.mean(axis=0) / self.max_score
 
-        self.point_measure = [self.dataframe[item].astype(float).corr(self.person_abilities)
-                              for item in self.dataframe.columns]
-        self.point_measure = pd.Series(self.point_measure)
-        self.point_measure.index = self.dataframe.columns
+        (self.point_measure,
+         self.exp_point_measure) = self.pt_meas(self.person_abilities, self.exp_score_df, self.info_df)
 
-        item_abil_dev = {item: self.person_abilities[self.dataframe[item] == self.dataframe[item]]
-                         for item in self.dataframe.columns}
-        for item in self.dataframe.columns:
-            item_abil_dev[item] -= item_abil_dev[item].mean()
-
-        exp_point_measure_df = self.exp_score_df - self.dataframe.mean()
-
-        exp_point_measure_num = [(exp_point_measure_df[item] * item_abil_dev[item]).sum()
-                                 for item in self.dataframe.columns]
-        exp_point_measure_num = pd.Series(exp_point_measure_num)
-        exp_point_measure_num.index = self.dataframe.columns
-
-        exp_point_measure_den = exp_point_measure_df ** 2 + self.info_df
-        exp_point_measure_den = exp_point_measure_den.sum()
-
-        for item in self.dataframe.columns:
-            exp_point_measure_den[item] *= (item_abil_dev[item] ** 2).sum()
-
-        exp_point_measure_den = np.sqrt(exp_point_measure_den.astype(float))
-
-        self.exp_point_measure = exp_point_measure_num / exp_point_measure_den
         '''
         Threshold fit statistics
         '''
@@ -10267,7 +10223,7 @@ class MFRM(Rasch):
 
         self.item_stats_global = pd.DataFrame()
 
-        self.item_stats_global['Estimate'] = difficulties.round(dp)                                                                             .round(dp)
+        self.item_stats_global['Estimate'] = difficulties.round(dp).round(dp)
         self.item_stats_global['SE'] = std_errors.to_numpy().round(dp)
 
         if interval is not None:
@@ -12378,26 +12334,8 @@ class MFRM(Rasch):
         abils_by_rater = {rater: abilities for rater in self.raters}
         abils_by_rater = pd.concat(abils_by_rater.values(), keys=abils_by_rater.keys())
         abils_by_rater.index.names = self.dataframe.index.names
-        abil_deviation = abils_by_rater.copy() - abils_by_rater.mean()
-        abil_deviation = abil_deviation.loc[exp_score_df.index]
 
-        point_measure_df = self.dataframe.copy()
-        for item in self.dataframe.columns:
-            point_measure_df[item] -= self.item_facilities[item]
-
-        point_measure_num = point_measure_df.mul(abil_deviation, axis=0).sum()
-        point_measure_den = np.sqrt((point_measure_df ** 2).sum() * (abil_deviation ** 2).sum())
-
-        item_point_measure = point_measure_num / point_measure_den
-
-        exp_point_measure_df = exp_score_df - self.dataframe.loc[exp_score_df.index].mean()
-        exp_point_measure_num = exp_point_measure_df.mul(abil_deviation, axis=0).sum()
-
-        exp_point_measure_den = ((exp_point_measure_df ** 2) + info_df).sum()
-        exp_point_measure_den *= (abil_deviation ** 2).sum()
-        exp_point_measure_den = np.sqrt(exp_point_measure_den)
-
-        item_exp_point_measure = exp_point_measure_num / exp_point_measure_den
+        item_point_measure, item_exp_point_measure = self.pt_meas(abils_by_rater, exp_score_df, info_df)
 
         return (item_outfit_ms,
                 item_outfit_zstd,
@@ -17044,9 +16982,6 @@ class MFRM(Rasch):
 
             yobsdata = yobsdata[obs].T
 
-            else:
-                yobsdata = yobsdata.T
-
         else:
             xobsdata = np.array(np.nan)
             yobsdata = np.array(np.nan)
@@ -17167,9 +17102,6 @@ class MFRM(Rasch):
                                                                  item=item, rater=rater, no_of_classes=no_of_classes)
 
             yobsdata = yobsdata[obs].T
-
-            else:
-                yobsdata = yobsdata.T
 
         else:
             xobsdata = np.array(np.nan)
@@ -17292,9 +17224,6 @@ class MFRM(Rasch):
 
             yobsdata = yobsdata[obs].T
 
-            else:
-                yobsdata = yobsdata.T
-
         else:
             xobsdata = np.array(np.nan)
             yobsdata = np.array(np.nan)
@@ -17413,6 +17342,7 @@ class MFRM(Rasch):
             else:
                 if anchor:
                     if hasattr(self, 'anchor_abils_matrix') == False:
+
                         self.person_abils_matrix(anchor=True)
                     abilities = self.anchor_abils_matrix
 
