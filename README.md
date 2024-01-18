@@ -14,7 +14,7 @@ To analyse data, create an object of in the appropriate class, passing a pandas 
 ## Usage and citation
 _RaschPy_ is provided as freeware under an Apache 2.0 Licence (see LICENSE file in this repository for details). Users are free to use or modify the code for their own purposes, but should cite using the following format:
 
-Elliott, M (2024) _RaschPy_ Rasch analysis sowtare. Downloaded from: https://github.com/MarkElliott999/RaschPy
+Elliott, M (2024) _RaschPy_ Rasch analysis software. Downloaded from: https://github.com/MarkElliott999/RaschPy
 
 ## References
 Andrich, D. (1978). A rating formulation for ordered response categories. _Psychometrika_, _43_(4), 561–573.
