@@ -1702,12 +1702,14 @@ class SLM(Rasch):
         else:
             sns.set_style('whitegrid')
 
-        palette_dict = {'dark blue': ['dark', 'cornflowerblue'],
+        palette_dict = {'dark blue': ['dark', 'royalblue'],
                         'light blue': ['light', 'cornflowerblue'],
                         'dark red': ['dark', 'firebrick'],
-                        'light red': ['light', 'firebrick'],
+                        'light red': ['light', 'indianred'],
                         'dark green': ['dark', 'forestgreen'],
-                        'light green': ['light', 'forestgreen'],
+                        'light green': ['light', 'mediumseagreen'],
+                        'dark grey': ['dark', 'dimgrey'],
+                        'light grey': ['light', 'darkgrey'],
                         'dark multi': ['dark', 'dark'],
                         'light multi': ['light', 'muted']}
 
@@ -1727,7 +1729,7 @@ class SLM(Rasch):
 
         no_of_plots = y_data.shape[1]
 
-        cNorm = colors.Normalize(vmin=0, vmax=no_of_plots)
+        cNorm = colors.Normalize(vmin=0, vmax=no_of_plots + 2)
 
         if 'multi' not in palette:
             scalarMap = cmx.ScalarMappable(norm=cNorm, cmap=color_map)
@@ -4146,12 +4148,14 @@ class PCM(Rasch):
         else:
             sns.set_style('whitegrid')
 
-        palette_dict = {'dark blue': ['dark', 'cornflowerblue'],
+        palette_dict = {'dark blue': ['dark', 'royalblue'],
                         'light blue': ['light', 'cornflowerblue'],
                         'dark red': ['dark', 'firebrick'],
-                        'light red': ['light', 'firebrick'],
+                        'light red': ['light', 'indianred'],
                         'dark green': ['dark', 'forestgreen'],
-                        'light green': ['light', 'forestgreen'],
+                        'light green': ['light', 'mediumseagreen'],
+                        'dark grey': ['dark', 'dimgrey'],
+                        'light grey': ['light', 'darkgrey'],
                         'dark multi': ['dark', 'dark'],
                         'light multi': ['light', 'muted']}
 
@@ -4171,7 +4175,7 @@ class PCM(Rasch):
 
         no_of_plots = y_data.shape[1]
 
-        cNorm = colors.Normalize(vmin=0, vmax=no_of_plots)
+        cNorm = colors.Normalize(vmin=0, vmax=no_of_plots + 2)
 
         if 'multi' not in palette:
             scalarMap = cmx.ScalarMappable(norm=cNorm, cmap=color_map)
@@ -6388,12 +6392,14 @@ class RSM(Rasch):
         else:
             sns.set_style('whitegrid')
 
-        palette_dict = {'dark blue': ['dark', 'cornflowerblue'],
+        palette_dict = {'dark blue': ['dark', 'royalblue'],
                         'light blue': ['light', 'cornflowerblue'],
                         'dark red': ['dark', 'firebrick'],
-                        'light red': ['light', 'firebrick'],
+                        'light red': ['light', 'indianred'],
                         'dark green': ['dark', 'forestgreen'],
-                        'light green': ['light', 'forestgreen'],
+                        'light green': ['light', 'mediumseagreen'],
+                        'dark grey': ['dark', 'dimgrey'],
+                        'light grey': ['light', 'darkgrey'],
                         'dark multi': ['dark', 'dark'],
                         'light multi': ['light', 'muted']}
 
@@ -6413,7 +6419,7 @@ class RSM(Rasch):
 
         no_of_plots = y_data.shape[1]
 
-        cNorm = colors.Normalize(vmin=0, vmax=no_of_plots)
+        cNorm = colors.Normalize(vmin=0, vmax=no_of_plots + 2)
 
         if 'multi' not in palette:
             scalarMap = cmx.ScalarMappable(norm=cNorm, cmap=color_map)
@@ -15587,12 +15593,14 @@ class MFRM(Rasch):
         else:
             sns.set_style('whitegrid')
 
-        palette_dict = {'dark blue': ['dark', 'cornflowerblue'],
+        palette_dict = {'dark blue': ['dark', 'royalblue'],
                         'light blue': ['light', 'cornflowerblue'],
                         'dark red': ['dark', 'firebrick'],
-                        'light red': ['light', 'firebrick'],
+                        'light red': ['light', 'indianred'],
                         'dark green': ['dark', 'forestgreen'],
-                        'light green': ['light', 'forestgreen'],
+                        'light green': ['light', 'mediumseagreen'],
+                        'dark grey': ['dark', 'dimgrey'],
+                        'light grey': ['light', 'darkgrey'],
                         'dark multi': ['dark', 'dark'],
                         'light multi': ['light', 'muted']}
 
@@ -15612,7 +15620,7 @@ class MFRM(Rasch):
 
         no_of_plots = y_data.shape[1]
 
-        cNorm = colors.Normalize(vmin=0, vmax=no_of_plots)
+        cNorm = colors.Normalize(vmin=0, vmax=no_of_plots + 2)
 
         if 'multi' not in palette:
             scalarMap = cmx.ScalarMappable(norm=cNorm, cmap=color_map)
@@ -16019,12 +16027,14 @@ class MFRM(Rasch):
         else:
             sns.set_style('whitegrid')
 
-        palette_dict = {'dark blue': ['dark', 'cornflowerblue'],
+        palette_dict = {'dark blue': ['dark', 'royalblue'],
                         'light blue': ['light', 'cornflowerblue'],
                         'dark red': ['dark', 'firebrick'],
-                        'light red': ['light', 'firebrick'],
+                        'light red': ['light', 'indianred'],
                         'dark green': ['dark', 'forestgreen'],
-                        'light green': ['light', 'forestgreen'],
+                        'light green': ['light', 'mediumseagreen'],
+                        'dark grey': ['dark', 'dimgrey'],
+                        'light grey': ['light', 'darkgrey'],
                         'dark multi': ['dark', 'dark'],
                         'light multi': ['light', 'muted']}
 
@@ -16044,7 +16054,7 @@ class MFRM(Rasch):
 
         no_of_plots = y_data.shape[1]
 
-        cNorm = colors.Normalize(vmin=0, vmax=no_of_plots)
+        cNorm = colors.Normalize(vmin=0, vmax=no_of_plots + 2)
 
         if 'multi' not in palette:
             scalarMap = cmx.ScalarMappable(norm=cNorm, cmap=color_map)
@@ -16453,12 +16463,14 @@ class MFRM(Rasch):
         else:
             sns.set_style('whitegrid')
 
-        palette_dict = {'dark blue': ['dark', 'cornflowerblue'],
+        palette_dict = {'dark blue': ['dark', 'royalblue'],
                         'light blue': ['light', 'cornflowerblue'],
                         'dark red': ['dark', 'firebrick'],
-                        'light red': ['light', 'firebrick'],
+                        'light red': ['light', 'indianred'],
                         'dark green': ['dark', 'forestgreen'],
-                        'light green': ['light', 'forestgreen'],
+                        'light green': ['light', 'mediumseagreen'],
+                        'dark grey': ['dark', 'dimgrey'],
+                        'light grey': ['light', 'darkgrey'],
                         'dark multi': ['dark', 'dark'],
                         'light multi': ['light', 'muted']}
 
@@ -16478,7 +16490,7 @@ class MFRM(Rasch):
 
         no_of_plots = y_data.shape[1]
 
-        cNorm = colors.Normalize(vmin=0, vmax=no_of_plots)
+        cNorm = colors.Normalize(vmin=0, vmax=no_of_plots + 2)
 
         if 'multi' not in palette:
             scalarMap = cmx.ScalarMappable(norm=cNorm, cmap=color_map)
@@ -16903,12 +16915,14 @@ class MFRM(Rasch):
         else:
             sns.set_style('whitegrid')
 
-        palette_dict = {'dark blue': ['dark', 'cornflowerblue'],
+        palette_dict = {'dark blue': ['dark', 'royalblue'],
                         'light blue': ['light', 'cornflowerblue'],
                         'dark red': ['dark', 'firebrick'],
-                        'light red': ['light', 'firebrick'],
+                        'light red': ['light', 'indianred'],
                         'dark green': ['dark', 'forestgreen'],
-                        'light green': ['light', 'forestgreen'],
+                        'light green': ['light', 'mediumseagreen'],
+                        'dark grey': ['dark', 'dimgrey'],
+                        'light grey': ['light', 'darkgrey'],
                         'dark multi': ['dark', 'dark'],
                         'light multi': ['light', 'muted']}
 
@@ -16928,7 +16942,7 @@ class MFRM(Rasch):
 
         no_of_plots = y_data.shape[1]
 
-        cNorm = colors.Normalize(vmin=0, vmax=no_of_plots)
+        cNorm = colors.Normalize(vmin=0, vmax=no_of_plots + 2)
 
         if 'multi' not in palette:
             scalarMap = cmx.ScalarMappable(norm=cNorm, cmap=color_map)
