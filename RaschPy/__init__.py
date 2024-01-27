@@ -17,7 +17,10 @@ import pandas as pd
 from scipy.stats import hmean, truncnorm, norm
 from sklearn.decomposition import PCA
 
-import matplotlib.pyplot as plt
+from matplotlib import pyplot as plt
+from matplotlib import colors as colors
+from matplotlib import cm as cmx
+import seaborn as sns
 
 import xlsxwriter
 
@@ -655,7 +658,7 @@ class Rasch:
                            x_max=6,
                            normal=False,
                            title=None,
-                           plot_style='colorblind',
+                           plot_style='white',
                            black=False,
                            font='Times',
                            title_font_size=15,
@@ -673,6 +676,12 @@ class Rasch:
         plt.rcParams["text.latex.preamble"].join([r"\usepackage{dashbox}", r"\setmainfont{xcolor}", ])
 
         plt.style.use('seaborn-v0_8-' + plot_style)
+
+        if plot_style == 'dark':
+            sns.set_style('darkgrid')
+
+        else:
+            sns.set_style('whitegrid')
 
         if black:
             histogram = plt.hist(std_residual_list, floor((std_residual_list.max() - std_residual_list.min()) / bin_width),
@@ -1664,7 +1673,8 @@ class SLM(Rasch):
                   cat_highlight=None,
                   graph_title='',
                   y_label='',
-                  plot_style='colorblind',
+                  plot_style='white',
+                  palette='dark blue',
                   black=False,
                   figsize=(8, 6),
                   font='Times',
@@ -1686,11 +1696,41 @@ class SLM(Rasch):
         else:
             plt.rcParams["text.usetex"] = False
 
-        plt.style.use('seaborn-v0_8-' + plot_style)
+        if plot_style == 'dark':
+            sns.set_style('darkgrid')
+
+        else:
+            sns.set_style('whitegrid')
+
+        palette_dict = {'dark blue': ['dark', 'cornflowerblue'],
+                        'light blue': ['light', 'cornflowerblue'],
+                        'dark red': ['dark', 'firebrick'],
+                        'light red': ['light', 'firebrick'],
+                        'dark green': ['dark', 'forestgreen'],
+                        'light green': ['light', 'forestgreen'],
+                        'dark multi': ['dark', 'dark'],
+                        'light multi': ['light', 'muted']}
+
+        if palette_dict[palette][0] == 'dark':
+            if palette == 'dark multi':
+                color_map = sns.color_palette('dark', as_cmap=True)
+            else:
+                color_map = sns.dark_palette(palette_dict[palette][1], reverse=True, as_cmap=True)
+
+        if palette_dict[palette][0] == 'light':
+            if palette == 'light multi':
+                color_map = sns.color_palette('muted', as_cmap=True)
+            else:
+                color_map = sns.light_palette(palette_dict[palette][1], reverse=True, as_cmap=True)
 
         graph, ax = plt.subplots(figsize=figsize)
 
         no_of_plots = y_data.shape[1]
+
+        cNorm = colors.Normalize(vmin=0, vmax=no_of_plots)
+
+        if 'multi' not in palette:
+            scalarMap = cmx.ScalarMappable(norm=cNorm, cmap=color_map)
 
         if black:
             for i in range(no_of_plots):
@@ -1698,12 +1738,22 @@ class SLM(Rasch):
 
         else:
             for i in range(no_of_plots):
-                ax.plot(x_data, y_data[:, i], '', label=i+1)
+                if 'multi' not in palette:
+                    colorVal = scalarMap.to_rgba(i)
+                else:
+                    colorVal = color_map[i]
+
+                ax.plot(x_data, y_data[:, i], '', color=colorVal, label=i+1)
 
         if obs:
             no_of_obs_plots = y_obs_data.shape[1]
             for j in range (no_of_obs_plots):
-                ax.plot(x_obs_data, y_obs_data[:, j], 'o')
+                if 'multi' not in palette:
+                    colorVal = scalarMap.to_rgba(j)
+                else:
+                    colorVal = color_map[j]
+
+                ax.plot(x_obs_data, y_obs_data[:, j], 'o', color=colorVal)
 
         if items is not None:
             difficulties = self.diffs.loc[items]
@@ -1850,7 +1900,8 @@ class SLM(Rasch):
             cat_highlight=None,
             xmin=-5,
             xmax=5,
-            plot_style='dark-palette',
+            plot_style='white',
+            palette='dark blue',
             black=False,
             font='Times',
             title_font_size=15,
@@ -1894,8 +1945,9 @@ class SLM(Rasch):
                               x_max=xmax, y_max=self.max_score, items=item, y_label=ylabel, graph_title=graphtitle,
                               obs=obs, thresh_line=thresh_line, score_lines_item=[item, score_lines],
                               score_labels=score_labels, cat_highlight=cat_highlight, plot_style=plot_style,
-                              black=black, font=font, title_font_size=title_font_size, axis_font_size=axis_font_size,
-                              labelsize=labelsize, filename=filename, plot_density=dpi, file_format=file_format)
+                              palette=palette, black=black, font=font, title_font_size=title_font_size,
+                              axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
+                              plot_density=dpi, file_format=file_format)
 
         return plot
 
@@ -1908,7 +1960,8 @@ class SLM(Rasch):
              cat_highlight=None,
              xmin=-5,
              xmax=5,
-             plot_style='colorblind',
+             plot_style='white',
+             palette='dark blue',
              black=False,
              font='Times',
              title_font_size=15,
@@ -1967,8 +2020,9 @@ class SLM(Rasch):
         plot = self.plot_data(x_data=abilities,  y_data=y, x_min=xmin, x_max=xmax, y_max=1, x_obs_data=xobsdata,
                               y_obs_data=yobsdata, items=item, graph_title=graphtitle, y_label=ylabel,
                               obs=obs, thresh_line=thresh_line, cat_highlight=cat_highlight, plot_style=plot_style,
-                              black=black, font=font, title_font_size=title_font_size, axis_font_size=axis_font_size,
-                              labelsize=labelsize, filename=filename, plot_density=dpi, file_format=file_format)
+                              palette=palette, black=black, font=font, title_font_size=title_font_size,
+                              axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
+                              plot_density=dpi, file_format=file_format)
 
         return plot
 
@@ -1981,7 +2035,8 @@ class SLM(Rasch):
             xmin=-5,
             xmax=5,
             ymax=None,
-            plot_style='colorblind',
+            plot_style='white',
+            palette='dark blue',
             black=False,
             title=None,
             font='Times',
@@ -2016,9 +2071,9 @@ class SLM(Rasch):
         plot = self.plot_data(x_data=abilities, y_data=y, x_min=xmin, x_max=xmax, y_max=ymax,
                               items=item, graph_title=graphtitle, y_label=ylabel, thresh_line=thresh_line,
                               point_info_lines_item=[item, point_info_lines], point_info_labels=point_info_labels,
-                              cat_highlight=cat_highlight, plot_style=plot_style, black=black, font=font,
-                              title_font_size=title_font_size, axis_font_size=axis_font_size, labelsize=labelsize,
-                              filename=filename, plot_density=dpi, file_format=file_format)
+                              cat_highlight=cat_highlight, plot_style=plot_style, palette=palette, black=black,
+                              font=font, title_font_size=title_font_size, axis_font_size=axis_font_size,
+                              labelsize=labelsize, filename=filename, plot_density=dpi, file_format=file_format)
 
         return plot
 
@@ -2031,7 +2086,8 @@ class SLM(Rasch):
             score_labels=False,
             xmin=-5,
             xmax=5,
-            plot_style='colorblind',
+            plot_style='white',
+            palette='dark blue',
             black=False,
             font='Times',
             title_font_size=15,
@@ -2098,9 +2154,9 @@ class SLM(Rasch):
         plot = self.plot_data(x_data=abilities, y_data=y, items=items, x_obs_data=xobsdata, y_obs_data=yobsdata,
                               x_min=xmin, x_max=xmax, y_max=y_max, score_lines_test=score_lines,
                               graph_title=graphtitle, y_label=ylabel, obs=obs, score_labels=score_labels,
-                              plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
-                              axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
-                              plot_density=dpi, file_format=file_format)
+                              plot_style=plot_style, palette=palette, black=black, font=font,
+                              title_font_size=title_font_size, axis_font_size=axis_font_size, labelsize=labelsize,
+                              filename=filename, plot_density=dpi, file_format=file_format)
 
         return plot
 
@@ -2112,7 +2168,8 @@ class SLM(Rasch):
                   xmax=5,
                   ymax=None,
                   title=None,
-                  plot_style='colorblind',
+                  plot_style='white',
+                  palette='dark blue',
                   black=False,
                   font='Times',
                   title_font_size=15,
@@ -2164,8 +2221,9 @@ class SLM(Rasch):
         plot = self.plot_data(x_data=abilities, y_data=y, items=items, x_min=xmin, x_max=xmax, y_max=ymax,
                               graph_title=graphtitle, point_info_lines_test=point_info_lines,
                               point_info_labels=point_info_labels, y_label=ylabel, plot_style=plot_style,
-                              black=black, font=font, title_font_size=title_font_size, axis_font_size=axis_font_size,
-                              labelsize=labelsize, filename=filename, plot_density=dpi, file_format=file_format)
+                              palette=palette, black=black, font=font, title_font_size=title_font_size,
+                              axis_font_size=axis_font_size, labelsize=labelsize, filename=filename, plot_density=dpi,
+                              file_format=file_format)
 
         return plot
 
@@ -2177,7 +2235,8 @@ class SLM(Rasch):
                   xmax=5,
                   ymax=5,
                   title=None,
-                  plot_style='colorblind',
+                  plot_style='white',
+                  palette='dark blue',
                   black=False,
                   font='Times',
                   title_font_size=15,
@@ -2226,7 +2285,7 @@ class SLM(Rasch):
 
         plot = self.plot_data(x_data=abilities, y_data=y, items=items, x_min=xmin, x_max=xmax, y_max=ymax,
                               graph_title=graphtitle, point_csem_lines=point_csem_lines, score_labels=point_csem_labels,
-                              y_label=ylabel, plot_style=plot_style, black=black, font=font,
+                              y_label=ylabel, plot_style=plot_style, palette=palette, black=black, font=font,
                               title_font_size=title_font_size, axis_font_size=axis_font_size, labelsize=labelsize,
                               filename=filename, plot_density=dpi, file_format=file_format)
 
@@ -2239,7 +2298,7 @@ class SLM(Rasch):
                            x_max=5,
                            normal=False,
                            title=None,
-                           plot_style='colorblind',
+                           plot_style='white',
                            black=False,
                            font='Times',
                            title_font_size=15,
@@ -4058,7 +4117,8 @@ class PCM(Rasch):
                   cat_highlight=None,
                   graph_title='',
                   y_label='',
-                  plot_style='colorblind',
+                  plot_style='white',
+                  palette='dark blue',
                   black=False,
                   figsize=(8, 6),
                   font='Times',
@@ -4080,11 +4140,41 @@ class PCM(Rasch):
         else:
             plt.rcParams["text.usetex"] = False
 
-        plt.style.use('seaborn-v0_8-' + plot_style)
+        if plot_style == 'dark':
+            sns.set_style('darkgrid')
+
+        else:
+            sns.set_style('whitegrid')
+
+        palette_dict = {'dark blue': ['dark', 'cornflowerblue'],
+                        'light blue': ['light', 'cornflowerblue'],
+                        'dark red': ['dark', 'firebrick'],
+                        'light red': ['light', 'firebrick'],
+                        'dark green': ['dark', 'forestgreen'],
+                        'light green': ['light', 'forestgreen'],
+                        'dark multi': ['dark', 'dark'],
+                        'light multi': ['light', 'muted']}
+
+        if palette_dict[palette][0] == 'dark':
+            if palette == 'dark multi':
+                color_map = sns.color_palette('dark', as_cmap=True)
+            else:
+                color_map = sns.dark_palette(palette_dict[palette][1], reverse=True, as_cmap=True)
+
+        if palette_dict[palette][0] == 'light':
+            if palette == 'light multi':
+                color_map = sns.color_palette('muted', as_cmap=True)
+            else:
+                color_map = sns.light_palette(palette_dict[palette][1], reverse=True, as_cmap=True)
 
         graph, ax = plt.subplots(figsize=figsize)
 
         no_of_plots = y_data.shape[1]
+
+        cNorm = colors.Normalize(vmin=0, vmax=no_of_plots)
+
+        if 'multi' not in palette:
+            scalarMap = cmx.ScalarMappable(norm=cNorm, cmap=color_map)
 
         if black:
             for i in range(no_of_plots):
@@ -4092,19 +4182,34 @@ class PCM(Rasch):
 
         else:
             for i in range(no_of_plots):
-                ax.plot(x_data, y_data[:, i], '', label=i+1)
+                if 'multi' not in palette:
+                    colorVal = scalarMap.to_rgba(i)
+                else:
+                    colorVal = color_map[i]
+
+                ax.plot(x_data, y_data[:, i], '', color=colorVal, label=i+1)
 
         if obs is not None:
             try:
                 no_of_observed_cats = y_obs_data.shape[1]
                 if isinstance(x_obs_data, pd.Series):
                     for j in range (no_of_observed_cats):
-                        ax.plot(x_obs_data, y_obs_data[:, j], 'o')
+                        if 'multi' not in palette:
+                            colorVal = scalarMap.to_rgba(j)
+                        else:
+                            colorVal = color_map[j]
+
+                        ax.plot(x_obs_data, y_obs_data[:, j], 'o', color=colorVal)
 
                 else:
                     no_of_observed_cats = y_obs_data.shape[1]
                     for j in range (no_of_observed_cats):
-                        ax.plot(x_obs_data[:, j], y_obs_data[:, j], 'o')
+                        if 'multi' not in palette:
+                            colorVal = scalarMap.to_rgba(j)
+                        else:
+                            colorVal = color_map[j]
+
+                        ax.plot(x_obs_data[:, j], y_obs_data[:, j], 'o', color=colorVal)
 
             except:
                 pass
@@ -4293,7 +4398,8 @@ class PCM(Rasch):
             cat_highlight=None,
             xmin=-5,
             xmax=5,
-            plot_style='colorblind',
+            plot_style='white',
+            palette='dark blue',
             black=False,
             font='Times',
             title_font_size=15,
@@ -4307,11 +4413,6 @@ class PCM(Rasch):
         Plots Item Characteristic Curves for PCM, with optional overplotting
         of observed data, threshold lines and expected score threshold lines.
         '''
-
-        abilities = np.arange(-20, 20, 0.1)
-        y = [self.exp_score_uncentred(ability, self.thresholds_uncentred[item])
-             for ability in abilities]
-        y = np.array(y).reshape([len(abilities), 1])
 
         if obs:
             if hasattr(self, 'person_abiliites') == False:
@@ -4327,6 +4428,12 @@ class PCM(Rasch):
             xobsdata = np.array(np.nan)
             yobsdata = np.array(np.nan)
 
+        abilities = np.arange(-20, 20, 0.1)
+
+        y = [self.exp_score_uncentred(ability, self.thresholds_uncentred[item])
+             for ability in abilities]
+        y = np.array(y).reshape([len(abilities), 1])
+
         if title is not None:
             graphtitle = title
 
@@ -4339,9 +4446,9 @@ class PCM(Rasch):
                               x_max=xmax, y_max=self.max_score_vector[item], items=item, graph_title=graphtitle,
                               y_label=ylabel, obs=obs, thresh_lines=thresh_lines, central_diff=central_diff,
                               score_lines_item=[item, score_lines], score_labels=score_labels, plot_style=plot_style,
-                              cat_highlight=cat_highlight, black=black, font=font, title_font_size=title_font_size,
-                              axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
-                              plot_density=dpi, file_format=file_format)
+                              palette=palette, cat_highlight=cat_highlight, black=black, font=font,
+                              title_font_size=title_font_size, axis_font_size=axis_font_size, labelsize=labelsize,
+                              filename=filename, plot_density=dpi, file_format=file_format)
         
         return plot
 
@@ -4355,7 +4462,8 @@ class PCM(Rasch):
              cat_highlight=None,
              xmin=-5,
              xmax=5,
-             plot_style='colorblind',
+             plot_style='white',
+             palette='dark blue',
              black=False,
              font='Times',
              title_font_size=15,
@@ -4372,12 +4480,6 @@ class PCM(Rasch):
 
         if item == 'none':
             item = None
-
-        abilities = np.arange(-20, 20, 0.1)
-
-        y = np.array([[self.cat_prob_uncentred(ability, category, self.thresholds_uncentred[item])
-                       for category in range(self.max_score_vector[item] + 1)]
-                      for ability in abilities])
 
         if obs is not None:
             if hasattr(self, 'person_abiliites') == False:
@@ -4400,6 +4502,12 @@ class PCM(Rasch):
             xobsdata = np.array(np.nan)
             yobsdata = np.array(np.nan)
 
+        abilities = np.arange(-20, 20, 0.1)
+
+        y = np.array([[self.cat_prob_uncentred(ability, category, self.thresholds_uncentred[item])
+                       for category in range(self.max_score_vector[item] + 1)]
+                      for ability in abilities])
+
         if title is not None:
             graphtitle = title
 
@@ -4411,9 +4519,9 @@ class PCM(Rasch):
         plot = self.plot_data(x_data=abilities, y_data=y, x_min=xmin, x_max=xmax, y_max=1, x_obs_data=xobsdata,
                               y_obs_data=yobsdata, items=item, graph_title=graphtitle, y_label=ylabel, obs=obs,
                               thresh_lines=thresh_lines, central_diff=central_diff, cat_highlight=cat_highlight,
-                              plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
-                              axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
-                              plot_density=dpi, file_format=file_format)
+                              plot_style=plot_style, palette=palette, black=black, font=font,
+                              title_font_size=title_font_size, axis_font_size=axis_font_size, labelsize=labelsize,
+                              filename=filename, plot_density=dpi, file_format=file_format)
 
         return plot
 
@@ -4427,7 +4535,8 @@ class PCM(Rasch):
                       cat_highlight=None,
                       xmin=-5,
                       xmax=5,
-                      plot_style='colorblind',
+                      plot_style='white',
+                      palette='dark blue',
                       black=False,
                       font='Times',
                       title_font_size=15,
@@ -4441,12 +4550,6 @@ class PCM(Rasch):
         Plots Threshold Characteristic Curves for RSM, with optional
         overplotting of observed data and threshold lines.
         '''
-
-        abilities = np.arange(-20, 20, 0.1)
-
-        y = np.array([[1 / (1 + np.exp(threshold - ability))
-                       for threshold in self.thresholds_uncentred[item]]
-                      for ability in abilities])
 
         if obs is not None:
             if hasattr(self, 'person_abiliites') == False:
@@ -4471,6 +4574,12 @@ class PCM(Rasch):
             xobsdata = np.array(np.nan)
             yobsdata = np.array(np.nan)
 
+        abilities = np.arange(-20, 20, 0.1)
+
+        y = np.array([[1 / (1 + np.exp(threshold - ability))
+                       for threshold in self.thresholds_uncentred[item]]
+                      for ability in abilities])
+
         if title is not None:
             graphtitle = title
 
@@ -4482,9 +4591,9 @@ class PCM(Rasch):
         plot = self.plot_data(x_data=abilities, y_data=y, y_max=1, x_min=xmin, x_max=xmax, items=item,
                               x_obs_data=xobsdata, y_obs_data=yobsdata, graph_title=graphtitle, y_label=ylabel,
                               obs=obs, thresh_lines=thresh_lines, central_diff=central_diff,
-                              cat_highlight=cat_highlight, plot_style=plot_style, black=black, font=font,
-                              title_font_size=title_font_size, axis_font_size=axis_font_size, labelsize=labelsize,
-                              filename=filename, plot_density=dpi, file_format=file_format)
+                              cat_highlight=cat_highlight, plot_style=plot_style, palette=palette, black=black,
+                              font=font, title_font_size=title_font_size, axis_font_size=axis_font_size,
+                              labelsize=labelsize, filename=filename, plot_density=dpi, file_format=file_format)
 
         return plot
 
@@ -4499,7 +4608,8 @@ class PCM(Rasch):
             title=None,
             xmin=-5,
             xmax=5,
-            plot_style='colorblind',
+            plot_style='white',
+            palette='dark blue',
             black=False,
             font='Times',
             title_font_size=15,
@@ -4532,7 +4642,7 @@ class PCM(Rasch):
         plot = self.plot_data(x_data=abilities, y_data=y, x_min=xmin, x_max=xmax, y_max=ymax, thresh_lines=thresh_lines,
                               items=item, central_diff=central_diff, point_info_lines_item=[item, point_info_lines],
                               score_labels=point_info_labels, cat_highlight=cat_highlight, graph_title=graphtitle,
-                              y_label=ylabel, plot_style=plot_style, black=black, font=font,
+                              y_label=ylabel, plot_style=plot_style, palette=palette, black=black, font=font,
                               title_font_size=title_font_size, axis_font_size=axis_font_size, labelsize=labelsize,
                               filename=filename, file_format=file_format, plot_density=dpi)
 
@@ -4548,7 +4658,8 @@ class PCM(Rasch):
             score_lines=None,
             score_labels=False,
             warm=True,
-            plot_style='colorblind',
+            plot_style='white',
+            palette='dark blue',
             black=False,
             font='Times',
             title_font_size=15,
@@ -4617,9 +4728,9 @@ class PCM(Rasch):
         plot = self.plot_data(x_data=abilities, y_data=y, x_obs_data=xobsdata, y_obs_data=yobsdata, x_min=xmin,
                               x_max=xmax, y_max=y_max, items=items, score_lines_test=score_lines,
                               score_labels=score_labels, warm=warm, graph_title=graphtitle, y_label=ylabel, obs=obs,
-                              plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
-                              axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
-                              file_format=file_format, plot_density=dpi)
+                              plot_style=plot_style, palette=palette, black=black, font=font,
+                              title_font_size=title_font_size, axis_font_size=axis_font_size, labelsize=labelsize,
+                              filename=filename, file_format=file_format, plot_density=dpi)
 
         return plot
 
@@ -4631,7 +4742,8 @@ class PCM(Rasch):
                   xmax=5,
                   ymax=None,
                   title=None,
-                  plot_style='colorblind',
+                  plot_style='white',
+                  palette='dark blue',
                   black=False,
                   font='Times',
                   title_font_size=15,
@@ -4682,8 +4794,8 @@ class PCM(Rasch):
 
         plot = self.plot_data(x_data=abilities, y_data=y, x_min=xmin, x_max=xmax, y_max=ymax, items=items,
                               graph_title=graphtitle, point_info_lines_test=point_info_lines,
-                              score_labels=point_info_labels, y_label=ylabel, plot_style=plot_style, black=black,
-                              font=font, title_font_size=title_font_size, axis_font_size=axis_font_size,
+                              score_labels=point_info_labels, y_label=ylabel, plot_style=plot_style, palette=palette,
+                              black=black, font=font, title_font_size=title_font_size, axis_font_size=axis_font_size,
                               labelsize=labelsize, filename=filename, file_format=file_format, plot_density=dpi)
 
         return plot
@@ -4696,7 +4808,8 @@ class PCM(Rasch):
                   xmax=5,
                   ymax=5,
                   title=None,
-                  plot_style='colorblind',
+                  plot_style='white',
+                  palette='dark blue',
                   black=False,
                   font='Times',
                   title_font_size=15,
@@ -4745,7 +4858,7 @@ class PCM(Rasch):
 
         plot = self.plot_data(x_data=abilities, y_data=y, x_min=xmin, x_max=xmax, y_max=ymax, items=items,
                               graph_title=graphtitle, point_csem_lines=point_csem_lines, score_labels=point_csem_labels,
-                              y_label=ylabel, plot_style=plot_style, black=black, font=font,
+                              y_label=ylabel, plot_style=plot_style, palette=palette, black=black, font=font,
                               title_font_size=title_font_size, axis_font_size=axis_font_size, labelsize=labelsize,
                               filename=filename, file_format=file_format, plot_density=dpi)
 
@@ -4758,7 +4871,7 @@ class PCM(Rasch):
                            x_max=6,
                            normal=False,
                            title=None,
-                           plot_style='colorblind',
+                           plot_style='white',
                            font='Times',
                            title_font_size=15,
                            axis_font_size=12,
@@ -6246,7 +6359,8 @@ class RSM(Rasch):
                   cat_highlight=None,
                   graph_title='',
                   y_label='',
-                  plot_style='colorblind',
+                  plot_style='white',
+                  palette='dark blue',
                   black=False,
                   figsize=(8, 6),
                   font='Times',
@@ -6268,11 +6382,41 @@ class RSM(Rasch):
         else:
             plt.rcParams["text.usetex"] = False
 
-        plt.style.use('seaborn-v0_8-' + plot_style)
+        if plot_style == 'dark':
+            sns.set_style('darkgrid')
+
+        else:
+            sns.set_style('whitegrid')
+
+        palette_dict = {'dark blue': ['dark', 'cornflowerblue'],
+                        'light blue': ['light', 'cornflowerblue'],
+                        'dark red': ['dark', 'firebrick'],
+                        'light red': ['light', 'firebrick'],
+                        'dark green': ['dark', 'forestgreen'],
+                        'light green': ['light', 'forestgreen'],
+                        'dark multi': ['dark', 'dark'],
+                        'light multi': ['light', 'muted']}
+
+        if palette_dict[palette][0] == 'dark':
+            if palette == 'dark multi':
+                color_map = sns.color_palette('dark', as_cmap=True)
+            else:
+                color_map = sns.dark_palette(palette_dict[palette][1], reverse=True, as_cmap=True)
+
+        if palette_dict[palette][0] == 'light':
+            if palette == 'light multi':
+                color_map = sns.color_palette('muted', as_cmap=True)
+            else:
+                color_map = sns.light_palette(palette_dict[palette][1], reverse=True, as_cmap=True)
 
         graph, ax = plt.subplots(figsize=figsize)
 
         no_of_plots = y_data.shape[1]
+
+        cNorm = colors.Normalize(vmin=0, vmax=no_of_plots)
+
+        if 'multi' not in palette:
+            scalarMap = cmx.ScalarMappable(norm=cNorm, cmap=color_map)
 
         if black:
             for i in range(no_of_plots):
@@ -6280,19 +6424,34 @@ class RSM(Rasch):
 
         else:
             for i in range(no_of_plots):
-                ax.plot(x_data, y_data[:, i], '', label=i+1)
+                if 'multi' not in palette:
+                    colorVal = scalarMap.to_rgba(i)
+                else:
+                    colorVal = color_map[i]
+
+                ax.plot(x_data, y_data[:, i], '', color=colorVal, label=i+1)
 
         if obs is not None:
             try:
                 no_of_obs_plots = y_obs_data.shape[1]
                 if isinstance(x_obs_data, pd.Series):
                     for j in range (no_of_obs_plots):
-                        ax.plot(x_obs_data, y_obs_data[:, j], 'o')
+                        if 'multi' not in palette:
+                            colorVal = scalarMap.to_rgba(j)
+                        else:
+                            colorVal = color_map[j]
+
+                        ax.plot(x_obs_data, y_obs_data[:, j], 'o', color=colorVal)
 
                 else:
                     no_of_obs_plots = y_obs_data.shape[1]
                     for j in range (no_of_obs_plots):
-                        ax.plot(x_obs_data[:, j], y_obs_data[:, j], 'o')
+                        if 'multi' not in palette:
+                            colorVal = scalarMap.to_rgba(j)
+                        else:
+                            colorVal = color_map[j]
+
+                        ax.plot(x_obs_data[:, j], y_obs_data[:, j], 'o', color=colorVal)
 
             except:
                 pass
@@ -6489,7 +6648,8 @@ class RSM(Rasch):
             cat_highlight=None,
             xmin=-5,
             xmax=5,
-            plot_style='colorblind',
+            plot_style='white',
+            palette='dark blue',
             black=False,
             font='Times',
             title_font_size=15,
@@ -6504,11 +6664,6 @@ class RSM(Rasch):
         of observed data, threshold lines and expected score threshold lines.
         '''
 
-        abilities = np.arange(-20, 20, 0.1)
-        y = [self.exp_score(ability, self.diffs[item], self.thresholds)
-             for ability in abilities]
-        y = np.array(y).reshape([len(abilities), 1])
-
         if obs:
             if hasattr(self, 'person_abiliites') == False:
                 self.person_abils(warm_corr=False)
@@ -6521,6 +6676,12 @@ class RSM(Rasch):
             xobsdata = np.array(np.nan)
             yobsdata = np.array(np.nan)
 
+        abilities = np.arange(-20, 20, 0.1)
+
+        y = [self.exp_score(ability, self.diffs[item], self.thresholds)
+             for ability in abilities]
+        y = np.array(y).reshape([len(abilities), 1])
+
         if title is not None:
             graphtitle = title
 
@@ -6532,9 +6693,9 @@ class RSM(Rasch):
         plot = self.plot_data(x_data=abilities, y_data=y, x_obs_data=xobsdata, y_obs_data=yobsdata, x_min=xmin,
                               x_max=xmax, y_max=self.max_score, items=item, graph_title=graphtitle, y_label=ylabel,
                               obs=obs, thresh_lines=thresh_lines, central_diff=central_diff, plot_style=plot_style,
-                              score_lines_item=[item, score_lines], score_labels=score_labels, black=black, font=font,
-                              cat_highlight= cat_highlight, title_font_size=title_font_size, labelsize=labelsize,
-                              axis_font_size=axis_font_size,  filename=filename, plot_density=dpi,
+                              palette=palette, score_lines_item=[item, score_lines], score_labels=score_labels,
+                              black=black, font=font, cat_highlight=cat_highlight, title_font_size=title_font_size,
+                              labelsize=labelsize, axis_font_size=axis_font_size,  filename=filename, plot_density=dpi,
                               file_format=file_format)
 
         return plot
@@ -6549,7 +6710,8 @@ class RSM(Rasch):
              cat_highlight=None,
              xmin=-5,
              xmax=5,
-             plot_style='colorblind',
+             plot_style='white',
+             palette='dark blue',
              black=False,
              font='Times',
              title_font_size=15,
@@ -6566,18 +6728,6 @@ class RSM(Rasch):
 
         if item == 'none':
             item = None
-
-        abilities = np.arange(-20, 20, 0.1)
-
-        if item is None:
-            y = np.array([[self.cat_prob(ability, 0, category, self.thresholds)
-                           for category in range(self.max_score + 1)]
-                          for ability in abilities])
-
-        else:
-            y = np.array([[self.cat_prob(ability, self.diffs[item], category, self.thresholds)
-                           for category in range(self.max_score + 1)]
-                          for ability in abilities])
 
         if obs is not None:
             if hasattr(self, 'person_abiliites') == False:
@@ -6600,6 +6750,18 @@ class RSM(Rasch):
             xobsdata = np.array(np.nan)
             yobsdata = np.array(np.nan)
 
+        abilities = np.arange(-20, 20, 0.1)
+
+        if item is None:
+            y = np.array([[self.cat_prob(ability, 0, category, self.thresholds)
+                           for category in range(self.max_score + 1)]
+                          for ability in abilities])
+
+        else:
+            y = np.array([[self.cat_prob(ability, self.diffs[item], category, self.thresholds)
+                           for category in range(self.max_score + 1)]
+                          for ability in abilities])
+
         if title is not None:
             graphtitle = title
 
@@ -6611,9 +6773,9 @@ class RSM(Rasch):
         plot = self.plot_data(x_data=abilities, y_data=y, x_min=xmin, x_max=xmax, y_max=1, x_obs_data=xobsdata,
                               y_obs_data=yobsdata, items=item, graph_title=graphtitle, y_label=ylabel, obs=obs,
                               thresh_lines=thresh_lines, central_diff=central_diff, cat_highlight=cat_highlight,
-                              plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
-                              axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
-                              plot_density=dpi, file_format=file_format)
+                              plot_style=plot_style, palette=palette, black=black, font=font,
+                              title_font_size=title_font_size, axis_font_size=axis_font_size, labelsize=labelsize,
+                              filename=filename, plot_density=dpi, file_format=file_format)
 
         return plot
 
@@ -6627,7 +6789,8 @@ class RSM(Rasch):
                       cat_highlight=None,
                       xmin=-5,
                       xmax=5,
-                      plot_style='colorblind',
+                      plot_style='white',
+                      palette='dark blue',
                       black=False,
                       font='Times',
                       title_font_size=15,
@@ -6644,18 +6807,6 @@ class RSM(Rasch):
 
         if item == 'none':
             item = None
-
-        abilities = np.arange(-20, 20, 0.1)
-
-        if item is None:
-            abs_thresholds = self.thresholds[1:]
-
-        else:
-            abs_thresholds = self.thresholds[1:] + self.diffs[item]
-
-        y = np.array([[1 / (1 + np.exp(threshold - ability))
-                       for threshold in abs_thresholds]
-                      for ability in abilities])
 
         if obs is not None:
             if hasattr(self, 'person_abiliites') == False:
@@ -6680,6 +6831,18 @@ class RSM(Rasch):
             xobsdata = np.array(np.nan)
             yobsdata = np.array(np.nan)
 
+        abilities = np.arange(-20, 20, 0.1)
+
+        if item is None:
+            abs_thresholds = self.thresholds[1:]
+
+        else:
+            abs_thresholds = self.thresholds[1:] + self.diffs[item]
+
+        y = np.array([[1 / (1 + np.exp(threshold - ability))
+                       for threshold in abs_thresholds]
+                      for ability in abilities])
+
         if title is not None:
             graphtitle = title
 
@@ -6691,9 +6854,9 @@ class RSM(Rasch):
         plot = self.plot_data(x_data=abilities, y_data=y, y_max=1, x_min=xmin, x_max=xmax, items=item, obs=obs,
                               x_obs_data=xobsdata, y_obs_data=yobsdata, graph_title=graphtitle, y_label=ylabel,
                               thresh_lines=thresh_lines, central_diff=central_diff, cat_highlight=cat_highlight,
-                              plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
-                              axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
-                              file_format=file_format, plot_density=dpi)
+                              plot_style=plot_style, palette=palette, black=black, font=font,
+                              title_font_size=title_font_size, axis_font_size=axis_font_size, labelsize=labelsize,
+                              filename=filename, file_format=file_format, plot_density=dpi)
 
         return plot
 
@@ -6708,7 +6871,8 @@ class RSM(Rasch):
             title=None,
             xmin=-5,
             xmax=5,
-            plot_style='colorblind',
+            plot_style='white',
+            palette='dark blue',
             black=False,
             font='Times',
             title_font_size=15,
@@ -6744,9 +6908,9 @@ class RSM(Rasch):
         plot = self.plot_data(x_data=abilities, y_data=y, x_min=xmin, x_max=xmax, y_max=ymax, items=item,
                               thresh_lines=thresh_lines, point_info_lines_item=[item, point_info_lines],
                               score_labels=point_info_labels, cat_highlight=cat_highlight, central_diff=central_diff,
-                              graph_title=graphtitle, y_label=ylabel, plot_style=plot_style, black=black, font=font,
-                              title_font_size=title_font_size, axis_font_size=axis_font_size, labelsize=labelsize,
-                              filename=filename, plot_density=dpi, file_format=file_format)
+                              graph_title=graphtitle, y_label=ylabel, plot_style=plot_style, palette=palette,
+                              black=black, font=font, title_font_size=title_font_size, axis_font_size=axis_font_size,
+                              labelsize=labelsize, filename=filename, plot_density=dpi, file_format=file_format)
 
         return plot
 
@@ -6759,7 +6923,8 @@ class RSM(Rasch):
             score_labels=False,
             xmin=-5,
             xmax=5,
-            plot_style='colorblind',
+            plot_style='white',
+            palette='dark blue',
             black=False,
             font='Times',
             title_font_size=15,
@@ -6783,16 +6948,6 @@ class RSM(Rasch):
             else:
                 items = [items]
 
-        abilities = np.arange(-20, 20, 0.1)
-
-        if items is None:
-            items = list(self.dataframe.columns)
-
-        y = [sum(self.exp_score(ability, self.diffs[item], self.thresholds)
-                 for item in items)
-             for ability in abilities]
-        y = np.array(y).reshape(len(abilities), 1)
-
         if obs:
             if hasattr(self, 'person_abiliites') == False:
                 self.person_abils(warm_corr=False)
@@ -6806,6 +6961,16 @@ class RSM(Rasch):
         else:
             xobsdata = np.array(np.nan)
             yobsdata = np.array(np.nan)
+
+        abilities = np.arange(-20, 20, 0.1)
+
+        if items is None:
+            items = list(self.dataframe.columns)
+
+        y = [sum(self.exp_score(ability, self.diffs[item], self.thresholds)
+                 for item in items)
+             for ability in abilities]
+        y = np.array(y).reshape(len(abilities), 1)
 
         if title is not None:
             graphtitle = title
@@ -6827,9 +6992,9 @@ class RSM(Rasch):
         plot = self.plot_data(x_data=abilities, y_data=y, items=items, x_obs_data=xobsdata, y_obs_data=yobsdata,
                               x_min=xmin, x_max=xmax, y_max=y_max, score_lines_test=score_lines,
                               score_labels=score_labels, graph_title=graphtitle, y_label=ylabel, obs=obs,
-                              plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
-                              axis_font_size=axis_font_size, labelsize=labelsize, filename=filename, plot_density=dpi,
-                              file_format=file_format)
+                              plot_style=plot_style, palette=palette, black=black, font=font,
+                              title_font_size=title_font_size, axis_font_size=axis_font_size, labelsize=labelsize,
+                              filename=filename, plot_density=dpi, file_format=file_format)
 
         return plot
 
@@ -6841,7 +7006,8 @@ class RSM(Rasch):
                   xmax=5,
                   ymax=None,
                   title=None,
-                  plot_style='colorblind',
+                  plot_style='white',
+                  palette='dark blue',
                   black=False,
                   font='Times',
                   title_font_size=15,
@@ -6892,8 +7058,8 @@ class RSM(Rasch):
 
         plot = self.plot_data(x_data=abilities, y_data=y, items=items, x_min=xmin, x_max=xmax, y_max=ymax,
                               graph_title=graphtitle, point_info_lines_test=point_info_lines,
-                              score_labels=point_info_labels, y_label=ylabel, plot_style=plot_style, black=black,
-                              font=font, title_font_size=title_font_size, axis_font_size=axis_font_size,
+                              score_labels=point_info_labels, y_label=ylabel, plot_style=plot_style, palette=palette,
+                              black=black, font=font, title_font_size=title_font_size, axis_font_size=axis_font_size,
                               labelsize=labelsize, filename=filename, plot_density=dpi, file_format=file_format)
 
         return plot
@@ -6906,7 +7072,8 @@ class RSM(Rasch):
                   xmax=5,
                   ymax=5,
                   title=None,
-                  plot_style='colorblind',
+                  plot_style='white',
+                  palette='dark blue',
                   black=False,
                   font='Times',
                   title_font_size=15,
@@ -6955,7 +7122,7 @@ class RSM(Rasch):
 
         plot = self.plot_data(x_data=abilities, y_data=y, items=items, x_min=xmin, x_max=xmax, y_max=ymax,
                               graph_title=graphtitle, point_csem_lines=point_csem_lines, score_labels=point_csem_labels,
-                              y_label=ylabel, plot_style=plot_style, black=black, font=font,
+                              y_label=ylabel, plot_style=plot_style, palette=palette, black=black, font=font,
                               title_font_size=title_font_size, axis_font_size=axis_font_size, labelsize=labelsize,
                               filename=filename, plot_density=dpi, file_format=file_format)
 
@@ -6968,7 +7135,7 @@ class RSM(Rasch):
                            x_max=6,
                            normal=False,
                            title=True,
-                           plot_style='colorblind',
+                           plot_style='white',
                            font='Times',
                            title_font_size=15,
                            axis_font_size=12,
@@ -15365,7 +15532,8 @@ class MFRM(Rasch):
                          warm=True,
                          graph_title='',
                          y_label='',
-                         plot_style='colorblind',
+                         plot_style='white',
+                         palette='dark blue',
                          black=False,
                          figsize=(8, 6),
                          font='Times',
@@ -15413,11 +15581,41 @@ class MFRM(Rasch):
         else:
             plt.rcParams["text.usetex"] = False
 
-        plt.style.use('seaborn-v0_8-' + plot_style)
+        if plot_style == 'dark':
+            sns.set_style('darkgrid')
+
+        else:
+            sns.set_style('whitegrid')
+
+        palette_dict = {'dark blue': ['dark', 'cornflowerblue'],
+                        'light blue': ['light', 'cornflowerblue'],
+                        'dark red': ['dark', 'firebrick'],
+                        'light red': ['light', 'firebrick'],
+                        'dark green': ['dark', 'forestgreen'],
+                        'light green': ['light', 'forestgreen'],
+                        'dark multi': ['dark', 'dark'],
+                        'light multi': ['light', 'muted']}
+
+        if palette_dict[palette][0] == 'dark':
+            if palette == 'dark multi':
+                color_map = sns.color_palette('dark', as_cmap=True)
+            else:
+                color_map = sns.dark_palette(palette_dict[palette][1], reverse=True, as_cmap=True)
+
+        if palette_dict[palette][0] == 'light':
+            if palette == 'light multi':
+                color_map = sns.color_palette('muted', as_cmap=True)
+            else:
+                color_map = sns.light_palette(palette_dict[palette][1], reverse=True, as_cmap=True)
 
         graph, ax = plt.subplots(figsize=figsize)
 
         no_of_plots = y_data.shape[1]
+
+        cNorm = colors.Normalize(vmin=0, vmax=no_of_plots)
+
+        if 'multi' not in palette:
+            scalarMap = cmx.ScalarMappable(norm=cNorm, cmap=color_map)
 
         if black:
             for i in range(no_of_plots):
@@ -15425,17 +15623,32 @@ class MFRM(Rasch):
 
         else:
             for i in range(no_of_plots):
-                ax.plot(x_data, y_data[:, i], '', label=i+1)
+                if 'multi' not in palette:
+                    colorVal = scalarMap.to_rgba(i)
+                else:
+                    colorVal = color_map[i]
+
+                ax.plot(x_data, y_data[:, i], '', color=colorVal, label=i+1)
 
         if obs is not None:
             try:
                 if isinstance(y_obs_data, pd.Series):
-                    ax.plot(x_obs_data, y_obs_data, 'o')
+                    if 'multi' not in palette:
+                        colorVal = scalarMap.to_rgba(0)
+                    else:
+                        colorVal = color_map[0]
+
+                    ax.plot(x_obs_data, y_obs_data, 'o', color=colorVal)
 
                 else:
                     no_of_observed_cats = y_obs_data.shape[1]
                     for j in range (no_of_observed_cats):
-                        ax.plot(x_obs_data, y_obs_data[:, j], 'o')
+                        if 'multi' not in palette:
+                            colorVal = scalarMap.to_rgba(j)
+                        else:
+                            colorVal = color_map[j]
+
+                        ax.plot(x_obs_data, y_obs_data[:, j], 'o', color=colorVal)
 
             except:
                 pass
@@ -15445,7 +15658,12 @@ class MFRM(Rasch):
                 thresh_obs = np.arange(self.max_score + 1)
             try:
                 for ob in thresh_obs:
-                        ax.plot(x_obs_data[ob - 1, :], y_obs_data[ob - 1, :], 'o')
+                    if 'multi' not in palette:
+                        colorVal = scalarMap.to_rgba(ob)
+                    else:
+                        colorVal = color_map[ob]
+
+                    ax.plot(x_obs_data[ob - 1, :], y_obs_data[ob - 1, :], 'o', color=colorVal)
 
             except:
                 pass
@@ -15746,7 +15964,8 @@ class MFRM(Rasch):
                         warm=True,
                         graph_title='',
                         y_label='',
-                        plot_style='colorblind',
+                        plot_style='white',
+                        palette='dark blue',
                         black=False,
                         figsize=(8, 6),
                         font='Times',
@@ -15794,11 +16013,41 @@ class MFRM(Rasch):
         else:
             plt.rcParams["text.usetex"] = False
 
-        plt.style.use('seaborn-v0_8-' + plot_style)
+        if plot_style == 'dark':
+            sns.set_style('darkgrid')
+
+        else:
+            sns.set_style('whitegrid')
+
+        palette_dict = {'dark blue': ['dark', 'cornflowerblue'],
+                        'light blue': ['light', 'cornflowerblue'],
+                        'dark red': ['dark', 'firebrick'],
+                        'light red': ['light', 'firebrick'],
+                        'dark green': ['dark', 'forestgreen'],
+                        'light green': ['light', 'forestgreen'],
+                        'dark multi': ['dark', 'dark'],
+                        'light multi': ['light', 'muted']}
+
+        if palette_dict[palette][0] == 'dark':
+            if palette == 'dark multi':
+                color_map = sns.color_palette('dark', as_cmap=True)
+            else:
+                color_map = sns.dark_palette(palette_dict[palette][1], reverse=True, as_cmap=True)
+
+        if palette_dict[palette][0] == 'light':
+            if palette == 'light multi':
+                color_map = sns.color_palette('muted', as_cmap=True)
+            else:
+                color_map = sns.light_palette(palette_dict[palette][1], reverse=True, as_cmap=True)
 
         graph, ax = plt.subplots(figsize=figsize)
 
         no_of_plots = y_data.shape[1]
+
+        cNorm = colors.Normalize(vmin=0, vmax=no_of_plots)
+
+        if 'multi' not in palette:
+            scalarMap = cmx.ScalarMappable(norm=cNorm, cmap=color_map)
 
         if black:
             for i in range(no_of_plots):
@@ -15806,17 +16055,32 @@ class MFRM(Rasch):
 
         else:
             for i in range(no_of_plots):
-                ax.plot(x_data, y_data[:, i], '', label=i+1)
+                if 'multi' not in palette:
+                    colorVal = scalarMap.to_rgba(i)
+                else:
+                    colorVal = color_map[i]
+
+                ax.plot(x_data, y_data[:, i], '', color=colorVal, label=i+1)
 
         if obs is not None:
             try:
                 if isinstance(y_obs_data, pd.Series):
-                    ax.plot(x_obs_data, y_obs_data, 'o')
+                    if 'multi' not in palette:
+                        colorVal = scalarMap.to_rgba(0)
+                    else:
+                        colorVal = color_map[0]
+
+                    ax.plot(x_obs_data, y_obs_data, 'o', color=colorVal)
 
                 else:
                     no_of_observed_cats = y_obs_data.shape[1]
                     for j in range (no_of_observed_cats):
-                        ax.plot(x_obs_data, y_obs_data[:, j], 'o')
+                        if 'multi' not in palette:
+                            colorVal = scalarMap.to_rgba(j)
+                        else:
+                            colorVal = color_map[j]
+
+                        ax.plot(x_obs_data, y_obs_data[:, j], 'o', color=colorVal)
 
             except:
                 pass
@@ -15826,7 +16090,12 @@ class MFRM(Rasch):
                 thresh_obs = np.arange(self.max_score + 1)
             try:
                 for ob in thresh_obs:
-                        ax.plot(x_obs_data[ob - 1, :], y_obs_data[ob - 1, :], 'o')
+                    if 'multi' not in palette:
+                        colorVal = scalarMap.to_rgba(ob)
+                    else:
+                        colorVal = color_map[ob]
+
+                    ax.plot(x_obs_data[ob - 1, :], y_obs_data[ob - 1, :], 'o', color=colorVal)
 
             except:
                 pass
@@ -16129,7 +16398,8 @@ class MFRM(Rasch):
                              warm=True,
                              graph_title='',
                              y_label='',
-                             plot_style='colorblind',
+                             plot_style='white',
+                             palette='dark blue',
                              black=False,
                              figsize=(8, 6),
                              font='Times',
@@ -16177,11 +16447,41 @@ class MFRM(Rasch):
         else:
             plt.rcParams["text.usetex"] = False
 
-        plt.style.use('seaborn-v0_8-' + plot_style)
+        if plot_style == 'dark':
+            sns.set_style('darkgrid')
+
+        else:
+            sns.set_style('whitegrid')
+
+        palette_dict = {'dark blue': ['dark', 'cornflowerblue'],
+                        'light blue': ['light', 'cornflowerblue'],
+                        'dark red': ['dark', 'firebrick'],
+                        'light red': ['light', 'firebrick'],
+                        'dark green': ['dark', 'forestgreen'],
+                        'light green': ['light', 'forestgreen'],
+                        'dark multi': ['dark', 'dark'],
+                        'light multi': ['light', 'muted']}
+
+        if palette_dict[palette][0] == 'dark':
+            if palette == 'dark multi':
+                color_map = sns.color_palette('dark', as_cmap=True)
+            else:
+                color_map = sns.dark_palette(palette_dict[palette][1], reverse=True, as_cmap=True)
+
+        if palette_dict[palette][0] == 'light':
+            if palette == 'light multi':
+                color_map = sns.color_palette('muted', as_cmap=True)
+            else:
+                color_map = sns.light_palette(palette_dict[palette][1], reverse=True, as_cmap=True)
 
         graph, ax = plt.subplots(figsize=figsize)
 
         no_of_plots = y_data.shape[1]
+
+        cNorm = colors.Normalize(vmin=0, vmax=no_of_plots)
+
+        if 'multi' not in palette:
+            scalarMap = cmx.ScalarMappable(norm=cNorm, cmap=color_map)
 
         if black:
             for i in range(no_of_plots):
@@ -16189,17 +16489,32 @@ class MFRM(Rasch):
 
         else:
             for i in range(no_of_plots):
-                ax.plot(x_data, y_data[:, i], '', label=i+1)
+                if 'multi' not in palette:
+                    colorVal = scalarMap.to_rgba(i)
+                else:
+                    colorVal = color_map[i]
+
+                ax.plot(x_data, y_data[:, i], '', color=colorVal, label=i+1)
 
         if obs is not None:
             try:
                 if isinstance(y_obs_data, pd.Series):
-                    ax.plot(x_obs_data, y_obs_data, 'o')
+                    if 'multi' not in palette:
+                        colorVal = scalarMap.to_rgba(0)
+                    else:
+                        colorVal = color_map[0]
+
+                    ax.plot(x_obs_data, y_obs_data, 'o', color=colorVal)
 
                 else:
                     no_of_observed_cats = y_obs_data.shape[1]
                     for j in range (no_of_observed_cats):
-                        ax.plot(x_obs_data, y_obs_data[:, j], 'o')
+                        if 'multi' not in palette:
+                            colorVal = scalarMap.to_rgba(j)
+                        else:
+                            colorVal = color_map[j]
+
+                        ax.plot(x_obs_data, y_obs_data[:, j], 'o', color=colorVal)
 
             except:
                 pass
@@ -16209,7 +16524,12 @@ class MFRM(Rasch):
                 thresh_obs = np.arange(self.max_score + 1)
             try:
                 for ob in thresh_obs:
-                        ax.plot(x_obs_data[ob - 1, :], y_obs_data[ob - 1, :], 'o')
+                    if 'multi' not in palette:
+                        colorVal = scalarMap.to_rgba(ob)
+                    else:
+                        colorVal = color_map[ob]
+
+                    ax.plot(x_obs_data[ob - 1, :], y_obs_data[ob - 1, :], 'o', color=colorVal)
 
             except:
                 pass
@@ -16516,7 +16836,8 @@ class MFRM(Rasch):
                          y_max=0,
                          graph_title='',
                          y_label='',
-                         plot_style='colorblind',
+                         plot_style='white',
+                         palette='dark blue',
                          black=False,
                          figsize=(8, 6),
                          font='Times',
@@ -16576,11 +16897,41 @@ class MFRM(Rasch):
         else:
             plt.rcParams["text.usetex"] = False
 
-        plt.style.use('seaborn-v0_8-' + plot_style)
+        if plot_style == 'dark':
+            sns.set_style('darkgrid')
+
+        else:
+            sns.set_style('whitegrid')
+
+        palette_dict = {'dark blue': ['dark', 'cornflowerblue'],
+                        'light blue': ['light', 'cornflowerblue'],
+                        'dark red': ['dark', 'firebrick'],
+                        'light red': ['light', 'firebrick'],
+                        'dark green': ['dark', 'forestgreen'],
+                        'light green': ['light', 'forestgreen'],
+                        'dark multi': ['dark', 'dark'],
+                        'light multi': ['light', 'muted']}
+
+        if palette_dict[palette][0] == 'dark':
+            if palette == 'dark multi':
+                color_map = sns.color_palette('dark', as_cmap=True)
+            else:
+                color_map = sns.dark_palette(palette_dict[palette][1], reverse=True, as_cmap=True)
+
+        if palette_dict[palette][0] == 'light':
+            if palette == 'light multi':
+                color_map = sns.color_palette('muted', as_cmap=True)
+            else:
+                color_map = sns.light_palette(palette_dict[palette][1], reverse=True, as_cmap=True)
 
         graph, ax = plt.subplots(figsize=figsize)
 
         no_of_plots = y_data.shape[1]
+
+        cNorm = colors.Normalize(vmin=0, vmax=no_of_plots)
+
+        if 'multi' not in palette:
+            scalarMap = cmx.ScalarMappable(norm=cNorm, cmap=color_map)
 
         if black:
             for i in range(no_of_plots):
@@ -16588,17 +16939,32 @@ class MFRM(Rasch):
 
         else:
             for i in range(no_of_plots):
-                ax.plot(x_data, y_data[:, i], '', label=i+1)
+                if 'multi' not in palette:
+                    colorVal = scalarMap.to_rgba(i)
+                else:
+                    colorVal = color_map[i]
+
+                ax.plot(x_data, y_data[:, i], '', color=colorVal, label=i+1)
 
         if obs is not None:
             try:
                 if isinstance(y_obs_data, pd.Series):
-                    ax.plot(x_obs_data, y_obs_data, 'o')
+                    if 'multi' not in palette:
+                        colorVal = scalarMap.to_rgba(0)
+                    else:
+                        colorVal = color_map[0]
+
+                    ax.plot(x_obs_data, y_obs_data, 'o', color=colorVal)
 
                 else:
                     no_of_observed_cats = y_obs_data.shape[1]
                     for j in range (no_of_observed_cats):
-                        ax.plot(x_obs_data, y_obs_data[:, j], 'o')
+                        if 'multi' not in palette:
+                            colorVal = scalarMap.to_rgba(j)
+                        else:
+                            colorVal = color_map[j]
+
+                        ax.plot(x_obs_data, y_obs_data[:, j], 'o', color=colorVal)
 
             except:
                 pass
@@ -16608,7 +16974,12 @@ class MFRM(Rasch):
                 thresh_obs = np.arange(self.max_score + 1)
             try:
                 for ob in thresh_obs:
-                        ax.plot(x_obs_data[ob - 1, :], y_obs_data[ob - 1, :], 'o')
+                    if 'multi' not in palette:
+                        colorVal = scalarMap.to_rgba(ob)
+                    else:
+                        colorVal = color_map[ob]
+
+                    ax.plot(x_obs_data[ob - 1, :], y_obs_data[ob - 1, :], 'o', color=colorVal)
 
             except:
                 pass
@@ -16905,7 +17276,8 @@ class MFRM(Rasch):
                    score_labels=False,
                    central_diff=False,
                    cat_highlight=None,
-                   plot_style='colorblind',
+                   plot_style='white',
+                   palette='dark blue',
                    black=False,
                    font='Times',
                    title_font_size=15,
@@ -16992,10 +17364,11 @@ class MFRM(Rasch):
                                      y_obs_data=yobsdata, thresh_lines=thresh_lines, graph_title=graphtitle,
                                      score_lines_item=[item, score_lines], score_labels=score_labels,
                                      central_diff=central_diff, cat_highlight=cat_highlight, y_label=ylabel,
-                                     plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
-                                     axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
-                                     plot_density=dpi, file_format=file_format)
+                                     plot_style=plot_style, palette=palette, black=black, font=font,
+                                     title_font_size=title_font_size, axis_font_size=axis_font_size,
+                                     labelsize=labelsize, filename=filename, plot_density=dpi, file_format=file_format)
 
+        return plot
         return plot
 
     def icc_items(self,
@@ -17013,7 +17386,8 @@ class MFRM(Rasch):
                   score_labels=False,
                   central_diff=False,
                   cat_highlight=None,
-                  plot_style='colorblind',
+                  plot_style='white',
+                  palette='dark blue',
                   black=False,
                   font='Times',
                   title_font_size=15,
@@ -17100,9 +17474,9 @@ class MFRM(Rasch):
                                     y_obs_data=yobsdata, thresh_lines=thresh_lines, graph_title=graphtitle,
                                     score_lines_item=[item, score_lines], score_labels=score_labels,
                                     central_diff=central_diff, cat_highlight=cat_highlight, y_label=ylabel,
-                                    plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
-                                    axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
-                                    plot_density=dpi, file_format=file_format)
+                                    plot_style=plot_style, palette=palette, black=black, font=font,
+                                    title_font_size=title_font_size, axis_font_size=axis_font_size,
+                                    labelsize=labelsize, filename=filename, plot_density=dpi, file_format=file_format)
 
         return plot
 
@@ -17121,7 +17495,8 @@ class MFRM(Rasch):
                        score_labels=False,
                        central_diff=False,
                        cat_highlight=None,
-                       plot_style='colorblind',
+                       plot_style='white',
+                       palette='dark blue',
                        black=False,
                        font='Times',
                        title_font_size=15,
@@ -17209,9 +17584,10 @@ class MFRM(Rasch):
                                          graph_title=graphtitle, score_lines_item=[item, score_lines],
                                          score_labels=score_labels, central_diff=central_diff,
                                          cat_highlight=cat_highlight, y_label=ylabel, plot_style=plot_style,
-                                         black=black, font=font, title_font_size=title_font_size,
+                                         palette=palette, black=black, font=font, title_font_size=title_font_size,
                                          axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
                                          plot_density=dpi, file_format=file_format)
+
 
         return plot
 
@@ -17230,7 +17606,8 @@ class MFRM(Rasch):
                    score_labels=False,
                    central_diff=False,
                    cat_highlight=None,
-                   plot_style='colorblind',
+                   plot_style='white',
+                   palette='dark blue',
                    black=False,
                    font='Times',
                    title_font_size=15,
@@ -17317,9 +17694,9 @@ class MFRM(Rasch):
                                      y_obs_data=yobsdata, thresh_lines=thresh_lines, graph_title=graphtitle,
                                      score_lines_item=[item, score_lines], score_labels=score_labels,
                                      central_diff=central_diff, cat_highlight=cat_highlight, y_label=ylabel,
-                                     plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
-                                     axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
-                                     plot_density=dpi, file_format=file_format)
+                                     plot_style=plot_style, palette=palette, black=black, font=font,
+                                     title_font_size=title_font_size, axis_font_size=axis_font_size,
+                                     labelsize=labelsize, filename=filename, plot_density=dpi, file_format=file_format)
 
         return plot
 
@@ -17335,7 +17712,8 @@ class MFRM(Rasch):
                     thresh_lines=False,
                     central_diff=False,
                     cat_highlight=None,
-                    plot_style='colorblind',
+                    plot_style='white',
+                    palette='dark blue',
                     black=False,
                     font='Times',
                     title_font_size=15,
@@ -17443,8 +17821,8 @@ class MFRM(Rasch):
         plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, items=item, raters=rater, x_min=xmin,
                                      x_max=xmax, y_max=1, x_obs_data=xobsdata, y_obs_data=yobsdata, y_label=ylabel,
                                      graph_title=graphtitle, obs=obs, thresh_lines=thresh_lines, plot_style=plot_style,
-                                     central_diff=central_diff, cat_highlight=cat_highlight, black=black, font=font,
-                                     title_font_size=title_font_size, labelsize=labelsize,
+                                     palette=palette, central_diff=central_diff, cat_highlight=cat_highlight,
+                                     black=black, font=font, title_font_size=title_font_size, labelsize=labelsize,
                                      axis_font_size=axis_font_size, filename=filename, plot_density=dpi,
                                      file_format=file_format)
 
@@ -17462,7 +17840,8 @@ class MFRM(Rasch):
                    thresh_lines=False,
                    central_diff=False,
                    cat_highlight=None,
-                   plot_style='colorblind',
+                   plot_style='white',
+                   palette='dark blue',
                    black=False,
                    font='Times',
                    title_font_size=15,
@@ -17580,9 +17959,10 @@ class MFRM(Rasch):
         plot = self.plot_data_items(x_data=abilities, y_data=y, anchor=anchor, items=item, raters=rater, x_min=xmin,
                                     x_max=xmax, y_max=1, x_obs_data=xobsdata, y_obs_data=yobsdata,y_label=ylabel,
                                     graph_title=graphtitle, obs=obs, thresh_lines=thresh_lines, plot_style=plot_style,
-                                    central_diff=central_diff, cat_highlight=cat_highlight, black=black, font=font,
-                                    title_font_size=title_font_size, labelsize=labelsize, axis_font_size=axis_font_size,
-                                    filename=filename, plot_density=dpi, file_format=file_format)
+                                    palette=palette, central_diff=central_diff, cat_highlight=cat_highlight,
+                                    black=black, font=font, title_font_size=title_font_size, labelsize=labelsize,
+                                    axis_font_size=axis_font_size, filename=filename, plot_density=dpi,
+                                    file_format=file_format)
 
         return plot
 
@@ -17598,7 +17978,8 @@ class MFRM(Rasch):
                         thresh_lines=False,
                         central_diff=False,
                         cat_highlight=None,
-                        plot_style='colorblind',
+                        plot_style='white',
+                        palette='dark blue',
                         black=False,
                         font='Times',
                         title_font_size=15,
@@ -17707,8 +18088,9 @@ class MFRM(Rasch):
         plot = self.plot_data_thresholds(x_data=abilities, y_data=y, anchor=anchor, items=item, raters=rater,
                                          x_min=xmin, x_max=xmax, y_max=1, x_obs_data=xobsdata, y_obs_data=yobsdata,
                                          y_label=ylabel, graph_title=graphtitle, obs=obs, thresh_lines=thresh_lines,
-                                         plot_style=plot_style, central_diff=central_diff, cat_highlight=cat_highlight,
-                                         black=black, font=font, title_font_size=title_font_size, labelsize=labelsize,
+                                         plot_style=plot_style, palette=palette, central_diff=central_diff,
+                                         cat_highlight=cat_highlight, black=black, font=font,
+                                         title_font_size=title_font_size, labelsize=labelsize,
                                          axis_font_size=axis_font_size, filename=filename, plot_density=dpi,
                                          file_format=file_format)
 
@@ -17726,7 +18108,8 @@ class MFRM(Rasch):
                     thresh_lines=False,
                     central_diff=False,
                     cat_highlight=None,
-                    plot_style='colorblind',
+                    plot_style='white',
+                    palette='dark blue',
                     black=False,
                     font='Times',
                     title_font_size=15,
@@ -17844,8 +18227,8 @@ class MFRM(Rasch):
         plot = self.plot_data_matrix(x_data=abilities, y_data=y, anchor=anchor, items=item, raters=rater, x_min=xmin,
                                      x_max=xmax, y_max=1, x_obs_data=xobsdata, y_obs_data=yobsdata, y_label=ylabel,
                                      graph_title=graphtitle, obs=obs, thresh_lines=thresh_lines, plot_style=plot_style,
-                                     central_diff=central_diff, cat_highlight=cat_highlight, black=black, font=font,
-                                     title_font_size=title_font_size, labelsize=labelsize,
+                                     palette=palette, central_diff=central_diff, cat_highlight=cat_highlight,
+                                     black=black, font=font, title_font_size=title_font_size, labelsize=labelsize,
                                      axis_font_size=axis_font_size, filename=filename, plot_density=dpi,
                                      file_format=file_format)
 
@@ -17864,7 +18247,8 @@ class MFRM(Rasch):
                              thresh_lines=False,
                              central_diff=False,
                              cat_highlight=None,
-                             plot_style='colorblind',
+                             plot_style='white',
+                             palette='dark blue',
                              black=False,
                              font='Times',
                              title_font_size=15,
@@ -17975,7 +18359,8 @@ class MFRM(Rasch):
                             thresh_lines=False,
                             central_diff=False,
                             cat_highlight=None,
-                            plot_style='colorblind',
+                            plot_style='white',
+                            palette='dark blue',
                             black=False,
                             font='Times',
                             title_font_size=15,
@@ -18067,8 +18452,8 @@ class MFRM(Rasch):
                                     x_min=xmin, x_max=xmax, warm=warm, x_obs_data=xobsdata, y_obs_data=yobsdata,
                                     graph_title=graphtitle, y_label=ylabel, thresh_obs=obs, thresh_lines=thresh_lines,
                                     central_diff=central_diff, cat_highlight=cat_highlight, plot_style=plot_style,
-                                    black=black, font=font, title_font_size=title_font_size,
-                                    axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
+                                    palette=palette, black=black, font=font, title_font_size=title_font_size,
+                                    labelsize=labelsize, axis_font_size=axis_font_size, filename=filename,
                                     file_format=file_format, plot_density=dpi)
 
         return plot
@@ -18086,7 +18471,8 @@ class MFRM(Rasch):
                                  thresh_lines=False,
                                  central_diff=False,
                                  cat_highlight=None,
-                                 plot_style='colorblind',
+                                 plot_style='white',
+                                 palette='dark blue',
                                  black=False,
                                  font='Times',
                                  title_font_size=15,
@@ -18191,8 +18577,8 @@ class MFRM(Rasch):
                                          x_max=xmax, items=item, warm=warm, x_obs_data=xobsdata, y_obs_data=yobsdata,
                                          graph_title=graphtitle, y_label=ylabel, thresh_obs=obs,
                                          thresh_lines=thresh_lines, central_diff=central_diff,
-                                         cat_highlight=cat_highlight, plot_style=plot_style, black=black, font=font,
-                                         title_font_size=title_font_size, labelsize=labelsize,
+                                         cat_highlight=cat_highlight, plot_style=plot_style, palette=palette,
+                                         black=black, font=font, title_font_size=title_font_size, labelsize=labelsize,
                                          axis_font_size=axis_font_size, filename=filename, file_format=file_format,
                                          plot_density=dpi)
 
@@ -18211,7 +18597,8 @@ class MFRM(Rasch):
                              thresh_lines=False,
                              central_diff=False,
                              cat_highlight=None,
-                             plot_style='colorblind',
+                             plot_style='white',
+                             palette='dark blue',
                              black=False,
                              font='Times',
                              title_font_size=15,
@@ -18319,9 +18706,9 @@ class MFRM(Rasch):
                                      x_max=xmax, items=item, warm=warm, x_obs_data=xobsdata, y_obs_data=yobsdata,
                                      graph_title=graphtitle, y_label=ylabel, thresh_obs=obs, thresh_lines=thresh_lines,
                                      central_diff=central_diff, cat_highlight=cat_highlight, plot_style=plot_style,
-                                     black=black, font=font, title_font_size=title_font_size, labelsize=labelsize,
-                                     axis_font_size=axis_font_size, filename=filename, file_format=file_format,
-                                     plot_density=dpi)
+                                     palette=palette, black=black, font=font, title_font_size=title_font_size,
+                                     labelsize=labelsize, axis_font_size=axis_font_size, filename=filename,
+                                     file_format=file_format, plot_density=dpi)
 
         return plot
 
@@ -18337,7 +18724,8 @@ class MFRM(Rasch):
                    point_info_labels=False,
                    cat_highlight=None,
                    title=None,
-                   plot_style='colorblind',
+                   plot_style='white',
+                   palette='dark blue',
                    black=False,
                    font='Times',
                    title_font_size=15,
@@ -18390,12 +18778,12 @@ class MFRM(Rasch):
         ylabel = 'Fisher information'
 
         plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, raters=rater, x_min=xmin, x_max=xmax,
-                                     y_max=max(y) * 1.1, items=item, thresh_lines=thresh_lines,  plot_style=plot_style,
-                                     point_info_lines_item=[item, point_info_lines], score_labels=point_info_labels,
-                                     cat_highlight=cat_highlight, central_diff=central_diff, graph_title=graphtitle,
-                                     y_label=ylabel, black=black, font=font, title_font_size=title_font_size,
-                                     axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
-                                     plot_density=dpi, file_format=file_format)
+                                     y_max=max(y) * 1.1, items=item, thresh_lines=thresh_lines, plot_style=plot_style,
+                                     palette=palette, point_info_lines_item=[item, point_info_lines],
+                                     score_labels=point_info_labels, cat_highlight=cat_highlight,
+                                     central_diff=central_diff, graph_title=graphtitle, y_label=ylabel, black=black,
+                                     font=font, title_font_size=title_font_size, axis_font_size=axis_font_size,
+                                     labelsize=labelsize, filename=filename, plot_density=dpi, file_format=file_format)
 
         return plot
 
@@ -18411,7 +18799,8 @@ class MFRM(Rasch):
                    point_info_labels=False,
                    cat_highlight=None,
                    title=None,
-                   plot_style='colorblind',
+                   plot_style='white',
+                   palette='dark blue',
                    black=False,
                    font='Times',
                    title_font_size=15,
@@ -18464,12 +18853,12 @@ class MFRM(Rasch):
         ylabel = 'Fisher information'
 
         plot = self.plot_data_items(x_data=abilities, y_data=y, anchor=anchor, raters=rater, x_min=xmin, x_max=xmax,
-                                    y_max=max(y) * 1.1, items=item, thresh_lines=thresh_lines,  plot_style=plot_style,
-                                    point_info_lines_item=[item, point_info_lines], score_labels=point_info_labels,
-                                    cat_highlight=cat_highlight, central_diff=central_diff, graph_title=graphtitle,
-                                    y_label=ylabel, black=black, font=font, title_font_size=title_font_size,
-                                    axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
-                                    plot_density=dpi, file_format=file_format)
+                                    y_max=max(y) * 1.1, items=item, thresh_lines=thresh_lines, plot_style=plot_style,
+                                    palette=palette, point_info_lines_item=[item, point_info_lines],
+                                    score_labels=point_info_labels, cat_highlight=cat_highlight,
+                                    central_diff=central_diff, graph_title=graphtitle, y_label=ylabel, black=black,
+                                    font=font, title_font_size=title_font_size, axis_font_size=axis_font_size,
+                                    labelsize=labelsize, filename=filename, plot_density=dpi, file_format=file_format)
 
         return plot
 
@@ -18485,7 +18874,8 @@ class MFRM(Rasch):
                        point_info_labels=False,
                        cat_highlight=None,
                        title=None,
-                       plot_style='colorblind',
+                       plot_style='white',
+                       palette='dark blue',
                        black=False,
                        font='Times',
                        title_font_size=15,
@@ -18539,12 +18929,12 @@ class MFRM(Rasch):
 
         plot = self.plot_data_thresholds(x_data=abilities, y_data=y, anchor=anchor, raters=rater, x_min=xmin,
                                          x_max=xmax, y_max=max(y) * 1.1, items=item, thresh_lines=thresh_lines,
-                                         plot_style=plot_style, point_info_lines_item=[item, point_info_lines],
-                                         score_labels=point_info_labels, cat_highlight=cat_highlight,
-                                         central_diff=central_diff, graph_title=graphtitle, y_label=ylabel, black=black,
-                                         font=font, title_font_size=title_font_size, axis_font_size=axis_font_size,
-                                         labelsize=labelsize, filename=filename, plot_density=dpi,
-                                         file_format=file_format)
+                                         plot_style=plot_style,  palette=palette,
+                                         point_info_lines_item=[item, point_info_lines], score_labels=point_info_labels,
+                                         cat_highlight=cat_highlight, central_diff=central_diff, graph_title=graphtitle,
+                                         y_label=ylabel, black=black, font=font, title_font_size=title_font_size,
+                                         axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
+                                         plot_density=dpi, file_format=file_format)
 
         return plot
 
@@ -18560,7 +18950,8 @@ class MFRM(Rasch):
                    point_info_labels=False,
                    cat_highlight=None,
                    title=None,
-                   plot_style='colorblind',
+                   plot_style='white',
+                   palette='dark blue',
                    black=False,
                    font='Times',
                    title_font_size=15,
@@ -18614,12 +19005,12 @@ class MFRM(Rasch):
         ylabel = 'Fisher information'
 
         plot = self.plot_data_matrix(x_data=abilities, y_data=y, anchor=anchor, raters=rater, x_min=xmin, x_max=xmax,
-                                     y_max=max(y) * 1.1, items=item, thresh_lines=thresh_lines,  plot_style=plot_style,
-                                     point_info_lines_item=[item, point_info_lines], score_labels=point_info_labels,
-                                     cat_highlight=cat_highlight, central_diff=central_diff, graph_title=graphtitle,
-                                     y_label=ylabel, black=black, font=font, title_font_size=title_font_size,
-                                     axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
-                                     plot_density=dpi, file_format=file_format)
+                                     y_max=max(y) * 1.1, items=item, thresh_lines=thresh_lines, plot_style=plot_style,
+                                     palette=palette, point_info_lines_item=[item, point_info_lines],
+                                     score_labels=point_info_labels, cat_highlight=cat_highlight,
+                                     central_diff=central_diff, graph_title=graphtitle, y_label=ylabel, black=black,
+                                     font=font, title_font_size=title_font_size, axis_font_size=axis_font_size,
+                                     labelsize=labelsize, filename=filename, plot_density=dpi, file_format=file_format)
 
         return plot
 
@@ -18634,7 +19025,8 @@ class MFRM(Rasch):
                    title=None,
                    score_lines=None,
                    score_labels=False,
-                   plot_style='colorblind',
+                   plot_style='white',
+                   palette='dark blue',
                    black=False,
                    font='Times',
                    title_font_size=15,
@@ -18779,9 +19171,9 @@ class MFRM(Rasch):
         plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor,  items=items, raters=raters,
                                      x_obs_data=xobsdata, y_obs_data=yobsdata, x_min=xmin, x_max=xmax, y_max=y_max,
                                      score_lines_test=score_lines, score_labels=score_labels, graph_title=graphtitle,
-                                     y_label=ylabel, obs=obs, plot_style=plot_style, black=black, font=font,
-                                     title_font_size=title_font_size, axis_font_size=axis_font_size, labelsize=labelsize,
-                                     filename=filename, plot_density=dpi, file_format=file_format)
+                                     y_label=ylabel, obs=obs, plot_style=plot_style, palette=palette, black=black,
+                                     font=font, title_font_size=title_font_size, axis_font_size=axis_font_size,
+                                     labelsize=labelsize, filename=filename, plot_density=dpi, file_format=file_format)
 
         return plot
 
@@ -18796,7 +19188,8 @@ class MFRM(Rasch):
                   title=None,
                   score_lines=None,
                   score_labels=False,
-                  plot_style='colorblind',
+                  plot_style='white',
+                  palette='dark blue',
                   black=False,
                   font='Times',
                   title_font_size=15,
@@ -18940,9 +19333,9 @@ class MFRM(Rasch):
         plot = self.plot_data_items(x_data=abilities, y_data=y, anchor=anchor,  items=items, raters=raters,
                                     x_obs_data=xobsdata, y_obs_data=yobsdata, x_min=xmin, x_max=xmax, y_max=y_max,
                                     score_lines_test=score_lines, score_labels=score_labels, graph_title=graphtitle,
-                                    y_label=ylabel, obs=obs, plot_style=plot_style, black=black, font=font,
-                                    title_font_size=title_font_size, axis_font_size=axis_font_size, labelsize=labelsize,
-                                    filename=filename, plot_density=dpi, file_format=file_format)
+                                    y_label=ylabel, obs=obs, plot_style=plot_style, palette=palette, black=black,
+                                    font=font, title_font_size=title_font_size, axis_font_size=axis_font_size,
+                                    labelsize=labelsize, filename=filename, plot_density=dpi, file_format=file_format)
         return plot
 
     def tcc_thresholds(self,
@@ -18956,7 +19349,8 @@ class MFRM(Rasch):
                        title=None,
                        score_lines=None,
                        score_labels=False,
-                       plot_style='colorblind',
+                       plot_style='white',
+                       palette='dark blue',
                        black=False,
                        font='Times',
                        title_font_size=15,
@@ -19101,7 +19495,7 @@ class MFRM(Rasch):
                                          x_obs_data=xobsdata, y_obs_data=yobsdata, x_min=xmin, x_max=xmax, y_max=y_max,
                                          score_lines_test=score_lines, score_labels=score_labels,
                                          graph_title=graphtitle, y_label=ylabel, obs=obs, plot_style=plot_style,
-                                         black=black, font=font, title_font_size=title_font_size,
+                                         palette=palette, black=black, font=font, title_font_size=title_font_size,
                                          axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
                                          plot_density=dpi, file_format=file_format)
         return plot
@@ -19117,7 +19511,8 @@ class MFRM(Rasch):
                    title=None,
                    score_lines=None,
                    score_labels=False,
-                   plot_style='colorblind',
+                   plot_style='white',
+                   palette='dark blue',
                    black=False,
                    font='Times',
                    title_font_size=15,
@@ -19262,9 +19657,9 @@ class MFRM(Rasch):
         plot = self.plot_data_matrix(x_data=abilities, y_data=y, anchor=anchor,  items=items, raters=raters,
                                      x_obs_data=xobsdata, y_obs_data=yobsdata, x_min=xmin, x_max=xmax, y_max=y_max,
                                      score_lines_test=score_lines, score_labels=score_labels, graph_title=graphtitle,
-                                     y_label=ylabel, obs=obs, plot_style=plot_style, black=black, font=font,
-                                     title_font_size=title_font_size, axis_font_size=axis_font_size, labelsize=labelsize,
-                                     filename=filename, plot_density=dpi, file_format=file_format)
+                                     y_label=ylabel, obs=obs, plot_style=plot_style, palette=palette, black=black,
+                                     font=font, title_font_size=title_font_size, axis_font_size=axis_font_size,
+                                     labelsize=labelsize, filename=filename, plot_density=dpi, file_format=file_format)
         return plot
 
     def test_info_global(self,
@@ -19277,7 +19672,8 @@ class MFRM(Rasch):
                          xmax=5,
                          ymax=None,
                          title=None,
-                         plot_style='colorblind',
+                         plot_style='white',
+                         palette='dark blue',
                          black=False,
                          font='Times',
                          title_font_size=15,
@@ -19312,7 +19708,7 @@ class MFRM(Rasch):
                 items = None
 
             else:
-                raters = [raters]
+                items = [items]
 
         if isinstance(raters, str):
             if raters == 'all':
@@ -19325,7 +19721,7 @@ class MFRM(Rasch):
                 raters = None
 
             else:
-                items = [items]
+                raters = [raters]
 
         dummy_sevs = pd.Series({'dummy_rater': 0})
 
@@ -19369,9 +19765,9 @@ class MFRM(Rasch):
         plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, items=items, raters=raters, x_min=xmin,
                                      x_max=xmax, y_max=ymax, point_info_lines_test=point_info_lines,
                                      score_labels=point_info_labels, graph_title=graphtitle, y_label=ylabel,
-                                     plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
-                                     axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
-                                     plot_density=dpi, file_format=file_format)
+                                     plot_style=plot_style, palette=palette, black=black, font=font,
+                                     title_font_size=title_font_size, axis_font_size=axis_font_size,
+                                     labelsize=labelsize, filename=filename, plot_density=dpi, file_format=file_format)
 
         return plot
 
@@ -19385,7 +19781,8 @@ class MFRM(Rasch):
                         xmax=5,
                         ymax=None,
                         title=None,
-                        plot_style='colorblind',
+                        plot_style='white',
+                        palette='dark blue',
                         black=False,
                         font='Times',
                         title_font_size=15,
@@ -19420,7 +19817,7 @@ class MFRM(Rasch):
                 items = None
 
             else:
-                raters = [raters]
+                items = [items]
 
         if isinstance(raters, str):
             if raters == 'all':
@@ -19433,7 +19830,7 @@ class MFRM(Rasch):
                 raters = None
 
             else:
-                items = [items]
+                raters = [raters]
 
         dummy_sevs = {'dummy_rater': {item: 0 for item in self.dataframe.columns}}
 
@@ -19477,9 +19874,9 @@ class MFRM(Rasch):
         plot = self.plot_data_items(x_data=abilities, y_data=y, anchor=anchor, items=items, raters=raters, x_min=xmin,
                                     x_max=xmax, y_max=ymax, point_info_lines_test=point_info_lines,
                                     score_labels=point_info_labels, graph_title=graphtitle, y_label=ylabel,
-                                    plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
-                                    axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
-                                    plot_density=dpi, file_format=file_format)
+                                    plot_style=plot_style, palette=palette, black=black, font=font,
+                                    title_font_size=title_font_size, axis_font_size=axis_font_size,
+                                    labelsize=labelsize, filename=filename, plot_density=dpi, file_format=file_format)
 
         return plot
 
@@ -19493,7 +19890,8 @@ class MFRM(Rasch):
                              xmax=5,
                              ymax=None,
                              title=None,
-                             plot_style='colorblind',
+                             plot_style='white',
+                             palette='dark blue',
                              black=False,
                              font='Times',
                              title_font_size=15,
@@ -19528,7 +19926,7 @@ class MFRM(Rasch):
                 items = None
 
             else:
-                raters = [raters]
+                items = [items]
 
         if isinstance(raters, str):
             if raters == 'all':
@@ -19541,7 +19939,7 @@ class MFRM(Rasch):
                 raters = None
 
             else:
-                items = [items]
+                raters = [raters]
 
         dummy_sevs = {'dummy_rater': np.zeros(self.max_score + 1)}
 
@@ -19585,9 +19983,9 @@ class MFRM(Rasch):
         plot = self.plot_data_thresholds(x_data=abilities, y_data=y, anchor=anchor, items=items, raters=raters,
                                          x_min=xmin, x_max=xmax, y_max=ymax, point_info_lines_test=point_info_lines,
                                          score_labels=point_info_labels, graph_title=graphtitle, y_label=ylabel,
-                                         plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
-                                         axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
-                                         plot_density=dpi, file_format=file_format)
+                                         plot_style=plot_style, palette=palette, black=black, font=font,
+                                         title_font_size=title_font_size, axis_font_size=axis_font_size,
+                                         labelsize=labelsize, filename=filename, plot_density=dpi, file_format=file_format)
 
         return plot
 
@@ -19601,7 +19999,8 @@ class MFRM(Rasch):
                          xmax=5,
                          ymax=None,
                          title=None,
-                         plot_style='colorblind',
+                         plot_style='white',
+                         palette='dark blue',
                          black=False,
                          font='Times',
                          title_font_size=15,
@@ -19636,7 +20035,7 @@ class MFRM(Rasch):
                 items = None
 
             else:
-                raters = [raters]
+                items = [items]
 
         if isinstance(raters, str):
             if raters == 'all':
@@ -19649,7 +20048,7 @@ class MFRM(Rasch):
                 raters = None
 
             else:
-                items = [items]
+                raters = [raters]
 
         dummy_sevs = {'dummy_rater': {item: np.zeros(self.max_score + 1)
                                       for item in self.dataframe.columns}}
@@ -19694,9 +20093,9 @@ class MFRM(Rasch):
         plot = self.plot_data_matrix(x_data=abilities, y_data=y, anchor=anchor, items=items, raters=raters, x_min=xmin,
                                      x_max=xmax, y_max=ymax, point_info_lines_test=point_info_lines,
                                      score_labels=point_info_labels, graph_title=graphtitle, y_label=ylabel,
-                                     plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
-                                     axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
-                                     plot_density=dpi, file_format=file_format)
+                                     plot_style=plot_style, palette=palette, black=black, font=font,
+                                     title_font_size=title_font_size, axis_font_size=axis_font_size,
+                                     labelsize=labelsize, filename=filename, plot_density=dpi, file_format=file_format)
 
         return plot
 
@@ -19710,7 +20109,8 @@ class MFRM(Rasch):
                          xmax=5,
                          ymax=5,
                          title=None,
-                         plot_style='colorblind',
+                         plot_style='white',
+                         palette='dark blue',
                          black=False,
                          font='Times',
                          title_font_size=15,
@@ -19745,7 +20145,7 @@ class MFRM(Rasch):
                 items = None
 
             else:
-                raters = [raters]
+                items = [items]
 
         if isinstance(raters, str):
             if raters == 'all':
@@ -19758,7 +20158,7 @@ class MFRM(Rasch):
                 raters = None
 
             else:
-                items = [items]
+                raters = [raters]
 
         abilities = np.arange(-20, 20, 0.1)
 
@@ -19801,9 +20201,9 @@ class MFRM(Rasch):
         plot = self.plot_data_global(x_data=abilities, y_data=y, anchor=anchor, items=items, raters=raters,
                                      x_min=xmin, x_max=xmax, y_max=ymax, point_csem_lines=point_csem_lines,
                                      score_labels=point_csem_labels, graph_title=graphtitle, y_label=ylabel,
-                                     plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
-                                     axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
-                                     plot_density=dpi, file_format=file_format)
+                                     plot_style=plot_style, palette=palette, black=black, font=font,
+                                     title_font_size=title_font_size, axis_font_size=axis_font_size,
+                                     labelsize=labelsize, filename=filename, plot_density=dpi, file_format=file_format)
 
         return plot
 
@@ -19817,7 +20217,8 @@ class MFRM(Rasch):
                         xmax=5,
                         ymax=5,
                         title=None,
-                        plot_style='colorblind',
+                        plot_style='white',
+                        palette='dark blue',
                         black=False,
                         font='Times',
                         title_font_size=15,
@@ -19852,7 +20253,7 @@ class MFRM(Rasch):
                 items = None
 
             else:
-                raters = [raters]
+                items = [items]
 
         if isinstance(raters, str):
             if raters == 'all':
@@ -19865,7 +20266,7 @@ class MFRM(Rasch):
                 raters = None
 
             else:
-                items = [items]
+                raters = [raters]
 
         dummy_sevs = {'dummy_rater': {item: 0 for item in self.dataframe.columns}}
 
@@ -19908,9 +20309,9 @@ class MFRM(Rasch):
         plot = self.plot_data_items(x_data=abilities, y_data=y, anchor=anchor, items=items, raters=raters,
                                     x_min=xmin, x_max=xmax, y_max=ymax, point_csem_lines=point_csem_lines,
                                     score_labels=point_csem_labels, graph_title=graphtitle, y_label=ylabel,
-                                    plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
-                                    axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
-                                    plot_density=dpi, file_format=file_format)
+                                    plot_style=plot_style, palette=palette, black=black, font=font,
+                                    title_font_size=title_font_size, axis_font_size=axis_font_size, labelsize=labelsize,
+                                    filename=filename, plot_density=dpi, file_format=file_format)
 
         return plot
 
@@ -19924,7 +20325,8 @@ class MFRM(Rasch):
                              xmax=5,
                              ymax=5,
                              title=None,
-                             plot_style='colorblind',
+                             plot_style='white',
+                             palette='dark blue',
                              black=False,
                              font='Times',
                              title_font_size=15,
@@ -19959,7 +20361,7 @@ class MFRM(Rasch):
                 items = None
 
             else:
-                raters = [raters]
+                items = [items]
 
         if isinstance(raters, str):
             if raters == 'all':
@@ -19972,7 +20374,7 @@ class MFRM(Rasch):
                 raters = None
 
             else:
-                items = [items]
+                raters = [raters]
 
         dummy_sevs = {'dummy_rater': np.zeros(self.max_score + 1)}
 
@@ -20015,9 +20417,10 @@ class MFRM(Rasch):
         plot = self.plot_data_thresholds(x_data=abilities, y_data=y, anchor=anchor, items=items, raters=raters,
                                          x_min=xmin, x_max=xmax, y_max=ymax, point_csem_lines=point_csem_lines,
                                          score_labels=point_csem_labels, graph_title=graphtitle, y_label=ylabel,
-                                         plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
-                                         axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
-                                         plot_density=dpi, file_format=file_format)
+                                         plot_style=plot_style, palette=palette, black=black, font=font,
+                                         title_font_size=title_font_size, axis_font_size=axis_font_size,
+                                         labelsize=labelsize, filename=filename, plot_density=dpi,
+                                         file_format=file_format)
 
         return plot
 
@@ -20031,7 +20434,8 @@ class MFRM(Rasch):
                          xmax=5,
                          ymax=5,
                          title=None,
-                         plot_style='colorblind',
+                         plot_style='white',
+                         palette='dark blue',
                          black=False,
                          font='Times',
                          title_font_size=15,
@@ -20066,7 +20470,7 @@ class MFRM(Rasch):
                 items = None
 
             else:
-                raters = [raters]
+                items = [items]
 
         if isinstance(raters, str):
             if raters == 'all':
@@ -20079,7 +20483,7 @@ class MFRM(Rasch):
                 raters = None
 
             else:
-                items = [items]
+                raters = [raters]
 
         dummy_sevs = {'dummy_rater': {item: np.zeros(self.max_score + 1)
                                       for item in self.dataframe.columns}}
@@ -20123,9 +20527,9 @@ class MFRM(Rasch):
         plot = self.plot_data_matrix(x_data=abilities, y_data=y, anchor=anchor, items=items, raters=raters,
                                      x_min=xmin, x_max=xmax, y_max=ymax, point_csem_lines=point_csem_lines,
                                      score_labels=point_csem_labels, graph_title=graphtitle, y_label=ylabel,
-                                     plot_style=plot_style, black=black, font=font, title_font_size=title_font_size,
-                                     axis_font_size=axis_font_size, labelsize=labelsize, filename=filename,
-                                     plot_density=dpi, file_format=file_format)
+                                     plot_style=plot_style, palette=palette, black=black, font=font,
+                                     title_font_size=title_font_size, axis_font_size=axis_font_size,
+                                     labelsize=labelsize, filename=filename, plot_density=dpi, file_format=file_format)
 
         return plot
 
@@ -20137,7 +20541,7 @@ class MFRM(Rasch):
                                   x_max=6,
                                   normal=False,
                                   title=None,
-                                  plot_style='colorblind',
+                                  plot_style='white',
                                   font='Times',
                                   title_font_size=15,
                                   axis_font_size=12,
@@ -20201,7 +20605,7 @@ class MFRM(Rasch):
                                  x_max=6,
                                  normal=False,
                                  title=None,
-                                 plot_style='colorblind',
+                                 plot_style='white',
                                  font='Times',
                                  title_font_size=15,
                                  axis_font_size=12,
@@ -20265,7 +20669,7 @@ class MFRM(Rasch):
                                       x_max=6,
                                       normal=False,
                                       title=None,
-                                      plot_style='colorblind',
+                                      plot_style='white',
                                       font='Times',
                                       title_font_size=15,
                                       axis_font_size=12,
@@ -20325,7 +20729,7 @@ class MFRM(Rasch):
                                   x_max=6,
                                   normal=False,
                                   title=None,
-                                  plot_style='colorblind',
+                                  plot_style='white',
                                   font='Times',
                                   title_font_size=15,
                                   axis_font_size=12,
