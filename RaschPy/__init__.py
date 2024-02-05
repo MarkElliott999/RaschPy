@@ -2655,6 +2655,17 @@ class PCM(Rasch):
 
         self.central_diffs = pd.Series(self.central_diffs)
 
+        self.cat_widths = {}
+
+        for item in self.items:
+            if self.max_score_vector[item] > 1:
+                self.cat_widths[item] = np.array([(self.thresholds_uncentred[item][score + 1] -
+                                                   self.thresholds_uncentred[item][score])
+                                                  for score in range(self.max_score_vector[item] - 1)])
+
+            else:
+                self.cat_widths[item] = np.zeros(1)
+
     def calibrate_anchor(self,
                          anchors,
                          sd_ratio_tol=1.1,
@@ -2885,20 +2896,23 @@ class PCM(Rasch):
         '''
 
         if items is None:
-            thresholds = self.thresholds_uncentred
+            items = self.dataframe.columns
 
-        elif isinstance(items, str):
+        if isinstance(items, str):
             if items == 'all':
-                thresholds = self.thresholds_uncentred
+                items = self.dataframe.columns
+            elif items == 'none':
+                items = self.dataframe.columns
 
-        else:
-            thresholds = {item: self.thresholds_uncentred[item] for item in items}
+        thresholds = {item: self.thresholds_uncentred[item] for item in items
+                      if self.dataframe.loc[person, item] == self.dataframe.loc[person, item]}
 
         person_data = self.dataframe.loc[person]
         person_filter = (person_data + 1) / (person_data + 1)
         score = np.nansum(person_data)
 
-        ext_score = np.nansum(self.max_score_vector * person_filter)[items].sum()
+        ext_score = np.nansum([self.max_score_vector[item] * person_filter[item]
+                               for item in items])
 
         if score == 0:
             score = ext_score_adjustment
@@ -2916,12 +2930,10 @@ class PCM(Rasch):
             while (abs(change) > tolerance) & (iters <= max_iters):
 
                 result = sum(self.exp_score_uncentred(estimate, item_thresholds)
-                             for item, item_thresholds in thresholds.items()
-                             if person_filter[item] == 1)
+                             for item, item_thresholds in thresholds.items())
 
                 info = sum(self.variance_uncentred(estimate, item_thresholds)
-                           for item, item_thresholds in thresholds.items()
-                           if person_filter[item] == 1)
+                           for item, item_thresholds in thresholds.items())
 
                 change = max(-1, min(1, (result - score) / info))
                 estimate -= change
@@ -3158,16 +3170,6 @@ class PCM(Rasch):
         estimation, includes optional Warm (1989) bias correction.
         '''
 
-        if items is None:
-            thresholds = self.thresholds_uncentred
-
-        elif isinstance(items, str):
-            if items == 'all':
-                thresholds = self.thresholds_uncentred
-
-        else:
-            items = {item: self.thresholds_uncentred[item] for item in items}
-
         estimates = {person: self.abil(person, items=items, warm_corr=warm_corr, tolerance=tolerance,
                                        max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
                      for person in self.dataframe.index}
@@ -3248,27 +3250,51 @@ class PCM(Rasch):
         item_count = (df == df).sum(axis=0)
         person_count = (df == df).sum(axis=1)
 
-        max_max_score = self.max_score_vector.max()
+        self.cat_prob_dict = {}
 
-        self.cat_prob_dict = {cat: {item: {person: self.cat_prob_uncentred(abil, cat, self.thresholds_uncentred[item])
-                                           if self.max_score_vector[item] >= cat
-                                           else 0
-                                           for person, abil in abilities.items()}
-                                    for item in self.dataframe.columns}
-                              for cat in range(max_max_score + 1)}
+        for item in self.items:
+            abil_df = pd.DataFrame({cat: self.person_abilities
+                                    for cat in range(self.max_score_vector[item] + 1)})
+            thr_df = pd.DataFrame({person: self.thresholds_centred[item] + self.central_diffs[item]
+                                   for person in self.persons},
+                                  index=[i for i in range(self.max_score_vector[item] + 1)]).T
+            cat_probs = abil_df - thr_df
+            cat_probs.iloc[:, 0] = 0
 
-        for cat in range(max_max_score + 1):
-            self.cat_prob_dict[cat] = pd.DataFrame(self.cat_prob_dict[cat])
+            for cat in range(self.max_score_vector[item]):
+                cat_probs[cat + 1] += cat_probs[cat]
 
-        self.exp_score_df = sum(cat * self.cat_prob_dict[cat] for cat in range(max_max_score + 1))
+            cat_probs = np.exp(cat_probs)
+            cat_probs = cat_probs.div(cat_probs.sum(axis=1), axis=0)
+
+            self.cat_prob_dict[item] = cat_probs
+
+        del abil_df
+        del thr_df
+        del cat_probs
+
+        self.exp_score_df = pd.DataFrame()
+
+        for item in self.items:
+            self.exp_score_df[item] = sum(cat * self.cat_prob_dict[item][cat]
+                                          for cat in range(self.max_score_vector[item] + 1))
+
         self.exp_score_df *= missing_mask
 
-        self.info_df = sum(((cat - self.exp_score_df) ** 2) * self.cat_prob_dict[cat]
-                            for cat in range(max_max_score + 1))
+        self.info_df = pd.DataFrame()
+
+        for item in self.items:
+            self.info_df[item] = sum(((cat - self.exp_score_df[item]) ** 2) * self.cat_prob_dict[item][cat]
+                                     for cat in range(self.max_score_vector[item] + 1))
+
         self.info_df *= missing_mask
 
-        self.kurtosis_df = sum(self.cat_prob_dict[cat] * ((cat - self.exp_score_df) ** 4)
-                               for cat in range(max_max_score + 1))
+        self.kurtosis_df = pd.DataFrame()
+
+        for item in self.items:
+            self.kurtosis_df[item] = sum(self.cat_prob_dict[item][cat] * ((cat - self.exp_score_df[item]) ** 4)
+                                         for cat in range(self.max_score_vector[item] + 1))
+
         self.kurtosis_df *= missing_mask
 
         self.residual_df = df - self.exp_score_df
@@ -3294,6 +3320,8 @@ class PCM(Rasch):
 
         (self.point_measure,
          self.exp_point_measure) = self.pt_meas(self.person_abilities, self.exp_score_df, self.info_df)
+        
+        self.disordered = {item: any([(width < 0) for width in self.cat_widths[item]]) for item in self.items}
 
         '''
         Threshold fit statistics
@@ -3666,6 +3694,13 @@ class PCM(Rasch):
         if point_measure_corr:
             self.item_stats['PM corr'] = self.point_measure.to_numpy().round(dp)
             self.item_stats['Exp PM corr'] = self.exp_point_measure.to_numpy().round(dp)
+
+        self.item_stats['Disordered'] = self.disordered
+
+        mask = self.item_stats.applymap(type) != bool
+        mapping = {True: 'True', False: ''}
+
+        self.item_stats = self.item_stats.where(mask, self.item_stats.replace(mapping))
 
         self.item_stats.index = self.dataframe.columns
 
@@ -5160,6 +5195,13 @@ class RSM(Rasch):
 
         self.thresholds = thresholds
 
+        if self.max_score > 1:
+            self.cat_widths = np.array([self.thresholds[score + 2] - self.thresholds[score + 1]
+                                        for score in range(self.max_score - 1)])
+
+        else:
+            self.cat_widths = np.zeros(1)
+
     def std_errors(self,
                    interval=None,
                    no_of_samples=100,
@@ -5327,9 +5369,6 @@ class RSM(Rasch):
         Creates raw score to ability estimate look-up table. Newton-Raphson ML
         estimation, includes optional Warm (1989) bias correction.
         '''
-
-        if items is None:
-            items = self.items
 
         estimates = {person: self.abil(person, items=items, warm_corr=warm_corr, tolerance=tolerance,
                                        max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
@@ -5613,6 +5652,8 @@ class RSM(Rasch):
 
         (self.point_measure,
          self.exp_point_measure) = self.pt_meas(self.person_abilities, self.exp_score_df, self.info_df)
+
+        self.disordered = any([(width < 0) for width in self.cat_widths])
 
         '''
         Threshold fit statistics
@@ -5899,6 +5940,12 @@ class RSM(Rasch):
         if point_measure_corr:
             self.item_stats['PM corr'] = self.point_measure.astype(float).round(dp)
             self.item_stats['Exp PM corr'] = self.exp_point_measure.astype(float).round(dp)
+
+        if self.disordered:
+            self.item_stats['Disordered'] = ['True' for item in self.items]
+
+        else:
+            self.item_stats['Disordered'] = ['False' for item in self.items]
 
         self.item_stats.index = self.dataframe.columns
 
@@ -8044,6 +8091,13 @@ class MFRM(Rasch):
         self.thresholds = self.ra_thresholds(self.diffs, constant)
         self.raters_global(constant=constant, method=method, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
+        if self.max_score > 1:
+            self.cat_widths = np.array([self.thresholds[score + 2] - self.thresholds[score + 1]
+                                        for score in range(self.max_score - 1)])
+
+        else:
+            self.cat_widths = np.zeros(1)
+
     def calibrate_items(self,
                         constant=0.1,
                         method='cos',
@@ -8069,6 +8123,13 @@ class MFRM(Rasch):
         self.item_diffs(constant=constant, method=method, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
         self.thresholds = self.ra_thresholds(self.diffs, constant)
         self.raters_items(constant=constant, method=method, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
+
+        if self.max_score > 1:
+            self.cat_widths = np.array([self.thresholds[score + 2] - self.thresholds[score + 1]
+                                        for score in range(self.max_score - 1)])
+
+        else:
+            self.cat_widths = np.zeros(1)
 
 
     def calibrate_thresholds(self,
@@ -8097,6 +8158,13 @@ class MFRM(Rasch):
         self.thresholds = self.ra_thresholds(self.diffs, constant)
         self.raters_thresholds(constant=constant, method=method, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
+        if self.max_score > 1:
+            self.cat_widths = np.array([self.thresholds[score + 2] - self.thresholds[score + 1]
+                                        for score in range(self.max_score - 1)])
+
+        else:
+            self.cat_widths = np.zeros(1)
+
     def calibrate_matrix(self,
                          constant=0.1,
                          method='cos',
@@ -8122,6 +8190,13 @@ class MFRM(Rasch):
         self.item_diffs(constant=constant, method=method, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
         self.thresholds = self.ra_thresholds(self.diffs, constant)
         self.raters_matrix(constant=constant, method=method, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
+
+        if self.max_score > 1:
+            self.cat_widths = np.array([self.thresholds[score + 2] - self.thresholds[score + 1]
+                                        for score in range(self.max_score - 1)])
+
+        else:
+            self.cat_widths = np.zeros(1)
 
     def std_errors_global(self,
                           anchor_raters=None,
@@ -8813,6 +8888,14 @@ class MFRM(Rasch):
 
         self.anchor_raters_global = anchor_raters
 
+        if self.max_score > 1:
+            self.anchor_cat_widths_global = np.array([(self.anchor_thresholds_global[score + 2] -
+                                                       self.anchor_thresholds_global[score + 1])
+                                                      for score in range(self.max_score - 1)])
+
+        else:
+            self.anchor_cat_widths_global = np.zeros(1)
+
     def std_errors_global_anchor(self,
                                  anchor_raters,
                                  interval=None,
@@ -8942,6 +9025,14 @@ class MFRM(Rasch):
 
         self.anchor_raters_items = anchor_raters
 
+        if self.max_score > 1:
+            self.anchor_cat_widths_items = np.array([(self.anchor_thresholds_items[score + 2] -
+                                                       self.anchor_thresholds_items[score + 1])
+                                                     for score in range(self.max_score - 1)])
+
+        else:
+            self.anchor_cat_widths_items = np.zeros(1)
+
     def calibrate_thresholds_anchor(self,
                                     anchor_raters,
                                     calibrate=False,
@@ -8973,6 +9064,14 @@ class MFRM(Rasch):
         self.anchor_thresholds_thresholds[1:] -= self.anchor_thresholds_thresholds[1:].mean()
 
         self.anchor_raters_thresholds = anchor_raters
+
+        if self.max_score > 1:
+            self.anchor_cat_widths_thresholds = np.array([(self.anchor_thresholds_thresholds[score + 2] -
+                                                           self.anchor_thresholds_thresholds[score + 1])
+                                                          for score in range(self.max_score - 1)])
+
+        else:
+            self.anchor_cat_widths_thresholds = np.zeros(1)
 
     def calibrate_matrix_anchor(self,
                                 anchor_raters,
@@ -9044,6 +9143,14 @@ class MFRM(Rasch):
             self.anchor_marginal_severities_thresholds[rater][1:] -= adjustment
 
         self.anchor_raters_matrix = anchor_raters
+
+        if self.max_score > 1:
+            self.anchor_cat_widths_matrix = np.array([(self.anchor_thresholds_matrix[score + 2] -
+                                                       self.anchor_thresholds_matrix[score + 1])
+                                                      for score in range(self.max_score - 1)])
+
+        else:
+            self.anchor_cat_widths_matrix = np.zeros(1)
 
     def abil_global(self,
                     person,
@@ -10775,6 +10882,18 @@ class MFRM(Rasch):
             self.item_stats_global['PM corr'] = self.point_measure_global.to_numpy().round(dp)
             self.item_stats_global['Exp PM corr'] = self.exp_point_measure_global.to_numpy().round(dp)
 
+        if anchor_raters is None:
+            disordered = any([(width < 0) for width in self.cat_widths])
+
+        else:
+            disordered = any([(width < 0) for width in self.anchor_cat_widths_global])
+
+        if disordered:
+            self.item_stats_global['Disordered'] = ['True' for item in self.items]
+
+        else:
+            self.item_stats_global['Disordered'] = ['False' for item in self.items]
+
         self.item_stats_global.index = self.dataframe.columns
 
     def threshold_stats_df_global(self,
@@ -11211,6 +11330,18 @@ class MFRM(Rasch):
         if point_measure_corr:
             self.item_stats_items['PM corr'] = self.point_measure_items.to_numpy().round(dp)
             self.item_stats_items['Exp PM corr'] = self.exp_point_measure_items.to_numpy().round(dp)
+
+        if anchor_raters is None:
+            disordered = any([(width < 0) for width in self.cat_widths])
+
+        else:
+            disordered = any([(width < 0) for width in self.anchor_cat_widths_items])
+
+        if disordered:
+            self.item_stats_items['Disordered'] = ['True' for item in self.items]
+
+        else:
+            self.item_stats_items['Disordered'] = ['False' for item in self.items]
 
         self.item_stats_items.index = self.dataframe.columns
 
@@ -11657,6 +11788,18 @@ class MFRM(Rasch):
         if point_measure_corr:
             self.item_stats_thresholds['PM corr'] = self.point_measure_thresholds.to_numpy().round(dp)
             self.item_stats_thresholds['Exp PM corr'] = self.exp_point_measure_thresholds.to_numpy().round(dp)
+
+        if anchor_raters is None:
+            disordered = any([(width < 0) for width in self.cat_widths])
+
+        else:
+            disordered = any([(width < 0) for width in self.anchor_cat_widths_thresholds])
+
+        if disordered:
+            self.item_stats_thresholds['Disordered'] = ['True' for item in self.items]
+
+        else:
+            self.item_stats_thresholds['Disordered'] = ['False' for item in self.items]
 
         self.item_stats_thresholds.index = self.dataframe.columns
 
@@ -12105,6 +12248,18 @@ class MFRM(Rasch):
         if point_measure_corr:
             self.item_stats_matrix['PM corr'] = self.point_measure_matrix.to_numpy().round(dp)
             self.item_stats_matrix['Exp PM corr'] = self.exp_point_measure_matrix.to_numpy().round(dp)
+
+        if anchor_raters is None:
+            disordered = any([(width < 0) for width in self.cat_widths])
+
+        else:
+            disordered = any([(width < 0) for width in self.anchor_cat_widths_matrix])
+
+        if disordered:
+            self.item_stats_matrix['Disordered'] = ['True' for item in self.items]
+        
+        else:
+            self.item_stats_matrix['Disordered'] = ['False' for item in self.items]
 
         self.item_stats_matrix.index = self.dataframe.columns
 
@@ -21138,8 +21293,7 @@ class PCM_Sim(Rasch_Sim):
         '''
 
         self.cat_probs = {f'Item_{item + 1}':
-                          np.array([[self.pcm.cat_prob_uncentred(abil,
-                                                                 cat,
+                          np.array([[self.pcm.cat_prob_uncentred(abil, cat,
                                                                  self.thresholds_uncentred[f'Item_{item + 1}'])
                                      for cat in range(self.max_score_vector[item] + 1)]
                                     for abil in self.abilities])
