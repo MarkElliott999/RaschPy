@@ -1,0 +1,32 @@
+*** RaschPy Examples ***
+
+In this folder, there are the following examples:
+
+- Worked examples for the following models: SLM, PCM, RSM, global MFRM, matrix MFRM
+- Code to run the RaschPy anaysis for the simulation studies in Elliott & Buttery
+  (2022a) and Elliott & Buttery (2022b)
+- An Excel spreadsheet working through the PAIR algoritm for dichotomous data
+  to illustrate how it works
+
+*** Worked examples  ***
+
+For each class, there is a Jupyter notebook which runs through the main analysis
+functions from a simulated data set (also included). .csv files with the generating
+parameters for the simulations are included for reference and comparison, and a folder
+of output files contains the .csv files of statistcal output and .png files of graphical
+output.
+
+*** Code to run the simulation studies analysis ***
+*** FORTHCOMING - not yet in repo ***
+
+Jupyter notebooks to run large-scale simulation experiments as in Elliott & Buttery (2022a)
+and Elliott & Buttery (2022b) are included (this only covers the RaschPy analysis - running
+comparisons with JMLE, CMLE or any other algorithms would need to be done separately, with
+appropriate software (data sets and generating parameters are saved to file for comparison
+with other algorithms).
+
+*** Excel spreadsheet ***
+
+An Excel file modelled on Moulton's worked example of JMLE is included, showing the steps
+of the PAIR algorithm for dichotomous data. The data set is the same as the Moulton data set,
+and the Moulton JMLE results are included for comparison.
