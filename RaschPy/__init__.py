@@ -22,7 +22,7 @@ from matplotlib import colors as colors
 from matplotlib import cm as cmx
 import seaborn as sns
 
-import xlsxwriter
+#import xlsxwriter
 
 def loadup_slm(filename,
                item_names=True,
@@ -259,11 +259,11 @@ def loadup_mfrm_single(filename,
     valid = transformed_responses[~transformed_responses.isnull().all(axis=1)]
     invalid = transformed_responses[transformed_responses.isnull().all(axis=1)]
 
-    invalid_responses = invalid.stack(dropna=False).swaplevel().sort_index(level=[0, 1])
+    invalid_responses = invalid.stack(future_stack=True).swaplevel().sort_index(level=[0, 1])
     for col in invalid_responses.columns:
         invalid_responses[col] = np.where(invalid_responses[col].isna(), np.nan, invalid_responses[col])
 
-    responses = valid.stack(dropna=False).swaplevel().sort_index(level=[0, 1])
+    responses = valid.stack(future_stack=True).swaplevel().sort_index(level=[0, 1])
     for col in invalid_responses.columns:
         responses[col] = np.where(responses[col].isna(), np.nan, responses[col])
 
@@ -546,7 +546,7 @@ class Rasch:
         if pcm:
             names = []
             for i, item in enumerate(self.dataframe.columns):
-                for j in range(self.max_score_vector[i]):
+                for j in range(self.max_score_vector.iloc[i]):
                     names.append(f'{str(item)}_{str(j + 1)}')
 
         else:
@@ -629,14 +629,17 @@ class Rasch:
                 abils,
                 exp_score_df,
                 info_df):
-
+        
         abil_dev_df = {item: abils - abils.mean()
                        for item in self.dataframe.columns}
         abil_dev_df = pd.DataFrame(abil_dev_df)
         abil_dev_df *= ((self.dataframe + 1) / (self.dataframe + 1))
+        abil_dev_df = abil_dev_df.loc[exp_score_df.index]
 
         score_dev_df = self.dataframe - self.dataframe.mean(axis=0)
-        exp_score_dev_df = exp_score_df - self.dataframe.mean(axis=0)
+        score_dev_df = score_dev_df.loc[exp_score_df.index]
+        
+        exp_score_dev_df = exp_score_df - self.dataframe.loc[exp_score_df.index].mean(axis=0)
 
         pt_measure_num = (score_dev_df * abil_dev_df).sum(axis=0)
         pt_measure_den = np.sqrt((score_dev_df ** 2).sum(axis=0) * (abil_dev_df ** 2).sum(axis=0))
@@ -660,7 +663,7 @@ class Rasch:
                            title=None,
                            plot_style='white',
                            black=False,
-                           font='Times',
+                           font='Times New Roman',
                            title_font_size=15,
                            axis_font_size=12,
                            labelsize=12,
@@ -1230,6 +1233,7 @@ class SLM(Rasch):
         self.csem_vector = 1 / np.sqrt(self.info_df.sum(axis=1))
         self.rsem_vector = np.sqrt((self.residual_df ** 2).sum(axis=1)) / self.info_df.sum(axis=1)
 
+
         self.person_outfit_ms = (self.std_residual_df ** 2).mean(axis=1)
         self.person_outfit_ms.name = 'Outfit MS'
         self.person_infit_ms = (self.residual_df ** 2).sum(axis=1) / self.info_df.sum(axis=1)
@@ -1677,7 +1681,7 @@ class SLM(Rasch):
                   palette='dark blue',
                   black=False,
                   figsize=(8, 6),
-                  font='Times',
+                  font='Times New Roman',
                   title_font_size=15,
                   axis_font_size=12,
                   labelsize=12,
@@ -1905,7 +1909,7 @@ class SLM(Rasch):
             plot_style='white',
             palette='dark blue',
             black=False,
-            font='Times',
+            font='Times New Roman',
             title_font_size=15,
             axis_font_size=12,
             labelsize=12,
@@ -1965,7 +1969,7 @@ class SLM(Rasch):
              plot_style='white',
              palette='dark blue',
              black=False,
-             font='Times',
+             font='Times New Roman',
              title_font_size=15,
              axis_font_size=12,
              labelsize=12,
@@ -2041,7 +2045,7 @@ class SLM(Rasch):
             palette='dark blue',
             black=False,
             title=None,
-            font='Times',
+            font='Times New Roman',
             title_font_size=15,
             axis_font_size=12,
             labelsize=12,
@@ -2091,7 +2095,7 @@ class SLM(Rasch):
             plot_style='white',
             palette='dark blue',
             black=False,
-            font='Times',
+            font='Times New Roman',
             title_font_size=15,
             axis_font_size=12,
             labelsize=12,
@@ -2173,7 +2177,7 @@ class SLM(Rasch):
                   plot_style='white',
                   palette='dark blue',
                   black=False,
-                  font='Times',
+                  font='Times New Roman',
                   title_font_size=15,
                   axis_font_size=12,
                   labelsize=12,
@@ -2240,7 +2244,7 @@ class SLM(Rasch):
                   plot_style='white',
                   palette='dark blue',
                   black=False,
-                  font='Times',
+                  font='Times New Roman',
                   title_font_size=15,
                   axis_font_size=12,
                   labelsize=12,
@@ -2302,7 +2306,7 @@ class SLM(Rasch):
                            title=None,
                            plot_style='white',
                            black=False,
-                           font='Times',
+                           font='Times New Roman',
                            title_font_size=15,
                            axis_font_size=12,
                            labelsize=12,
@@ -2573,8 +2577,8 @@ class PCM(Rasch):
 
         mat_block = [[np.count_nonzero((df_array[:, item_1] == i + 1) &
                                        (df_array[:, item_2] == j))
-                      for j in range(self.max_score_vector[item_2])]
-                     for i in range(self.max_score_vector[item_1])]
+                      for j in range(self.max_score_vector.iloc[item_2])]
+                     for i in range(self.max_score_vector.iloc[item_1])]
 
         mat_block = np.array(mat_block)
 
@@ -2641,7 +2645,7 @@ class PCM(Rasch):
 
         for i, item in enumerate(self.dataframe.columns):
 
-            item_max = self.max_score_vector[i]
+            item_max = self.max_score_vector.iloc[i]
 
             start = sum(self.max_score_vector[:i])
             finish = start + item_max
@@ -2654,17 +2658,6 @@ class PCM(Rasch):
             self.thresholds_centred[item] = thresholds_centred
 
         self.central_diffs = pd.Series(self.central_diffs)
-
-        self.cat_widths = {}
-
-        for item in self.items:
-            if self.max_score_vector[item] > 1:
-                self.cat_widths[item] = np.array([(self.thresholds_uncentred[item][score + 1] -
-                                                   self.thresholds_uncentred[item][score])
-                                                  for score in range(self.max_score_vector[item] - 1)])
-
-            else:
-                self.cat_widths[item] = np.zeros(1)
 
     def calibrate_anchor(self,
                          anchors,
@@ -2896,23 +2889,20 @@ class PCM(Rasch):
         '''
 
         if items is None:
-            items = self.dataframe.columns
+            thresholds = self.thresholds_uncentred
 
-        if isinstance(items, str):
+        elif isinstance(items, str):
             if items == 'all':
-                items = self.dataframe.columns
-            elif items == 'none':
-                items = self.dataframe.columns
+                thresholds = self.thresholds_uncentred
 
-        thresholds = {item: self.thresholds_uncentred[item] for item in items
-                      if self.dataframe.loc[person, item] == self.dataframe.loc[person, item]}
+        else:
+            thresholds = {item: self.thresholds_uncentred[item] for item in items}
 
         person_data = self.dataframe.loc[person]
         person_filter = (person_data + 1) / (person_data + 1)
         score = np.nansum(person_data)
 
-        ext_score = np.nansum([self.max_score_vector[item] * person_filter[item]
-                               for item in items])
+        ext_score = np.nansum(self.max_score_vector * person_filter)[items].sum()
 
         if score == 0:
             score = ext_score_adjustment
@@ -2930,10 +2920,12 @@ class PCM(Rasch):
             while (abs(change) > tolerance) & (iters <= max_iters):
 
                 result = sum(self.exp_score_uncentred(estimate, item_thresholds)
-                             for item, item_thresholds in thresholds.items())
+                             for item, item_thresholds in thresholds.items()
+                             if person_filter[item] == 1)
 
                 info = sum(self.variance_uncentred(estimate, item_thresholds)
-                           for item, item_thresholds in thresholds.items())
+                           for item, item_thresholds in thresholds.items()
+                           if person_filter[item] == 1)
 
                 change = max(-1, min(1, (result - score) / info))
                 estimate -= change
@@ -3170,6 +3162,16 @@ class PCM(Rasch):
         estimation, includes optional Warm (1989) bias correction.
         '''
 
+        if items is None:
+            thresholds = self.thresholds_uncentred
+
+        elif isinstance(items, str):
+            if items == 'all':
+                thresholds = self.thresholds_uncentred
+
+        else:
+            items = {item: self.thresholds_uncentred[item] for item in items}
+
         estimates = {person: self.abil(person, items=items, warm_corr=warm_corr, tolerance=tolerance,
                                        max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
                      for person in self.dataframe.index}
@@ -3250,51 +3252,27 @@ class PCM(Rasch):
         item_count = (df == df).sum(axis=0)
         person_count = (df == df).sum(axis=1)
 
-        self.cat_prob_dict = {}
+        max_max_score = self.max_score_vector.max()
 
-        for item in self.items:
-            abil_df = pd.DataFrame({cat: self.person_abilities
-                                    for cat in range(self.max_score_vector[item] + 1)})
-            thr_df = pd.DataFrame({person: self.thresholds_centred[item] + self.central_diffs[item]
-                                   for person in self.persons},
-                                  index=[i for i in range(self.max_score_vector[item] + 1)]).T
-            cat_probs = abil_df - thr_df
-            cat_probs.iloc[:, 0] = 0
+        self.cat_prob_dict = {cat: {item: {person: self.cat_prob_uncentred(abil, cat, self.thresholds_uncentred[item])
+                                           if self.max_score_vector[item] >= cat
+                                           else 0
+                                           for person, abil in abilities.items()}
+                                    for item in self.dataframe.columns}
+                              for cat in range(max_max_score + 1)}
 
-            for cat in range(self.max_score_vector[item]):
-                cat_probs[cat + 1] += cat_probs[cat]
+        for cat in range(max_max_score + 1):
+            self.cat_prob_dict[cat] = pd.DataFrame(self.cat_prob_dict[cat])
 
-            cat_probs = np.exp(cat_probs)
-            cat_probs = cat_probs.div(cat_probs.sum(axis=1), axis=0)
-
-            self.cat_prob_dict[item] = cat_probs
-
-        del abil_df
-        del thr_df
-        del cat_probs
-
-        self.exp_score_df = pd.DataFrame()
-
-        for item in self.items:
-            self.exp_score_df[item] = sum(cat * self.cat_prob_dict[item][cat]
-                                          for cat in range(self.max_score_vector[item] + 1))
-
+        self.exp_score_df = sum(cat * self.cat_prob_dict[cat] for cat in range(max_max_score + 1))
         self.exp_score_df *= missing_mask
 
-        self.info_df = pd.DataFrame()
-
-        for item in self.items:
-            self.info_df[item] = sum(((cat - self.exp_score_df[item]) ** 2) * self.cat_prob_dict[item][cat]
-                                     for cat in range(self.max_score_vector[item] + 1))
-
+        self.info_df = sum(((cat - self.exp_score_df) ** 2) * self.cat_prob_dict[cat]
+                            for cat in range(max_max_score + 1))
         self.info_df *= missing_mask
 
-        self.kurtosis_df = pd.DataFrame()
-
-        for item in self.items:
-            self.kurtosis_df[item] = sum(self.cat_prob_dict[item][cat] * ((cat - self.exp_score_df[item]) ** 4)
-                                         for cat in range(self.max_score_vector[item] + 1))
-
+        self.kurtosis_df = sum(self.cat_prob_dict[cat] * ((cat - self.exp_score_df) ** 4)
+                               for cat in range(max_max_score + 1))
         self.kurtosis_df *= missing_mask
 
         self.residual_df = df - self.exp_score_df
@@ -3320,8 +3298,6 @@ class PCM(Rasch):
 
         (self.point_measure,
          self.exp_point_measure) = self.pt_meas(self.person_abilities, self.exp_score_df, self.info_df)
-        
-        self.disordered = {item: any([(width < 0) for width in self.cat_widths[item]]) for item in self.items}
 
         '''
         Threshold fit statistics
@@ -3352,7 +3328,7 @@ class PCM(Rasch):
         for item in self.dataframe.columns:
             for threshold in range(self.max_score_vector[item]):
 
-                diff_list = [self.thresholds_uncentred[item][threshold]
+                diff_list = [self.thresholds_uncentred[item].iloc[threshold]
                                for person in self.dataframe.index]
                 diff_series = pd.Series(diff_list)
                 diff_series.index = self.dataframe.index
@@ -3515,7 +3491,7 @@ class PCM(Rasch):
         for item in self.dataframe.columns:
             for threshold in range(self.max_score_vector[item]):
                 differences[item][threshold + 1] = (self.person_abilities -
-                                                    self.thresholds_uncentred[item][threshold])
+                                                    self.thresholds_uncentred[item].iloc[threshold])
 
         nums = {item: {threshold + 1:
                        (differences[item][threshold + 1] *
@@ -3695,13 +3671,6 @@ class PCM(Rasch):
             self.item_stats['PM corr'] = self.point_measure.to_numpy().round(dp)
             self.item_stats['Exp PM corr'] = self.exp_point_measure.to_numpy().round(dp)
 
-        self.item_stats['Disordered'] = self.disordered
-
-        mask = self.item_stats.applymap(type) != bool
-        mapping = {True: 'True', False: ''}
-
-        self.item_stats = self.item_stats.where(mask, self.item_stats.replace(mapping))
-
         self.item_stats.index = self.dataframe.columns
 
     def threshold_stats_df(self,
@@ -3736,10 +3705,11 @@ class PCM(Rasch):
         							for threshold in self.thresholds_uncentred[item]])
         se_array = np.array([se for item in self.dataframe.columns
         					 for se in self.threshold_se[item]])
-        low_array = np.array([low for item in self.dataframe.columns
-        					  for low in self.threshold_low[item]])
-        high_array = np.array([high for item in self.dataframe.columns
-        					   for high in self.threshold_high[item]])
+        if interval is not None:
+            low_array = np.array([low for item in self.dataframe.columns
+            					  for low in self.threshold_low[item]])
+            high_array = np.array([high for item in self.dataframe.columns
+            					   for high in self.threshold_high[item]])
 
         self.threshold_stats_uncentred = pd.DataFrame()
 
@@ -3772,8 +3742,10 @@ class PCM(Rasch):
                                   for threshold in range(self.max_score_vector[item])])
 
         self.threshold_stats_centred['Estimate'] -= central_array.round(dp)
-        self.threshold_stats_centred[f'{round((1 - interval) * 50, 1)}%'] -= central_array.round(dp)
-        self.threshold_stats_centred[f'{round((1 + interval) * 50, 1)}%'] -= central_array.round(dp)
+        
+        if interval is not None:
+            self.threshold_stats_centred[f'{round((1 - interval) * 50, 1)}%'] -= central_array.round(dp)
+            self.threshold_stats_centred[f'{round((1 + interval) * 50, 1)}%'] -= central_array.round(dp)
 
     def person_stats_df(self,
                         full=False,
@@ -4158,7 +4130,7 @@ class PCM(Rasch):
                   palette='dark blue',
                   black=False,
                   figsize=(8, 6),
-                  font='Times',
+                  font='Times New Roman',
                   title_font_size=15,
                   axis_font_size=12,
                   labelsize=12,
@@ -4440,7 +4412,7 @@ class PCM(Rasch):
             plot_style='white',
             palette='dark blue',
             black=False,
-            font='Times',
+            font='Times New Roman',
             title_font_size=15,
             axis_font_size=12,
             labelsize=12,
@@ -4504,7 +4476,7 @@ class PCM(Rasch):
              plot_style='white',
              palette='dark blue',
              black=False,
-             font='Times',
+             font='Times New Roman',
              title_font_size=15,
              axis_font_size=12,
              labelsize=12,
@@ -4577,7 +4549,7 @@ class PCM(Rasch):
                       plot_style='white',
                       palette='dark blue',
                       black=False,
-                      font='Times',
+                      font='Times New Roman',
                       title_font_size=15,
                       axis_font_size=12,
                       labelsize=12,
@@ -4650,7 +4622,7 @@ class PCM(Rasch):
             plot_style='white',
             palette='dark blue',
             black=False,
-            font='Times',
+            font='Times New Roman',
             title_font_size=15,
             axis_font_size=12,
             labelsize=12,
@@ -4700,7 +4672,7 @@ class PCM(Rasch):
             plot_style='white',
             palette='dark blue',
             black=False,
-            font='Times',
+            font='Times New Roman',
             title_font_size=15,
             axis_font_size=12,
             labelsize=12,
@@ -4784,7 +4756,7 @@ class PCM(Rasch):
                   plot_style='white',
                   palette='dark blue',
                   black=False,
-                  font='Times',
+                  font='Times New Roman',
                   title_font_size=15,
                   axis_font_size=12,
                   labelsize=12,
@@ -4850,7 +4822,7 @@ class PCM(Rasch):
                   plot_style='white',
                   palette='dark blue',
                   black=False,
-                  font='Times',
+                  font='Times New Roman',
                   title_font_size=15,
                   axis_font_size=12,
                   labelsize=12,
@@ -4911,7 +4883,7 @@ class PCM(Rasch):
                            normal=False,
                            title=None,
                            plot_style='white',
-                           font='Times',
+                           font='Times New Roman',
                            title_font_size=15,
                            axis_font_size=12,
                            labelsize=12,
@@ -5106,7 +5078,7 @@ class RSM(Rasch):
                     weight = hmean([num, den])
 
                     estimator += weight * (log(num) - log(den) +
-                                           difficulties[item_1] - difficulties[item_2])
+                                           difficulties.iloc[item_1] - difficulties.iloc[item_2])
                     weights_sum += weight
 
         try:
@@ -5194,13 +5166,6 @@ class RSM(Rasch):
         thresholds = np.insert(thresholds, 0, 0)
 
         self.thresholds = thresholds
-
-        if self.max_score > 1:
-            self.cat_widths = np.array([self.thresholds[score + 2] - self.thresholds[score + 1]
-                                        for score in range(self.max_score - 1)])
-
-        else:
-            self.cat_widths = np.zeros(1)
 
     def std_errors(self,
                    interval=None,
@@ -5369,6 +5334,9 @@ class RSM(Rasch):
         Creates raw score to ability estimate look-up table. Newton-Raphson ML
         estimation, includes optional Warm (1989) bias correction.
         '''
+
+        if items is None:
+            items = self.items
 
         estimates = {person: self.abil(person, items=items, warm_corr=warm_corr, tolerance=tolerance,
                                        max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
@@ -5653,8 +5621,6 @@ class RSM(Rasch):
         (self.point_measure,
          self.exp_point_measure) = self.pt_meas(self.person_abilities, self.exp_score_df, self.info_df)
 
-        self.disordered = any([(width < 0) for width in self.cat_widths])
-
         '''
         Threshold fit statistics
         '''
@@ -5890,6 +5856,7 @@ class RSM(Rasch):
 
     def item_stats_df(self,
                       full=False,
+                      zstd=False,
                       point_measure_corr=False,
                       dp=3,
                       warm_corr=True,
@@ -5940,12 +5907,6 @@ class RSM(Rasch):
         if point_measure_corr:
             self.item_stats['PM corr'] = self.point_measure.astype(float).round(dp)
             self.item_stats['Exp PM corr'] = self.exp_point_measure.astype(float).round(dp)
-
-        if self.disordered:
-            self.item_stats['Disordered'] = ['True' for item in self.items]
-
-        else:
-            self.item_stats['Disordered'] = ['False' for item in self.items]
 
         self.item_stats.index = self.dataframe.columns
 
@@ -6414,7 +6375,7 @@ class RSM(Rasch):
                   palette='dark blue',
                   black=False,
                   figsize=(8, 6),
-                  font='Times',
+                  font='Times New Roman',
                   title_font_size=15,
                   axis_font_size=12,
                   labelsize=12,
@@ -6704,7 +6665,7 @@ class RSM(Rasch):
             plot_style='white',
             palette='dark blue',
             black=False,
-            font='Times',
+            font='Times New Roman',
             title_font_size=15,
             axis_font_size=12,
             labelsize=12,
@@ -6766,7 +6727,7 @@ class RSM(Rasch):
              plot_style='white',
              palette='dark blue',
              black=False,
-             font='Times',
+             font='Times New Roman',
              title_font_size=15,
              axis_font_size=12,
              labelsize=12,
@@ -6845,7 +6806,7 @@ class RSM(Rasch):
                       plot_style='white',
                       palette='dark blue',
                       black=False,
-                      font='Times',
+                      font='Times New Roman',
                       title_font_size=15,
                       axis_font_size=12,
                       labelsize=12,
@@ -6927,7 +6888,7 @@ class RSM(Rasch):
             plot_style='white',
             palette='dark blue',
             black=False,
-            font='Times',
+            font='Times New Roman',
             title_font_size=15,
             axis_font_size=12,
             labelsize=12,
@@ -6979,7 +6940,7 @@ class RSM(Rasch):
             plot_style='white',
             palette='dark blue',
             black=False,
-            font='Times',
+            font='Times New Roman',
             title_font_size=15,
             axis_font_size=12,
             labelsize=12,
@@ -7062,7 +7023,7 @@ class RSM(Rasch):
                   plot_style='white',
                   palette='dark blue',
                   black=False,
-                  font='Times',
+                  font='Times New Roman',
                   title_font_size=15,
                   axis_font_size=12,
                   labelsize=12,
@@ -7128,7 +7089,7 @@ class RSM(Rasch):
                   plot_style='white',
                   palette='dark blue',
                   black=False,
-                  font='Times',
+                  font='Times New Roman',
                   title_font_size=15,
                   axis_font_size=12,
                   labelsize=12,
@@ -7189,7 +7150,7 @@ class RSM(Rasch):
                            normal=False,
                            title=True,
                            plot_style='white',
-                           font='Times',
+                           font='Times New Roman',
                            title_font_size=15,
                            axis_font_size=12,
                            labelsize=12,
@@ -8032,7 +7993,7 @@ class MFRM(Rasch):
                     weight = hmean([num, den])
 
                     estimator += weight * (log(num) - log(den) +
-                                           difficulties[item_1] - difficulties[item_2])
+                                           difficulties.iloc[item_1] - difficulties.iloc[item_2])
                     weights_sum += weight
 
         try:
@@ -8091,13 +8052,6 @@ class MFRM(Rasch):
         self.thresholds = self.ra_thresholds(self.diffs, constant)
         self.raters_global(constant=constant, method=method, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
-        if self.max_score > 1:
-            self.cat_widths = np.array([self.thresholds[score + 2] - self.thresholds[score + 1]
-                                        for score in range(self.max_score - 1)])
-
-        else:
-            self.cat_widths = np.zeros(1)
-
     def calibrate_items(self,
                         constant=0.1,
                         method='cos',
@@ -8123,13 +8077,6 @@ class MFRM(Rasch):
         self.item_diffs(constant=constant, method=method, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
         self.thresholds = self.ra_thresholds(self.diffs, constant)
         self.raters_items(constant=constant, method=method, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
-
-        if self.max_score > 1:
-            self.cat_widths = np.array([self.thresholds[score + 2] - self.thresholds[score + 1]
-                                        for score in range(self.max_score - 1)])
-
-        else:
-            self.cat_widths = np.zeros(1)
 
 
     def calibrate_thresholds(self,
@@ -8158,13 +8105,6 @@ class MFRM(Rasch):
         self.thresholds = self.ra_thresholds(self.diffs, constant)
         self.raters_thresholds(constant=constant, method=method, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
-        if self.max_score > 1:
-            self.cat_widths = np.array([self.thresholds[score + 2] - self.thresholds[score + 1]
-                                        for score in range(self.max_score - 1)])
-
-        else:
-            self.cat_widths = np.zeros(1)
-
     def calibrate_matrix(self,
                          constant=0.1,
                          method='cos',
@@ -8190,13 +8130,6 @@ class MFRM(Rasch):
         self.item_diffs(constant=constant, method=method, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
         self.thresholds = self.ra_thresholds(self.diffs, constant)
         self.raters_matrix(constant=constant, method=method, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
-
-        if self.max_score > 1:
-            self.cat_widths = np.array([self.thresholds[score + 2] - self.thresholds[score + 1]
-                                        for score in range(self.max_score - 1)])
-
-        else:
-            self.cat_widths = np.zeros(1)
 
     def std_errors_global(self,
                           anchor_raters=None,
@@ -8766,7 +8699,7 @@ class MFRM(Rasch):
                             for item in self.dataframe.columns}
                     for rater in self.raters}
 
-        rater_se_marginal_items = {rater: {item: pd.DataFrame(marginal_rater_ests_items[rater]).std(axis=1)[i]
+        rater_se_marginal_items = {rater: {item: pd.DataFrame(marginal_rater_ests_items[rater]).std(axis=1).iloc[i]
                                            for i, item in enumerate(self.dataframe.columns)}
                                    for rater in self.raters}
 
@@ -8887,14 +8820,6 @@ class MFRM(Rasch):
             self.anchor_severities_global[rater] -= severity_adjustment
 
         self.anchor_raters_global = anchor_raters
-
-        if self.max_score > 1:
-            self.anchor_cat_widths_global = np.array([(self.anchor_thresholds_global[score + 2] -
-                                                       self.anchor_thresholds_global[score + 1])
-                                                      for score in range(self.max_score - 1)])
-
-        else:
-            self.anchor_cat_widths_global = np.zeros(1)
 
     def std_errors_global_anchor(self,
                                  anchor_raters,
@@ -9025,14 +8950,6 @@ class MFRM(Rasch):
 
         self.anchor_raters_items = anchor_raters
 
-        if self.max_score > 1:
-            self.anchor_cat_widths_items = np.array([(self.anchor_thresholds_items[score + 2] -
-                                                       self.anchor_thresholds_items[score + 1])
-                                                     for score in range(self.max_score - 1)])
-
-        else:
-            self.anchor_cat_widths_items = np.zeros(1)
-
     def calibrate_thresholds_anchor(self,
                                     anchor_raters,
                                     calibrate=False,
@@ -9059,19 +8976,12 @@ class MFRM(Rasch):
 
         for rater in self.raters:
             severities_thresholds_df.loc[rater].iloc[1:] -= severity_adjustments
-        self.anchor_severities_thresholds = {rater: severities_thresholds_df.loc[rater] for rater in self.raters}
+        self.anchor_severities_thresholds = {rater: severities_thresholds_df.loc[rater]
+                                             for rater in self.raters}
 
         self.anchor_thresholds_thresholds[1:] -= self.anchor_thresholds_thresholds[1:].mean()
 
         self.anchor_raters_thresholds = anchor_raters
-
-        if self.max_score > 1:
-            self.anchor_cat_widths_thresholds = np.array([(self.anchor_thresholds_thresholds[score + 2] -
-                                                           self.anchor_thresholds_thresholds[score + 1])
-                                                          for score in range(self.max_score - 1)])
-
-        else:
-            self.anchor_cat_widths_thresholds = np.zeros(1)
 
     def calibrate_matrix_anchor(self,
                                 anchor_raters,
@@ -9143,14 +9053,6 @@ class MFRM(Rasch):
             self.anchor_marginal_severities_thresholds[rater][1:] -= adjustment
 
         self.anchor_raters_matrix = anchor_raters
-
-        if self.max_score > 1:
-            self.anchor_cat_widths_matrix = np.array([(self.anchor_thresholds_matrix[score + 2] -
-                                                       self.anchor_thresholds_matrix[score + 1])
-                                                      for score in range(self.max_score - 1)])
-
-        else:
-            self.anchor_cat_widths_matrix = np.zeros(1)
 
     def abil_global(self,
                     person,
@@ -10882,18 +10784,6 @@ class MFRM(Rasch):
             self.item_stats_global['PM corr'] = self.point_measure_global.to_numpy().round(dp)
             self.item_stats_global['Exp PM corr'] = self.exp_point_measure_global.to_numpy().round(dp)
 
-        if anchor_raters is None:
-            disordered = any([(width < 0) for width in self.cat_widths])
-
-        else:
-            disordered = any([(width < 0) for width in self.anchor_cat_widths_global])
-
-        if disordered:
-            self.item_stats_global['Disordered'] = ['True' for item in self.items]
-
-        else:
-            self.item_stats_global['Disordered'] = ['False' for item in self.items]
-
         self.item_stats_global.index = self.dataframe.columns
 
     def threshold_stats_df_global(self,
@@ -11118,7 +11008,7 @@ class MFRM(Rasch):
             person_stats_df['RSEM'] = self.rsem_vector_global.round(dp)
 
         person_stats_df['Score'] = [np.nan for person in self.persons]
-        person_stats_df['Score'].update(self.dataframe.unstack(level=0).sum(axis=1))
+        person_stats_df['Score'] = self.dataframe.unstack(level=0).sum(axis=1)
         person_stats_df['Score'] = person_stats_df['Score'].astype(int)
 
         person_stats_df['Max score'] = [np.nan for person in self.persons]
@@ -11330,18 +11220,6 @@ class MFRM(Rasch):
         if point_measure_corr:
             self.item_stats_items['PM corr'] = self.point_measure_items.to_numpy().round(dp)
             self.item_stats_items['Exp PM corr'] = self.exp_point_measure_items.to_numpy().round(dp)
-
-        if anchor_raters is None:
-            disordered = any([(width < 0) for width in self.cat_widths])
-
-        else:
-            disordered = any([(width < 0) for width in self.anchor_cat_widths_items])
-
-        if disordered:
-            self.item_stats_items['Disordered'] = ['True' for item in self.items]
-
-        else:
-            self.item_stats_items['Disordered'] = ['False' for item in self.items]
 
         self.item_stats_items.index = self.dataframe.columns
 
@@ -11788,18 +11666,6 @@ class MFRM(Rasch):
         if point_measure_corr:
             self.item_stats_thresholds['PM corr'] = self.point_measure_thresholds.to_numpy().round(dp)
             self.item_stats_thresholds['Exp PM corr'] = self.exp_point_measure_thresholds.to_numpy().round(dp)
-
-        if anchor_raters is None:
-            disordered = any([(width < 0) for width in self.cat_widths])
-
-        else:
-            disordered = any([(width < 0) for width in self.anchor_cat_widths_thresholds])
-
-        if disordered:
-            self.item_stats_thresholds['Disordered'] = ['True' for item in self.items]
-
-        else:
-            self.item_stats_thresholds['Disordered'] = ['False' for item in self.items]
 
         self.item_stats_thresholds.index = self.dataframe.columns
 
@@ -12248,18 +12114,6 @@ class MFRM(Rasch):
         if point_measure_corr:
             self.item_stats_matrix['PM corr'] = self.point_measure_matrix.to_numpy().round(dp)
             self.item_stats_matrix['Exp PM corr'] = self.exp_point_measure_matrix.to_numpy().round(dp)
-
-        if anchor_raters is None:
-            disordered = any([(width < 0) for width in self.cat_widths])
-
-        else:
-            disordered = any([(width < 0) for width in self.anchor_cat_widths_matrix])
-
-        if disordered:
-            self.item_stats_matrix['Disordered'] = ['True' for item in self.items]
-        
-        else:
-            self.item_stats_matrix['Disordered'] = ['False' for item in self.items]
 
         self.item_stats_matrix.index = self.dataframe.columns
 
@@ -13016,9 +12870,14 @@ class MFRM(Rasch):
 
         self.item_facilities = self.dataframe.mean(axis=0) / self.max_score
 
+        #abils_by_rater = pd.DataFrame()
+        #for rater in self.raters:
+            #abils_by_rater[rater] = abilities
         abils_by_rater = {rater: abilities for rater in self.raters}
+        #abils_by_rater = pd.DataFrame(abils_by_rater)
         abils_by_rater = pd.concat(abils_by_rater.values(), keys=abils_by_rater.keys())
         abils_by_rater.index.names = self.dataframe.index.names
+        #self.abils_by_rater = abils_by_rater
 
         item_point_measure, item_exp_point_measure = self.pt_meas(abils_by_rater, exp_score_df, info_df)
 
@@ -15697,7 +15556,7 @@ class MFRM(Rasch):
                          palette='dark blue',
                          black=False,
                          figsize=(8, 6),
-                         font='Times',
+                         font='Times New Roman',
                          title_font_size=15,
                          axis_font_size=12,
                          labelsize=12,
@@ -16131,7 +15990,7 @@ class MFRM(Rasch):
                         palette='dark blue',
                         black=False,
                         figsize=(8, 6),
-                        font='Times',
+                        font='Times New Roman',
                         title_font_size=15,
                         axis_font_size=12,
                         labelsize=12,
@@ -16567,7 +16426,7 @@ class MFRM(Rasch):
                              palette='dark blue',
                              black=False,
                              figsize=(8, 6),
-                             font='Times',
+                             font='Times New Roman',
                              title_font_size=15,
                              axis_font_size=12,
                              labelsize=12,
@@ -17007,7 +16866,7 @@ class MFRM(Rasch):
                          palette='dark blue',
                          black=False,
                          figsize=(8, 6),
-                         font='Times',
+                         font='Times New Roman',
                          title_font_size=15,
                          axis_font_size=12,
                          labelsize=12,
@@ -17448,7 +17307,7 @@ class MFRM(Rasch):
                    plot_style='white',
                    palette='dark blue',
                    black=False,
-                   font='Times',
+                   font='Times New Roman',
                    title_font_size=15,
                    axis_font_size=12,
                    labelsize=12,
@@ -17558,7 +17417,7 @@ class MFRM(Rasch):
                   plot_style='white',
                   palette='dark blue',
                   black=False,
-                  font='Times',
+                  font='Times New Roman',
                   title_font_size=15,
                   axis_font_size=12,
                   labelsize=12,
@@ -17667,7 +17526,7 @@ class MFRM(Rasch):
                        plot_style='white',
                        palette='dark blue',
                        black=False,
-                       font='Times',
+                       font='Times New Roman',
                        title_font_size=15,
                        axis_font_size=12,
                        labelsize=12,
@@ -17778,7 +17637,7 @@ class MFRM(Rasch):
                    plot_style='white',
                    palette='dark blue',
                    black=False,
-                   font='Times',
+                   font='Times New Roman',
                    title_font_size=15,
                    axis_font_size=12,
                    labelsize=12,
@@ -17884,7 +17743,7 @@ class MFRM(Rasch):
                     plot_style='white',
                     palette='dark blue',
                     black=False,
-                    font='Times',
+                    font='Times New Roman',
                     title_font_size=15,
                     axis_font_size=12,
                     labelsize=12,
@@ -18012,7 +17871,7 @@ class MFRM(Rasch):
                    plot_style='white',
                    palette='dark blue',
                    black=False,
-                   font='Times',
+                   font='Times New Roman',
                    title_font_size=15,
                    axis_font_size=12,
                    labelsize=12,
@@ -18150,7 +18009,7 @@ class MFRM(Rasch):
                         plot_style='white',
                         palette='dark blue',
                         black=False,
-                        font='Times',
+                        font='Times New Roman',
                         title_font_size=15,
                         axis_font_size=12,
                         labelsize=12,
@@ -18280,7 +18139,7 @@ class MFRM(Rasch):
                     plot_style='white',
                     palette='dark blue',
                     black=False,
-                    font='Times',
+                    font='Times New Roman',
                     title_font_size=15,
                     axis_font_size=12,
                     labelsize=12,
@@ -18419,7 +18278,7 @@ class MFRM(Rasch):
                              plot_style='white',
                              palette='dark blue',
                              black=False,
-                             font='Times',
+                             font='Times New Roman',
                              title_font_size=15,
                              axis_font_size=12,
                              labelsize=12,
@@ -18531,7 +18390,7 @@ class MFRM(Rasch):
                             plot_style='white',
                             palette='dark blue',
                             black=False,
-                            font='Times',
+                            font='Times New Roman',
                             title_font_size=15,
                             axis_font_size=12,
                             labelsize=12,
@@ -18582,7 +18441,8 @@ class MFRM(Rasch):
             xobsdata, yobsdata = self.class_intervals_thr_items(abilities, difficulties, severities, item=item,
                                                                 rater=rater, shift=shift, no_of_classes=no_of_classes)
 
-            if obs != 'all':
+
+            if obs == 'all':
                 obs = [i + 1 for i in range(self.max_score)]
 
         else:
@@ -18596,7 +18456,8 @@ class MFRM(Rasch):
                 adj_thresholds = thresholds[1:]
 
             else:
-                adj_thresholds = thresholds[1:] + np.mean([severities[rater][item] for item in self.dataframe.columns])
+                adj_thresholds = thresholds[1:] + np.mean([severities[rater][item]
+                                                           for item in self.dataframe.columns])
 
         else:
             if rater is None:
@@ -18643,7 +18504,7 @@ class MFRM(Rasch):
                                  plot_style='white',
                                  palette='dark blue',
                                  black=False,
-                                 font='Times',
+                                 font='Times New Roman',
                                  title_font_size=15,
                                  axis_font_size=12,
                                  labelsize=12,
@@ -18769,7 +18630,7 @@ class MFRM(Rasch):
                              plot_style='white',
                              palette='dark blue',
                              black=False,
-                             font='Times',
+                             font='Times New Roman',
                              title_font_size=15,
                              axis_font_size=12,
                              labelsize=12,
@@ -18896,7 +18757,7 @@ class MFRM(Rasch):
                    plot_style='white',
                    palette='dark blue',
                    black=False,
-                   font='Times',
+                   font='Times New Roman',
                    title_font_size=15,
                    axis_font_size=12,
                    labelsize=12,
@@ -18971,7 +18832,7 @@ class MFRM(Rasch):
                    plot_style='white',
                    palette='dark blue',
                    black=False,
-                   font='Times',
+                   font='Times New Roman',
                    title_font_size=15,
                    axis_font_size=12,
                    labelsize=12,
@@ -19046,7 +18907,7 @@ class MFRM(Rasch):
                        plot_style='white',
                        palette='dark blue',
                        black=False,
-                       font='Times',
+                       font='Times New Roman',
                        title_font_size=15,
                        axis_font_size=12,
                        labelsize=12,
@@ -19122,7 +18983,7 @@ class MFRM(Rasch):
                    plot_style='white',
                    palette='dark blue',
                    black=False,
-                   font='Times',
+                   font='Times New Roman',
                    title_font_size=15,
                    axis_font_size=12,
                    labelsize=12,
@@ -19197,7 +19058,7 @@ class MFRM(Rasch):
                    plot_style='white',
                    palette='dark blue',
                    black=False,
-                   font='Times',
+                   font='Times New Roman',
                    title_font_size=15,
                    axis_font_size=12,
                    labelsize=12,
@@ -19360,7 +19221,7 @@ class MFRM(Rasch):
                   plot_style='white',
                   palette='dark blue',
                   black=False,
-                  font='Times',
+                  font='Times New Roman',
                   title_font_size=15,
                   axis_font_size=12,
                   labelsize=12,
@@ -19521,7 +19382,7 @@ class MFRM(Rasch):
                        plot_style='white',
                        palette='dark blue',
                        black=False,
-                       font='Times',
+                       font='Times New Roman',
                        title_font_size=15,
                        axis_font_size=12,
                        labelsize=12,
@@ -19683,7 +19544,7 @@ class MFRM(Rasch):
                    plot_style='white',
                    palette='dark blue',
                    black=False,
-                   font='Times',
+                   font='Times New Roman',
                    title_font_size=15,
                    axis_font_size=12,
                    labelsize=12,
@@ -19844,7 +19705,7 @@ class MFRM(Rasch):
                          plot_style='white',
                          palette='dark blue',
                          black=False,
-                         font='Times',
+                         font='Times New Roman',
                          title_font_size=15,
                          axis_font_size=12,
                          labelsize=12,
@@ -19953,7 +19814,7 @@ class MFRM(Rasch):
                         plot_style='white',
                         palette='dark blue',
                         black=False,
-                        font='Times',
+                        font='Times New Roman',
                         title_font_size=15,
                         axis_font_size=12,
                         labelsize=12,
@@ -20062,7 +19923,7 @@ class MFRM(Rasch):
                              plot_style='white',
                              palette='dark blue',
                              black=False,
-                             font='Times',
+                             font='Times New Roman',
                              title_font_size=15,
                              axis_font_size=12,
                              labelsize=12,
@@ -20171,7 +20032,7 @@ class MFRM(Rasch):
                          plot_style='white',
                          palette='dark blue',
                          black=False,
-                         font='Times',
+                         font='Times New Roman',
                          title_font_size=15,
                          axis_font_size=12,
                          labelsize=12,
@@ -20281,7 +20142,7 @@ class MFRM(Rasch):
                          plot_style='white',
                          palette='dark blue',
                          black=False,
-                         font='Times',
+                         font='Times New Roman',
                          title_font_size=15,
                          axis_font_size=12,
                          labelsize=12,
@@ -20389,7 +20250,7 @@ class MFRM(Rasch):
                         plot_style='white',
                         palette='dark blue',
                         black=False,
-                        font='Times',
+                        font='Times New Roman',
                         title_font_size=15,
                         axis_font_size=12,
                         labelsize=12,
@@ -20497,7 +20358,7 @@ class MFRM(Rasch):
                              plot_style='white',
                              palette='dark blue',
                              black=False,
-                             font='Times',
+                             font='Times New Roman',
                              title_font_size=15,
                              axis_font_size=12,
                              labelsize=12,
@@ -20606,7 +20467,7 @@ class MFRM(Rasch):
                          plot_style='white',
                          palette='dark blue',
                          black=False,
-                         font='Times',
+                         font='Times New Roman',
                          title_font_size=15,
                          axis_font_size=12,
                          labelsize=12,
@@ -20711,7 +20572,7 @@ class MFRM(Rasch):
                                   normal=False,
                                   title=None,
                                   plot_style='white',
-                                  font='Times',
+                                  font='Times New Roman',
                                   title_font_size=15,
                                   axis_font_size=12,
                                   labelsize=12,
@@ -20775,7 +20636,7 @@ class MFRM(Rasch):
                                  normal=False,
                                  title=None,
                                  plot_style='white',
-                                 font='Times',
+                                 font='Times New Roman',
                                  title_font_size=15,
                                  axis_font_size=12,
                                  labelsize=12,
@@ -20839,7 +20700,7 @@ class MFRM(Rasch):
                                       normal=False,
                                       title=None,
                                       plot_style='white',
-                                      font='Times',
+                                      font='Times New Roman',
                                       title_font_size=15,
                                       axis_font_size=12,
                                       labelsize=12,
@@ -20899,7 +20760,7 @@ class MFRM(Rasch):
                                   normal=False,
                                   title=None,
                                   plot_style='white',
-                                  font='Times',
+                                  font='Times New Roman',
                                   title_font_size=15,
                                   axis_font_size=12,
                                   labelsize=12,
@@ -21293,7 +21154,8 @@ class PCM_Sim(Rasch_Sim):
         '''
 
         self.cat_probs = {f'Item_{item + 1}':
-                          np.array([[self.pcm.cat_prob_uncentred(abil, cat,
+                          np.array([[self.pcm.cat_prob_uncentred(abil,
+                                                                 cat,
                                                                  self.thresholds_uncentred[f'Item_{item + 1}'])
                                      for cat in range(self.max_score_vector[item] + 1)]
                                     for abil in self.abilities])
