@@ -17,9 +17,8 @@ of output files contains the .csv files of statistcal output and .png files of g
 output.
 
 *** Code to run the simulation studies analysis ***
-*** NOTE: Code for extended MFRM simulation analysis not yet in repo ***
 
-Jupyter notebooks to run large-scale simulation experiments as in Elliott & Buttery (2022a)
+Jupyter notebooks to run simulation experiments as in Elliott & Buttery (2022a)
 and Elliott & Buttery (2022b) are included (this only covers the RaschPy analysis - running
 comparisons with JMLE, CMLE or any other algorithms would need to be done separately, with
 appropriate software (data sets and generating parameters are saved to file for comparison
