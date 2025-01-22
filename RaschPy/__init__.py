@@ -8936,7 +8936,7 @@ class MFRM(Rasch):
         severity_adjustments = anchor_severities_df.mean(axis=0)
 
         for i, item in enumerate(self.dataframe.columns):
-            self.anchor_diffs_items[item] += severity_adjustments[i]
+            self.anchor_diffs_items[item] += severity_adjustments.iloc[i]
 
         for rater in self.raters:
             severities_items_df.loc[rater] -= severity_adjustments
@@ -8975,7 +8975,7 @@ class MFRM(Rasch):
         self.anchor_thresholds_thresholds[1:] += severity_adjustments
 
         for rater in self.raters:
-            severities_thresholds_df.loc[rater].iloc[1:] -= severity_adjustments
+            severities_thresholds_df.loc[rater, 1:] -= severity_adjustments
         self.anchor_severities_thresholds = {rater: severities_thresholds_df.loc[rater]
                                              for rater in self.raters}
 
@@ -10962,6 +10962,8 @@ class MFRM(Rasch):
                                full=False,
                                rsem=False,
                                zstd=False,
+                               interval=None,
+                               no_of_samples=100,
                                dp=3,
                                warm_corr=True,
                                tolerance=0.0000001,
@@ -21491,7 +21493,7 @@ class MFRM_Sim_Global(MFRM_Sim):
         self.items = manual_item_names
         self.raters = manual_rater_names
         self.dataframe = self.produce_df([[0], [1]], [[0]])
-        self.dataframe.loc[0].iloc[0, 0] = self.max_score
+        self.dataframe.iloc[0, (0, 0)] = 0
         self.mfrm = MFRM(self.dataframe, self.max_score)
 
         '''
@@ -21688,7 +21690,7 @@ class MFRM_Sim_Items(MFRM_Sim):
         self.items = manual_item_names
         self.raters = manual_rater_names
         self.dataframe = self.produce_df([[0], [1]], [[0]])
-        self.dataframe.loc[0].iloc[0, 0] = self.max_score
+        self.dataframe.iloc[0, (0, 0)] = 0
         self.mfrm = MFRM(self.dataframe, self.max_score)
 
         '''
@@ -21900,7 +21902,7 @@ class MFRM_Sim_Thresholds(MFRM_Sim):
         self.items = manual_item_names
         self.raters = manual_rater_names
         self.dataframe = self.produce_df([[0], [1]], [[0]])
-        self.dataframe.loc[0].iloc[0, 0] = 0
+        self.dataframe.iloc[0, (0, 0)] = 0
         self.mfrm = MFRM(self.dataframe, self.max_score)
 
         '''
@@ -22107,7 +22109,7 @@ class MFRM_Sim_Matrix(MFRM_Sim):
         self.items = manual_item_names
         self.raters = manual_rater_names
         self.dataframe = self.produce_df([[0], [1]], [[0]])
-        self.dataframe.loc[0].iloc[0, 0] = 0
+        self.dataframe.iloc[0, (0, 0)] = 0
         self.mfrm = MFRM(self.dataframe, self.max_score)
 
         '''
