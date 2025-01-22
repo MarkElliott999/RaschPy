@@ -17,7 +17,7 @@ of output files contains the .csv files of statistcal output and .png files of g
 output.
 
 *** Code to run the simulation studies analysis ***
-*** FORTHCOMING - not yet in repo ***
+*** NOTE: Code for extended MFRM simulation analysis not yet in repo ***
 
 Jupyter notebooks to run large-scale simulation experiments as in Elliott & Buttery (2022a)
 and Elliott & Buttery (2022b) are included (this only covers the RaschPy analysis - running
@@ -25,8 +25,23 @@ comparisons with JMLE, CMLE or any other algorithms would need to be done separa
 appropriate software (data sets and generating parameters are saved to file for comparison
 with other algorithms).
 
+In order to run the experiment in Elliott & Buttery (2022a), it is necessary to install an
+additional Python packege, raschpy_addendum, which contains the code to calculate RSM
+thresholds using the EVM method (Garner & Engelhard, 2002) and the modified EVM method
+described in Elliott & Buttery (2022a). The raschpy_addendum package may be found in its
+own folder in this directory.
+
 *** Excel spreadsheet ***
 
 An Excel file modelled on Moulton's worked example of JMLE is included, showing the steps
 of the PAIR algorithm for dichotomous data. The data set is the same as the Moulton data set,
 and the Moulton JMLE results are included for comparison.
+
+*** References ***
+
+Elliott, M., & Buttery, P. J. (2022a) Non-iterative Conditional Pairwise Estimation for the
+    Rating Scale Model, Educational and Psychological Measurement, 82(5), 989-1019.
+Elliott, M., & Buttery, P. J. (2022b). Extended rater representations in the many-facet Rasch
+    model. Journal of Applied Measurement, 22 (1), 133–160.
+Garner, M., & Engelhard, G. (2002). An eigenvector method for estimating item parameters of
+    the dichotomous and polytomous Rasch models. Journal of Applied Measurement, 3(2), 107–128.
