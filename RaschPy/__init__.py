@@ -9199,10 +9199,8 @@ class MFRM(Rasch):
         if isinstance(items, str):
             if items == 'all':
                 items = None
-
-        if isinstance(raters, str):
-            if raters == 'all':
-                raters = self.raters.tolist()
+            else:
+                items = [items]
 
         if anchor:
             if hasattr(self, 'anchor_diffs_global'):
@@ -9222,10 +9220,10 @@ class MFRM(Rasch):
         dummy_sevs = pd.Series({'dummy_rater': 0})
 
         if isinstance(raters, str):
-            raters = [raters]
-
-        if isinstance(items, str):
-            items = [items]
+            if raters == 'all':
+                raters = [rater for rater in self.raters]
+            else:
+                raters = [raters]
 
         if raters is None:
             if items is None:
@@ -9236,10 +9234,12 @@ class MFRM(Rasch):
 
         else:
             if items is None:
-                person_filter = np.array([[1 for item in self.dataframe.columns] for rater in raters])
+                person_filter = np.array([[1 for item in self.dataframe.columns]
+                                          for rater in raters])
 
             else:
-                person_filter = np.array([[1 for item in items] for rater in raters])
+                person_filter = np.array([[1 for item in items]
+                                          for rater in raters])
 
         ext_score = person_filter.sum() * self.max_score
 
@@ -9301,7 +9301,11 @@ class MFRM(Rasch):
             iters += 1
 
         if warm_corr:
-            sevs = severities[raters]
+            if raters is not None:
+                sevs = severities[raters]
+            else:
+                sevs = severities
+                
             estimate += self.warm_global(estimate, person_filter, difficulties, thresholds, sevs)
 
         if iters >= max_iters:
@@ -9589,39 +9593,35 @@ class MFRM(Rasch):
                          tolerance=0.0000001,
                          max_iters=100,
                          ext_score_adjustment=0.5):
-
+        
         if isinstance(items, str):
-            if items == 'all':
-                items = None
-
-        if isinstance(raters, str):
-            if raters == 'all':
-                raters = self.raters.tolist()
-
+           if items == 'all':
+               items = None
+           else:
+               items = [items]
+ 
         if anchor:
             if hasattr(self, 'anchor_diffs_items'):
                 difficulties = self.anchor_diffs_items
                 thresholds = self.anchor_thresholds_items
                 severities = self.anchor_severities_items
-
+ 
             else:
                 print('Anchor calibration required')
                 return
-
+ 
         else:
             difficulties = self.diffs
             thresholds = self.thresholds
             severities = self.severities_items
-
-        if raters is None:
-            raters = 'dummy_rater'
-            severities = {'dummy_rater': {item: 0 for item in self.dataframe.columns}}
-
+ 
+        dummy_sevs = pd.Series({'dummy_rater': 0})
+ 
         if isinstance(raters, str):
-            raters = [raters]
-
-        if isinstance(items, str):
-            items = [items]
+            if raters == 'all':
+                raters = [rater for rater in self.raters]
+            else:
+                raters = [raters]
 
         if raters is None:
             if items is None:
@@ -9632,10 +9632,12 @@ class MFRM(Rasch):
 
         else:
             if items is None:
-                person_filter = np.array([[1 for item in self.dataframe.columns] for rater in raters])
+                person_filter = np.array([[1 for item in self.dataframe.columns]
+                                          for rater in raters])
 
             else:
-                person_filter = np.array([[1 for item in items] for rater in raters])
+                person_filter = np.array([[1 for item in items]
+                                          for rater in raters])
 
         ext_score = person_filter.sum() * self.max_score
 
@@ -9995,10 +9997,8 @@ class MFRM(Rasch):
         if isinstance(items, str):
             if items == 'all':
                 items = None
-
-        if isinstance(raters, str):
-            if raters == 'all':
-                raters = self.raters.tolist()
+            else:
+                items = [items]
 
         if anchor:
             if hasattr(self, 'anchor_diffs_thresholds'):
@@ -10015,13 +10015,13 @@ class MFRM(Rasch):
             thresholds = self.thresholds
             severities = self.severities_thresholds
 
-        dummy_sevs = {'dummy_rater': np.zeros(self.max_score + 1)}
+        dummy_sevs = pd.Series({'dummy_rater': 0})
 
         if isinstance(raters, str):
-            raters = [raters]
-
-        if isinstance(items, str):
-            items = [items]
+            if raters == 'all':
+                raters = [rater for rater in self.raters]
+            else:
+                raters = [raters]
 
         if raters is None:
             if items is None:
@@ -10388,10 +10388,8 @@ class MFRM(Rasch):
         if isinstance(items, str):
             if items == 'all':
                 items = None
-
-        if isinstance(raters, str):
-            if raters == 'all':
-                raters = self.raters.tolist()
+            else:
+                items = [items]
 
         if anchor:
             if hasattr(self, 'anchor_diffs_matrix'):
@@ -10408,13 +10406,13 @@ class MFRM(Rasch):
             thresholds = self.thresholds
             severities = self.severities_matrix
 
-        dummy_sevs = {'dummy_rater': {item: np.zeros(self.max_score + 1) for item in self.dataframe.columns}}
+        dummy_sevs = pd.Series({'dummy_rater': 0})
 
         if isinstance(raters, str):
-            raters = [raters]
-
-        if isinstance(items, str):
-            items = [items]
+            if raters == 'all':
+                raters = [rater for rater in self.raters]
+            else:
+                raters = [raters]
 
         if raters is None:
             if items is None:
@@ -10645,11 +10643,11 @@ class MFRM(Rasch):
         if item in self.dataframe.columns:
 
             if rater is None:
-                return self.dataframe.apply(pd.value_counts)[item][:self.max_score + 1].fillna(0).astype(int)
+                return self.dataframe[item].value_counts().fillna(0).astype(int)
 
             else:
                 if rater in self.raters:
-                    return self.dataframe.xs(rater).apply(pd.value_counts)[item][:self.max_score + 1].fillna(0).astype(int)
+                    return self.dataframe.xs(rater)[item].value_counts().fillna(0).astype(int)
 
                 else:
                     print('Invalid rater name')
@@ -10663,7 +10661,7 @@ class MFRM(Rasch):
 
         for item in self.dataframe.columns:
             for score, count in self.category_counts_item(item).items():
-                category_counts_df.loc[item].iloc[int(score)] = count
+                category_counts_df.loc[item, int(score)] = count
 
         category_counts_df['Total'] = self.dataframe.count()
         category_counts_df['Missing'] = self.dataframe.shape[0] - category_counts_df['Total']
@@ -10681,7 +10679,7 @@ class MFRM(Rasch):
 
             for item in self.dataframe.columns:
                 for score, count in self.category_counts_item(item, rater).items():
-                    category_counts_df.loc[item].iloc[int(score)] = count
+                    category_counts_df.loc[item, int(score)] = count
 
             category_counts_df['Total'] = self.dataframe.xs(rater).count()
             category_counts_df['Missing'] = len(self.dataframe.xs(rater).index) - category_counts_df['Total']
@@ -13038,7 +13036,9 @@ class MFRM(Rasch):
                                       constant=0.1,
                                       method='cos',
                                       matrix_power=3,
-                                      log_lik_tol=0.000001):
+                                      log_lik_tol=0.000001,
+                                      no_of_samples=100,
+                                      interval=None):
 
         if hasattr(self, 'std_residual_df_global') == False:
             self.fit_statistics_global(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
@@ -13060,7 +13060,9 @@ class MFRM(Rasch):
                                      constant=0.1,
                                      method='cos',
                                      matrix_power=3,
-                                     log_lik_tol=0.000001):
+                                     log_lik_tol=0.000001,
+                                     no_of_samples=100,
+                                     interval=None):
 
         if hasattr(self, 'std_residual_df_items') == False:
             self.fit_statistics_items(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
@@ -13082,7 +13084,9 @@ class MFRM(Rasch):
                                           constant=0.1,
                                           method='cos',
                                           matrix_power=3,
-                                          log_lik_tol=0.000001):
+                                          log_lik_tol=0.000001,
+                                          no_of_samples=100,
+                                          interval=None):
 
         if hasattr(self, 'std_residual_df_thresholds') == False:
             self.fit_statistics_thresholds(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
@@ -13104,7 +13108,9 @@ class MFRM(Rasch):
                                       constant=0.1,
                                       method='cos',
                                       matrix_power=3,
-                                      log_lik_tol=0.000001):
+                                      log_lik_tol=0.000001,
+                                      no_of_samples=100,
+                                      interval=None):
 
         if hasattr(self, 'std_residual_df_matrix') == False:
             self.fit_statistics_matrix(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
@@ -14087,7 +14093,8 @@ class MFRM(Rasch):
         '''
 
         if hasattr(self, 'thresholds_global') == False:
-            self.calibrate_global(constant=constant, method=method, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
+            self.calibrate_global(constant=constant, method=method,
+                                  matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         if hasattr(self, 'threshold_se_global') == False:
             self.std_errors_global(interval=interval, no_of_samples=no_of_samples, constant=constant, method=method,
@@ -14125,11 +14132,12 @@ class MFRM(Rasch):
         '''
 
         if hasattr(self, 'thresholds_items') == False:
-            self.calibrate_items(constant=constant, method=method, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
-
+            self.calibrate_items(constant=constant, method=method,
+                                 matrix_power=matrix_power, log_lik_tol=log_lik_tol)
+            
         if hasattr(self, 'threshold_se_items') == False:
             self.std_errors_items(interval=interval, no_of_samples=no_of_samples, constant=constant, method=method,
-                                   matrix_power=matrix_power, log_lik_tol=log_lik_tol)
+                                  matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         if hasattr(self, 'abils_items') == False:
             self.person_abils_items(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
@@ -14154,6 +14162,8 @@ class MFRM(Rasch):
                                   ext_score_adjustment=0.5,
                                   method='cos',
                                   constant=0.1,
+                                  matrix_power=3,
+                                  log_lik_tol=0.000001,
                                   no_of_samples=100,
                                   interval=None):
         '''
@@ -14161,10 +14171,12 @@ class MFRM(Rasch):
         '''
 
         if hasattr(self, 'thresholds_thresholds') == False:
-            self.calibrate_thresholds(constant, method)
+            self.calibrate_thresholds(constant=constant, method=method,
+                                      matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         if hasattr(self, 'threshold_se_thresholds') == False:
-            self.std_errors_thresholds(interval, no_of_samples, constant, method)
+            self.std_errors_thresholds(interval=interval, no_of_samples=no_of_samples, constant=constant, method=method,
+                                       matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         if hasattr(self, 'abils_thresholds') == False:
             self.person_abils_thresholds(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
@@ -14189,6 +14201,8 @@ class MFRM(Rasch):
                               ext_score_adjustment=0.5,
                               method='cos',
                               constant=0.1,
+                              matrix_power=3,
+                              log_lik_tol=0.000001,
                               no_of_samples=100,
                               interval=None):
         '''
@@ -14196,11 +14210,13 @@ class MFRM(Rasch):
         '''
 
         if hasattr(self, 'thresholds_matrix') == False:
-            self.calibrate_matrix(constant, method)
+            self.calibrate_matrix(constant=constant, method=method,
+                                  matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         if hasattr(self, 'threshold_se_matrix') == False:
-            self.std_errors_matrix(interval, no_of_samples, constant, method)
-
+            self.std_errors_matrix(interval=interval, no_of_samples=no_of_samples, constant=constant, method=method,
+                                   matrix_power=matrix_power, log_lik_tol=log_lik_tol)
+            
         if hasattr(self, 'abils_matrix') == False:
             self.person_abils_matrix(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                      ext_score_adjustment=ext_score_adjustment)
@@ -21141,14 +21157,14 @@ class PCM_Sim(Rasch_Sim):
 
         self.thresholds_uncentred = {f'Item_{item + 1}':
                                      self.thresholds_centred[f'Item_{item + 1}'][1:] +
-                                     self.diffs[item]
+                                     self.diffs.iloc[item]
                                      for item in range(self.no_of_items)}
 
         threshold_list = itertools.chain.from_iterable(self.thresholds_uncentred.values())
         threshold_mean = statistics.mean(threshold_list)
         
         for item in range(self.no_of_items):
-            self.diffs[item] -= threshold_mean
+            self.diffs.iloc[item] -= threshold_mean
             self.thresholds_uncentred[f'Item_{item + 1}'] -= threshold_mean
             
         '''
