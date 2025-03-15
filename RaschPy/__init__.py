@@ -642,13 +642,13 @@ class Rasch:
         exp_score_dev_df = exp_score_df - self.dataframe.loc[exp_score_df.index].mean(axis=0)
 
         pt_measure_num = (score_dev_df * abil_dev_df).sum(axis=0)
-        pt_measure_den = np.sqrt((score_dev_df ** 2).sum(axis=0) * (abil_dev_df ** 2).sum(axis=0))
+        pt_measure_den = ((score_dev_df ** 2).sum(axis=0) * (abil_dev_df ** 2).sum(axis=0)) ** 0.5
 
         pt_measure = pt_measure_num / pt_measure_den
 
         exp_pt_measure_num = (exp_score_dev_df * abil_dev_df).sum(axis=0)
-        exp_pt_measure_den = np.sqrt((exp_score_dev_df ** 2 + info_df).sum(axis=0) *
-                                     (abil_dev_df ** 2).sum(axis=0))
+        exp_pt_measure_den = ((exp_score_dev_df ** 2 + info_df).sum(axis=0) *
+                              (abil_dev_df ** 2).sum(axis=0)) ** 0.5
 
         exp_pt_measure = exp_pt_measure_num / exp_pt_measure_den
 
@@ -1194,7 +1194,7 @@ class SLM(Rasch):
         self.kurtosis_df *= missing_mask
 
         self.residual_df = self.dataframe - self.exp_score_df
-        self.std_residual_df = self.residual_df / np.sqrt(self.info_df.astype(float))
+        self.std_residual_df = self.residual_df / (self.info_df ** 0.5)
 
         scores = self.dataframe.sum(axis=1)
         max_scores = self.dataframe.count(axis=1)
@@ -1213,12 +1213,12 @@ class SLM(Rasch):
         self.item_infit_ms = (self.residual_df ** 2).sum() / self.info_df.sum()
 
         item_outfit_q = ((self.kurtosis_df / (self.info_df ** 2)) / (item_count ** 2)).sum() - (1 / item_count)
-        item_outfit_q = np.sqrt(item_outfit_q)
-        self.item_outfit_zstd = (np.cbrt(self.item_outfit_ms) - 1) * (3 / item_outfit_q) + (item_outfit_q / 3)
+        item_outfit_q = item_outfit_q ** 0.5
+        self.item_outfit_zstd = ((self.item_outfit_ms ** (1/3)) - 1) * (3 / item_outfit_q) + (item_outfit_q / 3)
 
         item_infit_q = (self.kurtosis_df - self.info_df ** 2).sum() / (self.info_df.sum() ** 2)
-        item_infit_q = np.sqrt(item_infit_q)
-        self.item_infit_zstd = (np.cbrt(self.item_infit_ms) - 1) * (3 / item_infit_q) + (item_infit_q / 3)
+        item_infit_q = item_infit_q ** 0.5
+        self.item_infit_zstd = ((self.item_infit_ms ** (1/3)) - 1) * (3 / item_infit_q) + (item_infit_q / 3)
 
         self.response_counts = self.dataframe.count(axis=0)
         self.item_facilities = self.dataframe.mean(axis=0)
@@ -1230,8 +1230,8 @@ class SLM(Rasch):
         Person fit statistics
         '''
 
-        self.csem_vector = 1 / np.sqrt(self.info_df.sum(axis=1))
-        self.rsem_vector = np.sqrt((self.residual_df ** 2).sum(axis=1)) / self.info_df.sum(axis=1)
+        self.csem_vector = 1 / (self.info_df.sum(axis=1) ** 0.5)
+        self.rsem_vector = ((self.residual_df ** 2).sum(axis=1) ** 0.5) / self.info_df.sum(axis=1)
 
 
         self.person_outfit_ms = (self.std_residual_df ** 2).mean(axis=1)
@@ -1243,13 +1243,13 @@ class SLM(Rasch):
         for column in self.dataframe.columns:
             base_df[column] /= (person_count ** 2)
         person_outfit_q = base_df.sum(axis=1) -  (1 / person_count)
-        person_outfit_q = np.sqrt(person_outfit_q)
-        self.person_outfit_zstd = (np.cbrt(self.person_outfit_ms) - 1) * (3 / person_outfit_q) + (person_outfit_q / 3)
+        person_outfit_q = person_outfit_q ** 0.5
+        self.person_outfit_zstd = ((self.person_outfit_ms ** (1/3)) - 1) * (3 / person_outfit_q) + (person_outfit_q / 3)
         self.person_outfit_zstd.name = 'Outfit Z'
 
         person_infit_q = (self.kurtosis_df - self.info_df ** 2).sum(axis=1) / (self.info_df.sum(axis=1) ** 2)
-        person_infit_q = np.sqrt(person_infit_q)
-        self.person_infit_zstd = (np.cbrt(self.person_infit_ms) - 1) * (3 / person_infit_q) + (person_infit_q / 3)
+        person_infit_q = person_infit_q ** 0.5
+        self.person_infit_zstd = ((self.person_infit_ms ** (1/3)) - 1) * (3 / person_infit_q) + (person_infit_q / 3)
         self.person_infit_zstd.name = 'Infit Z'
 
         differences = pd.DataFrame()
@@ -1263,12 +1263,12 @@ class SLM(Rasch):
         Test-level fit statistics
         '''
 
-        self.isi = np.sqrt(self.diffs.var() / (self.item_se ** 2).mean() - 1)
+        self.isi = (self.diffs.var() / (self.item_se ** 2).mean() - 1) ** 0.5
         self.item_strata = (4 * self.isi + 1) / 3
         self.item_reliability = self.isi ** 2 / (1 + self.isi ** 2)
 
-        self.psi = (np.sqrt(np.var(self.person_abilities) - (self.rsem_vector ** 2).mean()) /
-                     np.sqrt((self.rsem_vector ** 2).mean()))
+        self.psi = ((np.var(self.person_abilities) - (self.rsem_vector ** 2).mean()) ** 0.5 /
+                     ((self.rsem_vector ** 2).mean()) ** 0.5)
         self.person_strata = (4 * self.psi + 1) / 3
         self.person_reliability = (self.psi ** 2) / (1 + (self.psi ** 2))
 
@@ -1319,7 +1319,7 @@ class SLM(Rasch):
             self.variance_explained.index = [f'PC {pc + 1}' for pc in range(self.no_of_items)]
             self.variance_explained.columns = ['Variance explained']
 
-            self.loadings = self.eigenvectors.T * np.sqrt(pca.explained_variance_)
+            self.loadings = self.eigenvectors.T * (pca.explained_variance_ ** 0.5)
             self.loadings = pd.DataFrame(self.loadings)
             self.loadings.columns = [f'PC {pc + 1}' for pc in range(self.no_of_items)]
             self.loadings.index = [item for item in self.dataframe.columns]
@@ -1366,29 +1366,29 @@ class SLM(Rasch):
 
         self.item_stats = pd.DataFrame()
 
-        self.item_stats['Estimate'] = self.diffs.to_numpy().round(dp)
-        self.item_stats['SE'] = self.item_se.to_numpy().round(dp)
+        self.item_stats['Estimate'] = self.diffs.round(dp)
+        self.item_stats['SE'] = self.item_se.round(dp)
 
         if interval is not None:
-            self.item_stats[f'{round((1 - interval) * 50, 1)}%'] = self.item_low.to_numpy().round(dp)
-            self.item_stats[f'{round((1 + interval) * 50, 1)}%'] = self.item_high.to_numpy().round(dp)
+            self.item_stats[f'{round((1 - interval) * 50, 1)}%'] = self.item_low.round(dp)
+            self.item_stats[f'{round((1 + interval) * 50, 1)}%'] = self.item_high.round(dp)
 
-        self.item_stats['Count'] = self.response_counts.to_numpy().astype(int)
-        self.item_stats['Facility'] = self.item_facilities.to_numpy().round(dp)
+        self.item_stats['Count'] = self.response_counts.astype(int)
+        self.item_stats['Facility'] = self.item_facilities.round(dp)
 
-        self.item_stats['Infit MS'] = self.item_infit_ms.to_numpy().round(dp)
+        self.item_stats['Infit MS'] = self.item_infit_ms.round(dp)
         if zstd:
-            self.item_stats['Infit Z'] = self.item_infit_zstd.to_numpy().round(dp)
-        self.item_stats['Outfit MS'] = self.item_outfit_ms.to_numpy().round(dp)
+            self.item_stats['Infit Z'] = self.item_infit_zstd.round(dp)
+        self.item_stats['Outfit MS'] = self.item_outfit_ms.round(dp)
         if zstd:
-            self.item_stats['Outfit Z'] = self.item_outfit_zstd.to_numpy().round(dp)
+            self.item_stats['Outfit Z'] = self.item_outfit_zstd.round(dp)
 
         if disc:
-            self.item_stats['Discrim'] = self.discrimination.to_numpy().round(dp)
+            self.item_stats['Discrim'] = self.discrimination.round(dp)
 
         if point_measure_corr:
-            self.item_stats['PM corr'] = self.point_measure.to_numpy().round(dp)
-            self.item_stats['Exp PM corr'] = self.exp_point_measure.to_numpy().round(dp)
+            self.item_stats['PM corr'] = self.point_measure.round(dp)
+            self.item_stats['Exp PM corr'] = self.exp_point_measure.round(dp)
 
         self.item_stats.index = self.dataframe.columns
 
@@ -1434,10 +1434,10 @@ class SLM(Rasch):
         person_stats_df['Outfit MS'] = [np.nan for person in self.dataframe.index]
         person_stats_df['Outfit Z'] = [np.nan for person in self.dataframe.index]
 
-        person_stats_df.update(self.person_infit_ms.round(dp))
-        person_stats_df.update(self.person_infit_zstd.round(dp))
-        person_stats_df.update(self.person_outfit_ms.round(dp))
-        person_stats_df.update(self.person_outfit_zstd.round(dp))
+        person_stats_df.update({'Infit MS': self.person_infit_ms.round(dp)})
+        person_stats_df.update({'Infit Z': self.person_infit_zstd.round(dp)})
+        person_stats_df.update({'Outfit MS': self.person_outfit_ms.round(dp)})
+        person_stats_df.update({'Outfit Z': self.person_outfit_zstd.round(dp)})
 
         self.person_stats = person_stats_df
         
@@ -1857,7 +1857,7 @@ class SLM(Rasch):
                             for difficulty in difficulties)
                         for ability in point_csem_lines]
             info_set = np.array(info_set)
-            csem_set = 1 / np.sqrt(info_set)
+            csem_set = 1 / (info_set ** 0.5)
 
             for abil, csem in zip(point_csem_lines, csem_set):
                 plt.vlines(x=abil, ymin=-100, ymax=csem, color='black', linestyles='dashed')
@@ -2278,7 +2278,7 @@ class SLM(Rasch):
                               for item in items)
                           for ability in abilities])
 
-        y = 1 / np.sqrt(y)
+        y = 1 / (y ** 0.5)
         y = y.reshape(len(abilities), 1)
 
         if title is not None:
@@ -3119,7 +3119,7 @@ class PCM(Rasch):
                          for item, item_thresholds in thresholds.items()
                          if person_filter_dict[item] == person_filter_dict[item])
 
-        cond_sem = 1 / np.sqrt(total_info)
+        cond_sem = 1 / (total_info ** 0.5)
 
         return cond_sem
 
@@ -3146,7 +3146,7 @@ class PCM(Rasch):
                          for item, item_thresholds in thresholds.items()
                          if person_filter_dict[item] == person_filter_dict[item])
 
-        cond_sem = 1 / np.sqrt(total_info)
+        cond_sem = 1 / (total_info ** 0.5)
 
         return cond_sem
 
@@ -3276,7 +3276,7 @@ class PCM(Rasch):
         self.kurtosis_df *= missing_mask
 
         self.residual_df = df - self.exp_score_df
-        self.std_residual_df = self.residual_df / np.sqrt(self.info_df.astype(float))
+        self.std_residual_df = self.residual_df / (self.info_df ** 0.5)
 
         '''
         Item fit statistics
@@ -3286,12 +3286,12 @@ class PCM(Rasch):
         self.item_infit_ms =  (self.residual_df ** 2).sum() / self.info_df.sum()
 
         item_outfit_q = ((self.kurtosis_df / (self.info_df ** 2)) / (item_count ** 2)).sum() - (1 / item_count)
-        item_outfit_q = np.sqrt(item_outfit_q)
-        self.item_outfit_zstd = (np.cbrt(self.item_outfit_ms) - 1) * (3 / item_outfit_q) + (item_outfit_q / 3)
+        item_outfit_q = item_outfit_q ** 0.5
+        self.item_outfit_zstd = ((self.item_outfit_ms ** (1/3)) - 1) * (3 / item_outfit_q) + (item_outfit_q / 3)
 
         item_infit_q = (self.kurtosis_df - self.info_df ** 2).sum() / (self.info_df.sum() ** 2)
-        item_infit_q = np.sqrt(item_infit_q)
-        self.item_infit_zstd = (np.cbrt(self.item_infit_ms) - 1) * (3 / item_infit_q) + (item_infit_q / 3)
+        item_infit_q = item_infit_q ** 0.5
+        self.item_infit_zstd = ((self.item_infit_ms ** (1/3)) - 1) * (3 / item_infit_q) + (item_infit_q / 3)
 
         self.response_counts = self.dataframe.count(axis=0)
         self.item_facilities = self.dataframe.mean(axis=0) / self.max_score_vector
@@ -3352,7 +3352,7 @@ class PCM(Rasch):
                 dich_residuals[item][threshold + 1] = (dich_thresh[item][threshold + 1] -
                                                        dich_thresh_exp[item][threshold + 1])
                 dich_std_residuals[item][threshold + 1] = (dich_residuals[item][threshold + 1] /
-                                                           np.sqrt(dich_thresh_var[item][threshold + 1]))
+                                                           (dich_thresh_var[item][threshold + 1] ** 0.5))
 
         self.threshold_outfit_ms = {item: {threshold + 1:
                                            (dich_std_residuals[item][threshold + 1] ** 2).sum() /
@@ -3385,9 +3385,9 @@ class PCM(Rasch):
         for item in self.dataframe.columns:
             threshold_outfit_q[item] = pd.Series(threshold_outfit_q[item])
         threshold_outfit_q = pd.concat(threshold_outfit_q.values(), keys=self.dataframe.columns)
-        threshold_outfit_q = np.sqrt(threshold_outfit_q)
+        threshold_outfit_q = threshold_outfit_q ** 0.5
 
-        self.threshold_outfit_zstd = ((np.cbrt(self.threshold_outfit_ms) - 1) *
+        self.threshold_outfit_zstd = (((self.threshold_outfit_ms ** (1/3)) - 1) *
                                       (3 / threshold_outfit_q) +
                                       (threshold_outfit_q / 3))
 
@@ -3400,9 +3400,9 @@ class PCM(Rasch):
         for item in self.dataframe.columns:
             threshold_infit_q[item] = pd.Series(threshold_infit_q[item])
         threshold_infit_q = pd.concat(threshold_infit_q.values(), keys=self.dataframe.columns)
-        threshold_infit_q = np.sqrt(threshold_infit_q)
+        threshold_infit_q = threshold_infit_q ** 0.5
 
-        self.threshold_infit_zstd = ((np.cbrt(self.threshold_infit_ms) - 1) *
+        self.threshold_infit_zstd = (((self.threshold_infit_ms ** (1/3)) - 1) *
                                      (3 / threshold_infit_q) +
                                      (threshold_infit_q / 3))
 
@@ -3436,7 +3436,7 @@ class PCM(Rasch):
         for item in self.dataframe.columns:
             point_measure_dens[item] = pd.Series(point_measure_dens[item])
         point_measure_dens = pd.concat(point_measure_dens.values(), keys = self.dataframe.columns)
-        point_measure_dens = np.sqrt(point_measure_dens)
+        point_measure_dens = point_measure_dens ** 0.5
 
         self.threshold_point_measure = point_measure_nums / point_measure_dens
 
@@ -3468,7 +3468,7 @@ class PCM(Rasch):
         threshold_exp_pm_den = pd.concat(threshold_exp_pm_den.values(), keys=self.dataframe.columns)
 
         threshold_exp_pm_den *= (abil_deviation ** 2).sum()
-        threshold_exp_pm_den = np.sqrt(threshold_exp_pm_den)
+        threshold_exp_pm_den = threshold_exp_pm_den ** 0.5
 
         self.threshold_exp_point_measure = threshold_exp_pm_num / threshold_exp_pm_den
 
@@ -3482,7 +3482,7 @@ class PCM(Rasch):
             self.threshold_rmsr[item] = pd.Series(self.threshold_rmsr[item])
         self.threshold_rmsr = pd.concat(self.threshold_rmsr.values(), keys=self.dataframe.columns)
 
-        self.threshold_rmsr = np.sqrt(self.threshold_rmsr)
+        self.threshold_rmsr = self.threshold_rmsr ** 0.5
 
         differences = {item: {threshold + 1: pd.DataFrame()
                               for threshold in range(self.max_score_vector[item])}
@@ -3519,8 +3519,8 @@ class PCM(Rasch):
         Person fit statistics
         '''
 
-        self.csem_vector = 1 / np.sqrt(self.info_df.sum(axis=1))
-        self.rsem_vector = np.sqrt((self.residual_df ** 2).sum(axis=1)) / self.info_df.sum(axis=1)
+        self.csem_vector = 1 / (self.info_df.sum(axis=1) ** 0.5)
+        self.rsem_vector = ((self.residual_df ** 2).sum(axis=1) ** 0.5) / self.info_df.sum(axis=1)
 
         self.person_outfit_ms = (self.std_residual_df ** 2).mean(axis=1)
         self.person_outfit_ms.name = 'Outfit MS'
@@ -3531,13 +3531,13 @@ class PCM(Rasch):
         for column in self.dataframe.columns:
             base_df[column] /= (person_count ** 2)
         person_outfit_q = base_df.sum(axis=1) -  (1 / person_count)
-        person_outfit_q = np.sqrt(person_outfit_q)
-        self.person_outfit_zstd = (np.cbrt(self.person_outfit_ms) - 1) * (3 / person_outfit_q) + (person_outfit_q / 3)
+        person_outfit_q = person_outfit_q ** 0.5
+        self.person_outfit_zstd = ((self.person_outfit_ms ** (1/3)) - 1) * (3 / person_outfit_q) + (person_outfit_q / 3)
         self.person_outfit_zstd.name = 'Outfit Z'
 
         person_infit_q = (self.kurtosis_df - self.info_df ** 2).sum(axis=1) / (self.info_df.sum(axis=1) ** 2)
-        person_infit_q = np.sqrt(person_infit_q)
-        self.person_infit_zstd = (np.cbrt(self.person_infit_ms) - 1) * (3 / person_infit_q) + (person_infit_q / 3)
+        person_infit_q = person_infit_q ** 0.5
+        self.person_infit_zstd = ((self.person_infit_ms ** (1/3)) - 1) * (3 / person_infit_q) + (person_infit_q / 3)
         self.person_infit_zstd.name = 'Infit Z'
 
         '''
@@ -3549,16 +3549,16 @@ class PCM(Rasch):
         self.threshold_se_list = itertools.chain.from_iterable(self.threshold_se.values())
         self.threshold_se_list = np.array(list(self.threshold_se_list))
 
-        self.isi_central = np.sqrt(self.central_diffs.var() / (self.central_se ** 2).mean() - 1)
+        self.isi_central = (self.central_diffs.var() / (self.central_se ** 2).mean() - 1) ** 0.5
         self.item_strata = (4 * self.isi_central + 1) / 3
         self.item_reliability = self.isi_central ** 2 / (1 + self.isi_central ** 2)
 
-        self.isi_thresholds = np.sqrt(self.threshold_list.var() / (self.threshold_se_list ** 2).mean() - 1)
+        self.isi_thresholds = (self.threshold_list.var() / (self.threshold_se_list ** 2).mean() - 1) ** 0.5
         self.threshold_strata = (4 * self.isi_thresholds + 1) / 3
         self.threshold_reliability = self.isi_thresholds ** 2 / (1 + self.isi_thresholds ** 2)
 
-        self.psi = (np.sqrt(np.var(self.person_abilities) - (self.rsem_vector ** 2).mean()) /
-                     np.sqrt((self.rsem_vector ** 2).mean()))
+        self.psi = ((np.var(self.person_abilities) - (self.rsem_vector ** 2).mean()) ** 0.5 /
+                    ((self.rsem_vector ** 2).mean()) ** 0.5)
         self.person_strata = (4 * self.psi + 1) / 3
         self.person_reliability = (self.psi ** 2) / (1 + (self.psi ** 2))
 
@@ -3603,7 +3603,7 @@ class PCM(Rasch):
             self.variance_explained.index = [f'PC {pc + 1}' for pc in range(self.no_of_items)]
             self.variance_explained.columns = ['Variance explained']
 
-            self.loadings = self.eigenvectors.T * np.sqrt(pca.explained_variance_)
+            self.loadings = self.eigenvectors.T * (pca.explained_variance_ ** 0.5)
             self.loadings = pd.DataFrame(self.loadings)
             self.loadings.columns = [f'PC {pc + 1}' for pc in range(self.no_of_items)]
             self.loadings.index = [item for item in self.dataframe.columns]
@@ -3650,26 +3650,26 @@ class PCM(Rasch):
         self.item_stats = pd.DataFrame()
 
         self.item_stats['Estimate'] = self.central_diffs.round(dp)
-        self.item_stats['SE'] = self.central_se.to_numpy().round(dp)
+        self.item_stats['SE'] = self.central_se.round(dp)
 
         if interval is not None:
-            self.item_stats[f'{round((1 - interval) * 50, 1)}%'] = self.central_low.to_numpy().round(dp)
-            self.item_stats[f'{round((1 + interval) * 50, 1)}%'] = self.central_high.to_numpy().round(dp)
+            self.item_stats[f'{round((1 - interval) * 50, 1)}%'] = self.central_low.round(dp)
+            self.item_stats[f'{round((1 + interval) * 50, 1)}%'] = self.central_high.round(dp)
 
-        self.item_stats['Count'] = self.response_counts.to_numpy().astype(int)
-        self.item_stats['Facility'] = self.item_facilities.to_numpy().round(dp)
+        self.item_stats['Count'] = self.response_counts.astype(int)
+        self.item_stats['Facility'] = self.item_facilities.round(dp)
 
-        self.item_stats['Infit MS'] = self.item_infit_ms.to_numpy().round(dp)
+        self.item_stats['Infit MS'] = self.item_infit_ms.round(dp)
         if zstd:
-            self.item_stats['Infit Z'] = self.item_infit_zstd.to_numpy().round(dp)
+            self.item_stats['Infit Z'] = self.item_infit_zstd.round(dp)
 
-        self.item_stats['Outfit MS'] = self.item_outfit_ms.to_numpy().round(dp)
+        self.item_stats['Outfit MS'] = self.item_outfit_ms.round(dp)
         if zstd:
-            self.item_stats['Outfit Z'] = self.item_outfit_zstd.to_numpy().round(dp)
+            self.item_stats['Outfit Z'] = self.item_outfit_zstd.round(dp)
 
         if point_measure_corr:
-            self.item_stats['PM corr'] = self.point_measure.to_numpy().round(dp)
-            self.item_stats['Exp PM corr'] = self.exp_point_measure.to_numpy().round(dp)
+            self.item_stats['PM corr'] = self.point_measure.round(dp)
+            self.item_stats['Exp PM corr'] = self.exp_point_measure.round(dp)
 
         self.item_stats.index = self.dataframe.columns
 
@@ -3719,19 +3719,29 @@ class PCM(Rasch):
             self.threshold_stats_uncentred[f'{round((1 - interval) * 50, 1)}%'] = low_array.round(dp)
             self.threshold_stats_uncentred[f'{round((1 + interval) * 50, 1)}%'] = high_array.round(dp)
 
-        self.threshold_stats_uncentred['Infit MS'] = self.threshold_infit_ms.to_numpy().round(dp)
+        infit_ms_vector = self.threshold_infit_ms.reset_index(drop=True)
+        self.threshold_stats_uncentred['Infit MS'] = infit_ms_vector.round(dp)
+
         if zstd:
-            self.threshold_stats_uncentred['Infit Z'] = self.threshold_infit_zstd.to_numpy().round(dp)
-        self.threshold_stats_uncentred['Outfit MS'] = self.threshold_outfit_ms.to_numpy().round(dp)
+            infit_z_vector = self.threshold_infit_zstd.reset_index(drop=True)
+            self.threshold_stats_uncentred['Infit Z'] = infit_z_vector.round(dp)
+
+        outfit_ms_vector = self.threshold_outfit_ms.reset_index(drop=True)
+        self.threshold_stats_uncentred['Outfit MS'] = outfit_ms_vector.round(dp)
+
         if zstd:
-            self.threshold_stats_uncentred['Outfit Z'] = self.threshold_outfit_zstd.to_numpy().round(dp)
+            outfit_z_vector = self.threshold_outfit_zstd.reset_index(drop=True)
+            self.threshold_stats_uncentred['Outfit Z'] = outfit_z_vector.round(dp)
 
         if disc:
-            self.threshold_stats_uncentred['Discrim'] = self.threshold_discrimination.to_numpy().round(dp)
+            disc_vector = self.threshold_discrimination.reset_index(drop=True)
+            self.threshold_stats_uncentred['Discrim'] = disc_vector.round(dp)
 
         if point_measure_corr:
-            self.threshold_stats_uncentred['PM corr'] = self.threshold_point_measure.to_numpy().round(dp)
-            self.threshold_stats_uncentred['Exp PM corr'] = self.threshold_exp_point_measure.to_numpy().round(dp)
+            pm_vector = self.threshold_point_measure.reset_index(drop=True)
+            exp_pm_vector = self.threshold_exp_point_measure.reset_index(drop=True)
+            self.threshold_stats_uncentred['PM corr'] = pm_vector.round(dp)
+            self.threshold_stats_uncentred['Exp PM corr'] = exp_pm_vector.round(dp)
 
         self.threshold_stats_uncentred.index = self.threshold_infit_ms.index
 
@@ -3773,7 +3783,7 @@ class PCM(Rasch):
         person_stats_df = pd.DataFrame()
         person_stats_df.index = self.dataframe.index
 
-        person_stats_df['Estimate'] = self.person_abilities.to_numpy().round(dp)
+        person_stats_df['Estimate'] = self.person_abilities.round(dp)
 
         person_stats_df['CSEM'] = self.csem_vector.round(dp)
         if rsem:
@@ -3792,10 +3802,10 @@ class PCM(Rasch):
         person_stats_df['Outfit MS'] = [np.nan for person in self.dataframe.index]
         person_stats_df['Outfit Z'] = [np.nan for person in self.dataframe.index]
 
-        person_stats_df['Infit MS'].update(self.person_infit_ms.round(dp))
-        person_stats_df['Infit Z'].update(self.person_infit_zstd.round(dp))
-        person_stats_df['Outfit MS'].update(self.person_outfit_ms.round(dp))
-        person_stats_df['Outfit Z'].update(self.person_outfit_zstd.round(dp))
+        person_stats_df.update({'Infit MS': self.person_infit_ms.round(dp)})
+        person_stats_df.update({'Infit Z': self.person_infit_zstd.round(dp)})
+        person_stats_df.update({'Outfit MS': self.person_outfit_ms.round(dp)})
+        person_stats_df.update({'Outfit Z': self.person_outfit_zstd.round(dp)})
 
         self.person_stats = person_stats_df
 
@@ -4347,7 +4357,7 @@ class PCM(Rasch):
                             for ability in point_csem_lines]
 
             info_set = np.array(info_set)
-            csem_set = 1 / np.sqrt(info_set)
+            csem_set = 1 / (info_set ** 0.5)
 
             for abil, csem in zip(point_csem_lines, csem_set):
                 plt.vlines(x=abil, ymin=-100, ymax=csem, color='black', linestyles='dashed')
@@ -4856,7 +4866,7 @@ class PCM(Rasch):
                      for item in items)
                  for ability in abilities])
 
-        y = 1 / np.sqrt(y)
+        y = 1 / (y ** 0.5)
         y = y.reshape(len(abilities), 1)
 
         if title is not None:
@@ -5502,7 +5512,7 @@ class RSM(Rasch):
                          for flag, difficulty in zip(person_filter, difficulties)
                          if flag == flag)
 
-        cond_sem = 1 / np.sqrt(total_info)
+        cond_sem = 1 / (total_info ** 0.5)
 
         return cond_sem
 
@@ -5589,7 +5599,7 @@ class RSM(Rasch):
         self.kurtosis_df *= missing_mask
 
         self.residual_df = self.dataframe - self.exp_score_df
-        self.std_residual_df = self.residual_df / np.sqrt(self.info_df.astype(float))
+        self.std_residual_df = self.residual_df / (self.info_df ** 0.5)
 
         scores = self.dataframe.sum(axis=1)
         max_scores = self.dataframe.count(axis=1) * self.max_score
@@ -5608,12 +5618,12 @@ class RSM(Rasch):
         self.item_infit_ms = (self.residual_df ** 2).sum() / self.info_df.sum()
 
         item_outfit_q = ((self.kurtosis_df / (self.info_df ** 2)) / (item_count ** 2)).sum() - (1 / item_count)
-        item_outfit_q = np.sqrt(item_outfit_q)
-        self.item_outfit_zstd = (np.cbrt(self.item_outfit_ms) - 1) * (3 / item_outfit_q) + (item_outfit_q / 3)
+        item_outfit_q = item_outfit_q ** 0.5
+        self.item_outfit_zstd = ((self.item_outfit_ms ** (1/3)) - 1) * (3 / item_outfit_q) + (item_outfit_q / 3)
 
         item_infit_q = (self.kurtosis_df - self.info_df ** 2).sum() / (self.info_df.sum() ** 2)
-        item_infit_q = np.sqrt(item_infit_q)
-        self.item_infit_zstd = (np.cbrt(self.item_infit_ms) - 1) * (3 / item_infit_q) + (item_infit_q / 3)
+        item_infit_q = item_infit_q ** 0.5
+        self.item_infit_zstd = ((self.item_infit_ms ** (1/3)) - 1) * (3 / item_infit_q) + (item_infit_q / 3)
 
         self.response_counts = self.dataframe.count(axis=0)
         self.item_facilities = self.dataframe.mean(axis=0) / self.max_score
@@ -5666,7 +5676,7 @@ class RSM(Rasch):
 
             dich_residuals[threshold + 1] = dich_thresh[threshold + 1] - dich_thresh_exp[threshold + 1]
             dich_std_residuals[threshold + 1] = (dich_residuals[threshold + 1] /
-                                                 np.sqrt(dich_thresh_var[threshold + 1].astype(float)))
+                                                 (dich_thresh_var[threshold + 1] ** 0.5))
 
         self.threshold_outfit_ms = {threshold + 1: ((dich_std_residuals[threshold + 1] ** 2).sum().sum() /
                                                     dich_thresh[threshold + 1].count().sum())
@@ -5683,9 +5693,9 @@ class RSM(Rasch):
                               (1 / dich_thresh_count[threshold + 1]))
             for threshold in range(self.max_score)}
         threshold_outfit_q = pd.Series(threshold_outfit_q)
-        threshold_outfit_q = np.sqrt(threshold_outfit_q.astype(float))
+        threshold_outfit_q = threshold_outfit_q ** 0.5
 
-        self.threshold_outfit_zstd = (np.cbrt(self.threshold_outfit_ms.astype(float)) - 1) * (3 / threshold_outfit_q) + (
+        self.threshold_outfit_zstd = ((self.threshold_outfit_ms ** (1/3)) - 1) * (3 / threshold_outfit_q) + (
                     threshold_outfit_q / 3)
 
         threshold_infit_q = {threshold + 1: ((dich_thresh_kur[threshold + 1] -
@@ -5693,9 +5703,9 @@ class RSM(Rasch):
                                              (dich_thresh_var[threshold + 1].sum().sum() ** 2))
                              for threshold in range(self.max_score)}
         threshold_infit_q = pd.Series(threshold_infit_q)
-        threshold_infit_q = np.sqrt(threshold_infit_q.astype(float))
+        threshold_infit_q = threshold_infit_q ** 0.5
 
-        self.threshold_infit_zstd = (np.cbrt(self.threshold_infit_ms.astype(float)) - 1) * (3 / threshold_infit_q) + (
+        self.threshold_infit_zstd = ((self.threshold_infit_ms ** (1/3)) - 1) * (3 / threshold_infit_q) + (
                     threshold_infit_q / 3)
 
         dich_facilities = {threshold + 1: dich_thresh[threshold + 1].mean(axis=0)
@@ -5713,8 +5723,8 @@ class RSM(Rasch):
                               for threshold in range(self.max_score)}
         point_measure_nums = pd.Series(point_measure_nums)
 
-        point_measure_dens = {threshold + 1: np.sqrt((point_measure_dict[threshold + 1] ** 2).sum().sum() *
-                                                     (abil_deviation ** 2).sum())
+        point_measure_dens = {threshold + 1: ((point_measure_dict[threshold + 1] ** 2).sum().sum() *
+                                              (abil_deviation ** 2).sum()) ** 0.5
                               for threshold in range(self.max_score)}
         point_measure_dens = pd.Series(point_measure_dens)
 
@@ -5734,12 +5744,12 @@ class RSM(Rasch):
                                 for threshold in range(self.max_score)}
         threshold_exp_pm_den = pd.Series(threshold_exp_pm_den)
         threshold_exp_pm_den *= (abil_deviation ** 2).sum()
-        threshold_exp_pm_den = np.sqrt(threshold_exp_pm_den)
+        threshold_exp_pm_den = threshold_exp_pm_den ** 0.5
 
         self.threshold_exp_point_measure = threshold_exp_pm_num / threshold_exp_pm_den
 
-        self.threshold_rmsr = {threshold + 1: (np.sqrt((dich_residuals[threshold + 1] ** 2).sum().sum() /
-                                                       dich_residuals[threshold + 1].count().sum()))
+        self.threshold_rmsr = {threshold + 1: (((dich_residuals[threshold + 1] ** 2).sum().sum() /
+                                               dich_residuals[threshold + 1].count().sum())) ** 0.5
                                for threshold in range(self.max_score)}
         self.threshold_rmsr = pd.Series(self.threshold_rmsr)
 
@@ -5764,8 +5774,8 @@ class RSM(Rasch):
         Person fit statistics
         '''
 
-        self.csem_vector = 1 / np.sqrt(self.info_df.sum(axis=1))
-        self.rsem_vector = np.sqrt((self.residual_df ** 2).sum(axis=1)) / self.info_df.sum(axis=1)
+        self.csem_vector = 1 / (self.info_df.sum(axis=1) ** 0.5)
+        self.rsem_vector = ((self.residual_df ** 2).sum(axis=1) ** 0.5) / self.info_df.sum(axis=1)
 
         self.person_outfit_ms = (self.std_residual_df ** 2).mean(axis=1)
         self.person_outfit_ms.name = 'Outfit MS'
@@ -5776,25 +5786,25 @@ class RSM(Rasch):
         for column in self.dataframe.columns:
             base_df[column] /= (person_count ** 2)
         person_outfit_q = base_df.sum(axis=1) -  (1 / person_count)
-        person_outfit_q = np.sqrt(person_outfit_q.astype(float))
-        self.person_outfit_zstd = (np.cbrt(self.person_outfit_ms.astype(float)) - 1) * (3 / person_outfit_q) + (person_outfit_q / 3)
+        person_outfit_q = person_outfit_q ** 0.5
+        self.person_outfit_zstd = ((self.person_outfit_ms ** (1/3)) - 1) * (3 / person_outfit_q) + (person_outfit_q / 3)
         self.person_outfit_zstd.name = 'Outfit Z'
 
         person_infit_q = (self.kurtosis_df - self.info_df ** 2).sum(axis=1) / (self.info_df.sum(axis=1) ** 2)
-        person_infit_q = np.sqrt(person_infit_q.astype(float))
-        self.person_infit_zstd = (np.cbrt(self.person_infit_ms.astype(float)) - 1) * (3 / person_infit_q) + (person_infit_q / 3)
+        person_infit_q = person_infit_q ** 0.5
+        self.person_infit_zstd = ((self.person_infit_ms ** (1/3)) - 1) * (3 / person_infit_q) + (person_infit_q / 3)
         self.person_infit_zstd.name = 'Infit Z'
 
         '''
         Test-level fit statistics
         '''
 
-        self.isi = np.sqrt(self.diffs.var() / (self.item_se ** 2).mean() - 1)
+        self.isi = (self.diffs.var() / (self.item_se ** 2).mean() - 1) ** 0.5
         self.item_strata = (4 * self.isi + 1) / 3
         self.item_reliability = self.isi ** 2 / (1 + self.isi ** 2)
 
-        self.psi = (np.sqrt(np.var(self.person_abilities) - (self.rsem_vector ** 2).mean()) /
-                     np.sqrt((self.rsem_vector ** 2).mean()))
+        self.psi = ((np.var(self.person_abilities) ** 0.5 - (self.rsem_vector ** 2).mean()) /
+                     ((self.rsem_vector ** 2).mean() ** 0.5))
         self.person_strata = (4 * self.psi + 1) / 3
         self.person_reliability = (self.psi ** 2) / (1 + (self.psi ** 2))
 
@@ -5840,7 +5850,7 @@ class RSM(Rasch):
             self.variance_explained.index = [f'PC {pc + 1}' for pc in range(self.no_of_items)]
             self.variance_explained.columns = ['Variance explained']
 
-            self.loadings = self.eigenvectors.T * np.sqrt(pca.explained_variance_)
+            self.loadings = self.eigenvectors.T * (pca.explained_variance_ ** 0.5)
             self.loadings = pd.DataFrame(self.loadings)
             self.loadings.columns = [f'PC {pc + 1}' for pc in range(self.no_of_items)]
             self.loadings.index = [item for item in self.dataframe.columns]
@@ -5887,22 +5897,22 @@ class RSM(Rasch):
         self.item_stats = pd.DataFrame()
 
         self.item_stats['Estimate'] = self.diffs.astype(float).round(dp)
-        self.item_stats['SE'] = self.item_se.to_numpy().round(dp)
+        self.item_stats['SE'] = self.item_se.round(dp)
 
         if interval is not None:
-            self.item_stats[f'{round((1 - interval) * 50, 1)}%'] = self.item_low.to_numpy().round(dp)
-            self.item_stats[f'{round((1 + interval) * 50, 1)}%'] = self.item_high.to_numpy().round(dp)
+            self.item_stats[f'{round((1 - interval) * 50, 1)}%'] = self.item_low.round(dp)
+            self.item_stats[f'{round((1 + interval) * 50, 1)}%'] = self.item_high.round(dp)
 
-        self.item_stats['Count'] = self.response_counts.to_numpy().astype(int)
-        self.item_stats['Facility'] = self.item_facilities.to_numpy().round(dp)
+        self.item_stats['Count'] = self.response_counts.astype(int)
+        self.item_stats['Facility'] = self.item_facilities.round(dp)
 
-        self.item_stats['Infit MS'] = self.item_infit_ms.to_numpy().round(dp)
+        self.item_stats['Infit MS'] = self.item_infit_ms.round(dp)
         if zstd:
-            self.item_stats['Infit Z'] = self.item_infit_zstd.to_numpy().round(dp)
+            self.item_stats['Infit Z'] = self.item_infit_zstd.round(dp)
 
-        self.item_stats['Outfit MS'] = self.item_outfit_ms.to_numpy().round(dp)
+        self.item_stats['Outfit MS'] = self.item_outfit_ms.round(dp)
         if zstd:
-            self.item_stats['Outfit Z'] = self.item_outfit_zstd.to_numpy().round(dp)
+            self.item_stats['Outfit Z'] = self.item_outfit_zstd.round(dp)
 
         if point_measure_corr:
             self.item_stats['PM corr'] = self.point_measure.astype(float).round(dp)
@@ -5946,19 +5956,29 @@ class RSM(Rasch):
             self.threshold_stats[f'{round((1 - interval) * 50, 1)}%'] = self.threshold_low[1:].round(dp)
             self.threshold_stats[f'{round((1 + interval) * 50, 1)}%'] = self.threshold_high[1:].round(dp)
 
-        self.threshold_stats['Infit MS'] = self.threshold_infit_ms.to_numpy().round(dp)
+        infit_ms_vector = self.threshold_infit_ms.reset_index(drop=True)
+        self.threshold_stats['Infit MS'] = infit_ms_vector.round(dp)
+        
         if zstd:
-            self.threshold_stats['Infit Z'] = self.threshold_infit_zstd.to_numpy().round(dp)
-        self.threshold_stats['Outfit MS'] = self.threshold_outfit_ms.to_numpy().round(dp)
+            infit_z_vector = self.threshold_infit_zstd.reset_index(drop=True)
+            self.threshold_stats['Infit Z'] = infit_z_vector.round(dp)
+            
+        outfit_ms_vector = self.threshold_outfit_ms.reset_index(drop=True)
+        self.threshold_stats['Outfit MS'] = outfit_ms_vector.round(dp)
+        
         if zstd:
-            self.threshold_stats['Outfit Z'] = self.threshold_outfit_zstd.to_numpy().round(dp)
+            outfit_z_vector = self.threshold_outfit_zstd.reset_index(drop=True)
+            self.threshold_stats['Outfit Z'] = outfit_z_vector.round(dp)
 
         if disc:
-            self.threshold_stats['Discrim'] = self.threshold_discrimination.to_numpy().round(dp)
+            disc_vector = self.threshold_discrimination.reset_index(drop=True)
+            self.threshold_stats['Discrim'] = disc_vector.round(dp)
 
         if point_measure_corr:
-            self.threshold_stats['PM corr'] = self.threshold_point_measure.to_numpy().round(dp)
-            self.threshold_stats['Exp PM corr'] = self.threshold_exp_point_measure.to_numpy().round(dp)
+            pm_vector = self.threshold_point_measure.reset_index(drop=True)
+            exp_pm_vector = self.threshold_exp_point_measure.reset_index(drop=True)
+            self.threshold_stats['PM corr'] = pm_vector.round(dp)
+            self.threshold_stats['Exp PM corr'] = exp_pm_vector.round(dp)
 
         self.threshold_stats.index = [f'Threshold {threshold + 1}' for threshold in range(self.max_score)]
 
@@ -6003,10 +6023,10 @@ class RSM(Rasch):
         person_stats_df['Outfit MS'] = [np.nan for person in self.dataframe.index]
         person_stats_df['Outfit Z'] = [np.nan for person in self.dataframe.index]
 
-        person_stats_df.update(self.person_infit_ms.round(dp))
-        person_stats_df.update(self.person_infit_zstd.round(dp))
-        person_stats_df.update(self.person_outfit_ms.round(dp))
-        person_stats_df.update(self.person_outfit_zstd.round(dp))
+        person_stats_df.update({'Infit MS': self.person_infit_ms.round(dp)})
+        person_stats_df.update({'Infit Z': self.person_infit_zstd.round(dp)})
+        person_stats_df.update({'Outfit MS': self.person_outfit_ms.round(dp)})
+        person_stats_df.update({'Outfit Z': self.person_outfit_zstd.round(dp)})
 
         self.person_stats = person_stats_df
 
@@ -6588,7 +6608,7 @@ class RSM(Rasch):
                             for ability in point_csem_lines]
 
             info_set = np.array(info_set)
-            csem_set = 1 / np.sqrt(info_set)
+            csem_set = 1 / (info_set ** 0.5)
 
             for abil, csem in zip(point_csem_lines, csem_set):
                 plt.vlines(x=abil, ymin=-100, ymax=csem, color='black', linestyles='dashed')
@@ -7123,7 +7143,7 @@ class RSM(Rasch):
                               for item in items)
                           for ability in abilities])
 
-        y = 1 / np.sqrt(y)
+        y = 1 / (y ** 0.5)
         y = y.reshape(len(abilities), 1)
 
         if title is not None:
@@ -7323,7 +7343,7 @@ class MFRM(Rasch):
         set of thresholds and rater severity, basic MFRM.
         '''
 
-        cat_prob_nums = [exp(cat * (ability - difficulties[item] - severities[rater]) -
+        cat_prob_nums = [exp(cat * (ability - difficulties.loc[item] - severities[rater]) -
                              sum(thresholds[:cat + 1]))
                          for cat in range(self.max_score + 1)]
 
@@ -7343,7 +7363,8 @@ class MFRM(Rasch):
         of the extended vector-by-item form of the Many-Facet Rasch Model (MFRM).
         '''
 
-        cat_prob_nums = [exp(cat * (ability - difficulties[item] - severities[rater][item]) -
+        cat_prob_nums = [exp(cat * (ability - difficulties.loc[item] -
+                                    severities[rater][item]) -
                              sum(thresholds[:cat + 1]))
                          for cat in range(self.max_score + 1)]
 
@@ -7363,7 +7384,7 @@ class MFRM(Rasch):
         extended vector-by-threshold form of the Many-Facet Rasch Model (MFRM).
         '''
 
-        cat_prob_nums = [exp(cat * (ability - difficulties[item]) -
+        cat_prob_nums = [exp(cat * (ability - difficulties.loc[item]) -
                              sum(thresholds[:cat + 1]) - sum(severities[rater][:cat + 1]))
                          for cat in range(self.max_score + 1)]
 
@@ -7383,7 +7404,7 @@ class MFRM(Rasch):
         extended matrix form of the Many-Facet Rasch Model (MFRM).
         '''
 
-        cat_prob_nums = [exp(cat * (ability - difficulties[item]) -
+        cat_prob_nums = [exp(cat * (ability - difficulties.loc[item]) -
                              sum(thresholds[:cat + 1]) - sum(severities[rater][item][:cat + 1]))
                          for cat in range(self.max_score + 1)]
 
@@ -8715,13 +8736,13 @@ class MFRM(Rasch):
 
             rater_low_marginal_items = {rater: {item:
                                                 pd.DataFrame(marginal_rater_ests_items[rater]).quantile((1 - interval) / 2,
-                                                                                                        axis=1)[i]
+                                                                                                        axis=1).iloc[i]
                                                 for i, item in enumerate(self.dataframe.columns)}
                                         for rater in self.raters}
 
             rater_low_marginal_thresholds = {rater:
                                              pd.DataFrame(marginal_rater_ests_thresholds[rater]).quantile((1 - interval) / 2,
-                                                                                                                   axis=1)
+                                                                                                          axis=1)
                                              for rater in self.raters}
 
             rater_high = {rater: by_row_index[rater].quantile((1 + interval) / 2)
@@ -8732,7 +8753,7 @@ class MFRM(Rasch):
 
             rater_high_marginal_items = {rater: {item:
                                                  pd.DataFrame(marginal_rater_ests_items[rater]).quantile((1 + interval) / 2,
-                                                                                                         axis=1)[i]
+                                                                                                         axis=1).iloc[i]
                                                  for i, item in enumerate(self.dataframe.columns)}
                                          for rater in self.raters}
 
@@ -9066,14 +9087,20 @@ class MFRM(Rasch):
 
         if isinstance(items, str):
             if items == 'all':
-                items = None
-
+                items = self.items.tolist()
+                
+        if items is None:
+            items = self.items.tolist()
+         
         if raters is None:
             raters = self.raters.tolist()
-
+         
         if isinstance(raters, str):
             if raters == 'all':
                 raters = self.raters.tolist()
+                
+        if isinstance(raters, pd.core.indexes.base.Index):
+            raters = raters.tolist()
 
         if anchor:
             if hasattr(self, 'anchor_diffs_global'):
@@ -9089,15 +9116,8 @@ class MFRM(Rasch):
             difficulties = self.diffs
             thresholds = self.thresholds
             severities = self.severities_global
-
-        if isinstance(raters, list):
-            person_data = [self.dataframe[items].xs(rater).loc[person].to_numpy()
-                           for rater in raters]
-            person_data = np.array(person_data)
-
-        else:
-            person_data = self.dataframe[items].xs(raters).loc[person].to_numpy()
-
+          
+        person_data = self.dataframe[items].swaplevel().loc[person].loc[raters, :]
         person_filter = (person_data + 1) / (person_data + 1)
         score = np.nansum(person_data)
 
@@ -9449,7 +9469,7 @@ class MFRM(Rasch):
                      if self.dataframe.loc[(rater, person), item] == self.dataframe.loc[(rater, person), item]]
 
         total_info = sum(info_list)
-        csem = 1 / np.sqrt(total_info)
+        csem = 1 / (total_info ** 0.5)
 
         return csem
 
@@ -9465,14 +9485,20 @@ class MFRM(Rasch):
 
         if isinstance(items, str):
             if items == 'all':
-                items = None
-
+                items = self.items.tolist()
+                
+        if items is None:
+            items = self.items.tolist()
+         
         if raters is None:
             raters = self.raters.tolist()
-
+         
         if isinstance(raters, str):
             if raters == 'all':
                 raters = self.raters.tolist()
+                
+        if isinstance(raters, pd.core.indexes.base.Index):
+            raters = raters.tolist()
 
         if anchor:
             if hasattr(self, 'anchor_diffs_items'):
@@ -9488,15 +9514,8 @@ class MFRM(Rasch):
             difficulties = self.diffs
             thresholds = self.thresholds
             severities = self.severities_items
-
-        if isinstance(raters, list):
-            person_data = [self.dataframe[items].xs(rater).loc[person].to_numpy()
-                           for rater in raters]
-            person_data = np.array(person_data)
-
-        else:
-            person_data = self.dataframe[items].xs(raters).loc[person].to_numpy()
-
+         
+        person_data = self.dataframe[items].swaplevel().loc[person].loc[raters, :]
         person_filter = (person_data + 1) / (person_data + 1)
         score = np.nansum(person_data)
 
@@ -9615,7 +9634,8 @@ class MFRM(Rasch):
             thresholds = self.thresholds
             severities = self.severities_items
  
-        dummy_sevs = pd.Series({'dummy_rater': 0})
+        dummy_sevs = pd.Series({'dummy_rater': {item: 0
+                                                for item in self.dataframe.columns}})
  
         if isinstance(raters, str):
             if raters == 'all':
@@ -9848,7 +9868,7 @@ class MFRM(Rasch):
                      if self.dataframe.loc[(rater, person), item] == self.dataframe.loc[(rater, person), item]]
 
         total_info = sum(info_list)
-        csem = 1 / np.sqrt(total_info)
+        csem = 1 / (total_info ** 0.5)
 
         return csem
 
@@ -9864,7 +9884,10 @@ class MFRM(Rasch):
 
         if isinstance(items, str):
             if items == 'all':
-                items = None
+                items = self.items.tolist()
+                
+        if items is None:
+            items = self.items.tolist()
 
         if raters is None:
             raters = self.raters.tolist()
@@ -9872,6 +9895,9 @@ class MFRM(Rasch):
         if isinstance(raters, str):
             if raters == 'all':
                 raters = self.raters.tolist()
+                
+        if isinstance(raters, pd.core.indexes.base.Index):
+            raters = raters.tolist()
 
         if anchor:
             if hasattr(self, 'anchor_diffs_thresholds'):
@@ -9888,14 +9914,7 @@ class MFRM(Rasch):
             thresholds = self.thresholds
             severities = self.severities_thresholds
 
-        if isinstance(raters, list):
-            person_data = [self.dataframe[items].xs(rater).loc[person].to_numpy()
-                           for rater in raters]
-            person_data = np.array(person_data)
-
-        else:
-            person_data = self.dataframe[items].xs(raters).loc[person].to_numpy()
-
+        person_data = self.dataframe[items].swaplevel().loc[person].loc[raters, :]
         person_filter = (person_data + 1) / (person_data + 1)
         score = np.nansum(person_data)
 
@@ -10015,7 +10034,8 @@ class MFRM(Rasch):
             thresholds = self.thresholds
             severities = self.severities_thresholds
 
-        dummy_sevs = pd.Series({'dummy_rater': 0})
+        dummy_sevs = pd.Series({'dummy_rater':
+                                [0 for threshold in range(self.max_score + 1)]})
 
         if isinstance(raters, str):
             if raters == 'all':
@@ -10241,7 +10261,7 @@ class MFRM(Rasch):
                      if self.dataframe.loc[(rater, person), item] == self.dataframe.loc[(rater, person), item]]
 
         total_info = sum(info_list)
-        csem = 1 / np.sqrt(total_info)
+        csem = 1 / (total_info ** 0.5)
 
         return csem
 
@@ -10257,7 +10277,10 @@ class MFRM(Rasch):
 
         if isinstance(items, str):
             if items == 'all':
-                items = None
+                items = self.items.tolist()
+                
+        if items is None:
+            items = self.items.tolist()
 
         if raters is None:
             raters = self.raters.tolist()
@@ -10265,6 +10288,9 @@ class MFRM(Rasch):
         if isinstance(raters, str):
             if raters == 'all':
                 raters = self.raters.tolist()
+                
+        if isinstance(raters, pd.core.indexes.base.Index):
+            raters = raters.tolist()
 
         if anchor:
             if hasattr(self, 'anchor_diffs_matrix'):
@@ -10281,14 +10307,7 @@ class MFRM(Rasch):
             thresholds = self.thresholds
             severities = self.severities_matrix
 
-        if isinstance(raters, list):
-            person_data = [self.dataframe[items].xs(rater).loc[person].to_numpy()
-                           for rater in raters]
-            person_data = np.array(person_data)
-
-        else:
-            person_data = self.dataframe[items].xs(raters).loc[person].to_numpy()
-
+        person_data = self.dataframe[items].swaplevel().loc[person].loc[raters, :]
         person_filter = (person_data + 1) / (person_data + 1)
         score = np.nansum(person_data)
 
@@ -10406,7 +10425,10 @@ class MFRM(Rasch):
             thresholds = self.thresholds
             severities = self.severities_matrix
 
-        dummy_sevs = pd.Series({'dummy_rater': 0})
+        dummy_sevs = pd.Series({'dummy_rater':
+                                {item:
+                                 [0 for threshold in range(self.max_score + 1)]
+                                 for item in self.dataframe.columns}})
 
         if isinstance(raters, str):
             if raters == 'all':
@@ -10632,7 +10654,7 @@ class MFRM(Rasch):
                      if self.dataframe.loc[(rater, person), item] == self.dataframe.loc[(rater, person), item]]
 
         total_info = sum(info_list)
-        csem = 1 / np.sqrt(total_info)
+        csem = 1 / (total_info ** 0.5)
 
         return csem
 
@@ -10761,26 +10783,26 @@ class MFRM(Rasch):
         self.item_stats_global = pd.DataFrame()
 
         self.item_stats_global['Estimate'] = difficulties.round(dp).round(dp)
-        self.item_stats_global['SE'] = std_errors.to_numpy().round(dp)
+        self.item_stats_global['SE'] = std_errors.round(dp)
 
         if interval is not None:
-            self.item_stats_global[f'{round((1 - interval) * 50, 1)}%'] = low.to_numpy().round(dp)
-            self.item_stats_global[f'{round((1 + interval) * 50, 1)}%'] = high.to_numpy().round(dp)
+            self.item_stats_global[f'{round((1 - interval) * 50, 1)}%'] = low.round(dp)
+            self.item_stats_global[f'{round((1 + interval) * 50, 1)}%'] = high.round(dp)
 
-        self.item_stats_global['Count'] = self.response_counts.to_numpy().astype(int)
-        self.item_stats_global['Facility'] = self.item_facilities.to_numpy().round(dp)
+        self.item_stats_global['Count'] = self.response_counts.astype(int)
+        self.item_stats_global['Facility'] = self.item_facilities.round(dp)
 
-        self.item_stats_global['Infit MS'] = self.item_infit_ms_global.to_numpy().round(dp)
+        self.item_stats_global['Infit MS'] = self.item_infit_ms_global.round(dp)
         if zstd:
-            self.item_stats_global['Infit Z'] = self.item_infit_zstd_global.to_numpy().round(dp)
+            self.item_stats_global['Infit Z'] = self.item_infit_zstd_global.round(dp)
 
-        self.item_stats_global['Outfit MS'] = self.item_outfit_ms_global.to_numpy().round(dp)
+        self.item_stats_global['Outfit MS'] = self.item_outfit_ms_global.round(dp)
         if zstd:
-            self.item_stats_global['Outfit Z'] = self.item_outfit_zstd_global.to_numpy().round(dp)
+            self.item_stats_global['Outfit Z'] = self.item_outfit_zstd_global.round(dp)
 
         if point_measure_corr:
-            self.item_stats_global['PM corr'] = self.point_measure_global.to_numpy().round(dp)
-            self.item_stats_global['Exp PM corr'] = self.exp_point_measure_global.to_numpy().round(dp)
+            self.item_stats_global['PM corr'] = self.point_measure_global.round(dp)
+            self.item_stats_global['Exp PM corr'] = self.exp_point_measure_global.round(dp)
 
         self.item_stats_global.index = self.dataframe.columns
 
@@ -10863,19 +10885,29 @@ class MFRM(Rasch):
                 self.threshold_stats_global[f'{round((1 - interval) * 50, 1)}%'] = self.threshold_low_global[1:].round(dp)
                 self.threshold_stats_global[f'{round((1 + interval) * 50, 1)}%'] = self.threshold_high_global[1:].round(dp)
 
-        self.threshold_stats_global['Infit MS'] = self.threshold_infit_ms_global.to_numpy().round(dp)
+        infit_ms_vector = self.threshold_infit_ms_global.reset_index(drop=True)
+        self.threshold_stats_global['Infit MS'] = infit_ms_vector.round(dp)
+        
         if zstd:
-            self.threshold_stats_global['Infit Z'] = self.threshold_infit_zstd_global.to_numpy().round(dp)
-        self.threshold_stats_global['Outfit MS'] = self.threshold_outfit_ms_global.to_numpy().round(dp)
+            infit_z_vector = self.threshold_infit_zstd_global.reset_index(drop=True)
+            self.threshold_stats_global['Infit Z'] = infit_z_vector.round(dp)
+            
+        outfit_ms_vector = self.threshold_outfit_ms_global.reset_index(drop=True)
+        self.threshold_stats_global['Outfit MS'] = outfit_ms_vector.round(dp)
+        
         if zstd:
-            self.threshold_stats_global['Outfit Z'] = self.threshold_outfit_zstd_global.to_numpy().round(dp)
+            outfit_z_vector = self.threshold_outfit_zstd_global.reset_index(drop=True)
+            self.threshold_stats_global['Outfit Z'] = outfit_z_vector.round(dp)
 
         if disc:
-            self.threshold_stats_global['Discrim'] = self.threshold_discrimination_global.to_numpy().round(dp)
+            disc_vector = self.threshold_discrimination_global.reset_index(drop=True)
+            self.threshold_stats_global['Discrim'] = disc_vector.round(dp)
 
         if point_measure_corr:
-            self.threshold_stats_global['PM corr'] = self.threshold_point_measure_global.to_numpy().round(dp)
-            self.threshold_stats_global['Exp PM corr'] = self.threshold_exp_point_measure_global.to_numpy().round(dp)
+            pm_vector = self.threshold_point_measure_global.reset_index(drop=True)
+            exp_pm_vector = self.threshold_exp_point_measure_global.reset_index(drop=True)
+            self.threshold_stats_global['PM corr'] = pm_vector.round(dp)
+            self.threshold_stats_global['Exp PM corr'] = exp_pm_vector.round(dp)
 
         self.threshold_stats_global.index = [f'Threshold {threshold + 1}' for threshold in range(self.max_score)]
 
@@ -10936,22 +10968,22 @@ class MFRM(Rasch):
 
         self.rater_stats_global = pd.DataFrame()
 
-        self.rater_stats_global['Estimate'] = severities.to_numpy().round(dp)
-        self.rater_stats_global['SE'] = se.to_numpy().round(dp)
+        self.rater_stats_global['Estimate'] = severities.round(dp)
+        self.rater_stats_global['SE'] = se.round(dp)
 
         if interval is not None:
-            self.rater_stats_global[f'{round((1 - interval) * 50, 1)}%'] = low.to_numpy().round(dp)
-            self.rater_stats_global[f'{round((1 + interval) * 50, 1)}%'] = high.to_numpy().round(dp)
+            self.rater_stats_global[f'{round((1 - interval) * 50, 1)}%'] = low.round(dp)
+            self.rater_stats_global[f'{round((1 + interval) * 50, 1)}%'] = high.round(dp)
 
         self.rater_stats_global['Count'] = np.array([self.dataframe.xs(rater).count().sum()
                                                      for rater in self.raters]).astype(int)
 
-        self.rater_stats_global['Infit MS'] = self.rater_infit_ms_global.to_numpy().round(dp)
+        self.rater_stats_global['Infit MS'] = self.rater_infit_ms_global.round(dp)
         if zstd:
-            self.rater_stats_global['Infit Z'] = self.rater_infit_zstd_global.to_numpy().round(dp)
-        self.rater_stats_global['Outfit MS'] = self.rater_outfit_ms_global.to_numpy().round(dp)
+            self.rater_stats_global['Infit Z'] = self.rater_infit_zstd_global.round(dp)
+        self.rater_stats_global['Outfit MS'] = self.rater_outfit_ms_global.round(dp)
         if zstd:
-            self.rater_stats_global['Outfit Z'] = self.rater_outfit_zstd_global.to_numpy().round(dp)
+            self.rater_stats_global['Outfit Z'] = self.rater_outfit_zstd_global.round(dp)
 
         self.rater_stats_global.index = self.raters
 
@@ -10998,10 +11030,10 @@ class MFRM(Rasch):
         person_stats_df.index = self.dataframe.index.get_level_values(1).unique()
 
         if anchor_raters is None:
-            person_stats_df['Estimate'] = self.abils_global.to_numpy().round(dp)
+            person_stats_df['Estimate'] = self.abils_global.round(dp)
 
         else:
-            person_stats_df['Estimate'] = self.anchor_abils_global.to_numpy().round(dp)
+            person_stats_df['Estimate'] = self.anchor_abils_global.round(dp)
 
         person_stats_df['CSEM'] = self.csem_vector_global.round(dp)
         if rsem:
@@ -11012,26 +11044,31 @@ class MFRM(Rasch):
         person_stats_df['Score'] = person_stats_df['Score'].astype(int)
 
         person_stats_df['Max score'] = [np.nan for person in self.persons]
-        person_stats_df['Max score'].update(self.dataframe.unstack(level=0).count(axis=1) * self.max_score)
+        person_stats_df.update({'Max score': self.dataframe.unstack(level=0).count(axis=1) * self.max_score})
         person_stats_df['Max score'] = person_stats_df['Max score'].astype(int)
 
         person_stats_df['p'] = [np.nan for person in self.persons]
-        person_stats_df['p'].update(self.dataframe.unstack(level=0).mean(axis=1) / self.max_score)
+        p_vector = self.dataframe.unstack(level=0).mean(axis=1) / self.max_score
+        person_stats_df.update({'p': p_vector.astype(float)})
         person_stats_df['p'] = person_stats_df['p'].round(dp)
 
         person_stats_df['Infit MS'] = [np.nan for person in self.persons]
-        person_stats_df['Infit MS'].update(self.person_infit_ms_global.round(dp))
+        infit_vector = self.person_infit_ms_global.astype(float)
+        person_stats_df.update({'Infit MS': infit_vector.round(dp)})
 
         if zstd:
             person_stats_df['Infit Z'] = [np.nan for person in self.persons]
-            person_stats_df['Infit Z'].update(self.person_infit_zstd_global.round(dp))
+            infit_z_vector = self.person_infit_zstd_global.astype(float)
+            person_stats_df.update({'Infit Z': infit_z_vector.round(dp)})
 
         person_stats_df['Outfit MS'] = [np.nan for person in self.persons]
-        person_stats_df['Outfit MS'].update(self.person_outfit_ms_global.round(dp))
+        outfit_vector = self.person_outfit_ms_global.astype(float)
+        person_stats_df.update({'Outfit MS': outfit_vector.round(dp)})
 
         if zstd:
             person_stats_df['Outfit Z'] = [np.nan for person in self.persons]
-            person_stats_df['Outfit Z'].update(self.person_outfit_zstd_global.round(dp))
+            outfit_z_vector = self.person_outfit_zstd_global.astype(float)
+            person_stats_df.update({'Outfit Z': outfit_z_vector.round(dp)})
 
         self.person_stats_global = person_stats_df
 
@@ -11201,25 +11238,25 @@ class MFRM(Rasch):
 
         self.item_stats_items = pd.DataFrame()
 
-        self.item_stats_items['Estimate'] = difficulties.to_numpy().round(dp)
-        self.item_stats_items['SE'] = std_errors.to_numpy().round(dp)
+        self.item_stats_items['Estimate'] = difficulties.round(dp)
+        self.item_stats_items['SE'] = std_errors.round(dp)
         if interval is not None:
-            self.item_stats_items[f'{round((1 - interval) * 50, 1)}%'] = low.to_numpy().round(dp)
-            self.item_stats_items[f'{round((1 + interval) * 50, 1)}%'] = high.to_numpy().round(dp)
+            self.item_stats_items[f'{round((1 - interval) * 50, 1)}%'] = low.round(dp)
+            self.item_stats_items[f'{round((1 + interval) * 50, 1)}%'] = high.round(dp)
 
-        self.item_stats_items['Count'] = self.response_counts.to_numpy().astype(int)
-        self.item_stats_items['Facility'] = self.item_facilities.to_numpy().round(dp)
+        self.item_stats_items['Count'] = self.response_counts.astype(int)
+        self.item_stats_items['Facility'] = self.item_facilities.round(dp)
 
-        self.item_stats_items['Infit MS'] = self.item_infit_ms_items.to_numpy().round(dp)
+        self.item_stats_items['Infit MS'] = self.item_infit_ms_items.round(dp)
         if zstd:
-            self.item_stats_items['Infit Z'] = self.item_infit_zstd_items.to_numpy().round(dp)
-        self.item_stats_items['Outfit MS'] = self.item_outfit_ms_items.to_numpy().round(dp)
+            self.item_stats_items['Infit Z'] = self.item_infit_zstd_items.round(dp)
+        self.item_stats_items['Outfit MS'] = self.item_outfit_ms_items.round(dp)
         if zstd:
-            self.item_stats_items['Outfit Z'] = self.item_outfit_zstd_items.to_numpy().round(dp)
+            self.item_stats_items['Outfit Z'] = self.item_outfit_zstd_items.round(dp)
 
         if point_measure_corr:
-            self.item_stats_items['PM corr'] = self.point_measure_items.to_numpy().round(dp)
-            self.item_stats_items['Exp PM corr'] = self.exp_point_measure_items.to_numpy().round(dp)
+            self.item_stats_items['PM corr'] = self.point_measure_items.round(dp)
+            self.item_stats_items['Exp PM corr'] = self.exp_point_measure_items.round(dp)
 
         self.item_stats_items.index = self.dataframe.columns
 
@@ -11302,19 +11339,29 @@ class MFRM(Rasch):
                 self.threshold_stats_items[f'{round((1 - interval) * 50, 1)}%'] = self.threshold_low_items[1:].round(dp)
                 self.threshold_stats_items[f'{round((1 + interval) * 50, 1)}%'] = self.threshold_high_items[1:].round(dp)
 
-        self.threshold_stats_items['Infit MS'] = self.threshold_infit_ms_items.to_numpy().round(dp)
+        infit_ms_vector = self.threshold_infit_ms_items.reset_index(drop=True)
+        self.threshold_stats_items['Infit MS'] = infit_ms_vector.round(dp)
+        
         if zstd:
-            self.threshold_stats_items['Infit Z'] = self.threshold_infit_zstd_items.to_numpy().round(dp)
-        self.threshold_stats_items['Outfit MS'] = self.threshold_outfit_ms_items.to_numpy().round(dp)
+            infit_z_vector = self.threshold_infit_zstd_items.reset_index(drop=True)
+            self.threshold_stats_items['Infit Z'] = infit_z_vector.round(dp)
+            
+        outfit_ms_vector = self.threshold_outfit_ms_items.reset_index(drop=True)
+        self.threshold_stats_items['Outfit MS'] = outfit_ms_vector.round(dp)
+        
         if zstd:
-            self.threshold_stats_items['Outfit Z'] = self.threshold_outfit_zstd_items.to_numpy().round(dp)
+            outfit_z_vector = self.threshold_outfit_zstd_items.reset_index(drop=True)
+            self.threshold_stats_items['Outfit Z'] = outfit_z_vector.round(dp)
 
         if disc:
-            self.threshold_stats_items['Discrim'] = self.threshold_discrimination_items.to_numpy().round(dp)
+            disc_vector = self.threshold_discrimination_items.reset_index(drop=True)
+            self.threshold_stats_items['Discrim'] = disc_vector.round(dp)
 
         if point_measure_corr:
-            self.threshold_stats_items['PM corr'] = self.threshold_point_measure_items.to_numpy().round(dp)
-            self.threshold_stats_items['Exp PM corr'] = self.threshold_exp_point_measure_items.to_numpy().round(dp)
+            pm_vector = self.threshold_point_measure_items.reset_index(drop=True)
+            exp_pm_vector = self.threshold_exp_point_measure_items.reset_index(drop=True)
+            self.threshold_stats_items['PM corr'] = pm_vector.round(dp)
+            self.threshold_stats_items['Exp PM corr'] = exp_pm_vector.round(dp)
 
         self.threshold_stats_items.index = [f'Threshold {threshold + 1}' for threshold in range(self.max_score)]
 
@@ -11391,19 +11438,41 @@ class MFRM(Rasch):
             item_stats.index = self.raters
             self.rater_stats_items[item] = item_stats.T
 
-        ov_stats_df = pd.DataFrame()
-
-        ov_stats_df['Count'] = np.array([self.dataframe.xs(rater).count().sum() for rater in self.raters]).astype(int)
-        ov_stats_df['Infit MS'] = self.rater_infit_ms_items.to_numpy().round(dp)
-        if zstd:
-            ov_stats_df['Infit Z'] = self.rater_infit_zstd_items.to_numpy().round(dp)
-        ov_stats_df['Outfit MS'] = self.rater_outfit_ms_items.to_numpy().round(dp)
-        if zstd:
-            ov_stats_df['Outfit Z'] = self.rater_outfit_zstd_items.to_numpy().round(dp)
-
-        ov_stats_df.index = self.raters
+            if zstd:
+                ov_stats_df = pd.DataFrame(index=self.raters,
+                                           columns=['Count', 'Infit MS', 'Infit Z', 'Outfit MS', 'Outfit Z'])
+    
+                count_vector = {rater: self.dataframe.xs(rater).count().sum() for rater in self.raters}
+                ov_stats_df.update({'Count': count_vector})
+                ov_stats_df['Count'] = ov_stats_df['Count'].astype(int)
+                            
+                infit_ms_vector = self.rater_infit_ms_items.astype(float)
+                ov_stats_df.update({'Infit MS': infit_ms_vector.round(dp)})
+                
+                infit_z_vector = self.rater_infit_zstd_items.astype(float)
+                ov_stats_df.update({'Infit Z': infit_z_vector.round(dp)})
+                            
+                outfit_ms_vector = self.rater_outfit_ms_items.astype(float)
+                ov_stats_df.update({'Outfit MS': outfit_ms_vector.round(dp)})
+                
+                outfit_z_vector = self.rater_outfit_zstd_items.astype(float)
+                ov_stats_df.update({'Outfit Z': outfit_z_vector.round(dp)})
+                
+            else:
+                ov_stats_df = pd.DataFrame(index=self.raters,
+                                           columns=['Count', 'Infit MS', 'Outfit MS'])
+        
+                count_vector = {rater: self.dataframe.xs(rater).count().sum() for rater in self.raters}
+                ov_stats_df.update({'Count': count_vector})
+                ov_stats_df['Count'] = ov_stats_df['Count'].astype(int)
+                            
+                infit_ms_vector = self.rater_infit_ms_items.astype(float)
+                ov_stats_df.update({'Infit MS': infit_ms_vector.round(dp)})
+                            
+                outfit_ms_vector = self.rater_outfit_ms_items.astype(float)
+                ov_stats_df.update({'Outfit MS': outfit_ms_vector.round(dp)})
+                
         self.rater_stats_items['Overall statistics'] = ov_stats_df.T
-
         self.rater_stats_items = pd.concat(self.rater_stats_items.values(), keys=self.rater_stats_items.keys()).T
 
     def person_stats_df_items(self,
@@ -11439,40 +11508,47 @@ class MFRM(Rasch):
         person_stats_df.index = self.dataframe.index.get_level_values(1).unique()
 
         if anchor_raters is None:
-            person_stats_df['Estimate'] = self.abils_items.to_numpy().round(dp)
+            person_stats_df['Estimate'] = self.abils_items.round(dp)
 
         else:
-            person_stats_df['Estimate'] = self.anchor_abils_items.to_numpy().round(dp)
+            person_stats_df['Estimate'] = self.anchor_abils_items.round(dp)
 
         person_stats_df['CSEM'] = self.csem_vector_items.round(dp)
         if rsem:
             person_stats_df['RSEM'] = self.rsem_vector_items.round(dp)
 
         person_stats_df['Score'] = [np.nan for person in self.persons]
-        person_stats_df['Score'].update(self.dataframe.unstack(level=0).sum(axis=1))
+        score_vector = self.dataframe.unstack(level=0).sum(axis=1)
+        person_stats_df.update({'Score': score_vector})
         person_stats_df['Score'] = person_stats_df['Score'].astype(int)
 
         person_stats_df['Max score'] = [np.nan for person in self.persons]
-        person_stats_df['Max score'].update(self.dataframe.unstack(level=0).count(axis=1) * self.max_score)
+        max_score_vector = self.dataframe.unstack(level=0).count(axis=1) * self.max_score
+        person_stats_df.update({'Max score': max_score_vector})
         person_stats_df['Max score'] = person_stats_df['Max score'].astype(int)
 
         person_stats_df['p'] = [np.nan for person in self.persons]
-        person_stats_df['p'].update(self.dataframe.unstack(level=0).mean(axis=1) / self.max_score)
+        p_vector = self.dataframe.unstack(level=0).mean(axis=1) / self.max_score
+        person_stats_df.update({'p': p_vector.astype(float)})
         person_stats_df['p'] = person_stats_df['p'].round(dp)
 
         person_stats_df['Infit MS'] = [np.nan for person in self.persons]
-        person_stats_df['Infit MS'].update(self.person_infit_ms_items.round(dp))
+        infit_ms_vector = self.person_infit_ms_items.astype(float)
+        person_stats_df.update({'Infit MS': infit_ms_vector.round(dp)})
 
         if zstd:
             person_stats_df['Infit Z'] = [np.nan for person in self.persons]
-            person_stats_df['Infit Z'].update(self.person_infit_zstd_items.round(dp))
+            infit_z_vector = self.person_infit_zstd_items.astype(float)
+            person_stats_df.update({'Infit Z': infit_z_vector.round(dp)})
 
         person_stats_df['Outfit MS'] = [np.nan for person in self.persons]
-        person_stats_df['Outfit MS'].update(self.person_outfit_ms_items.round(dp))
+        outfit_ms_vector = self.person_outfit_ms_items.astype(float)
+        person_stats_df.update({'Outfit MS': outfit_ms_vector.round(dp)})
 
         if zstd:
             person_stats_df['Outfit Z'] = [np.nan for person in self.persons]
-            person_stats_df['Outfit Z'].update(self.person_outfit_zstd_items.round(dp))
+            outfit_z_vector = self.person_outfit_zstd_items.astype(float)
+            person_stats_df.update({'Outfit Z': outfit_z_vector.round(dp)})
 
         self.person_stats_items = person_stats_df
 
@@ -11647,25 +11723,25 @@ class MFRM(Rasch):
 
         self.item_stats_thresholds = pd.DataFrame()
 
-        self.item_stats_thresholds['Estimate'] = difficulties.to_numpy().round(dp)
-        self.item_stats_thresholds['SE'] = std_errors.to_numpy().round(dp)
+        self.item_stats_thresholds['Estimate'] = difficulties.round(dp)
+        self.item_stats_thresholds['SE'] = std_errors.round(dp)
         if interval is not None:
-            self.item_stats_thresholds[f'{round((1 - interval) * 50, 1)}%'] = low.to_numpy().round(dp)
-            self.item_stats_thresholds[f'{round((1 + interval) * 50, 1)}%'] = high.to_numpy().round(dp)
+            self.item_stats_thresholds[f'{round((1 - interval) * 50, 1)}%'] = low.round(dp)
+            self.item_stats_thresholds[f'{round((1 + interval) * 50, 1)}%'] = high.round(dp)
 
-        self.item_stats_thresholds['Count'] = self.response_counts.to_numpy().astype(int)
-        self.item_stats_thresholds['Facility'] = self.item_facilities.to_numpy().round(dp)
+        self.item_stats_thresholds['Count'] = self.response_counts.astype(int)
+        self.item_stats_thresholds['Facility'] = self.item_facilities.round(dp)
 
-        self.item_stats_thresholds['Infit MS'] = self.item_infit_ms_thresholds.to_numpy().round(dp)
+        self.item_stats_thresholds['Infit MS'] = self.item_infit_ms_thresholds.round(dp)
         if zstd:
-            self.item_stats_thresholds['Infit Z'] = self.item_infit_zstd_thresholds.to_numpy().round(dp)
-        self.item_stats_thresholds['Outfit MS'] = self.item_outfit_ms_thresholds.to_numpy().round(dp)
+            self.item_stats_thresholds['Infit Z'] = self.item_infit_zstd_thresholds.round(dp)
+        self.item_stats_thresholds['Outfit MS'] = self.item_outfit_ms_thresholds.round(dp)
         if zstd:
-            self.item_stats_thresholds['Outfit Z'] = self.item_outfit_zstd_thresholds.to_numpy().round(dp)
+            self.item_stats_thresholds['Outfit Z'] = self.item_outfit_zstd_thresholds.round(dp)
 
         if point_measure_corr:
-            self.item_stats_thresholds['PM corr'] = self.point_measure_thresholds.to_numpy().round(dp)
-            self.item_stats_thresholds['Exp PM corr'] = self.exp_point_measure_thresholds.to_numpy().round(dp)
+            self.item_stats_thresholds['PM corr'] = self.point_measure_thresholds.round(dp)
+            self.item_stats_thresholds['Exp PM corr'] = self.exp_point_measure_thresholds.round(dp)
 
         self.item_stats_thresholds.index = self.dataframe.columns
 
@@ -11748,19 +11824,29 @@ class MFRM(Rasch):
                 self.threshold_stats_thresholds[f'{round((1 - interval) * 50, 1)}%'] = self.threshold_low_thresholds[1:].round(dp)
                 self.threshold_stats_thresholds[f'{round((1 + interval) * 50, 1)}%'] = self.threshold_high_thresholds[1:].round(dp)
 
-        self.threshold_stats_thresholds['Infit MS'] = self.threshold_infit_ms_thresholds.to_numpy().round(dp)
+        infit_ms_vector = self.threshold_infit_ms_thresholds.reset_index(drop=True)
+        self.threshold_stats_thresholds['Infit MS'] = infit_ms_vector.round(dp)
+        
         if zstd:
-            self.threshold_stats_thresholds['Infit Z'] = self.threshold_infit_zstd_thresholds.to_numpy().round(dp)
-        self.threshold_stats_thresholds['Outfit MS'] = self.threshold_outfit_ms_thresholds.to_numpy().round(dp)
+            infit_z_vector = self.threshold_infit_zstd_thresholds.reset_index(drop=True)
+            self.threshold_stats_thresholds['Infit Z'] = infit_z_vector.round(dp)
+            
+        outfit_ms_vector = self.threshold_outfit_ms_thresholds.reset_index(drop=True)
+        self.threshold_stats_thresholds['Outfit MS'] = outfit_ms_vector.round(dp)
+        
         if zstd:
-            self.threshold_stats_thresholds['Outfit Z'] = self.threshold_outfit_zstd_thresholds.to_numpy().round(dp)
+            outfit_z_vector = self.threshold_outfit_zstd_thresholds.reset_index(drop=True)
+            self.threshold_stats_thresholds['Outfit Z'] = outfit_z_vector.round(dp)
 
         if disc:
-            self.threshold_stats_thresholds['Discrim'] = self.threshold_discrimination_thresholds.to_numpy().round(dp)
+            disc_vector = self.threshold_discrimination_thresholds.reset_index(drop=True)
+            self.threshold_stats_thresholds['Discrim'] = disc_vector.round(dp)
 
         if point_measure_corr:
-            self.threshold_stats_thresholds['PM corr'] = self.threshold_point_measure_thresholds.to_numpy().round(dp)
-            self.threshold_stats_thresholds['Exp PM corr'] = self.threshold_exp_point_measure_thresholds.to_numpy().round(dp)
+            pm_vector = self.threshold_point_measure_thresholds.reset_index(drop=True)
+            exp_pm_vector = self.threshold_exp_point_measure_thresholds.reset_index(drop=True)
+            self.threshold_stats_thresholds['PM corr'] = pm_vector.round(dp)
+            self.threshold_stats_thresholds['Exp PM corr'] = exp_pm_vector.round(dp)
 
         self.threshold_stats_thresholds.index = [f'Threshold {threshold + 1}' for threshold in range(self.max_score)]
 
@@ -11840,19 +11926,41 @@ class MFRM(Rasch):
             item_stats.index = self.raters
             self.rater_stats_thresholds[f'Threshold {threshold + 1}'] = item_stats.T
 
-        ov_stats_df = pd.DataFrame()
-
-        ov_stats_df['Count'] = np.array([self.dataframe.xs(rater).count().sum() for rater in self.raters]).astype(int)
-        ov_stats_df['Infit MS'] = self.rater_infit_ms_thresholds.to_numpy().round(dp)
-        if zstd:
-            ov_stats_df['Infit Z'] = self.rater_infit_zstd_thresholds.to_numpy().round(dp)
-        ov_stats_df['Outfit MS'] = self.rater_outfit_ms_thresholds.to_numpy().round(dp)
-        if zstd:
-            ov_stats_df['Outfit Z'] = self.rater_outfit_zstd_thresholds.to_numpy().round(dp)
-
-        ov_stats_df.index = self.raters
+            if zstd:
+                ov_stats_df = pd.DataFrame(index=self.raters,
+                                           columns=['Count', 'Infit MS', 'Infit Z', 'Outfit MS', 'Outfit Z'])
+    
+                count_vector = {rater: self.dataframe.xs(rater).count().sum() for rater in self.raters}
+                ov_stats_df.update({'Count': count_vector})
+                ov_stats_df['Count'] = ov_stats_df['Count'].astype(int)
+                            
+                infit_ms_vector = self.rater_infit_ms_thresholds.astype(float)
+                ov_stats_df.update({'Infit MS': infit_ms_vector.round(dp)})
+                
+                infit_z_vector = self.rater_infit_zstd_thresholds.astype(float)
+                ov_stats_df.update({'Infit Z': infit_z_vector.round(dp)})
+                            
+                outfit_ms_vector = self.rater_outfit_ms_thresholds.astype(float)
+                ov_stats_df.update({'Outfit MS': outfit_ms_vector.round(dp)})
+                
+                outfit_z_vector = self.rater_outfit_zstd_thresholds.astype(float)
+                ov_stats_df.update({'Outfit Z': outfit_z_vector.round(dp)})
+                
+            else:
+                ov_stats_df = pd.DataFrame(index=self.raters,
+                                           columns=['Count', 'Infit MS', 'Outfit MS'])
+        
+                count_vector = {rater: self.dataframe.xs(rater).count().sum() for rater in self.raters}
+                ov_stats_df.update({'Count': count_vector})
+                ov_stats_df['Count'] = ov_stats_df['Count'].astype(int)
+                            
+                infit_ms_vector = self.rater_infit_ms_thresholds.astype(float)
+                ov_stats_df.update({'Infit MS': infit_ms_vector.round(dp)})
+                            
+                outfit_ms_vector = self.rater_outfit_ms_thresholds.astype(float)
+                ov_stats_df.update({'Outfit MS': outfit_ms_vector.round(dp)})
+                
         self.rater_stats_thresholds['Overall statistics'] = ov_stats_df.T
-
         self.rater_stats_thresholds = pd.concat(self.rater_stats_thresholds.values(),
                                                 keys=self.rater_stats_thresholds.keys()).T
 
@@ -11889,40 +11997,47 @@ class MFRM(Rasch):
         person_stats_df.index = self.dataframe.index.get_level_values(1).unique()
 
         if anchor_raters is None:
-            person_stats_df['Estimate'] = self.abils_thresholds.to_numpy().round(dp)
+            person_stats_df['Estimate'] = self.abils_thresholds.round(dp)
 
         else:
-            person_stats_df['Estimate'] = self.anchor_abils_thresholds.to_numpy().round(dp)
+            person_stats_df['Estimate'] = self.anchor_abils_thresholds.round(dp)
 
         person_stats_df['CSEM'] = self.csem_vector_thresholds.round(dp)
         if rsem:
             person_stats_df['RSEM'] = self.rsem_vector_thresholds.round(dp)
 
         person_stats_df['Score'] = [np.nan for person in self.persons]
-        person_stats_df['Score'].update(self.dataframe.unstack(level=0).sum(axis=1))
+        score_vector = self.dataframe.unstack(level=0).sum(axis=1)
+        person_stats_df.update({'Score': score_vector})
         person_stats_df['Score'] = person_stats_df['Score'].astype(int)
 
         person_stats_df['Max score'] = [np.nan for person in self.persons]
-        person_stats_df['Max score'].update(self.dataframe.unstack(level=0).count(axis=1) * self.max_score)
+        max_score_vector = self.dataframe.unstack(level=0).count(axis=1) * self.max_score
+        person_stats_df.update({'Max score': max_score_vector})
         person_stats_df['Max score'] = person_stats_df['Max score'].astype(int)
 
         person_stats_df['p'] = [np.nan for person in self.persons]
-        person_stats_df['p'].update(self.dataframe.unstack(level=0).mean(axis=1) / self.max_score)
+        p_vector = self.dataframe.unstack(level=0).mean(axis=1) / self.max_score
+        person_stats_df.update({'p': p_vector.astype(float)})
         person_stats_df['p'] = person_stats_df['p'].round(dp)
 
         person_stats_df['Infit MS'] = [np.nan for person in self.persons]
-        person_stats_df['Infit MS'].update(self.person_infit_ms_thresholds.round(dp))
+        infit_ms_vector = self.person_infit_ms_thresholds.astype(float)
+        person_stats_df.update({'Infit MS': infit_ms_vector.round(dp)})
 
         if zstd:
             person_stats_df['Infit Z'] = [np.nan for person in self.persons]
-            person_stats_df['Infit Z'].update(self.person_infit_zstd_thresholds.round(dp))
+            infit_z_vector = self.person_infit_zstd_thresholds.astype(float)
+            person_stats_df.update({'Infit Z': infit_z_vector.round(dp)})
 
         person_stats_df['Outfit MS'] = [np.nan for person in self.persons]
-        person_stats_df['Outfit MS'].update(self.person_outfit_ms_thresholds.round(dp))
+        outfit_ms_vector = self.person_outfit_ms_thresholds.astype(float)
+        person_stats_df.update({'Outfit MS': outfit_ms_vector.round(dp)})
 
         if zstd:
             person_stats_df['Outfit Z'] = [np.nan for person in self.persons]
-            person_stats_df['Outfit Z'].update(self.person_outfit_zstd_thresholds.round(dp))
+            outfit_z_vector = self.person_outfit_zstd_thresholds.astype(float)
+            person_stats_df.update({'Outfit Z': outfit_z_vector.round(dp)})
 
         self.person_stats_thresholds = person_stats_df
 
@@ -12094,26 +12209,26 @@ class MFRM(Rasch):
 
         self.item_stats_matrix = pd.DataFrame()
 
-        self.item_stats_matrix['Estimate'] = difficulties.to_numpy().round(dp)
-        self.item_stats_matrix['SE'] = std_errors.to_numpy().round(dp)
+        self.item_stats_matrix['Estimate'] = difficulties.round(dp)
+        self.item_stats_matrix['SE'] = std_errors.round(dp)
 
         if interval is not None:
-            self.item_stats_matrix[f'{round((1 - interval) * 50, 1)}%'] = low.to_numpy().round(dp)
-            self.item_stats_matrix[f'{round((1 + interval) * 50, 1)}%'] = high.to_numpy().round(dp)
+            self.item_stats_matrix[f'{round((1 - interval) * 50, 1)}%'] = low.round(dp)
+            self.item_stats_matrix[f'{round((1 + interval) * 50, 1)}%'] = high.round(dp)
 
-        self.item_stats_matrix['Count'] = self.response_counts.to_numpy().astype(int)
-        self.item_stats_matrix['Facility'] = self.item_facilities.to_numpy().round(dp)
+        self.item_stats_matrix['Count'] = self.response_counts.astype(int)
+        self.item_stats_matrix['Facility'] = self.item_facilities.astype(float).round(dp)
 
-        self.item_stats_matrix['Infit MS'] = self.item_infit_ms_matrix.to_numpy().round(dp)
+        self.item_stats_matrix['Infit MS'] = self.item_infit_ms_matrix.round(dp)
         if zstd:
-            self.item_stats_matrix['Infit Z'] = self.item_infit_zstd_matrix.to_numpy().round(dp)
-        self.item_stats_matrix['Outfit MS'] = self.item_outfit_ms_matrix.to_numpy().round(dp)
+            self.item_stats_matrix['Infit Z'] = self.item_infit_zstd_matrix.round(dp)
+        self.item_stats_matrix['Outfit MS'] = self.item_outfit_ms_matrix.round(dp)
         if zstd:
-            self.item_stats_matrix['Outfit Z'] = self.item_outfit_zstd_matrix.to_numpy().round(dp)
+            self.item_stats_matrix['Outfit Z'] = self.item_outfit_zstd_matrix.round(dp)
 
         if point_measure_corr:
-            self.item_stats_matrix['PM corr'] = self.point_measure_matrix.to_numpy().round(dp)
-            self.item_stats_matrix['Exp PM corr'] = self.exp_point_measure_matrix.to_numpy().round(dp)
+            self.item_stats_matrix['PM corr'] = self.point_measure_matrix.round(dp)
+            self.item_stats_matrix['Exp PM corr'] = self.exp_point_measure_matrix.round(dp)
 
         self.item_stats_matrix.index = self.dataframe.columns
 
@@ -12197,20 +12312,30 @@ class MFRM(Rasch):
                 self.threshold_stats_matrix[f'{round((1 - interval) * 50, 1)}%'] = self.threshold_low_matrix[1:].round(dp)
                 self.threshold_stats_matrix[f'{round((1 + interval) * 50, 1)}%'] = self.threshold_high_matrix[1:].round(dp)
 
-        self.threshold_stats_matrix['Infit MS'] = self.threshold_infit_ms_matrix.to_numpy().round(dp)
+        infit_ms_vector = self.threshold_infit_ms_matrix.reset_index(drop=True)
+        self.threshold_stats_matrix['Infit MS'] = infit_ms_vector.round(dp)
+        
         if zstd:
-            self.threshold_stats_matrix['Infit Z'] = self.threshold_infit_zstd_matrix.to_numpy().round(dp)
-        self.threshold_stats_matrix['Outfit MS'] = self.threshold_outfit_ms_matrix.to_numpy().round(dp)
+            infit_z_vector = self.threshold_infit_zstd_matrix.reset_index(drop=True)
+            self.threshold_stats_matrix['Infit Z'] = infit_z_vector.round(dp)
+            
+        outfit_ms_vector = self.threshold_outfit_ms_matrix.reset_index(drop=True)
+        self.threshold_stats_matrix['Outfit MS'] = outfit_ms_vector.round(dp)
+        
         if zstd:
-            self.threshold_stats_matrix['Outfit Z'] = self.threshold_outfit_zstd_matrix.to_numpy().round(dp)
+            outfit_z_vector = self.threshold_outfit_zstd_matrix.reset_index(drop=True)
+            self.threshold_stats_matrix['Outfit Z'] = outfit_z_vector.round(dp)
 
         if disc:
-            self.threshold_stats_matrix['Discrim'] = self.threshold_discrimination_matrix.to_numpy().round(dp)
+            disc_vector = self.threshold_discrimination_matrix.reset_index(drop=True)
+            self.threshold_stats_matrix['Discrim'] = disc_vector.round(dp)
 
         if point_measure_corr:
-            self.threshold_stats_matrix['PM corr'] = self.threshold_point_measure_matrix.to_numpy().round(dp)
-            self.threshold_stats_matrix['Exp PM corr'] = self.threshold_exp_point_measure_matrix.to_numpy().round(dp)
-
+            pm_vector = self.threshold_point_measure_matrix.reset_index(drop=True)
+            exp_pm_vector = self.threshold_exp_point_measure_matrix.reset_index(drop=True)
+            self.threshold_stats_matrix['PM corr'] = pm_vector.round(dp)
+            self.threshold_stats_matrix['Exp PM corr'] = exp_pm_vector.round(dp)
+            
         self.threshold_stats_matrix.index = [f'Threshold {threshold + 1}' for threshold in range(self.max_score)]
 
     def rater_stats_df_matrix(self,
@@ -12337,20 +12462,43 @@ class MFRM(Rasch):
                 item_stats.index = self.raters
                 self.rater_stats_matrix[f'Threshold {threshold + 1}'] = item_stats.T
 
-            ov_stats_df = pd.DataFrame()
-
-            ov_stats_df['Count'] = np.array([self.dataframe.xs(rater).count().sum() for rater in self.raters]).astype(int)
-            ov_stats_df['Infit MS'] = self.rater_infit_ms_matrix.to_numpy().round(dp)
             if zstd:
-                ov_stats_df['Infit Z'] = self.rater_infit_zstd_matrix.to_numpy().round(dp)
-            ov_stats_df['Outfit MS'] = self.rater_outfit_ms_matrix.to_numpy().round(dp)
-            if zstd:
-                ov_stats_df['Outfit Z'] = self.rater_outfit_zstd_matrix.to_numpy().round(dp)
-
-            ov_stats_df.index = self.raters
+                ov_stats_df = pd.DataFrame(index=self.raters,
+                                           columns=['Count', 'Infit MS', 'Infit Z', 'Outfit MS', 'Outfit Z'])
+    
+                count_vector = {rater: self.dataframe.xs(rater).count().sum() for rater in self.raters}
+                ov_stats_df.update({'Count': count_vector})
+                ov_stats_df['Count'] = ov_stats_df['Count'].astype(int)
+                            
+                infit_ms_vector = self.rater_infit_ms_matrix.astype(float)
+                ov_stats_df.update({'Infit MS': infit_ms_vector.round(dp)})
+                
+                infit_z_vector = self.rater_infit_zstd_matrix.astype(float)
+                ov_stats_df.update({'Infit Z': infit_z_vector.round(dp)})
+                            
+                outfit_ms_vector = self.rater_outfit_ms_matrix.astype(float)
+                ov_stats_df.update({'Outfit MS': outfit_ms_vector.round(dp)})
+                
+                outfit_z_vector = self.rater_outfit_zstd_matrix.astype(float)
+                ov_stats_df.update({'Outfit Z': outfit_z_vector.round(dp)})
+                
+            else:
+                ov_stats_df = pd.DataFrame(index=self.raters,
+                                           columns=['Count', 'Infit MS', 'Outfit MS'])
+        
+                count_vector = {rater: self.dataframe.xs(rater).count().sum() for rater in self.raters}
+                ov_stats_df.update({'Count': count_vector})
+                ov_stats_df['Count'] = ov_stats_df['Count'].astype(int)
+                
+                infit_ms_vector = self.rater_infit_ms_matrix.astype(float)
+                ov_stats_df.update({'Infit MS': infit_ms_vector.round(dp)})
+                            
+                outfit_ms_vector = self.rater_outfit_ms_matrix.astype(float)
+                ov_stats_df.update({'Outfit MS': outfit_ms_vector.round(dp)})
+        
             self.rater_stats_matrix['Overall statistics'] = ov_stats_df.T
-
-            self.rater_stats_matrix = pd.concat(self.rater_stats_matrix.values(), keys=self.rater_stats_matrix.keys()).T
+            self.rater_stats_matrix = pd.concat(self.rater_stats_matrix.values(),
+                                                keys=self.rater_stats_matrix.keys()).T
 
         else:
             self.rater_stats_matrix = {}
@@ -12374,20 +12522,43 @@ class MFRM(Rasch):
                     item_stats.index = self.raters
                     self.rater_stats_matrix[f'{item}, Threshold {threshold + 1}'] = item_stats.T
 
-            ov_stats_df = pd.DataFrame()
-
-            ov_stats_df['Count'] = np.array([self.dataframe.xs(rater).count().sum() for rater in self.raters]).astype(int)
-            ov_stats_df['Infit MS'] = self.rater_infit_ms_matrix.to_numpy().round(dp)
             if zstd:
-                ov_stats_df['Infit Z'] = self.rater_infit_zstd_matrix.to_numpy().round(dp)
-            ov_stats_df['Outfit MS'] = self.rater_outfit_ms_matrix.to_numpy().round(dp)
-            if zstd:
-                ov_stats_df['Outfit Z'] = self.rater_outfit_zstd_matrix.to_numpy().round(dp)
-
-            ov_stats_df.index = self.raters
+                ov_stats_df = pd.DataFrame(index=self.raters,
+                                           columns=['Count', 'Infit MS', 'Infit Z', 'Outfit MS', 'Outfit Z'])
+    
+                count_vector = {rater: self.dataframe.xs(rater).count().sum() for rater in self.raters}
+                ov_stats_df.update({'Count': count_vector})
+                ov_stats_df['Count'] = ov_stats_df['Count'].astype(int)
+                            
+                infit_ms_vector = self.rater_infit_ms_matrix.astype(float)
+                ov_stats_df.update({'Infit MS': infit_ms_vector.round(dp)})
+                
+                infit_z_vector = self.rater_infit_zstd_matrix.astype(float)
+                ov_stats_df.update({'Infit Z': infit_z_vector.round(dp)})
+                            
+                outfit_ms_vector = self.rater_outfit_ms_matrix.astype(float)
+                ov_stats_df.update({'Outfit MS': outfit_ms_vector.round(dp)})
+                
+                outfit_z_vector = self.rater_outfit_zstd_matrix.astype(float)
+                ov_stats_df.update({'Outfit Z': outfit_z_vector.round(dp)})
+                
+            else:
+                ov_stats_df = pd.DataFrame(index=self.raters,
+                                           columns=['Count', 'Infit MS', 'Outfit MS'])
+        
+                count_vector = {rater: self.dataframe.xs(rater).count().sum() for rater in self.raters}
+                ov_stats_df.update({'Count': count_vector})
+                ov_stats_df['Count'] = ov_stats_df['Count'].astype(int)
+                
+                infit_ms_vector = self.rater_infit_ms_matrix.astype(float)
+                ov_stats_df.update({'Infit MS': infit_ms_vector.round(dp)})
+                            
+                outfit_ms_vector = self.rater_outfit_ms_matrix.astype(float)
+                ov_stats_df.update({'Outfit MS': outfit_ms_vector.round(dp)})
+        
             self.rater_stats_matrix['Overall statistics'] = ov_stats_df.T
-
-            self.rater_stats_matrix = pd.concat(self.rater_stats_matrix.values(), keys=self.rater_stats_matrix.keys()).T
+            self.rater_stats_matrix = pd.concat(self.rater_stats_matrix.values(),
+                                                keys=self.rater_stats_matrix.keys()).T
 
     def person_stats_df_matrix(self,
                                anchor_raters=None,
@@ -12422,40 +12593,45 @@ class MFRM(Rasch):
         person_stats_df.index = self.dataframe.index.get_level_values(1).unique()
 
         if anchor_raters is None:
-            person_stats_df['Estimate'] = self.abils_matrix.to_numpy().round(dp)
+            person_stats_df['Estimate'] = self.abils_matrix.round(dp)
 
         else:
-            person_stats_df['Estimate'] = self.anchor_abils_matrix.to_numpy().round(dp)
+            person_stats_df['Estimate'] = self.anchor_abils_matrix.round(dp)
 
         person_stats_df['CSEM'] = self.csem_vector_matrix.round(dp)
         if rsem:
             person_stats_df['RSEM'] = self.rsem_vector_matrix.round(dp)
 
         person_stats_df['Score'] = [np.nan for person in self.persons]
-        person_stats_df['Score'].update(self.dataframe.unstack(level=0).sum(axis=1))
+        person_stats_df.update({'Score': self.dataframe.unstack(level=0).sum(axis=1)})
         person_stats_df['Score'] = person_stats_df['Score'].astype(int)
 
         person_stats_df['Max score'] = [np.nan for person in self.persons]
-        person_stats_df['Max score'].update(self.dataframe.unstack(level=0).count(axis=1) * self.max_score)
+        person_stats_df.update({'Max score': self.dataframe.unstack(level=0).count(axis=1) * self.max_score})
         person_stats_df['Max score'] = person_stats_df['Max score'].astype(int)
 
         person_stats_df['p'] = [np.nan for person in self.persons]
-        person_stats_df['p'].update(self.dataframe.unstack(level=0).mean(axis=1) / self.max_score)
+        p_vector = self.dataframe.unstack(level=0).mean(axis=1) / self.max_score
+        person_stats_df.update({'p': p_vector.astype(float)})
         person_stats_df['p'] = person_stats_df['p'].round(dp)
 
         person_stats_df['Infit MS'] = [np.nan for person in self.persons]
-        person_stats_df['Infit MS'].update(self.person_infit_ms_matrix.round(dp))
+        infit_vector = self.person_infit_ms_matrix.astype(float)
+        person_stats_df.update({'Infit MS': infit_vector.round(dp)})
 
         if zstd:
             person_stats_df['Infit Z'] = [np.nan for person in self.persons]
-            person_stats_df['Infit Z'].update(self.person_infit_zstd_matrix.round(dp))
+            infit_z_vector = self.person_infit_zstd_matrix.astype(float)
+            person_stats_df.update({'Infit Z': infit_z_vector.round(dp)})
 
         person_stats_df['Outfit MS'] = [np.nan for person in self.persons]
-        person_stats_df['Outfit MS'].update(self.person_outfit_ms_matrix.round(dp))
+        outfit_vector = self.person_outfit_ms_matrix.astype(float)
+        person_stats_df.update({'Outfit MS': outfit_vector.round(dp)})
 
         if zstd:
             person_stats_df['Outfit Z'] = [np.nan for person in self.persons]
-            person_stats_df['Outfit Z'].update(self.person_outfit_zstd_matrix.round(dp))
+            outfit_z_vector = self.person_outfit_zstd_matrix.astype(float)
+            person_stats_df.update({'Outfit Z': outfit_z_vector.round(dp)})
 
         self.person_stats_matrix = person_stats_df
 
@@ -12743,7 +12919,7 @@ class MFRM(Rasch):
         kurtosis_df *= missing_mask
 
         residual_df = self.dataframe - exp_score_df
-        std_residual_df = residual_df / np.sqrt(info_df)
+        std_residual_df = residual_df / (info_df ** 0.5)
 
         scores = self.dataframe.sum(axis=1)
         max_scores = self.dataframe.count(axis=1) * self.max_score
@@ -12863,10 +13039,10 @@ class MFRM(Rasch):
         self.response_counts = self.dataframe.count(axis=0)
 
         item_outfit_ms = (std_residual_df ** 2).mean()
-        item_outfit_zstd = (np.cbrt(item_outfit_ms) - 1 + (2 / (9 * item_count))) / np.sqrt(2 / (9 * item_count))
+        item_outfit_zstd = ((item_outfit_ms ** (1/3)) - 1 + (2 / (9 * item_count))) / ((2 / (9 * item_count)) ** 0.5)
 
         item_infit_ms = (residual_df ** 2).sum() / info_df.sum()
-        item_infit_zstd = (np.cbrt(item_infit_ms) - 1 + (2 / (9 * item_count))) / np.sqrt(2 / (9 * item_count))
+        item_infit_zstd = ((item_infit_ms ** (1/3)) - 1 + (2 / (9 * item_count))) / ((2 / (9 * item_count)) ** 0.5)
 
         self.item_facilities = self.dataframe.mean(axis=0) / self.max_score
 
@@ -13009,7 +13185,7 @@ class MFRM(Rasch):
             item_variance_explained.index = [f'PC {pc + 1}' for pc in range(self.no_of_items)]
             item_variance_explained.columns = ['Variance explained']
 
-            item_loadings = item_eigenvectors.T * np.sqrt(pca.explained_variance_)
+            item_loadings = item_eigenvectors.T * (pca.explained_variance_ ** 0.5)
             item_loadings = pd.DataFrame(item_loadings)
             item_loadings.columns = [f'PC {pc + 1}' for pc in range(self.no_of_items)]
             item_loadings.index = [item for item in self.dataframe.columns]
@@ -13187,7 +13363,7 @@ class MFRM(Rasch):
             dich_residuals[threshold + 1] = dich_residuals[threshold + 1].loc[(scores > 0) & (scores < max_scores)]
 
             dich_std_residuals[threshold + 1] = (dich_residuals[threshold + 1] /
-                                                 np.sqrt(dich_thresh_var[threshold + 1]))
+                                                 (dich_thresh_var[threshold + 1]) ** 0.5)
 
         threshold_outfit_ms = {threshold + 1: ((dich_std_residuals[threshold + 1] ** 2).sum().sum() /
                                                dich_thresh[threshold + 1].count().sum())
@@ -13205,9 +13381,9 @@ class MFRM(Rasch):
                                               (1 / dich_thresh_count[threshold + 1]))
                               for threshold in range(self.max_score)}
         threshold_outfit_q = pd.Series(threshold_outfit_q)
-        threshold_outfit_q = np.sqrt(threshold_outfit_q)
+        threshold_outfit_q = threshold_outfit_q ** 0.5
 
-        threshold_outfit_zstd = ((np.cbrt(threshold_outfit_ms) - 1) *
+        threshold_outfit_zstd = (((threshold_outfit_ms ** (1/3)) - 1) *
                                  (3 / threshold_outfit_q) + (threshold_outfit_q / 3))
 
         threshold_infit_q = {threshold + 1: ((dich_thresh_kur[threshold + 1] -
@@ -13215,9 +13391,9 @@ class MFRM(Rasch):
                                              (dich_thresh_var[threshold + 1].sum().sum() ** 2))
                              for threshold in range(self.max_score)}
         threshold_infit_q = pd.Series(threshold_infit_q)
-        threshold_infit_q = np.sqrt(threshold_infit_q)
+        threshold_infit_q = threshold_infit_q ** 0.5
 
-        threshold_infit_zstd = ((np.cbrt(threshold_infit_ms) - 1) *
+        threshold_infit_zstd = (((threshold_infit_ms ** (1/3)) - 1) *
                                 (3 / threshold_infit_q) + (threshold_infit_q / 3))
 
         dich_facilities = {threshold + 1: dich_thresh[threshold + 1].copy().mean(axis=0)
@@ -13246,8 +13422,8 @@ class MFRM(Rasch):
 
         point_measure_nums = pd.Series(point_measure_nums)
 
-        point_measure_dens = {threshold + 1: np.sqrt((point_measure_dict[threshold + 1] ** 2).sum().sum() *
-                                                     (abil_deviation ** 2).sum())
+        point_measure_dens = {threshold + 1: ((point_measure_dict[threshold + 1] ** 2).sum().sum() *
+                                              (abil_deviation ** 2).sum()) ** 0.5
                               for threshold in range(self.max_score)}
         point_measure_dens = pd.Series(point_measure_dens)
 
@@ -13275,12 +13451,12 @@ class MFRM(Rasch):
                                 for threshold in range(self.max_score)}
         threshold_exp_pm_den = pd.Series(threshold_exp_pm_den)
         threshold_exp_pm_den *= (abil_deviation ** 2).sum()
-        threshold_exp_pm_den = np.sqrt(threshold_exp_pm_den)
+        threshold_exp_pm_den = threshold_exp_pm_den ** 0.5
 
         threshold_exp_point_measure = threshold_exp_pm_num / threshold_exp_pm_den
 
-        threshold_rmsr = {threshold + 1: (np.sqrt((dich_residuals[threshold + 1] ** 2).sum().sum() /
-                                                  dich_residuals[threshold + 1].count().sum()))
+        threshold_rmsr = {threshold + 1: (((dich_residuals[threshold + 1] ** 2).sum().sum() /
+                                          dich_residuals[threshold + 1].count().sum())) ** 0.5
                           for threshold in range(self.max_score)}
         threshold_rmsr = pd.Series(threshold_rmsr)
 
@@ -13580,14 +13756,14 @@ class MFRM(Rasch):
 
         rater_outfit_q = ((self.rater_pivot(kurtosis_df) / (self.rater_pivot(info_df) ** 2)) /
                           (rater_count ** 2)).sum() - (1 / rater_count)
-        rater_outfit_q = np.sqrt(rater_outfit_q)
-        rater_outfit_zstd = ((np.cbrt(rater_outfit_ms) - 1) *
+        rater_outfit_q = rater_outfit_q ** 0.5
+        rater_outfit_zstd = (((rater_outfit_ms ** (1/3)) - 1) *
                              (3 / rater_outfit_q)) + (rater_outfit_q / 3)
 
         rater_infit_q = ((self.rater_pivot(kurtosis_df) - self.rater_pivot(info_df) ** 2).sum() /
                          (self.rater_pivot(info_df).sum() ** 2))
-        rater_infit_q = np.sqrt(rater_infit_q)
-        rater_infit_zstd = ((np.cbrt(rater_infit_ms) - 1) *
+        rater_infit_q = rater_infit_q ** 0.5
+        rater_infit_zstd = (((rater_infit_ms ** (1/3)) - 1) *
                             (3 / rater_infit_q)) + (rater_infit_q / 3)
 
         return (rater_outfit_ms, rater_outfit_zstd, rater_infit_ms, rater_infit_zstd)
@@ -13607,8 +13783,7 @@ class MFRM(Rasch):
         if hasattr(self, 'exp_score_df_global') == False:
             self.fit_matrices_global(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                      ext_score_adjustment=ext_score_adjustment, method=method,
-                                     constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol,
-                                     no_of_samples=no_of_samples, interval=interval)
+                                     constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         (self.rater_outfit_ms_global,
          self.rater_outfit_zstd_global,
@@ -13631,8 +13806,7 @@ class MFRM(Rasch):
         if hasattr(self, 'exp_score_df_items') == False:
             self.fit_matrices_items(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                     ext_score_adjustment=ext_score_adjustment, method=method,
-                                    constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol,
-                                    no_of_samples=no_of_samples, interval=interval)
+                                    constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         (self.rater_outfit_ms_items,
          self.rater_outfit_zstd_items,
@@ -13655,8 +13829,7 @@ class MFRM(Rasch):
         if hasattr(self, 'exp_score_df_thresholds') == False:
             self.fit_matrices_thresholds(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                          ext_score_adjustment=ext_score_adjustment, method=method,
-                                         constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol,
-                                         no_of_samples=no_of_samples, interval=interval)
+                                         constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         (self.rater_outfit_ms_thresholds,
          self.rater_outfit_zstd_thresholds,
@@ -13681,8 +13854,7 @@ class MFRM(Rasch):
         if hasattr(self, 'exp_score_df_matrix') == False:
             self.fit_matrices_matrix(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                      ext_score_adjustment=ext_score_adjustment, method=method,
-                                     constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol,
-                                     no_of_samples=no_of_samples, interval=interval)
+                                     constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         (self.rater_outfit_ms_matrix,
          self.rater_outfit_zstd_matrix,
@@ -13713,7 +13885,7 @@ class MFRM(Rasch):
             rater_variance_explained.index = [f'PC {pc + 1}' for pc in range(self.no_of_raters)]
             rater_variance_explained.columns = ['Variance explained']
 
-            rater_loadings = rater_eigenvectors.T * np.sqrt(pca.explained_variance_)
+            rater_loadings = rater_eigenvectors.T * (pca.explained_variance_ ** 0.5)
             rater_loadings = pd.DataFrame(rater_loadings)
             rater_loadings.columns = [f'PC {pc + 1}' for pc in range(self.no_of_raters)]
             rater_loadings.index = [rater for rater in self.raters]
@@ -13785,9 +13957,9 @@ class MFRM(Rasch):
         Person fit statistics
         '''
 
-        csems = 1 / np.sqrt(info_df.unstack(level=0).sum(axis=1))
+        csems = 1 / (info_df.unstack(level=0).sum(axis=1) ** 0.5)
 
-        rsems = (np.sqrt((residual_df.unstack(level=0) ** 2).sum(axis=1)) /
+        rsems = (((residual_df.unstack(level=0) ** 2).sum(axis=1)) ** 0.5 /
                  info_df.unstack(level=0).sum(axis=1))
 
         person_outfit_ms = (std_residual_df.unstack(level=0) ** 2).mean(axis=1)
@@ -13805,14 +13977,14 @@ class MFRM(Rasch):
         for column in base_df.columns:
             base_df[column] /= (person_count ** 2)
         person_outfit_q = base_df.sum(axis=1) - (1 / person_count)
-        person_outfit_q = np.sqrt(person_outfit_q.astype(float))
-        person_outfit_zstd = ((np.cbrt(person_outfit_ms) - 1) * (3 / person_outfit_q)) + (person_outfit_q / 3)
+        person_outfit_q = person_outfit_q ** 0.5
+        person_outfit_zstd = (((person_outfit_ms ** (1/3)) - 1) * (3 / person_outfit_q)) + (person_outfit_q / 3)
         person_outfit_zstd = person_outfit_zstd[:self.no_of_persons]
 
         person_infit_q = ((kurtosis_df.unstack(level=0) - info_df.unstack(level=0) ** 2).sum(axis=1) /
                           (info_df.unstack(level=0).sum(axis=1) ** 2))
-        person_infit_q = np.sqrt(person_infit_q)
-        person_infit_zstd = ((np.cbrt(person_infit_ms) - 1) * (3 / person_infit_q)) + (person_infit_q / 3)
+        person_infit_q = person_infit_q ** 0.5
+        person_infit_zstd = (((person_infit_ms ** (1/3)) - 1) * (3 / person_infit_q)) + (person_infit_q / 3)
 
         return csems, rsems, person_outfit_ms, person_outfit_zstd, person_infit_ms, person_infit_zstd
 
@@ -13952,11 +14124,11 @@ class MFRM(Rasch):
 
         abilities = abilities.copy()[(scores > 0) & (scores < max_scores)]
 
-        isi = np.sqrt(self.diffs.var() / (self.item_se ** 2).mean() - 1)
+        isi = (self.diffs.var() / (self.item_se ** 2).mean() - 1) ** 0.5
         item_strata = (4 * isi + 1) / 3
         item_reliability = (isi ** 2) / (1 + isi ** 2)
 
-        psi = np.sqrt(np.var(abilities) -  (rsems ** 2).mean()) / np.sqrt((rsems ** 2).mean())
+        psi = ((np.var(abilities) -  (rsems ** 2).mean()) ** 0.5) / ((rsems ** 2).mean() ** 0.5)
         person_strata = (4 * psi + 1) / 3
         person_reliability = (psi ** 2) / (1 + (psi ** 2))
 
@@ -14719,6 +14891,7 @@ class MFRM(Rasch):
                                    severities,
                                    item=None,
                                    rater=None,
+                                   shift=0,
                                    no_of_classes=5):
 
         if rater == 'none':
@@ -14826,6 +14999,7 @@ class MFRM(Rasch):
                                         severities,
                                         item=None,
                                         rater=None,
+                                        shift=0,
                                         no_of_classes=5):
 
         if rater == 'none':
@@ -15881,7 +16055,7 @@ class MFRM(Rasch):
                                 for ability in point_csem_lines]
             
             info_set = np.array(info_set)
-            csem_set = 1 / np.sqrt(info_set)
+            csem_set = 1 / (info_set ** 0.5)
 
             for abil, csem in zip(point_csem_lines, csem_set):
                 plt.vlines(x=abil, ymin=-100, ymax=csem, color='black', linestyles='dashed')
@@ -16318,7 +16492,7 @@ class MFRM(Rasch):
                                 for ability in point_csem_lines]
 
             info_set = np.array(info_set)
-            csem_set = 1 / np.sqrt(info_set)
+            csem_set = 1 / (info_set ** 0.5)
 
             for abil, csem in zip(point_csem_lines, csem_set):
                 plt.vlines(x=abil, ymin=-100, ymax=csem, color='black', linestyles='dashed')
@@ -16756,7 +16930,7 @@ class MFRM(Rasch):
                                 for ability in point_csem_lines]
 
             info_set = np.array(info_set)
-            csem_set = 1 / np.sqrt(info_set)
+            csem_set = 1 / (info_set ** 0.5)
 
             for abil, csem in zip(point_csem_lines, csem_set):
                 plt.vlines(x=abil, ymin=-100, ymax=csem, color='black', linestyles='dashed')
@@ -17206,7 +17380,7 @@ class MFRM(Rasch):
                                 for ability in point_csem_lines]
 
             info_set = np.array(info_set)
-            csem_set = 1 / np.sqrt(info_set)
+            csem_set = 1 / (info_set ** 0.5)
 
             for abil, csem in zip(point_csem_lines, csem_set):
                 plt.vlines(x=abil, ymin=-100, ymax=csem, color='black', linestyles='dashed')
@@ -20235,7 +20409,7 @@ class MFRM(Rasch):
                      for ability in abilities]
 
         y = np.array(y)
-        y = 1 / np.sqrt(y)
+        y = 1 / (y ** 0.5)
         y = y.reshape(len(abilities), 1)
 
         if title is not None:
@@ -20343,7 +20517,7 @@ class MFRM(Rasch):
                      for ability in abilities]
 
         y = np.array(y)
-        y = 1 / np.sqrt(y)
+        y = 1 / (y ** 0.5)
         y = y.reshape(len(abilities), 1)
 
         if title is not None:
@@ -20451,7 +20625,7 @@ class MFRM(Rasch):
                      for ability in abilities]
 
         y = np.array(y)
-        y = 1 / np.sqrt(y)
+        y = 1 / (y ** 0.5)
         y = y.reshape(len(abilities), 1)
 
         if title is not None:
@@ -20561,7 +20735,7 @@ class MFRM(Rasch):
                      for ability in abilities]
 
         y = np.array(y)
-        y = 1 / np.sqrt(y)
+        y = 1 / (y ** 0.5)
         y = y.reshape(len(abilities), 1)
 
         if title is not None:
