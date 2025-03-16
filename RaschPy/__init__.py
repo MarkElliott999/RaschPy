@@ -1366,29 +1366,30 @@ class SLM(Rasch):
 
         self.item_stats = pd.DataFrame()
 
-        self.item_stats['Estimate'] = self.diffs.round(dp)
-        self.item_stats['SE'] = self.item_se.round(dp)
+        self.item_stats['Estimate'] = self.diffs.astype(float).round(dp)
+        self.item_stats['SE'] = self.item_se.astype(float).round(dp)
 
         if interval is not None:
-            self.item_stats[f'{round((1 - interval) * 50, 1)}%'] = self.item_low.round(dp)
-            self.item_stats[f'{round((1 + interval) * 50, 1)}%'] = self.item_high.round(dp)
+            self.item_stats[f'{round((1 - interval) * 50, 1)}%'] = self.item_low.astype(float).round(dp)
+            self.item_stats[f'{round((1 + interval) * 50, 1)}%'] = self.item_high.astype(float).round(dp)
 
         self.item_stats['Count'] = self.response_counts.astype(int)
-        self.item_stats['Facility'] = self.item_facilities.round(dp)
+        self.item_stats['Facility'] = self.item_facilities.astype(float).round(dp)
 
-        self.item_stats['Infit MS'] = self.item_infit_ms.round(dp)
+        self.item_stats['Infit MS'] = self.item_infit_ms.astype(float).round(dp)
         if zstd:
-            self.item_stats['Infit Z'] = self.item_infit_zstd.round(dp)
-        self.item_stats['Outfit MS'] = self.item_outfit_ms.round(dp)
+            self.item_stats['Infit Z'] = self.item_infit_zstd.astype(float).round(dp)
+
+        self.item_stats['Outfit MS'] = self.item_outfit_ms.astype(float).round(dp)
         if zstd:
-            self.item_stats['Outfit Z'] = self.item_outfit_zstd.round(dp)
+            self.item_stats['Outfit Z'] = self.item_outfit_zstd.astype(float).round(dp)
 
         if disc:
-            self.item_stats['Discrim'] = self.discrimination.round(dp)
+            self.item_stats['Discrim'] = self.discrimination.astype(float).round(dp)
 
         if point_measure_corr:
-            self.item_stats['PM corr'] = self.point_measure.round(dp)
-            self.item_stats['Exp PM corr'] = self.exp_point_measure.round(dp)
+            self.item_stats['PM corr'] = self.point_measure.astype(float).round(dp)
+            self.item_stats['Exp PM corr'] = self.exp_point_measure.astype(float).round(dp)
 
         self.item_stats.index = self.dataframe.columns
 
@@ -3649,27 +3650,27 @@ class PCM(Rasch):
 
         self.item_stats = pd.DataFrame()
 
-        self.item_stats['Estimate'] = self.central_diffs.round(dp)
-        self.item_stats['SE'] = self.central_se.round(dp)
+        self.item_stats['Estimate'] = self.central_diffs.astype(float).round(dp)
+        self.item_stats['SE'] = self.central_se.astype(float).round(dp)
 
         if interval is not None:
-            self.item_stats[f'{round((1 - interval) * 50, 1)}%'] = self.central_low.round(dp)
-            self.item_stats[f'{round((1 + interval) * 50, 1)}%'] = self.central_high.round(dp)
+            self.item_stats[f'{round((1 - interval) * 50, 1)}%'] = self.central_low.astype(float).round(dp)
+            self.item_stats[f'{round((1 + interval) * 50, 1)}%'] = self.central_high.astype(float).round(dp)
 
         self.item_stats['Count'] = self.response_counts.astype(int)
-        self.item_stats['Facility'] = self.item_facilities.round(dp)
+        self.item_stats['Facility'] = self.item_facilities.astype(float).round(dp)
 
-        self.item_stats['Infit MS'] = self.item_infit_ms.round(dp)
+        self.item_stats['Infit MS'] = self.item_infit_ms.astype(float).round(dp)
         if zstd:
-            self.item_stats['Infit Z'] = self.item_infit_zstd.round(dp)
+            self.item_stats['Infit Z'] = self.item_infit_zstd.astype(float).round(dp)
 
-        self.item_stats['Outfit MS'] = self.item_outfit_ms.round(dp)
+        self.item_stats['Outfit MS'] = self.item_outfit_ms.astype(float).round(dp)
         if zstd:
-            self.item_stats['Outfit Z'] = self.item_outfit_zstd.round(dp)
+            self.item_stats['Outfit Z'] = self.item_outfit_zstd.astype(float).round(dp)
 
         if point_measure_corr:
-            self.item_stats['PM corr'] = self.point_measure.round(dp)
-            self.item_stats['Exp PM corr'] = self.exp_point_measure.round(dp)
+            self.item_stats['PM corr'] = self.point_measure.astype(float).round(dp)
+            self.item_stats['Exp PM corr'] = self.exp_point_measure.astype(float).round(dp)
 
         self.item_stats.index = self.dataframe.columns
 
@@ -5897,22 +5898,22 @@ class RSM(Rasch):
         self.item_stats = pd.DataFrame()
 
         self.item_stats['Estimate'] = self.diffs.astype(float).round(dp)
-        self.item_stats['SE'] = self.item_se.round(dp)
+        self.item_stats['SE'] = self.item_se.astype(float).round(dp)
 
         if interval is not None:
-            self.item_stats[f'{round((1 - interval) * 50, 1)}%'] = self.item_low.round(dp)
-            self.item_stats[f'{round((1 + interval) * 50, 1)}%'] = self.item_high.round(dp)
+            self.item_stats[f'{round((1 - interval) * 50, 1)}%'] = self.item_low.astype(float).round(dp)
+            self.item_stats[f'{round((1 + interval) * 50, 1)}%'] = self.item_high.astype(float).round(dp)
 
         self.item_stats['Count'] = self.response_counts.astype(int)
-        self.item_stats['Facility'] = self.item_facilities.round(dp)
+        self.item_stats['Facility'] = self.item_facilities.astype(float).round(dp)
 
-        self.item_stats['Infit MS'] = self.item_infit_ms.round(dp)
+        self.item_stats['Infit MS'] = self.item_infit_ms.astype(float).round(dp)
         if zstd:
-            self.item_stats['Infit Z'] = self.item_infit_zstd.round(dp)
+            self.item_stats['Infit Z'] = self.item_infit_zstd.astype(float).round(dp)
 
-        self.item_stats['Outfit MS'] = self.item_outfit_ms.round(dp)
+        self.item_stats['Outfit MS'] = self.item_outfit_ms.astype(float).round(dp)
         if zstd:
-            self.item_stats['Outfit Z'] = self.item_outfit_zstd.round(dp)
+            self.item_stats['Outfit Z'] = self.item_outfit_zstd.astype(float).round(dp)
 
         if point_measure_corr:
             self.item_stats['PM corr'] = self.point_measure.astype(float).round(dp)
@@ -10782,27 +10783,27 @@ class MFRM(Rasch):
 
         self.item_stats_global = pd.DataFrame()
 
-        self.item_stats_global['Estimate'] = difficulties.round(dp).round(dp)
-        self.item_stats_global['SE'] = std_errors.round(dp)
+        self.item_stats_global['Estimate'] = difficulties.astype(float).round(dp)
+        self.item_stats_global['SE'] = std_errors.astype(float).round(dp)
 
         if interval is not None:
-            self.item_stats_global[f'{round((1 - interval) * 50, 1)}%'] = low.round(dp)
-            self.item_stats_global[f'{round((1 + interval) * 50, 1)}%'] = high.round(dp)
+            self.item_stats_global[f'{round((1 - interval) * 50, 1)}%'] = low.astype(float).round(dp)
+            self.item_stats_global[f'{round((1 + interval) * 50, 1)}%'] = high.astype(float).round(dp)
 
         self.item_stats_global['Count'] = self.response_counts.astype(int)
-        self.item_stats_global['Facility'] = self.item_facilities.round(dp)
+        self.item_stats_global['Facility'] = self.item_facilities.astype(float).round(dp)
 
-        self.item_stats_global['Infit MS'] = self.item_infit_ms_global.round(dp)
+        self.item_stats_global['Infit MS'] = self.item_infit_ms_global.astype(float).round(dp)
         if zstd:
-            self.item_stats_global['Infit Z'] = self.item_infit_zstd_global.round(dp)
+            self.item_stats_global['Infit Z'] = self.item_infit_zstd_global.astype(float).round(dp)
 
-        self.item_stats_global['Outfit MS'] = self.item_outfit_ms_global.round(dp)
+        self.item_stats_global['Outfit MS'] = self.item_outfit_ms_global.astype(float).round(dp)
         if zstd:
-            self.item_stats_global['Outfit Z'] = self.item_outfit_zstd_global.round(dp)
+            self.item_stats_global['Outfit Z'] = self.item_outfit_zstd_global.astype(float).round(dp)
 
         if point_measure_corr:
-            self.item_stats_global['PM corr'] = self.point_measure_global.round(dp)
-            self.item_stats_global['Exp PM corr'] = self.exp_point_measure_global.round(dp)
+            self.item_stats_global['PM corr'] = self.point_measure_global.astype(float).round(dp)
+            self.item_stats_global['Exp PM corr'] = self.exp_point_measure_global.astype(float).round(dp)
 
         self.item_stats_global.index = self.dataframe.columns
 
@@ -10968,22 +10969,22 @@ class MFRM(Rasch):
 
         self.rater_stats_global = pd.DataFrame()
 
-        self.rater_stats_global['Estimate'] = severities.round(dp)
-        self.rater_stats_global['SE'] = se.round(dp)
+        self.rater_stats_global['Estimate'] = severities.astype(float).round(dp)
+        self.rater_stats_global['SE'] = se.astype(float).round(dp)
 
         if interval is not None:
-            self.rater_stats_global[f'{round((1 - interval) * 50, 1)}%'] = low.round(dp)
-            self.rater_stats_global[f'{round((1 + interval) * 50, 1)}%'] = high.round(dp)
+            self.rater_stats_global[f'{round((1 - interval) * 50, 1)}%'] = low.astype(float).round(dp)
+            self.rater_stats_global[f'{round((1 + interval) * 50, 1)}%'] = high.astype(float).round(dp)
 
         self.rater_stats_global['Count'] = np.array([self.dataframe.xs(rater).count().sum()
                                                      for rater in self.raters]).astype(int)
 
-        self.rater_stats_global['Infit MS'] = self.rater_infit_ms_global.round(dp)
+        self.rater_stats_global['Infit MS'] = self.rater_infit_ms_global.astype(float).round(dp)
         if zstd:
-            self.rater_stats_global['Infit Z'] = self.rater_infit_zstd_global.round(dp)
-        self.rater_stats_global['Outfit MS'] = self.rater_outfit_ms_global.round(dp)
+            self.rater_stats_global['Infit Z'] = self.rater_infit_zstd_global.astype(float).round(dp)
+        self.rater_stats_global['Outfit MS'] = self.rater_outfit_ms_global.astype(float).round(dp)
         if zstd:
-            self.rater_stats_global['Outfit Z'] = self.rater_outfit_zstd_global.round(dp)
+            self.rater_stats_global['Outfit Z'] = self.rater_outfit_zstd_global.astype(float).round(dp)
 
         self.rater_stats_global.index = self.raters
 
@@ -11238,25 +11239,27 @@ class MFRM(Rasch):
 
         self.item_stats_items = pd.DataFrame()
 
-        self.item_stats_items['Estimate'] = difficulties.round(dp)
-        self.item_stats_items['SE'] = std_errors.round(dp)
+        self.item_stats_items['Estimate'] = difficulties.astype(float).round(dp)
+        self.item_stats_items['SE'] = std_errors.astype(float).round(dp)
+
         if interval is not None:
-            self.item_stats_items[f'{round((1 - interval) * 50, 1)}%'] = low.round(dp)
-            self.item_stats_items[f'{round((1 + interval) * 50, 1)}%'] = high.round(dp)
+            self.item_stats_items[f'{round((1 - interval) * 50, 1)}%'] = low.astype(float).round(dp)
+            self.item_stats_items[f'{round((1 + interval) * 50, 1)}%'] = high.astype(float).round(dp)
 
         self.item_stats_items['Count'] = self.response_counts.astype(int)
-        self.item_stats_items['Facility'] = self.item_facilities.round(dp)
+        self.item_stats_items['Facility'] = self.item_facilities.astype(float).round(dp)
 
-        self.item_stats_items['Infit MS'] = self.item_infit_ms_items.round(dp)
+        self.item_stats_items['Infit MS'] = self.item_infit_ms_items.astype(float).round(dp)
         if zstd:
-            self.item_stats_items['Infit Z'] = self.item_infit_zstd_items.round(dp)
-        self.item_stats_items['Outfit MS'] = self.item_outfit_ms_items.round(dp)
+            self.item_stats_items['Infit Z'] = self.item_infit_zstd_items.astype(float).round(dp)
+
+        self.item_stats_items['Outfit MS'] = self.item_outfit_ms_items.astype(float).round(dp)
         if zstd:
-            self.item_stats_items['Outfit Z'] = self.item_outfit_zstd_items.round(dp)
+            self.item_stats_items['Outfit Z'] = self.item_outfit_zstd_items.astype(float).round(dp)
 
         if point_measure_corr:
-            self.item_stats_items['PM corr'] = self.point_measure_items.round(dp)
-            self.item_stats_items['Exp PM corr'] = self.exp_point_measure_items.round(dp)
+            self.item_stats_items['PM corr'] = self.point_measure_items.astype(float).round(dp)
+            self.item_stats_items['Exp PM corr'] = self.exp_point_measure_items.astype(float).round(dp)
 
         self.item_stats_items.index = self.dataframe.columns
 
@@ -11426,14 +11429,14 @@ class MFRM(Rasch):
 
             item_stats = pd.DataFrame()
 
-            item_stats['Estimate'] = np.array([severities[rater][item] for rater in self.raters]).round(dp)
-            item_stats['SE'] = np.array([se[rater][item] for rater in self.raters]).round(dp)
+            item_stats['Estimate'] = np.array([severities[rater][item] for rater in self.raters]).astype(float).round(dp)
+            item_stats['SE'] = np.array([se[rater][item] for rater in self.raters]).astype(float).round(dp)
 
             if interval is not None:
                 item_stats[ f'{round((1 - interval) * 50, 1)}%'] = np.array([low[rater][item]
-                                                                             for rater in self.raters]).round(dp)
+                                                                             for rater in self.raters]).astype(float).round(dp)
                 item_stats[f'{round((1 + interval) * 50, 1)}%'] = np.array([high[rater][item]
-                                                                            for rater in self.raters]).round(dp)
+                                                                            for rater in self.raters]).astype(float).round(dp)
 
             item_stats.index = self.raters
             self.rater_stats_items[item] = item_stats.T
@@ -11723,25 +11726,27 @@ class MFRM(Rasch):
 
         self.item_stats_thresholds = pd.DataFrame()
 
-        self.item_stats_thresholds['Estimate'] = difficulties.round(dp)
-        self.item_stats_thresholds['SE'] = std_errors.round(dp)
+        self.item_stats_thresholds['Estimate'] = difficulties.astype(float).round(dp)
+        self.item_stats_thresholds['SE'] = std_errors.astype(float).round(dp)
+
         if interval is not None:
-            self.item_stats_thresholds[f'{round((1 - interval) * 50, 1)}%'] = low.round(dp)
-            self.item_stats_thresholds[f'{round((1 + interval) * 50, 1)}%'] = high.round(dp)
+            self.item_stats_thresholds[f'{round((1 - interval) * 50, 1)}%'] = low.astype(float).round(dp)
+            self.item_stats_thresholds[f'{round((1 + interval) * 50, 1)}%'] = high.astype(float).round(dp)
 
         self.item_stats_thresholds['Count'] = self.response_counts.astype(int)
-        self.item_stats_thresholds['Facility'] = self.item_facilities.round(dp)
+        self.item_stats_thresholds['Facility'] = self.item_facilities.astype(float).round(dp)
 
-        self.item_stats_thresholds['Infit MS'] = self.item_infit_ms_thresholds.round(dp)
+        self.item_stats_thresholds['Infit MS'] = self.item_infit_ms_thresholds.astype(float).round(dp)
         if zstd:
-            self.item_stats_thresholds['Infit Z'] = self.item_infit_zstd_thresholds.round(dp)
-        self.item_stats_thresholds['Outfit MS'] = self.item_outfit_ms_thresholds.round(dp)
+            self.item_stats_thresholds['Infit Z'] = self.item_infit_zstd_thresholds.astype(float).round(dp)
+
+        self.item_stats_thresholds['Outfit MS'] = self.item_outfit_ms_thresholds.astype(float).round(dp)
         if zstd:
-            self.item_stats_thresholds['Outfit Z'] = self.item_outfit_zstd_thresholds.round(dp)
+            self.item_stats_thresholds['Outfit Z'] = self.item_outfit_zstd_thresholds.astype(float).round(dp)
 
         if point_measure_corr:
-            self.item_stats_thresholds['PM corr'] = self.point_measure_thresholds.round(dp)
-            self.item_stats_thresholds['Exp PM corr'] = self.exp_point_measure_thresholds.round(dp)
+            self.item_stats_thresholds['PM corr'] = self.point_measure_thresholds.astype(float).round(dp)
+            self.item_stats_thresholds['Exp PM corr'] = self.exp_point_measure_thresholds.astype(float).round(dp)
 
         self.item_stats_thresholds.index = self.dataframe.columns
 
@@ -11912,19 +11917,19 @@ class MFRM(Rasch):
 
         for threshold in range(self.max_score):
 
-            item_stats = pd.DataFrame()
+            threshold_stats = pd.DataFrame()
 
-            item_stats['Estimate'] = np.array([severities[rater][threshold + 1] for rater in self.raters]).round(dp)
-            item_stats['SE'] = np.array([se[rater][threshold + 1] for rater in self.raters]).round(dp)
+            threshold_stats['Estimate'] = np.array([severities[rater][threshold + 1] for rater in self.raters]).astype(float).round(dp)
+            threshold_stats['SE'] = np.array([se[rater][threshold + 1] for rater in self.raters]).astype(float).round(dp)
 
             if interval is not None:
-                item_stats[ f'{round((1 - interval) * 50, 1)}%'] = np.array([low[rater][threshold + 1]
-                                                                             for rater in self.raters]).round(dp)
-                item_stats[f'{round((1 + interval) * 50, 1)}%'] = np.array([high[rater][threshold + 1]
-                                                                            for rater in self.raters]).round(dp)
+                threshold_stats[ f'{round((1 - interval) * 50, 1)}%'] = np.array([low[rater][threshold + 1]
+                                                                                  for rater in self.raters]).astype(float).round(dp)
+                threshold_stats[f'{round((1 + interval) * 50, 1)}%'] = np.array([high[rater][threshold + 1]
+                                                                                 for rater in self.raters]).astype(float).round(dp)
 
-            item_stats.index = self.raters
-            self.rater_stats_thresholds[f'Threshold {threshold + 1}'] = item_stats.T
+            threshold_stats.index = self.raters
+            self.rater_stats_thresholds[f'Threshold {threshold + 1}'] = threshold_stats.T
 
             if zstd:
                 ov_stats_df = pd.DataFrame(index=self.raters,
@@ -12209,26 +12214,27 @@ class MFRM(Rasch):
 
         self.item_stats_matrix = pd.DataFrame()
 
-        self.item_stats_matrix['Estimate'] = difficulties.round(dp)
-        self.item_stats_matrix['SE'] = std_errors.round(dp)
+        self.item_stats_matrix['Estimate'] = difficulties.astype(float).round(dp)
+        self.item_stats_matrix['SE'] = std_errors.astype(float).round(dp)
 
         if interval is not None:
-            self.item_stats_matrix[f'{round((1 - interval) * 50, 1)}%'] = low.round(dp)
-            self.item_stats_matrix[f'{round((1 + interval) * 50, 1)}%'] = high.round(dp)
+            self.item_stats_matrix[f'{round((1 - interval) * 50, 1)}%'] = low.astype(float).round(dp)
+            self.item_stats_matrix[f'{round((1 + interval) * 50, 1)}%'] = high.astype(float).round(dp)
 
         self.item_stats_matrix['Count'] = self.response_counts.astype(int)
         self.item_stats_matrix['Facility'] = self.item_facilities.astype(float).round(dp)
 
-        self.item_stats_matrix['Infit MS'] = self.item_infit_ms_matrix.round(dp)
+        self.item_stats_matrix['Infit MS'] = self.item_infit_ms_matrix.astype(float).round(dp)
         if zstd:
-            self.item_stats_matrix['Infit Z'] = self.item_infit_zstd_matrix.round(dp)
-        self.item_stats_matrix['Outfit MS'] = self.item_outfit_ms_matrix.round(dp)
+            self.item_stats_matrix['Infit Z'] = self.item_infit_zstd_matrix.astype(float).round(dp)
+
+        self.item_stats_matrix['Outfit MS'] = self.item_outfit_ms_matrix.astype(float).round(dp)
         if zstd:
-            self.item_stats_matrix['Outfit Z'] = self.item_outfit_zstd_matrix.round(dp)
+            self.item_stats_matrix['Outfit Z'] = self.item_outfit_zstd_matrix.astype(float).round(dp)
 
         if point_measure_corr:
-            self.item_stats_matrix['PM corr'] = self.point_measure_matrix.round(dp)
-            self.item_stats_matrix['Exp PM corr'] = self.exp_point_measure_matrix.round(dp)
+            self.item_stats_matrix['PM corr'] = self.point_measure_matrix.astype(float).round(dp)
+            self.item_stats_matrix['Exp PM corr'] = self.exp_point_measure_matrix.astype(float).round(dp)
 
         self.item_stats_matrix.index = self.dataframe.columns
 
@@ -12407,60 +12413,60 @@ class MFRM(Rasch):
                 item_stats = pd.DataFrame()
 
                 item_stats['Estimate'] = np.array([marginal_items[rater][item]
-                                                   for rater in self.raters]).round(dp)
+                                                   for rater in self.raters]).astype(float).round(dp)
 
                 if anchor_raters is not None:
                     item_stats['SE'] = np.array([self.anchor_rater_se_marginal_items[rater][item]
-                                                for rater in self.raters]).round(dp)
+                                                for rater in self.raters]).astype(float).round(dp)
                 else:
                     item_stats['SE'] = np.array([self.rater_se_marginal_items[rater][item]
-                                                for rater in self.raters]).round(dp)
+                                                for rater in self.raters]).astype(float).round(dp)
 
                 if interval is not None:
                     if anchor_raters is not None:
                         item_stats[f'{round((1 - interval) * 50, 1)}%'] = np.array([self.anchor_rater_low_marginal_items[rater][item]
-                                                                                    for rater in self.raters]).round(dp)
+                                                                                    for rater in self.raters]).astype(float).round(dp)
                         item_stats[f'{round((1 + interval) * 50, 1)}%'] = np.array([self.anchor_rater_high_marginal_items[rater][item]
-                                                                                for rater in self.raters]).round(dp)
+                                                                                    for rater in self.raters]).astype(float).round(dp)
 
                     else:
                         item_stats[f'{round((1 - interval) * 50, 1)}%'] = np.array([self.rater_low_marginal_items[rater][item]
-                                                                                    for rater in self.raters]).round(dp)
+                                                                                    for rater in self.raters]).astype(float).round(dp)
                         item_stats[f'{round((1 + interval) * 50, 1)}%'] = np.array([self.rater_high_marginal_items[rater][item]
-                                                                                for rater in self.raters]).round(dp)
+                                                                                    for rater in self.raters]).astype(float).round(dp)
 
                 item_stats.index = self.raters
                 self.rater_stats_matrix[item] = item_stats.T
 
             for threshold in range(self.max_score):
 
-                item_stats = pd.DataFrame()
+                threshold_stats = pd.DataFrame()
 
-                item_stats['Estimate'] = np.array([marginal_thresholds[rater][threshold + 1]
-                                                   for rater in self.raters]).round(dp)
+                threshold_stats['Estimate'] = np.array([marginal_thresholds[rater][threshold + 1]
+                                                        for rater in self.raters]).astype(float).round(dp)
 
                 if anchor_raters is not None:
-                    item_stats['SE'] = np.array([self.anchor_rater_se_marginal_thresholds[rater][threshold + 1]
-                                                 for rater in self.raters]).round(dp)
+                    threshold_stats['SE'] = np.array([self.anchor_rater_se_marginal_thresholds[rater][threshold + 1]
+                                                      for rater in self.raters]).astype(float).round(dp)
                 else:
-                    item_stats['SE'] = np.array([self.rater_se_marginal_thresholds[rater][threshold + 1]
-                                                 for rater in self.raters]).round(dp)
+                    threshold_stats['SE'] = np.array([self.rater_se_marginal_thresholds[rater][threshold + 1]
+                                                      for rater in self.raters]).astype(float).round(dp)
 
                 if interval is not None:
                     if anchor_raters is not None:
-                        item_stats[ f'{round((1 - interval) * 50, 1)}%'] = np.array([self.anchor_rater_low_marginal_thresholds[rater][threshold + 1]
-                                                                                     for rater in self.raters]).round(dp)
-                        item_stats[f'{round((1 + interval) * 50, 1)}%'] = np.array([self.anchor_rater_high_marginal_thresholds[rater][threshold + 1]
-                                                                                    for rater in self.raters]).round(dp)
+                        threshold_stats[ f'{round((1 - interval) * 50, 1)}%'] = np.array([self.anchor_rater_low_marginal_thresholds[rater][threshold + 1]
+                                                                                          for rater in self.raters]).astype(float).round(dp)
+                        threshold_stats[f'{round((1 + interval) * 50, 1)}%'] = np.array([self.anchor_rater_high_marginal_thresholds[rater][threshold + 1]
+                                                                                         for rater in self.raters]).astype(float).round(dp)
 
                     else:
-                        item_stats[ f'{round((1 - interval) * 50, 1)}%'] = np.array([self.rater_low_marginal_thresholds[rater][threshold + 1]
-                                                                                     for rater in self.raters]).round(dp)
-                        item_stats[f'{round((1 + interval) * 50, 1)}%'] = np.array([self.rater_high_marginal_thresholds[rater][threshold + 1]
-                                                                                    for rater in self.raters]).round(dp)
+                        threshold_stats[ f'{round((1 - interval) * 50, 1)}%'] = np.array([self.rater_low_marginal_thresholds[rater][threshold + 1]
+                                                                                          for rater in self.raters]).astype(float).round(dp)
+                        threshold_stats[f'{round((1 + interval) * 50, 1)}%'] = np.array([self.rater_high_marginal_thresholds[rater][threshold + 1]
+                                                                                         for rater in self.raters]).astype(float).round(dp)
 
-                item_stats.index = self.raters
-                self.rater_stats_matrix[f'Threshold {threshold + 1}'] = item_stats.T
+                threshold_stats.index = self.raters
+                self.rater_stats_matrix[f'Threshold {threshold + 1}'] = threshold_stats.T
 
             if zstd:
                 ov_stats_df = pd.DataFrame(index=self.raters,
