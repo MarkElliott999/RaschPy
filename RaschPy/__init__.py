@@ -895,7 +895,7 @@ class SLM(Rasch):
              person,
              items=None,
              warm_corr=True,
-             tolerance=0.0000001,
+             tolerance=0.00001,
              max_iters=100,
              ext_score_adjustment=0.5):
 
@@ -966,7 +966,7 @@ class SLM(Rasch):
     def person_abils(self,
                      items=None,
                      warm_corr=True,
-                     tolerance=0.0000001,
+                     tolerance=0.00001,
                      max_iters=100,
                      ext_score_adjustment=0.5):
 
@@ -988,7 +988,7 @@ class SLM(Rasch):
                    score,
                    items=None,
                    warm_corr=True,
-                   tolerance=0.0000001,
+                   tolerance=0.00001,
                    max_iters=100,
                    ext_score_adjustment=0.5):
 
@@ -1040,7 +1040,7 @@ class SLM(Rasch):
                           items=None,
                           ext_scores=True,
                           warm_corr=True,
-                          tolerance=0.0000001,
+                          tolerance=0.00001,
                           max_iters=100,
                           ext_score_adjustment=0.5):
 
@@ -1143,7 +1143,9 @@ class SLM(Rasch):
 
     def fit_statistics(self,
                        warm_corr=True,
-                       tolerance=0.0000001,
+                       se=True,
+                       test_stats=True,
+                       tolerance=0.00001,
                        max_iters=100,
                        ext_score_adjustment=0.5,
                        constant=0.1,
@@ -1156,13 +1158,17 @@ class SLM(Rasch):
         if hasattr(self, 'diffs') == False:
             self.calibrate(constant=constant, method=method, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
-        if hasattr(self, 'item_se') == False:
-            self.std_errors(interval=interval, no_of_samples=no_of_samples, constant=constant, method=method,
-                            matrix_power=matrix_power, log_lik_tol=log_lik_tol)
+        if se:
+            if hasattr(self, 'item_se') == False:
+                self.std_errors(interval=interval, no_of_samples=no_of_samples, constant=constant, method=method,
+                                matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         if hasattr(self, 'person_abilities') == False:
             self.person_abils(warm_corr=warm_corr, tolerance=tolerance,
                               max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
+
+        if se == False:
+            test_stats = False
 
         '''
         Create matrices of expected scores, variances, kurtosis, residuals etc. to generate fit statistics
@@ -1263,14 +1269,15 @@ class SLM(Rasch):
         Test-level fit statistics
         '''
 
-        self.isi = (self.diffs.var() / (self.item_se ** 2).mean() - 1) ** 0.5
-        self.item_strata = (4 * self.isi + 1) / 3
-        self.item_reliability = self.isi ** 2 / (1 + self.isi ** 2)
+        if test_stats:
+            self.isi = (self.diffs.var() / (self.item_se ** 2).mean() - 1) ** 0.5
+            self.item_strata = (4 * self.isi + 1) / 3
+            self.item_reliability = self.isi ** 2 / (1 + self.isi ** 2)
 
-        self.psi = ((np.var(self.person_abilities) - (self.rsem_vector ** 2).mean()) ** 0.5 /
-                     ((self.rsem_vector ** 2).mean()) ** 0.5)
-        self.person_strata = (4 * self.psi + 1) / 3
-        self.person_reliability = (self.psi ** 2) / (1 + (self.psi ** 2))
+            self.psi = ((np.var(self.person_abilities) - (self.rsem_vector ** 2).mean()) ** 0.5 /
+                         ((self.rsem_vector ** 2).mean()) ** 0.5)
+            self.person_strata = (4 * self.psi + 1) / 3
+            self.person_reliability = (self.psi ** 2) / (1 + (self.psi ** 2))
 
         res_list = []
         diff_list = []
@@ -1283,7 +1290,7 @@ class SLM(Rasch):
 
     def res_corr_analysis(self,
                           warm_corr=True,
-                          tolerance=0.0000001,
+                          tolerance=0.00001,
                           max_iters=100,
                           ext_score_adjustment=0.5,
                           constant=0.1,
@@ -1340,7 +1347,7 @@ class SLM(Rasch):
                       point_measure_corr=False,
                       dp=3,
                       warm_corr=True,
-                      tolerance=0.0000001,
+                      tolerance=0.00001,
                       max_iters=100,
                       ext_score_adjustment=0.5,
                       method='cos',
@@ -1398,7 +1405,7 @@ class SLM(Rasch):
                         rsem=False,
                         dp=3,
                         warm_corr=True,
-                        tolerance=0.0000001,
+                        tolerance=0.00001,
                         max_iters=100,
                         ext_score_adjustment=0.5,
                         method='cos',
@@ -1445,7 +1452,7 @@ class SLM(Rasch):
     def test_stats_df(self,
                       dp=3,
                       warm_corr=True,
-                      tolerance=0.0000001,
+                      tolerance=0.00001,
                       max_iters=100,
                       ext_score_adjustment=0.5,
                       method='cos',
@@ -1478,7 +1485,7 @@ class SLM(Rasch):
                    format='csv',
                    dp=3,
                    warm_corr=True,
-                   tolerance=0.0000001,
+                   tolerance=0.00001,
                    max_iters=100,
                    ext_score_adjustment=0.5,
                    method='cos',
@@ -1526,7 +1533,7 @@ class SLM(Rasch):
                        single=True,
                        dp=3,
                        warm_corr=True,
-                       tolerance=0.0000001,
+                       tolerance=0.00001,
                        max_iters=100,
                        ext_score_adjustment=0.5,
                        method='cos',
@@ -2880,7 +2887,7 @@ class PCM(Rasch):
              person,
              items=None,
              warm_corr=True,
-             tolerance=0.0000001,
+             tolerance=0.00001,
              max_iters=100,
              ext_score_adjustment=0.5):
 
@@ -2947,7 +2954,7 @@ class PCM(Rasch):
                    score,
                    items=None,
                    warm_corr=True,
-                   tolerance=0.0000001,
+                   tolerance=0.00001,
                    max_iters=100,
                    ext_score_adjustment=0.5):
 
@@ -3015,7 +3022,7 @@ class PCM(Rasch):
                           items=None,
                           ext_scores=True,
                           warm_corr=True,
-                          tolerance=0.0000001,
+                          tolerance=0.00001,
                           max_iters=100,
                           ext_score_adjustment=0.5):
 
@@ -3154,7 +3161,7 @@ class PCM(Rasch):
     def person_abils(self,
                      items=None,
                      warm_corr=True,
-                     tolerance=0.0000001,
+                     tolerance=0.00001,
                      max_iters=100,
                      ext_score_adjustment=0.5):
 
@@ -3216,7 +3223,9 @@ class PCM(Rasch):
 
     def fit_statistics(self,
                        warm_corr=True,
-                       tolerance=0.0000001,
+                       se=True,
+                       test_stats=True,
+                       tolerance=0.00001,
                        max_iters=100,
                        ext_score_adjustment=0.5,
                        constant=0.1,
@@ -3229,13 +3238,17 @@ class PCM(Rasch):
         if hasattr(self, 'thresholds_uncentred') == False:
             self.calibrate(constant=constant, method=method)
 
-        if hasattr(self, 'threshold_se') == False:
-            self.std_errors(interval=interval, no_of_samples=no_of_samples,
-                            constant=constant, method=method)
+        if se:
+            if hasattr(self, 'threshold_se') == False:
+                self.std_errors(interval=interval, no_of_samples=no_of_samples,
+                                constant=constant, method=method)
 
         if hasattr(self, 'person_abilities') == False:
             self.person_abils(warm_corr=warm_corr, tolerance=tolerance,
                               max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
+
+        if se == False:
+            test_stats = False
 
         '''
         Create matrices of expected scores, variances, kurtosis, residuals etc. to generate fit statistics
@@ -3545,27 +3558,28 @@ class PCM(Rasch):
         Test-level fit statistics
         '''
 
-        self.threshold_list = itertools.chain.from_iterable(self.thresholds_uncentred.values())
-        self.threshold_list = np.array(list(self.threshold_list))
-        self.threshold_se_list = itertools.chain.from_iterable(self.threshold_se.values())
-        self.threshold_se_list = np.array(list(self.threshold_se_list))
+        if test_stats:
+            self.threshold_list = itertools.chain.from_iterable(self.thresholds_uncentred.values())
+            self.threshold_list = np.array(list(self.threshold_list))
+            self.threshold_se_list = itertools.chain.from_iterable(self.threshold_se.values())
+            self.threshold_se_list = np.array(list(self.threshold_se_list))
 
-        self.isi_central = (self.central_diffs.var() / (self.central_se ** 2).mean() - 1) ** 0.5
-        self.item_strata = (4 * self.isi_central + 1) / 3
-        self.item_reliability = self.isi_central ** 2 / (1 + self.isi_central ** 2)
+            self.isi_central = (self.central_diffs.var() / (self.central_se ** 2).mean() - 1) ** 0.5
+            self.item_strata = (4 * self.isi_central + 1) / 3
+            self.item_reliability = self.isi_central ** 2 / (1 + self.isi_central ** 2)
 
-        self.isi_thresholds = (self.threshold_list.var() / (self.threshold_se_list ** 2).mean() - 1) ** 0.5
-        self.threshold_strata = (4 * self.isi_thresholds + 1) / 3
-        self.threshold_reliability = self.isi_thresholds ** 2 / (1 + self.isi_thresholds ** 2)
+            self.isi_thresholds = (self.threshold_list.var() / (self.threshold_se_list ** 2).mean() - 1) ** 0.5
+            self.threshold_strata = (4 * self.isi_thresholds + 1) / 3
+            self.threshold_reliability = self.isi_thresholds ** 2 / (1 + self.isi_thresholds ** 2)
 
-        self.psi = ((np.var(self.person_abilities) - (self.rsem_vector ** 2).mean()) ** 0.5 /
-                    ((self.rsem_vector ** 2).mean()) ** 0.5)
-        self.person_strata = (4 * self.psi + 1) / 3
-        self.person_reliability = (self.psi ** 2) / (1 + (self.psi ** 2))
+            self.psi = ((np.var(self.person_abilities) - (self.rsem_vector ** 2).mean()) ** 0.5 /
+                        ((self.rsem_vector ** 2).mean()) ** 0.5)
+            self.person_strata = (4 * self.psi + 1) / 3
+            self.person_reliability = (self.psi ** 2) / (1 + (self.psi ** 2))
 
     def res_corr_analysis(self,
                           warm_corr=True,
-                          tolerance=0.0000001,
+                          tolerance=0.00001,
                           max_iters=100,
                           ext_score_adjustment=0.5,
                           constant=0.1,
@@ -3624,7 +3638,7 @@ class PCM(Rasch):
                       point_measure_corr=False,
                       dp=3,
                       warm_corr=True,
-                      tolerance=0.0000001,
+                      tolerance=0.00001,
                       max_iters=100,
                       ext_score_adjustment=0.5,
                       method='cos',
@@ -3681,7 +3695,7 @@ class PCM(Rasch):
                            point_measure_corr=False,
                            dp=3,
                            warm_corr=True,
-                           tolerance=0.0000001,
+                           tolerance=0.00001,
                            max_iters=100,
                            ext_score_adjustment=0.5,
                            method='cos',
@@ -3763,7 +3777,7 @@ class PCM(Rasch):
                         rsem=False,
                         dp=3,
                         warm_corr=True,
-                        tolerance=0.0000001,
+                        tolerance=0.00001,
                         max_iters=100,
                         ext_score_adjustment=0.5,
                         method='cos',
@@ -3813,7 +3827,7 @@ class PCM(Rasch):
     def test_stats_df(self,
                       dp=3,
                       warm_corr=True,
-                      tolerance=0.0000001,
+                      tolerance=0.00001,
                       max_iters=100,
                       ext_score_adjustment=0.5,
                       method='cos',
@@ -3852,7 +3866,7 @@ class PCM(Rasch):
                    format='csv',
                    dp=3,
                    warm_corr=True,
-                   tolerance=0.0000001,
+                   tolerance=0.00001,
                    max_iters=100,
                    ext_score_adjustment=0.5,
                    method='cos',
@@ -3909,7 +3923,7 @@ class PCM(Rasch):
                        single=True,
                        dp=3,
                        warm_corr=True,
-                       tolerance=0.0000001,
+                       tolerance=0.00001,
                        max_iters=100,
                        ext_score_adjustment=0.5,
                        method='cos',
@@ -5271,7 +5285,7 @@ class RSM(Rasch):
              person,
              items=None,
              warm_corr=True,
-             tolerance=0.0000001,
+             tolerance=0.00001,
              max_iters=100,
              ext_score_adjustment=0.5):
 
@@ -5337,7 +5351,7 @@ class RSM(Rasch):
     def person_abils(self,
                      items=None,
                      warm_corr=True,
-                     tolerance=0.0000001,
+                     tolerance=0.00001,
                      max_iters=100,
                      ext_score_adjustment=0.5):
 
@@ -5359,7 +5373,7 @@ class RSM(Rasch):
                    score,
                    items=None,
                    warm_corr=True,
-                   tolerance=0.0000001,
+                   tolerance=0.00001,
                    max_iters=100,
                    ext_score_adjustment=0.5):
 
@@ -5418,7 +5432,7 @@ class RSM(Rasch):
                           items=None,
                           ext_scores=True,
                           warm_corr=True,
-                          tolerance=0.0000001,
+                          tolerance=0.00001,
                           max_iters=100,
                           ext_score_adjustment=0.5):
 
@@ -5545,7 +5559,9 @@ class RSM(Rasch):
 
     def fit_statistics(self,
                        warm_corr=True,
-                       tolerance=0.0000001,
+                       se=True,
+                       test_stats=True,
+                       tolerance=0.00001,
                        max_iters=100,
                        ext_score_adjustment=0.5,
                        method='cos',
@@ -5556,13 +5572,17 @@ class RSM(Rasch):
         if hasattr(self, 'thresholds') == False:
             self.calibrate(constant=constant, method=method)
 
-        if hasattr(self, 'threshold_se') == False:
-            self.std_errors(interval=interval, no_of_samples=no_of_samples,
-                            constant=constant, method=method)
+        if se:
+            if hasattr(self, 'threshold_se') == False:
+                self.std_errors(interval=interval, no_of_samples=no_of_samples,
+                                constant=constant, method=method)
 
         if hasattr(self, 'person_abilities') == False:
             self.person_abils(warm_corr=warm_corr, tolerance=tolerance,
                               max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
+
+        if se == False:
+            test_stats = False
 
         '''
         Create matrices of expected scores, variances, kurtosis, residuals etc. to generate fit statistics
@@ -5800,18 +5820,19 @@ class RSM(Rasch):
         Test-level fit statistics
         '''
 
-        self.isi = (self.diffs.var() / (self.item_se ** 2).mean() - 1) ** 0.5
-        self.item_strata = (4 * self.isi + 1) / 3
-        self.item_reliability = self.isi ** 2 / (1 + self.isi ** 2)
+        if test_stats:
+            self.isi = (self.diffs.var() / (self.item_se ** 2).mean() - 1) ** 0.5
+            self.item_strata = (4 * self.isi + 1) / 3
+            self.item_reliability = self.isi ** 2 / (1 + self.isi ** 2)
 
-        self.psi = ((np.var(self.person_abilities) ** 0.5 - (self.rsem_vector ** 2).mean()) /
-                     ((self.rsem_vector ** 2).mean() ** 0.5))
-        self.person_strata = (4 * self.psi + 1) / 3
-        self.person_reliability = (self.psi ** 2) / (1 + (self.psi ** 2))
+            self.psi = ((np.var(self.person_abilities) ** 0.5 - (self.rsem_vector ** 2).mean()) /
+                         ((self.rsem_vector ** 2).mean() ** 0.5))
+            self.person_strata = (4 * self.psi + 1) / 3
+            self.person_reliability = (self.psi ** 2) / (1 + (self.psi ** 2))
 
     def res_corr_analysis(self,
                           warm_corr=True,
-                          tolerance=0.0000001,
+                          tolerance=0.00001,
                           max_iters=100,
                           ext_score_adjustment=0.5,
                           constant=0.1,
@@ -5871,7 +5892,7 @@ class RSM(Rasch):
                       point_measure_corr=False,
                       dp=3,
                       warm_corr=True,
-                      tolerance=0.0000001,
+                      tolerance=0.00001,
                       max_iters=100,
                       ext_score_adjustment=0.5,
                       method='cos',
@@ -5928,7 +5949,7 @@ class RSM(Rasch):
                            point_measure_corr=False,
                            dp=3,
                            warm_corr=True,
-                           tolerance=0.0000001,
+                           tolerance=0.00001,
                            max_iters=100,
                            ext_score_adjustment=0.5,
                            method='cos',
@@ -5988,7 +6009,7 @@ class RSM(Rasch):
                         rsem=False,
                         dp=3,
                         warm_corr=True,
-                        tolerance=0.0000001,
+                        tolerance=0.00001,
                         max_iters=100,
                         ext_score_adjustment=0.5,
                         method='cos',
@@ -6034,7 +6055,7 @@ class RSM(Rasch):
     def test_stats_df(self,
                       dp=3,
                       warm_corr=True,
-                      tolerance=0.0000001,
+                      tolerance=0.00001,
                       max_iters=100,
                       ext_score_adjustment=0.5,
                       method='cos',
@@ -6066,7 +6087,7 @@ class RSM(Rasch):
                    format='csv',
                    dp=3,
                    warm_corr=True,
-                   tolerance=0.0000001,
+                   tolerance=0.00001,
                    max_iters=100,
                    ext_score_adjustment=0.5,
                    method='cos',
@@ -6121,7 +6142,7 @@ class RSM(Rasch):
                        single=True,
                        dp=3,
                        warm_corr=True,
-                       tolerance=0.0000001,
+                       tolerance=0.00001,
                        max_iters=100,
                        ext_score_adjustment=0.5,
                        method='cos',
@@ -9082,7 +9103,7 @@ class MFRM(Rasch):
                     items=None,
                     raters=None,
                     warm_corr=True,
-                    tolerance=0.0000001,
+                    tolerance=0.00001,
                     max_iters=100,
                     ext_score_adjustment=0.5):
 
@@ -9174,7 +9195,7 @@ class MFRM(Rasch):
                             items=None,
                             raters=None,
                             warm_corr=True,
-                            tolerance=0.0000001,
+                            tolerance=0.00001,
                             max_iters=100,
                             ext_score_adjustment=0.5):
 
@@ -9213,7 +9234,7 @@ class MFRM(Rasch):
                           items=None,
                           raters=None,
                           warm_corr=True,
-                          tolerance=0.0000001,
+                          tolerance=0.00001,
                           max_iters=100,
                           ext_score_adjustment=0.5):
 
@@ -9339,7 +9360,7 @@ class MFRM(Rasch):
                                  items=None,
                                  raters=None,
                                  warm_corr=True,
-                                 tolerance=0.0000001,
+                                 tolerance=0.00001,
                                  max_iters=100,
                                  ext_score_adjustment=0.5):
 
@@ -9434,7 +9455,7 @@ class MFRM(Rasch):
                     items=None,
                     raters=None,
                     warm_corr=True,
-                    tolerance=0.0000001,
+                    tolerance=0.00001,
                     max_iters=100,
                     ext_score_adjustment=0.5):
 
@@ -9480,7 +9501,7 @@ class MFRM(Rasch):
                    items=None,
                    raters=None,
                    warm_corr=True,
-                   tolerance=0.0000001,
+                   tolerance=0.00001,
                    max_iters=100,
                    ext_score_adjustment=0.5):
 
@@ -9571,7 +9592,7 @@ class MFRM(Rasch):
                            items=None,
                            raters=None,
                            warm_corr=True,
-                           tolerance=0.0000001,
+                           tolerance=0.00001,
                            max_iters=100,
                            ext_score_adjustment=0.5):
 
@@ -9610,7 +9631,7 @@ class MFRM(Rasch):
                          items=None,
                          raters=None,
                          warm_corr=True,
-                         tolerance=0.0000001,
+                         tolerance=0.00001,
                          max_iters=100,
                          ext_score_adjustment=0.5):
         
@@ -9738,7 +9759,7 @@ class MFRM(Rasch):
                                 items=None,
                                 raters=None,
                                 warm_corr=True,
-                                tolerance=0.0000001,
+                                tolerance=0.00001,
                                 max_iters=100,
                                 ext_score_adjustment=0.5):
 
@@ -9833,7 +9854,7 @@ class MFRM(Rasch):
                    items=None,
                    raters=None,
                    warm_corr=True,
-                   tolerance=0.0000001,
+                   tolerance=0.00001,
                    max_iters=100,
                    ext_score_adjustment=0.5):
 
@@ -9879,7 +9900,7 @@ class MFRM(Rasch):
                         items=None,
                         raters=None,
                         warm_corr=True,
-                        tolerance=0.0000001,
+                        tolerance=0.00001,
                         max_iters=100,
                         ext_score_adjustment=0.5):
 
@@ -9971,7 +9992,7 @@ class MFRM(Rasch):
                                 items=None,
                                 raters=None,
                                 warm_corr=True,
-                                tolerance=0.0000001,
+                                tolerance=0.00001,
                                 max_iters=100,
                                 ext_score_adjustment=0.5):
 
@@ -10010,7 +10031,7 @@ class MFRM(Rasch):
                               items=None,
                               raters=None,
                               warm_corr=True,
-                              tolerance=0.0000001,
+                              tolerance=0.00001,
                               max_iters=100,
                               ext_score_adjustment=0.5):
 
@@ -10131,7 +10152,7 @@ class MFRM(Rasch):
                                      items=None,
                                      raters=None,
                                      warm_corr=True,
-                                     tolerance=0.0000001,
+                                     tolerance=0.00001,
                                      max_iters=100,
                                      ext_score_adjustment=0.5):
 
@@ -10226,7 +10247,7 @@ class MFRM(Rasch):
                         items=None,
                         raters=None,
                         warm_corr=True,
-                        tolerance=0.0000001,
+                        tolerance=0.00001,
                         max_iters=100,
                         ext_score_adjustment=0.5):
 
@@ -10272,7 +10293,7 @@ class MFRM(Rasch):
                     items=None,
                     raters=None,
                     warm_corr=True,
-                    tolerance=0.0000001,
+                    tolerance=0.00001,
                     max_iters=100,
                     ext_score_adjustment=0.5):
 
@@ -10362,7 +10383,7 @@ class MFRM(Rasch):
                             items=None,
                             raters=None,
                             warm_corr=True,
-                            tolerance=0.0000001,
+                            tolerance=0.00001,
                             max_iters=100,
                             ext_score_adjustment=0.5):
 
@@ -10401,7 +10422,7 @@ class MFRM(Rasch):
                           items=None,
                           raters=None,
                           warm_corr=True,
-                          tolerance=0.0000001,
+                          tolerance=0.00001,
                           max_iters=100,
                           ext_score_adjustment=0.5):
 
@@ -10524,7 +10545,7 @@ class MFRM(Rasch):
                                  items=None,
                                  raters=None,
                                  warm_corr=True,
-                                 tolerance=0.0000001,
+                                 tolerance=0.00001,
                                  max_iters=100,
                                  ext_score_adjustment=0.5):
 
@@ -10619,7 +10640,7 @@ class MFRM(Rasch):
                     items=None,
                     raters=None,
                     warm_corr=True,
-                    tolerance=0.0000001,
+                    tolerance=0.00001,
                     max_iters=100,
                     ext_score_adjustment=0.5):
 
@@ -10723,7 +10744,7 @@ class MFRM(Rasch):
                              point_measure_corr=False,
                              dp=3,
                              warm_corr=True,
-                             tolerance=0.0000001,
+                             tolerance=0.00001,
                              max_iters=100,
                              ext_score_adjustment=0.5,
                              method='cos',
@@ -10815,7 +10836,7 @@ class MFRM(Rasch):
                                   point_measure_corr=False,
                                   dp=3,
                                   warm_corr=True,
-                                  tolerance=0.0000001,
+                                  tolerance=0.00001,
                                   max_iters=100,
                                   ext_score_adjustment=0.5,
                                   method='cos',
@@ -10918,7 +10939,7 @@ class MFRM(Rasch):
                               zstd=False,
                               dp=3,
                               warm_corr=True,
-                              tolerance=0.0000001,
+                              tolerance=0.00001,
                               max_iters=100,
                               ext_score_adjustment=0.5,
                               method='cos',
@@ -10997,7 +11018,7 @@ class MFRM(Rasch):
                                no_of_samples=100,
                                dp=3,
                                warm_corr=True,
-                               tolerance=0.0000001,
+                               tolerance=0.00001,
                                max_iters=100,
                                ext_score_adjustment=0.5,
                                method='cos',
@@ -11076,7 +11097,7 @@ class MFRM(Rasch):
     def test_stats_df_global(self,
                              dp=3,
                              warm_corr=True,
-                             tolerance=0.0000001,
+                             tolerance=0.00001,
                              max_iters=100,
                              ext_score_adjustment=0.5,
                              method='cos',
@@ -11111,7 +11132,7 @@ class MFRM(Rasch):
                           format='csv',
                           dp=3,
                           warm_corr=True,
-                          tolerance=0.0000001,
+                          tolerance=0.00001,
                           max_iters=100,
                           ext_score_adjustment=0.5,
                           method='cos',
@@ -11181,7 +11202,7 @@ class MFRM(Rasch):
                             point_measure_corr=False,
                             dp=3,
                             warm_corr=True,
-                            tolerance=0.0000001,
+                            tolerance=0.00001,
                             max_iters=100,
                             ext_score_adjustment=0.5,
                             method='cos',
@@ -11271,7 +11292,7 @@ class MFRM(Rasch):
                                  point_measure_corr=False,
                                  dp=3,
                                  warm_corr=True,
-                                 tolerance=0.0000001,
+                                 tolerance=0.00001,
                                  max_iters=100,
                                  ext_score_adjustment=0.5,
                                  method='cos',
@@ -11374,7 +11395,7 @@ class MFRM(Rasch):
                              zstd=False,
                              dp=3,
                              warm_corr=True,
-                             tolerance=0.0000001,
+                             tolerance=0.00001,
                              max_iters=100,
                              ext_score_adjustment=0.5,
                              method='cos',
@@ -11485,7 +11506,7 @@ class MFRM(Rasch):
                               zstd=False,
                               dp=3,
                               warm_corr=True,
-                              tolerance=0.0000001,
+                              tolerance=0.00001,
                               max_iters=100,
                               ext_score_adjustment=0.5,
                               method='cos',
@@ -11558,7 +11579,7 @@ class MFRM(Rasch):
     def test_stats_df_items(self,
                             dp=3,
                             warm_corr=True,
-                            tolerance=0.0000001,
+                            tolerance=0.00001,
                             max_iters=100,
                             ext_score_adjustment=0.5,
                             method='cos',
@@ -11593,7 +11614,7 @@ class MFRM(Rasch):
                          format='csv',
                          dp=3,
                          warm_corr=True,
-                         tolerance=0.0000001,
+                         tolerance=0.00001,
                          max_iters=100,
                          ext_score_adjustment=0.5,
                          method='cos',
@@ -11663,7 +11684,7 @@ class MFRM(Rasch):
                                  point_measure_corr=False,
                                  dp=3,
                                  warm_corr=True,
-                                 tolerance=0.0000001,
+                                 tolerance=0.00001,
                                  max_iters=100,
                                  ext_score_adjustment=0.5,
                                  method='cos',
@@ -11758,7 +11779,7 @@ class MFRM(Rasch):
                                       point_measure_corr=False,
                                       dp=3,
                                       warm_corr=True,
-                                      tolerance=0.0000001,
+                                      tolerance=0.00001,
                                       max_iters=100,
                                       ext_score_adjustment=0.5,
                                       method='cos',
@@ -11861,7 +11882,7 @@ class MFRM(Rasch):
                                   zstd=True,
                                   dp=3,
                                   warm_corr=True,
-                                  tolerance=0.0000001,
+                                  tolerance=0.00001,
                                   max_iters=100,
                                   ext_score_adjustment=0.5,
                                   method='cos',
@@ -11976,7 +11997,7 @@ class MFRM(Rasch):
                                    zstd=False,
                                    dp=3,
                                    warm_corr=True,
-                                   tolerance=0.0000001,
+                                   tolerance=0.00001,
                                    max_iters=100,
                                    ext_score_adjustment=0.5,
                                    method='cos',
@@ -12049,7 +12070,7 @@ class MFRM(Rasch):
     def test_stats_df_thresholds(self,
                                  dp=3,
                                  warm_corr=True,
-                                 tolerance=0.0000001,
+                                 tolerance=0.00001,
                                  max_iters=100,
                                  ext_score_adjustment=0.5,
                                  method='cos',
@@ -12084,7 +12105,7 @@ class MFRM(Rasch):
                               format='csv',
                               dp=3,
                               warm_corr=True,
-                              tolerance=0.0000001,
+                              tolerance=0.00001,
                               max_iters=100,
                               ext_score_adjustment=0.5,
                               method='cos',
@@ -12154,7 +12175,7 @@ class MFRM(Rasch):
                              point_measure_corr=False,
                              dp=3,
                              warm_corr=True,
-                             tolerance=0.0000001,
+                             tolerance=0.00001,
                              max_iters=100,
                              ext_score_adjustment=0.5,
                              method='cos',
@@ -12246,7 +12267,7 @@ class MFRM(Rasch):
                                   point_measure_corr=False,
                                   dp=3,
                                   warm_corr=True,
-                                  tolerance=0.0000001,
+                                  tolerance=0.00001,
                                   max_iters=100,
                                   ext_score_adjustment=0.5,
                                   method='cos',
@@ -12351,7 +12372,7 @@ class MFRM(Rasch):
                               marginal=True,
                               dp=3,
                               warm_corr=True,
-                              tolerance=0.0000001,
+                              tolerance=0.00001,
                               max_iters=100,
                               ext_score_adjustment=0.5,
                               method='cos',
@@ -12573,7 +12594,7 @@ class MFRM(Rasch):
                                zstd=False,
                                dp=3,
                                warm_corr=True,
-                               tolerance=0.0000001,
+                               tolerance=0.00001,
                                max_iters=100,
                                ext_score_adjustment=0.5,
                                method='cos',
@@ -12644,7 +12665,7 @@ class MFRM(Rasch):
     def test_stats_df_matrix(self,
                              dp=3,
                              warm_corr=True,
-                             tolerance=0.0000001,
+                             tolerance=0.00001,
                              max_iters=100,
                              ext_score_adjustment=0.5,
                              method='cos',
@@ -12685,7 +12706,7 @@ class MFRM(Rasch):
                           format='csv',
                           dp=3,
                           warm_corr=True,
-                          tolerance=0.0000001,
+                          tolerance=0.00001,
                           max_iters=100,
                           ext_score_adjustment=0.5,
                           method='cos',
@@ -12750,7 +12771,7 @@ class MFRM(Rasch):
 
     def category_probability_dict_global(self,
                                          warm_corr=True,
-                                         tolerance=0.0000001,
+                                         tolerance=0.00001,
                                          max_iters=100,
                                          ext_score_adjustment=0.5,
                                          method='cos',
@@ -12788,7 +12809,7 @@ class MFRM(Rasch):
 
     def category_probability_dict_items(self,
                                         warm_corr=True,
-                                        tolerance=0.0000001,
+                                        tolerance=0.00001,
                                         max_iters=100,
                                         ext_score_adjustment=0.5,
                                         method='cos',
@@ -12826,7 +12847,7 @@ class MFRM(Rasch):
 
     def category_probability_dict_thresholds(self,
                                              warm_corr=True,
-                                             tolerance=0.0000001,
+                                             tolerance=0.00001,
                                              max_iters=100,
                                              ext_score_adjustment=0.5,
                                              method='cos',
@@ -12865,7 +12886,7 @@ class MFRM(Rasch):
 
     def category_probability_dict_matrix(self,
                                          warm_corr=True,
-                                         tolerance=0.0000001,
+                                         tolerance=0.00001,
                                          max_iters=100,
                                          ext_score_adjustment=0.5,
                                          method='cos',
@@ -12944,7 +12965,7 @@ class MFRM(Rasch):
 
     def fit_matrices_global(self,
                             warm_corr=True,
-                            tolerance=0.0000001,
+                            tolerance=0.00001,
                             max_iters=100,
                             ext_score_adjustment=0.5,
                             method='cos',
@@ -12965,7 +12986,7 @@ class MFRM(Rasch):
 
     def fit_matrices_items(self,
                            warm_corr=True,
-                           tolerance=0.0000001,
+                           tolerance=0.00001,
                            max_iters=100,
                            ext_score_adjustment=0.5,
                            method='cos',
@@ -12986,7 +13007,7 @@ class MFRM(Rasch):
 
     def fit_matrices_thresholds(self,
                                 warm_corr=True,
-                                tolerance=0.0000001,
+                                tolerance=0.00001,
                                 max_iters=100,
                                 ext_score_adjustment=0.5,
                                 method='cos',
@@ -13008,7 +13029,7 @@ class MFRM(Rasch):
 
     def fit_matrices_matrix(self,
                             warm_corr=True,
-                            tolerance=0.0000001,
+                            tolerance=0.00001,
                             max_iters=100,
                             ext_score_adjustment=0.5,
                             method='cos',
@@ -13072,7 +13093,7 @@ class MFRM(Rasch):
 
     def item_fit_statistics_global(self,
                                    warm_corr=True,
-                                   tolerance=0.0000001,
+                                   tolerance=0.00001,
                                    max_iters=100,
                                    ext_score_adjustment=0.5,
                                    method='cos',
@@ -13096,7 +13117,7 @@ class MFRM(Rasch):
 
     def item_fit_statistics_items(self,
                                   warm_corr=True,
-                                  tolerance=0.0000001,
+                                  tolerance=0.00001,
                                   max_iters=100,
                                   ext_score_adjustment=0.5,
                                   method='cos',
@@ -13120,7 +13141,7 @@ class MFRM(Rasch):
 
     def item_fit_statistics_thresholds(self,
                                        warm_corr=True,
-                                       tolerance=0.0000001,
+                                       tolerance=0.00001,
                                        max_iters=100,
                                        ext_score_adjustment=0.5,
                                        method='cos',
@@ -13147,7 +13168,7 @@ class MFRM(Rasch):
 
     def item_fit_statistics_matrix(self,
                                    warm_corr=True,
-                                   tolerance=0.0000001,
+                                   tolerance=0.00001,
                                    max_iters=100,
                                    ext_score_adjustment=0.5,
                                    method='cos',
@@ -13212,7 +13233,7 @@ class MFRM(Rasch):
 
     def item_res_corr_analysis_global(self,
                                       warm_corr=True,
-                                      tolerance=0.0000001,
+                                      tolerance=0.00001,
                                       max_iters=100,
                                       ext_score_adjustment=0.5,
                                       constant=0.1,
@@ -13236,7 +13257,7 @@ class MFRM(Rasch):
 
     def item_res_corr_analysis_items(self,
                                      warm_corr=True,
-                                     tolerance=0.0000001,
+                                     tolerance=0.00001,
                                      max_iters=100,
                                      ext_score_adjustment=0.5,
                                      constant=0.1,
@@ -13260,7 +13281,7 @@ class MFRM(Rasch):
 
     def item_res_corr_analysis_thresholds(self,
                                           warm_corr=True,
-                                          tolerance=0.0000001,
+                                          tolerance=0.00001,
                                           max_iters=100,
                                           ext_score_adjustment=0.5,
                                           constant=0.1,
@@ -13284,7 +13305,7 @@ class MFRM(Rasch):
 
     def item_res_corr_analysis_matrix(self,
                                       warm_corr=True,
-                                      tolerance=0.0000001,
+                                      tolerance=0.00001,
                                       max_iters=100,
                                       ext_score_adjustment=0.5,
                                       constant=0.1,
@@ -13495,7 +13516,7 @@ class MFRM(Rasch):
     def threshold_fit_statistics_global(self,
                                         anchor_raters=None,
                                         warm_corr=True,
-                                        tolerance=0.0000001,
+                                        tolerance=0.00001,
                                         max_iters=100,
                                         ext_score_adjustment=0.5,
                                         method='cos',
@@ -13551,7 +13572,7 @@ class MFRM(Rasch):
     def threshold_fit_statistics_items(self,
                                        anchor_raters=None,
                                        warm_corr=True,
-                                       tolerance=0.0000001,
+                                       tolerance=0.00001,
                                        max_iters=100,
                                        ext_score_adjustment=0.5,
                                        method='cos',
@@ -13608,7 +13629,7 @@ class MFRM(Rasch):
     def threshold_fit_statistics_thresholds(self,
                                             anchor_raters=None,
                                             warm_corr=True,
-                                            tolerance=0.0000001,
+                                            tolerance=0.00001,
                                             max_iters=100,
                                             ext_score_adjustment=0.5,
                                             method='cos',
@@ -13670,7 +13691,7 @@ class MFRM(Rasch):
     def threshold_fit_statistics_matrix(self,
                                         anchor_raters=None,
                                         warm_corr=True,
-                                        tolerance=0.0000001,
+                                        tolerance=0.00001,
                                         max_iters=100,
                                         ext_score_adjustment=0.5,
                                         method='cos',
@@ -13776,7 +13797,7 @@ class MFRM(Rasch):
 
     def rater_fit_statistics_global(self,
                                     warm_corr=True,
-                                    tolerance=0.0000001,
+                                    tolerance=0.00001,
                                     max_iters=100,
                                     ext_score_adjustment=0.5,
                                     method='cos',
@@ -13799,7 +13820,7 @@ class MFRM(Rasch):
 
     def rater_fit_statistics_items(self,
                                    warm_corr=True,
-                                   tolerance=0.0000001,
+                                   tolerance=0.00001,
                                    max_iters=100,
                                    ext_score_adjustment=0.5,
                                    method='cos',
@@ -13822,7 +13843,7 @@ class MFRM(Rasch):
 
     def rater_fit_statistics_thresholds(self,
                                         warm_corr=True,
-                                        tolerance=0.0000001,
+                                        tolerance=0.00001,
                                         max_iters=100,
                                         ext_score_adjustment=0.5,
                                         method='cos',
@@ -13847,7 +13868,7 @@ class MFRM(Rasch):
 
     def rater_fit_statistics_matrix(self,
                                     warm_corr=True,
-                                    tolerance=0.0000001,
+                                    tolerance=0.00001,
                                     max_iters=100,
                                     ext_score_adjustment=0.5,
                                     method='cos',
@@ -13949,7 +13970,7 @@ class MFRM(Rasch):
                               std_residual_df,
                               abilities,
                               warm_corr=True,
-                              tolerance=0.0000001,
+                              tolerance=0.00001,
                               max_iters=100,
                               ext_score_adjustment=0.5,
                               method='cos',
@@ -13997,7 +14018,7 @@ class MFRM(Rasch):
 
     def person_fit_statistics_global(self,
                                      warm_corr=True,
-                                     tolerance=0.0000001,
+                                     tolerance=0.00001,
                                      max_iters=100,
                                      ext_score_adjustment=0.5,
                                      method='cos',
@@ -14028,7 +14049,7 @@ class MFRM(Rasch):
 
     def person_fit_statistics_items(self,
                                     warm_corr=True,
-                                    tolerance=0.0000001,
+                                    tolerance=0.00001,
                                     max_iters=100,
                                     ext_score_adjustment=0.5,
                                     method='cos',
@@ -14058,7 +14079,7 @@ class MFRM(Rasch):
 
     def person_fit_statistics_thresholds(self,
                                          warm_corr=True,
-                                         tolerance=0.0000001,
+                                         tolerance=0.00001,
                                          max_iters=100,
                                          ext_score_adjustment=0.5,
                                          method='cos',
@@ -14090,7 +14111,7 @@ class MFRM(Rasch):
 
     def person_fit_statistics_matrix(self,
                                      warm_corr=True,
-                                     tolerance=0.0000001,
+                                     tolerance=0.00001,
                                      max_iters=100,
                                      ext_score_adjustment=0.5,
                                      method='cos',
@@ -14143,7 +14164,7 @@ class MFRM(Rasch):
 
     def test_fit_statistics_global(self,
                                    warm_corr=True,
-                                   tolerance=0.0000001,
+                                   tolerance=0.00001,
                                    max_iters=100,
                                    ext_score_adjustment=0.5,
                                    method='cos',
@@ -14171,7 +14192,7 @@ class MFRM(Rasch):
 
     def test_fit_statistics_items(self,
                                   warm_corr=True,
-                                  tolerance=0.0000001,
+                                  tolerance=0.00001,
                                   max_iters=100,
                                   ext_score_adjustment=0.5,
                                   method='cos',
@@ -14199,7 +14220,7 @@ class MFRM(Rasch):
 
     def test_fit_statistics_thresholds(self,
                                        warm_corr=True,
-                                       tolerance=0.0000001,
+                                       tolerance=0.00001,
                                        max_iters=100,
                                        ext_score_adjustment=0.5,
                                        method='cos',
@@ -14229,7 +14250,7 @@ class MFRM(Rasch):
 
     def test_fit_statistics_matrix(self,
                                    warm_corr=True,
-                                   tolerance=0.0000001,
+                                   tolerance=0.00001,
                                    max_iters=100,
                                    ext_score_adjustment=0.5,
                                    method='cos',
@@ -14256,7 +14277,9 @@ class MFRM(Rasch):
 
     def fit_statistics_global(self,
                               warm_corr=True,
-                              tolerance=0.0000001,
+                              se=True,
+                              test_stats=True,
+                              tolerance=0.00001,
                               max_iters=100,
                               ext_score_adjustment=0.5,
                               method='cos',
@@ -14274,9 +14297,10 @@ class MFRM(Rasch):
             self.calibrate_global(constant=constant, method=method,
                                   matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
-        if hasattr(self, 'threshold_se_global') == False:
-            self.std_errors_global(interval=interval, no_of_samples=no_of_samples, constant=constant, method=method,
-                                   matrix_power=matrix_power, log_lik_tol=log_lik_tol)
+        if se:
+            if hasattr(self, 'threshold_se_global') == False:
+                self.std_errors_global(interval=interval, no_of_samples=no_of_samples, constant=constant, method=method,
+                                       matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         if hasattr(self, 'abils_global') == False:
             self.person_abils_global(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
@@ -14286,17 +14310,23 @@ class MFRM(Rasch):
                                               ext_score_adjustment=ext_score_adjustment, method=method,
                                               constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
+        if se == False:
+            test_stats = False
+
         self.fit_matrices_global()
         self.item_fit_statistics_global()
         self.threshold_fit_statistics_global()
         self.rater_fit_statistics_global()
         self.person_fit_statistics_global()
-        self.test_fit_statistics_global()
+        if test_stats:
+            self.test_fit_statistics_global()
 
 
     def fit_statistics_items(self,
                              warm_corr=True,
-                             tolerance=0.0000001,
+                             se=True,
+                             test_stats=True,
+                             tolerance=0.00001,
                              max_iters=100,
                              ext_score_adjustment=0.5,
                              method='cos',
@@ -14313,9 +14343,10 @@ class MFRM(Rasch):
             self.calibrate_items(constant=constant, method=method,
                                  matrix_power=matrix_power, log_lik_tol=log_lik_tol)
             
-        if hasattr(self, 'threshold_se_items') == False:
-            self.std_errors_items(interval=interval, no_of_samples=no_of_samples, constant=constant, method=method,
-                                  matrix_power=matrix_power, log_lik_tol=log_lik_tol)
+        if se:
+            if hasattr(self, 'threshold_se_items') == False:
+                self.std_errors_items(interval=interval, no_of_samples=no_of_samples, constant=constant, method=method,
+                                      matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         if hasattr(self, 'abils_items') == False:
             self.person_abils_items(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
@@ -14325,17 +14356,23 @@ class MFRM(Rasch):
                                               ext_score_adjustment=ext_score_adjustment, method=method,
                                               constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
+        if se == False:
+            test_stats = False
+
         self.fit_matrices_items()
         self.item_fit_statistics_items()
         self.threshold_fit_statistics_items()
         self.rater_fit_statistics_items()
         self.person_fit_statistics_items()
-        self.test_fit_statistics_items()
+        if test_stats:
+            self.test_fit_statistics_items()
 
 
     def fit_statistics_thresholds(self,
                                   warm_corr=True,
-                                  tolerance=0.0000001,
+                                  se=True,
+                                  test_stats=True,
+                                  tolerance=0.00001,
                                   max_iters=100,
                                   ext_score_adjustment=0.5,
                                   method='cos',
@@ -14352,9 +14389,10 @@ class MFRM(Rasch):
             self.calibrate_thresholds(constant=constant, method=method,
                                       matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
-        if hasattr(self, 'threshold_se_thresholds') == False:
-            self.std_errors_thresholds(interval=interval, no_of_samples=no_of_samples, constant=constant, method=method,
-                                       matrix_power=matrix_power, log_lik_tol=log_lik_tol)
+        if se:
+            if hasattr(self, 'threshold_se_thresholds') == False:
+                self.std_errors_thresholds(interval=interval, no_of_samples=no_of_samples, constant=constant, method=method,
+                                           matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         if hasattr(self, 'abils_thresholds') == False:
             self.person_abils_thresholds(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
@@ -14364,17 +14402,23 @@ class MFRM(Rasch):
                                                   ext_score_adjustment=ext_score_adjustment, method=method,
                                                   constant=constant)
 
+        if se == False:
+            test_stats = False
+
         self.fit_matrices_thresholds()
         self.item_fit_statistics_thresholds()
         self.threshold_fit_statistics_thresholds()
         self.rater_fit_statistics_thresholds()
         self.person_fit_statistics_thresholds()
-        self.test_fit_statistics_thresholds()
+        if test_stats:
+            self.test_fit_statistics_thresholds()
 
 
     def fit_statistics_matrix(self,
                               warm_corr=True,
-                              tolerance=0.0000001,
+                              se=True,
+                              test_stats=True,
+                              tolerance=0.00001,
                               max_iters=100,
                               ext_score_adjustment=0.5,
                               method='cos',
@@ -14391,9 +14435,10 @@ class MFRM(Rasch):
             self.calibrate_matrix(constant=constant, method=method,
                                   matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
-        if hasattr(self, 'threshold_se_matrix') == False:
-            self.std_errors_matrix(interval=interval, no_of_samples=no_of_samples, constant=constant, method=method,
-                                   matrix_power=matrix_power, log_lik_tol=log_lik_tol)
+        if se:
+            if hasattr(self, 'threshold_se_matrix') == False:
+                self.std_errors_matrix(interval=interval, no_of_samples=no_of_samples, constant=constant, method=method,
+                                       matrix_power=matrix_power, log_lik_tol=log_lik_tol)
             
         if hasattr(self, 'abils_matrix') == False:
             self.person_abils_matrix(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
@@ -14403,12 +14448,16 @@ class MFRM(Rasch):
                                               ext_score_adjustment=ext_score_adjustment, method=method,
                                               constant=constant)
 
+        if se == False:
+            test_stats = False
+
         self.fit_matrices_matrix()
         self.item_fit_statistics_matrix()
         self.threshold_fit_statistics_matrix()
         self.rater_fit_statistics_matrix()
         self.person_fit_statistics_matrix()
-        self.test_fit_statistics_matrix()
+        if test_stats:
+            self.test_fit_statistics_matrix()
 
     def save_residuals(self,
                        eigenvectors,
@@ -14422,7 +14471,7 @@ class MFRM(Rasch):
                        single=True,
                        dp=3,
                        warm_corr=True,
-                       tolerance=0.0000001,
+                       tolerance=0.00001,
                        max_iters=100,
                        ext_score_adjustment=0.5,
                        method='cos',
@@ -14533,7 +14582,7 @@ class MFRM(Rasch):
                                     single=True,
                                     dp=3,
                                     warm_corr=True,
-                                    tolerance=0.0000001,
+                                    tolerance=0.00001,
                                     max_iters=100,
                                     ext_score_adjustment=0.5,
                                     method='cos',
@@ -14554,7 +14603,7 @@ class MFRM(Rasch):
                                    single=True,
                                    dp=3,
                                    warm_corr=True,
-                                   tolerance=0.0000001,
+                                   tolerance=0.00001,
                                    max_iters=100,
                                    ext_score_adjustment=0.5,
                                    method='cos',
@@ -14573,7 +14622,7 @@ class MFRM(Rasch):
                                      	single=True,
                                      	dp=3,
                                      	warm_corr=True,
-                                     	tolerance=0.0000001,
+                                     	tolerance=0.00001,
                                      	max_iters=100,
                                      	ext_score_adjustment=0.5,
                                      	method='cos',
@@ -14592,7 +14641,7 @@ class MFRM(Rasch):
                                     single=True,
                                     dp=3,
                                     warm_corr=True,
-                                    tolerance=0.0000001,
+                                    tolerance=0.00001,
                                     max_iters=100,
                                     ext_score_adjustment=0.5,
                                     method='cos',
@@ -14611,7 +14660,7 @@ class MFRM(Rasch):
                                      single=True,
                                      dp=3,
                                      warm_corr=True,
-                                     tolerance=0.0000001,
+                                     tolerance=0.00001,
                                      max_iters=100,
                                      ext_score_adjustment=0.5,
                                      method='cos',
@@ -14630,7 +14679,7 @@ class MFRM(Rasch):
                                     single=True,
                                     dp=3,
                                     warm_corr=True,
-                                    tolerance=0.0000001,
+                                    tolerance=0.00001,
                                     max_iters=100,
                                     ext_score_adjustment=0.5,
                                     method='cos',
@@ -14649,7 +14698,7 @@ class MFRM(Rasch):
                                          single=True,
                                          dp=3,
                                          warm_corr=True,
-                                         tolerance=0.0000001,
+                                         tolerance=0.00001,
                                          max_iters=100,
                                          ext_score_adjustment=0.5,
                                          method='cos',
@@ -14668,7 +14717,7 @@ class MFRM(Rasch):
                                      single=True,
                                      dp=3,
                                      warm_corr=True,
-                                     tolerance=0.0000001,
+                                     tolerance=0.00001,
                                      max_iters=100,
                                      ext_score_adjustment=0.5,
                                      method='cos',
