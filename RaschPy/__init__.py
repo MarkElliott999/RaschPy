@@ -3371,6 +3371,7 @@ class PCM(Rasch):
         self.threshold_outfit_ms = {item: {threshold + 1:
                                            (dich_std_residuals[item][threshold + 1] ** 2).sum() /
                                            dich_thresh[item][threshold + 1].count()
+                                           if dich_thresh[item][threshold + 1].count() != 0 else np.nan
                                            for threshold in range(self.max_score_vector[item])}
                                     for item in self.dataframe.columns}
 
@@ -3381,6 +3382,7 @@ class PCM(Rasch):
         self.threshold_infit_ms = {item: {threshold + 1:
                                           (dich_residuals[item][threshold + 1] ** 2).sum().sum() /
                                           dich_thresh_var[item][threshold + 1].sum().sum()
+                                          if dich_thresh_var[item][threshold + 1].sum().sum() != 0 else np.nan
                                           for threshold in range(self.max_score_vector[item])}
                                    for item in self.dataframe.columns}
 
@@ -3393,6 +3395,7 @@ class PCM(Rasch):
                                         (dich_thresh_var[item][threshold + 1] ** 2)) /
                                        (dich_thresh_count[item][threshold + 1] ** 2)).sum().sum() -
                                       (1 / dich_thresh_count[item][threshold + 1]))
+                                     if dich_thresh_count[item][threshold + 1] != 0 else np.nan
                                      for threshold in range(self.max_score_vector[item])}
                               for item in self.dataframe.columns}
 
@@ -3408,6 +3411,7 @@ class PCM(Rasch):
         threshold_infit_q = {item: {threshold + 1: ((dich_thresh_kur[item][threshold + 1] -
                                                       dich_thresh_var[item][threshold + 1] ** 2).sum().sum() /
                                                     (dich_thresh_var[item][threshold + 1].sum().sum() ** 2))
+                                    if dich_thresh_var[item][threshold + 1].sum().sum() != 0 else np.nan
                                     for threshold in range(self.max_score_vector[item])}
                              for item in self.dataframe.columns}
 
@@ -3458,6 +3462,7 @@ class PCM(Rasch):
                                         dich_thresh_exp[item][threshold + 1] -
                                         (dich_thresh_exp[item][threshold + 1].sum() /
                                          dich_thresh_exp[item][threshold + 1].count())
+                                        if dich_thresh_exp[item][threshold + 1].count() != 0 else np.nan
                                         for threshold in range(self.max_score_vector[item])}
                               for item in self.dataframe.columns}
 
@@ -3489,6 +3494,7 @@ class PCM(Rasch):
         self.threshold_rmsr = {item: {threshold + 1:
                                       (dich_residuals[item][threshold + 1] ** 2).sum() /
                                       dich_residuals[item][threshold + 1].count()
+                                      if dich_residuals[item][threshold + 1].count() != 0 else np.nan
                                       for threshold in range(self.max_score_vector[item])}
                               for item in self.dataframe.columns}
 
