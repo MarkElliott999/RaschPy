@@ -1,5 +1,5 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 '''
 RaschPy
 Created on Fri Jan 31 13:50:17 2020
@@ -1119,18 +1119,16 @@ class SLM(Rasch):
                              item):
 
         if item in self.dataframe.columns:
-            return self.dataframe.apply(pd.value_counts)[item].fillna(0).astype(int)
+            return self.dataframe[item].value_counts().fillna(0).astype(int)
 
         else:
             print('Invalid item name')
 
     def category_counts_df(self):
-
-        category_counts_df = pd.DataFrame(0, index=self.dataframe.columns, columns=[0, 1])
-
-        for item in self.dataframe.columns:
-            for score, count in self.category_counts_item(item).items():
-                category_counts_df.loc[item].iloc[int(score)] = count
+        cat_counts_dict = {item: {int(score): count if count == count else 0
+                                  for score, count in self.category_counts_item(item).items()}
+                           for item in self.dataframe.columns}
+        category_counts_df = pd.DataFrame(cat_counts_dict).T
 
         category_counts_df['Total'] = self.dataframe.count()
         category_counts_df['Missing'] = self.no_of_persons - category_counts_df['Total']
@@ -1145,6 +1143,7 @@ class SLM(Rasch):
                        warm_corr=True,
                        se=True,
                        test_stats=True,
+                       trim_cat_prob_dict=False,
                        tolerance=0.00001,
                        max_iters=100,
                        ext_score_adjustment=0.5,
@@ -1185,25 +1184,40 @@ class SLM(Rasch):
         diff_df.index = self.dataframe.index
         diff_df.columns = self.dataframe.columns
 
-        missing_mask = (self.dataframe + 1) / (self.dataframe + 1)
         item_count = (self.dataframe == self.dataframe).sum(axis=0)
         person_count = (self.dataframe == self.dataframe).sum(axis=1)
 
-        self.exp_score_df = 1 / (1 + np.exp(diff_df - abil_df))
+        df = self.dataframe.copy()
+        scores = df.sum(axis=1)
+        max_scores = (df == df).sum(axis=1)
+
+        df = df[(scores > 0) & (scores < max_scores)]
+        missing_mask = (df + 1) / (df + 1)
+        abilities = self.person_abilities.loc[df.index]
+
+        self.cat_prob_dict = {1: {item: self.diffs[item] - self.person_abilities
+                                  for item in self.items}}
+        self.cat_prob_dict[1] = pd.DataFrame(self.cat_prob_dict[1])
+        self.cat_prob_dict[1] = 1 / (1 + np.exp(self.cat_prob_dict[1]))
+        self.cat_prob_dict[0] = 1 - self.cat_prob_dict[1]
+
+        if trim_cat_prob_dict:
+            for cat in [0, 1]:
+                self.cat_prob_dict[cat] = self.cat_prob_dict[cat].loc[df.index]
+
+        self.exp_score_df = self.cat_prob_dict[1]
         self.exp_score_df *= missing_mask
 
-        self.info_df = self.exp_score_df * (1 - self.exp_score_df)
+        self.info_df = sum(((cat - self.exp_score_df) ** 2) * self.cat_prob_dict[cat]
+                           for cat in range(self.max_score + 1))
         self.info_df *= missing_mask
 
-        self.kurtosis_df = (((-self.exp_score_df) ** 4) * (1 - self.exp_score_df) +
-                            ((1 - self.exp_score_df) ** 4) * self.exp_score_df)
+        self.kurtosis_df = sum(self.cat_prob_dict[cat] * ((cat - self.exp_score_df) ** 4)
+                               for cat in range(self.max_score + 1))
         self.kurtosis_df *= missing_mask
 
-        self.residual_df = self.dataframe - self.exp_score_df
+        self.residual_df = df - self.exp_score_df
         self.std_residual_df = self.residual_df / (self.info_df ** 0.5)
-
-        scores = self.dataframe.sum(axis=1)
-        max_scores = self.dataframe.count(axis=1)
 
         self.exp_score_df = self.exp_score_df[(scores > 0) & (scores < max_scores)]
         self.info_df = self.info_df[(scores > 0) & (scores < max_scores)]
@@ -3190,7 +3204,7 @@ class PCM(Rasch):
                              item):
 
         if item in self.dataframe.columns:
-            counts = self.dataframe.apply(pd.value_counts)[item][:self.max_score_vector[item] + 1].fillna(0).astype(int)
+            counts = self.dataframe[item].value_counts().iloc[:self.max_score_vector[item] + 1].fillna(0).astype(int)
 
             return counts
 
@@ -3198,7 +3212,25 @@ class PCM(Rasch):
             print('Invalid item name')
 
     def category_counts_df(self):
+        cat_counts_dict = {item: {int(score): count if count == count else 0
+                                  for score, count in self.category_counts_item(item).items()}
+                           for item in self.dataframe.columns}
+        category_counts_df = pd.DataFrame(cat_counts_dict)
+        category_counts_df.sort_index(inplace=True)
+        category_counts_df = category_counts_df.T
 
+        category_counts_df['Total'] = self.dataframe.count()
+        category_counts_df['Missing'] = self.no_of_persons - category_counts_df['Total']
+
+        category_counts_df.loc['Total']= category_counts_df.sum()
+
+        category_counts_df = category_counts_df.fillna(-1)
+        category_counts_df = category_counts_df.astype(int)
+        category_counts_df = category_counts_df.replace(-1, '')
+
+        self.category_counts = category_counts_df
+
+    '''
         max_score = max(self.max_score_vector)
         category_counts_df = pd.DataFrame(-1, index=self.dataframe.columns, columns=np.arange(max_score + 1))
 
@@ -3220,11 +3252,13 @@ class PCM(Rasch):
         category_counts_df = category_counts_df.replace(-1, 'n/a')
 
         self.category_counts = category_counts_df
+        '''
 
     def fit_statistics(self,
                        warm_corr=True,
                        se=True,
                        test_stats=True,
+                       trim_cat_prob_dict=False,
                        tolerance=0.00001,
                        max_iters=100,
                        ext_score_adjustment=0.5,
@@ -3268,15 +3302,23 @@ class PCM(Rasch):
 
         max_max_score = self.max_score_vector.max()
 
-        self.cat_prob_dict = {cat: {item: {person: self.cat_prob_uncentred(abil, cat, self.thresholds_uncentred[item])
-                                           if self.max_score_vector[item] >= cat
-                                           else 0
-                                           for person, abil in abilities.items()}
-                                    for item in self.dataframe.columns}
-                              for cat in range(max_max_score + 1)}
+        self.cat_prob_dict = {cat: pd.DataFrame(0, index=self.person_abilities.index, columns=self.items)
+						for cat in range(max_max_score + 1)}
 
-        for cat in range(max_max_score + 1):
-            self.cat_prob_dict[cat] = pd.DataFrame(self.cat_prob_dict[cat])
+        for item in self.items:
+            for cat in range(self.max_score_vector[item] + 1):
+                self.cat_prob_dict[cat][item] = sum(self.person_abilities - self.thresholds_uncentred[item].iloc[category]
+                                                        for category in range(cat))
+                self.cat_prob_dict[cat][item] = np.exp(self.cat_prob_dict[cat][item])
+
+        den_df = sum(self.cat_prob_dict[cat] for cat in range(max_max_score + 1))
+
+        for cat in range(self.max_score_vector[item]):
+            self.cat_prob_dict[cat] /= den_df
+
+        if trim_cat_prob_dict:
+            for cat in range(self.max_score_vector[item]):
+                self.cat_prob_dict[cat] = self.cat_prob_dict[cat].loc[df.index]
 
         self.exp_score_df = sum(cat * self.cat_prob_dict[cat] for cat in range(max_max_score + 1))
         self.exp_score_df *= missing_mask
@@ -5541,18 +5583,16 @@ class RSM(Rasch):
                              item):
 
         if item in self.dataframe.columns:
-            return self.dataframe.apply(pd.value_counts)[item].fillna(0).astype(int)
+            return self.dataframe[item].value_counts().fillna(0).astype(int)
 
         else:
             print('Invalid item name')
 
     def category_counts_df(self):
-
-        category_counts_df = pd.DataFrame(0, index=self.dataframe.columns, columns=np.arange(self.max_score + 1))
-
-        for item in self.dataframe.columns:
-            for score, count in self.category_counts_item(item).items():
-                category_counts_df.loc[item].iloc[int(score)] = count
+        cat_counts_dict = {item: {int(score): count if count == count else 0
+                                  for score, count in self.category_counts_item(item).items()}
+                           for item in self.dataframe.columns}
+        category_counts_df = pd.DataFrame(cat_counts_dict).T
 
         category_counts_df['Total'] = self.dataframe.count()
         category_counts_df['Missing'] = self.no_of_persons - category_counts_df['Total']
@@ -5567,6 +5607,7 @@ class RSM(Rasch):
                        warm_corr=True,
                        se=True,
                        test_stats=True,
+                       trim_cat_prob_dict=False,
                        tolerance=0.00001,
                        max_iters=100,
                        ext_score_adjustment=0.5,
@@ -5594,48 +5635,50 @@ class RSM(Rasch):
         Create matrices of expected scores, variances, kurtosis, residuals etc. to generate fit statistics
         '''
 
-        missing_mask = (self.dataframe + 1) / (self.dataframe + 1)
         item_count = (self.dataframe == self.dataframe).sum(axis=0)
         person_count = (self.dataframe == self.dataframe).sum(axis=1)
 
-        self.cat_prob_dict = {item: [[self.cat_prob(abil, self.diffs[item], cat, self.thresholds)
-                                      for cat in range(self.max_score + 1)]
-                                     for abil in self.person_abilities.values]
-                              for item in self.dataframe.columns}
-        for item in self.dataframe.columns:
-            self.cat_prob_dict[item] = pd.DataFrame(self.cat_prob_dict[item])
-            self.cat_prob_dict[item].index = self.dataframe.index
-            self.cat_prob_dict[item].columns = np.arange(self.max_score + 1)
+        df = self.dataframe.copy()
+        scores = df.sum(axis=1)
+        max_scores = ((df == df) * self.max_score).sum(axis=1)
 
-        self.exp_score_df = pd.DataFrame()
-        for item in self.dataframe.columns:
-            self.exp_score_df[item] = sum(cat * self.cat_prob_dict[item][cat]
-                                          for cat in range(self.max_score + 1))
+        df = df[(scores > 0) & (scores < max_scores)]
+        missing_mask = (df + 1) / (df + 1)
+        abilities = self.person_abilities.loc[df.index]
+
+        c_p_df = {item: self.person_abilities - self.diffs[item]
+                  for item in self.items}
+        c_p_df = pd.DataFrame(c_p_df)
+
+        self.cat_prob_dict = {cat: (cat * c_p_df) - sum(self.thresholds[:cat + 1])
+                              for cat in range(self.max_score + 1)}
+
+        for cat in range(self.max_score + 1):
+            self.cat_prob_dict[cat] = np.exp(self.cat_prob_dict[cat])
+
+        den = sum(self.cat_prob_dict[cat] for cat in range(self.max_score + 1))
+
+        for cat in range(self.max_score + 1):
+            self.cat_prob_dict[cat] /= den
+
+        if trim_cat_prob_dict:
+            for cat in range(self.max_score):
+                self.cat_prob_dict[cat] = self.cat_prob_dict[cat].loc[df.index]
+
+        self.exp_score_df = sum(cat * self.cat_prob_dict[cat]
+                                for cat in range(self.max_score + 1))
         self.exp_score_df *= missing_mask
 
-        self.info_df = pd.DataFrame()
-        for item in self.dataframe.columns:
-            self.info_df[item] = sum(((cat - self.exp_score_df[item]) ** 2) * self.cat_prob_dict[item][cat]
-                                     for cat in range(self.max_score + 1))
+        self.info_df = sum(((cat - self.exp_score_df) ** 2) * self.cat_prob_dict[cat]
+                           for cat in range(self.max_score + 1))
         self.info_df *= missing_mask
 
-        self.kurtosis_df = pd.DataFrame()
-        for item in self.dataframe.columns:
-            self.kurtosis_df[item] = sum(self.cat_prob_dict[item][cat] * ((cat - self.exp_score_df[item]) ** 4)
-                                         for cat in range(self.max_score + 1))
+        self.kurtosis_df = sum(self.cat_prob_dict[cat] * ((cat - self.exp_score_df) ** 4)
+                               for cat in range(self.max_score + 1))
         self.kurtosis_df *= missing_mask
 
-        self.residual_df = self.dataframe - self.exp_score_df
+        self.residual_df = df - self.exp_score_df
         self.std_residual_df = self.residual_df / (self.info_df ** 0.5)
-
-        scores = self.dataframe.sum(axis=1)
-        max_scores = self.dataframe.count(axis=1) * self.max_score
-
-        self.exp_score_df = self.exp_score_df[(scores > 0) & (scores < max_scores)]
-        self.info_df = self.info_df[(scores > 0) & (scores < max_scores)]
-        self.kurtosis_df = self.kurtosis_df[(scores > 0) & (scores < max_scores)]
-        self.residual_df = self.residual_df[(scores > 0) & (scores < max_scores)]
-        self.std_residual_df = self.std_residual_df[(scores > 0) & (scores < max_scores)]
 
         '''
         Item fit statistics
@@ -10693,11 +10736,11 @@ class MFRM(Rasch):
         if item in self.dataframe.columns:
 
             if rater is None:
-                return self.dataframe[item].value_counts().fillna(0).astype(int)
+                return self.dataframe[item].value_counts().fillna(0).astype(int).iloc[:-1]
 
             else:
                 if rater in self.raters:
-                    return self.dataframe.xs(rater)[item].value_counts().fillna(0).astype(int)
+                    return self.dataframe.xs(rater)[item].value_counts().fillna(0).astype(int).iloc[:-1]
 
                 else:
                     print('Invalid rater name')
@@ -21217,69 +21260,60 @@ class SLM_Sim(Rasch_Sim):
         if self.items is not None:
             assert len(self.items) == self.no_of_items, 'Length of item names must match number of items.'
 
+        if manual_person_names is not None:
+            self.persons = manual_person_names
+
+        else:
+            self.persons = [f'Person_{person + 1}' for person in range(self.no_of_persons)]
+
         if self.abilities is None:
             self.abilities = np.random.normal(0, self.person_sd, self.no_of_persons)
             self.abilities -= np.mean(self.abilities)
             self.abilities += self.offset
-            self.abilities = {f'Person_{person + 1}': ability for person, ability in enumerate(self.abilities)}
-            self.abilities = pd.Series(self.abilities)
-            
+
         else:
             assert len(self.abilities) == self.no_of_persons, 'Length of manual abilities must match number of persons.'
             self.abilities = np.array(self.abilities)
-            self.abilities = {f'Person_{person + 1}': ability for person, ability in enumerate(self.abilities)}
-            self.abilities = pd.Series(self.abilities)
+
+        self.abilities = {person: ability for person, ability in zip(self.persons, self.abilities)}
+        self.abilities = pd.Series(self.abilities)
+
+        if manual_item_names is not None:
+            self.items = manual_item_names
+
+        else:
+            self.items = [f'Item_{item + 1}' for item in range(self.no_of_items)]
         
         if self.diffs is None:
             self.diffs = np.random.uniform(0, 1, self.no_of_items)
             self.diffs *= (self.item_range / (np.max(self.diffs) - np.min(self.diffs)))
             self.diffs -= np.mean(self.diffs)
-            self.diffs = {f'Item_{item + 1}': diff for item, diff in enumerate(self.diffs)}
-            self.diffs = pd.Series(self.diffs)
 
         else:
             assert len(self.diffs) == self.no_of_items, 'Length of manual difficulties must match number of items.'
             self.diffs = np.array(self.diffs)
-            self.diffs = {f'Item_{item + 1}': diff for item, diff in enumerate(self.diffs)}
-            self.diffs = pd.Series(self.diffs)
-        
+            
+        self.diffs = {item: diff for item, diff in zip(self.items, self.diffs)}
+        self.diffs = pd.Series(self.diffs)
+
         '''
         Calculates probability of a correct response for each person on each item
         '''
-        
-        self.probs = [[self.slm.exp_score(ability, difficulty)
-                       for difficulty in self.diffs]
-                      for ability in self.abilities]
-        self.probs = np.array(self.probs)
+
+        self.probs = {item: self.diffs[item] - self.abilities
+                      for item in self.items}
+        self.probs = pd.DataFrame(self.probs, columns=self.items, index=self.persons)
+        self.probs = 1 / (1 + np.exp(self.probs))
         
         '''
         Calculates scores and removes required amount of missing data
         '''
 
-        scoring_randoms = self.randoms()
-        self.scores = (scoring_randoms <= self.probs).astype(np.float64)
-        
-        missing_randoms = self.randoms()
+        scoring_randoms = pd.DataFrame(self.randoms(), columns=self.items, index=self.persons)
+        self.scores = (scoring_randoms <= self.probs).astype(int)
+
+        missing_randoms = pd.DataFrame(self.randoms(), columns=self.items, index=self.persons)
         self.scores[missing_randoms < self.missing] = np.nan
-        
-        self.scores = pd.DataFrame(self.scores)
-
-        if manual_person_names is not None:
-            self.scores.index = manual_person_names
-
-        else:
-            for person in range(self.no_of_persons):
-                self.scores.rename(index={person: f'Person_{person + 1}'}, inplace=True)
-
-        if manual_person_names is not None:
-            self.scores.index = manual_person_names
-
-        else:
-            for item in range(self.no_of_items):
-                self.scores.rename(columns={item: f'Item_{item + 1}'}, inplace=True)
-
-        self.persons = self.scores.index.tolist()
-        self.items = self.scores.columns.tolist()
 
 class PCM_Sim(Rasch_Sim):
     
@@ -21331,49 +21365,62 @@ class PCM_Sim(Rasch_Sim):
         if self.items is not None:
             assert len(self.items) == self.no_of_items, 'Length of item names must match number of items.'
 
+        if manual_person_names is not None:
+            self.persons = manual_person_names
+
+        else:
+            self.persons = [f'Person_{person + 1}' for person in range(self.no_of_persons)]
+
+        if self.items is not None:
+            assert len(self.items) == self.no_of_items, 'Length of item names must match number of items.'
+
         if self.abilities is None:
             self.abilities = np.random.normal(0, self.person_sd, self.no_of_persons)
             self.abilities -= np.mean(self.abilities)
             self.abilities += self.offset
-            self.abilities = {f'Person_{person + 1}': ability for person, ability in enumerate(self.abilities)}
-            self.abilities = pd.Series(self.abilities)
-            
+
         else:
             assert len(self.abilities) == self.no_of_persons, 'Length of manual abilities must match number of persons.'
             self.abilities = np.array(self.abilities)
-            self.abilities = {f'Person_{person + 1}': ability for person, ability in enumerate(self.abilities)}
-            self.abilities = pd.Series(self.abilities)
-        
+
+        self.abilities = {person: ability for person, ability in zip(self.persons, self.abilities)}
+        self.abilities = pd.Series(self.abilities)
+
+        if manual_item_names is not None:
+            self.items = manual_item_names
+
+        else:
+            self.items = [f'Item_{item + 1}' for item in range(self.no_of_items)]
+
         if self.diffs is None:
             self.diffs = np.random.uniform(0, 1, self.no_of_items)
             self.diffs *= (self.item_range / (np.max(self.diffs) - np.min(self.diffs)))
             self.diffs -= np.mean(self.diffs)
-            self.diffs = {f'Item_{item + 1}': diff for item, diff in enumerate(self.diffs)}
-            self.diffs = pd.Series(self.diffs)
 
         else:
             assert len(self.diffs) == self.no_of_items, 'Length of manual difficulties must match number of items.'
             self.diffs = np.array(self.diffs)
-            self.diffs = {f'Item_{item + 1}': diff for item, diff in enumerate(self.diffs)}
-            self.diffs = pd.Series(self.diffs)
+
+        self.diffs = {item: diff for item, diff in zip(self.items, self.diffs)}
+        self.diffs = pd.Series(self.diffs)
 
         if manual_thresholds is None:
             
-            category_widths = {f'Item_{item + 1}':
+            category_widths = {item:
                                np.random.uniform(self.max_disorder,
                                                  2 * self.category_base - self.max_disorder,
-                                                 value - 1)
-                               for item, value in enumerate(self.max_score_vector)}
+                                                 max_score - 1)
+                               for item, max_score in zip(self.items, self.max_score_vector)}
             
-            self.thresholds_centred = {f'Item_{item + 1}':
-                                       np.array([np.sum(category_widths[f'Item_{item + 1}'][:category])
-                                                 for category in range(value)])
-                                       for item, value in enumerate(self.max_score_vector)}
+            self.thresholds_centred = {item:
+                                       np.array([np.sum(category_widths[item][:category])
+                                                 for category in range(max_score)])
+                                       for item, max_score in zip(self.items, self.max_score_vector)}
     
-            for item in range(self.no_of_items):
+            for item in self.items:
     
-                self.thresholds_centred[f'Item_{item + 1}'] -= np.mean(self.thresholds_centred[f'Item_{item + 1}'])
-                self.thresholds_centred[f'Item_{item + 1}'] = np.insert(self.thresholds_centred[f'Item_{item + 1}'], 0, 0)
+                self.thresholds_centred[item] -= np.mean(self.thresholds_centred[item])
+                self.thresholds_centred[item] = np.insert(self.thresholds_centred[item], 0, 0)
 
         else:
             assert len(manual_thresholds) == self.no_of_items, 'No of sets of manual thresholds must match number of items.'
@@ -21387,78 +21434,54 @@ class PCM_Sim(Rasch_Sim):
                 assert sum(manual_thresholds[item]) == 0 , ('All sets of item thresholds in manual thresholds must ' +
                     'sum to zero.')
 
-            self.thresholds_centred = {f'Item_{item + 1}': np.array(thresholds)
-                                       for item, thresholds in enumerate(manual_thresholds)}
+            self.thresholds_centred = {item: np.array(thresholds)
+                                       for item, thresholds in zip(self.items, manual_thresholds)}
 
-        self.thresholds_uncentred = {f'Item_{item + 1}':
-                                     self.thresholds_centred[f'Item_{item + 1}'][1:] +
-                                     self.diffs.iloc[item]
-                                     for item in range(self.no_of_items)}
+        self.thresholds_uncentred = {item:
+                                     self.thresholds_centred[item][1:] + self.diffs[item]
+                                     for item in self.items}
 
         threshold_list = itertools.chain.from_iterable(self.thresholds_uncentred.values())
         threshold_mean = statistics.mean(threshold_list)
         
-        for item in range(self.no_of_items):
-            self.diffs.iloc[item] -= threshold_mean
-            self.thresholds_uncentred[f'Item_{item + 1}'] -= threshold_mean
+        for item in self.items:
+            self.diffs[item] -= threshold_mean
+            self.thresholds_uncentred[item] -= threshold_mean
             
         '''
         Calculates probability of a response in each category for each person on each item
         '''
 
-        self.cat_probs = {f'Item_{item + 1}':
-                          np.array([[self.pcm.cat_prob_uncentred(abil,
-                                                                 cat,
-                                                                 self.thresholds_uncentred[f'Item_{item + 1}'])
-                                     for cat in range(self.max_score_vector[item] + 1)]
-                                    for abil in self.abilities])
-                          for item in range(self.no_of_items)}
+        max_max_score = max(self.max_score_vector)
+
+        self.cat_probs = {cat: pd.DataFrame(0, index=self.persons, columns=self.items)
+                          for cat in range(max_max_score + 1)}
+
+        for i, item in enumerate(self.items):
+            for cat in range(self.max_score_vector[i] + 1):
+                self.cat_probs[cat][item] = (self.abilities * cat) - sum(self.thresholds_uncentred[item][:cat])
+                self.cat_probs[cat][item] = np.exp(self.cat_probs[cat][item])
+
+            den_vector = sum(self.cat_probs.values())[item]
+
+            for cat in range(self.max_score_vector[i] + 1):
+                self.cat_probs[cat][item] /= den_vector
         
         '''
         Calculates scores and removes required amount of missing data
         '''
 
-        self.scores = np.zeros((self.no_of_persons, self.no_of_items))
+        scoring_randoms = pd.DataFrame(self.randoms(), columns=self.items, index=self.persons)
 
-        scoring_randoms = self.randoms()
-        
-        cat_scores = {}
+        cum_probs = {cat + 1: sum(self.cat_probs[category] for category in range(cat + 1, max_max_score + 1))
+                     for cat in range(max_max_score)}
 
-        for item in range(self.no_of_items):
+        self.scores = {cat + 1: scoring_randoms < cum_probs[cat + 1]
+                       for cat in range(max_max_score)}
+        self.scores = sum(self.scores.values())
 
-            cat_scores[f'Item_{item + 1}'] = np.zeros((self.no_of_persons,
-                                                       self.max_score_vector[item]))
-
-            for cat in range(self.max_score_vector[item]):
-
-                cat_scores[f'Item_{item + 1}'][:, cat] = (scoring_randoms[:, item] >
-                                                          np.sum(self.cat_probs[f'Item_{item + 1}'][:, :cat + 1],
-                                                                 axis = 1)).astype(np.float64)
-
-            self.scores[:, item] = np.sum(cat_scores[f'Item_{item + 1}'], axis = 1)
-
-        missing_randoms = self.randoms()
-
-        self.scores[(missing_randoms < self.missing)] = np.nan
-
-        self.scores = pd.DataFrame(self.scores)
-
-        if manual_person_names is not None:
-            self.scores.index = manual_person_names
-
-        else:
-            for person in range(self.no_of_persons):
-                self.scores.rename(index={person: f'Person_{person + 1}'}, inplace=True)
-
-        if manual_person_names is not None:
-            self.scores.index = manual_person_names
-
-        else:
-            for item in range(self.no_of_items):
-                self.scores.rename(columns={item: f'Item_{item + 1}'}, inplace=True)
-
-        self.persons = self.scores.index.tolist()
-        self.items = self.scores.columns.tolist()
+        missing_randoms = pd.DataFrame(self.randoms(), columns=self.items, index=self.persons)
+        self.scores[missing_randoms < self.missing] = np.nan
         
 class RSM_Sim(Rasch_Sim):
     
@@ -21508,32 +21531,42 @@ class RSM_Sim(Rasch_Sim):
 
         if self.items is not None:
             assert len(self.items) == self.no_of_items, 'Length of item names must match number of items.'
-        
+
+        if manual_person_names is not None:
+            self.persons = manual_person_names
+
+        else:
+            self.persons = [f'Person_{person + 1}' for person in range(self.no_of_persons)]
+
         if self.abilities is None:
             self.abilities = np.random.normal(0, self.person_sd, self.no_of_persons)
             self.abilities -= np.mean(self.abilities)
             self.abilities += self.offset
-            self.abilities = {f'Person_{person + 1}': ability for person, ability in enumerate(self.abilities)}
-            self.abilities = pd.Series(self.abilities)
-            
+
         else:
             assert len(self.abilities) == self.no_of_persons, 'Length of manual abilities must match number of persons.'
             self.abilities = np.array(self.abilities)
-            self.abilities = {f'Person_{person + 1}': ability for person, ability in enumerate(self.abilities)}
-            self.abilities = pd.Series(self.abilities)
+
+        self.abilities = {person: ability for person, ability in zip(self.persons, self.abilities)}
+        self.abilities = pd.Series(self.abilities)
+
+        if manual_item_names is not None:
+            self.items = manual_item_names
+
+        else:
+            self.items = [f'Item_{item + 1}' for item in range(self.no_of_items)]
 
         if self.diffs is None:
             self.diffs = np.random.uniform(0, 1, self.no_of_items)
             self.diffs *= (self.item_range / (np.max(self.diffs) - np.min(self.diffs)))
             self.diffs -= np.mean(self.diffs)
-            self.diffs = {f'Item_{item + 1}': diff for item, diff in enumerate(self.diffs)}
-            self.diffs = pd.Series(self.diffs)
 
         else:
             assert len(self.diffs) == self.no_of_items, 'Length of manual difficulties must match number of items.'
             self.diffs = np.array(self.diffs)
-            self.diffs = {f'Item_{item + 1}': diff for item, diff in enumerate(self.diffs)}
-            self.diffs = pd.Series(self.diffs)
+
+        self.diffs = {item: diff for item, diff in zip(self.items, self.diffs)}
+        self.diffs = pd.Series(self.diffs)
 
         if self.thresholds is None:
             category_widths = np.random.uniform(self.max_disorder,
@@ -21555,57 +21588,32 @@ class RSM_Sim(Rasch_Sim):
         Calculates probability of a response in each category for each person on each item
         '''
 
-        self.cat_probs = [[[self.rsm.cat_prob(ability,
-                                              difficulty,
-                                              category,
-                                              self.thresholds)
-                            for category in range(self.max_score + 1)]
-                           for ability in self.abilities]
-                          for difficulty in self.diffs]
+        c_p_df = {item: self.abilities - self.diffs[item]
+                  for item in self.items}
+        c_p_df = pd.DataFrame(c_p_df)
 
-        self.cat_probs = np.array(self.cat_probs)
+        self.cat_probs = {cat: (cat * c_p_df) - sum(self.thresholds[:cat + 1])
+                          for cat in range(self.max_score + 1)}
+        for cat in range(self.max_score + 1):
+            self.cat_probs[cat] = np.exp(self.cat_probs[cat])
+
+        den = sum(self.cat_probs[cat] for cat in range(self.max_score + 1))
+
+        for cat in range(self.max_score + 1):
+            self.cat_probs[cat] /= den
 
         '''
         Calculated scores and removes required amount of missing data
         '''
-        
-        scoring_randoms = self.randoms().T
-        
-        cat_scores = np.zeros((self.no_of_items,
-                               self.no_of_persons,
-                               self.max_score + 1))
-        
-        for cat in range(self.max_score):
-            
-            cat_scores[:, :, cat] = (scoring_randoms >
-                                     np.sum(self.cat_probs[:, :, :cat + 1],
-                                            axis = 2)).astype(np.float64)
-        
-        self.scores = np.sum(cat_scores, axis = 2)
-        
-        missing_randoms = self.randoms().T
-        
+
+        scoring_randoms = pd.DataFrame(self.randoms(), columns=self.items, index=self.persons)
+
+        self.scores = sum(scoring_randoms < sum(self.cat_probs[category]
+                                                for category in range(cat, self.max_score + 1))
+                          for cat in range(1, self.max_score + 1))
+
+        missing_randoms = pd.DataFrame(self.randoms(), columns=self.items, index=self.persons)
         self.scores[missing_randoms < self.missing] = np.nan
-        
-        self.scores = pd.DataFrame(self.scores.T)
-
-        if manual_person_names is not None:
-            self.scores.index = manual_person_names
-
-        else:
-            for person in range(self.no_of_persons):
-                self.scores.rename(index={person: f'Person_{person + 1}'}, inplace=True)
-
-        if manual_person_names is not None:
-            self.scores.index = manual_person_names
-
-        else:
-            for item in range(self.no_of_items):
-                self.scores.rename(columns={item: f'Item_{item + 1}'}, inplace=True)
-
-        self.persons = self.scores.index.tolist()
-        self.items = self.scores.columns.tolist()
-
 
 class MFRM_Sim(Rasch_Sim):
 
