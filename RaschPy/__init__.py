@@ -222,11 +222,12 @@ def loadup_mfrm_single(filename,
         max_score = responses.max().max()
     scores = np.arange(max_score + 1)
 
+    no_of_items = responses.shape[1]
+
     if not item_names:
         responses.columns = [f'Item_{item + 1}' for item in range(no_of_items)]
 
     rater_names = responses.index.get_level_values(0).unique()
-    no_of_items = responses.shape[1]
 
     persons = responses.index.get_level_values(1).unique()
     no_of_persons = len(persons)
@@ -458,7 +459,7 @@ def loadup_mfrm_multiple(filename_dict,
 
 class Rasch:
 
-    def __init__():
+    def __init__(self):
 
         pass
 
@@ -2988,10 +2989,11 @@ class PCM(Rasch):
                 thresholds = self.thresholds_uncentred
 
             else:
-                thresholds = {item: self.thresholds_uncentred[item]}
+                thresholds = {items: self.thresholds_uncentred[items]}
 
         else:
-            thresholds = {item: self.thresholds_uncentred[item] for item in items}
+            thresholds = {item: self.thresholds_uncentred[item]
+                          for item in items}
 
         thresold_list = [threshold for item in items for threshold in thresholds[item]]
 
@@ -3317,10 +3319,10 @@ class PCM(Rasch):
             self.cat_prob_dict[cat] /= den_df
 
         if trim_cat_prob_dict:
-            for cat in range(self.max_score_vector[item]):
+            for cat in range(self.max_score_vector[item] + 1):
                 self.cat_prob_dict[cat] = self.cat_prob_dict[cat].loc[df.index]
 
-        self.exp_score_df = sum(cat * self.cat_prob_dict[cat] for cat in range(max_max_score + 1))
+        self.exp_score_df = sum(cat * df for cat, df in self.cat_prob_dict.items())
         self.exp_score_df *= missing_mask
 
         self.info_df = sum(((cat - self.exp_score_df) ** 2) * self.cat_prob_dict[cat]
@@ -5613,11 +5615,13 @@ class RSM(Rasch):
                        ext_score_adjustment=0.5,
                        method='cos',
                        constant=0.1,
+                       matrix_power=3,
                        no_of_samples=100,
+                       log_lik_tol=0.000001,
                        interval=None):
 
         if hasattr(self, 'thresholds') == False:
-            self.calibrate(constant=constant, method=method)
+            self.calibrate(constant=constant, method=method, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         if se:
             if hasattr(self, 'threshold_se') == False:
@@ -5646,7 +5650,7 @@ class RSM(Rasch):
         missing_mask = (df + 1) / (df + 1)
         abilities = self.person_abilities.loc[df.index]
 
-        c_p_df = {item: self.person_abilities - self.diffs[item]
+        c_p_df = {item: abilities - self.diffs[item]
                   for item in self.items}
         c_p_df = pd.DataFrame(c_p_df)
 
@@ -5662,19 +5666,16 @@ class RSM(Rasch):
             self.cat_prob_dict[cat] /= den
 
         if trim_cat_prob_dict:
-            for cat in range(self.max_score):
+            for cat in range(self.max_score + 1):
                 self.cat_prob_dict[cat] = self.cat_prob_dict[cat].loc[df.index]
 
-        self.exp_score_df = sum(cat * self.cat_prob_dict[cat]
-                                for cat in range(self.max_score + 1))
+        self.exp_score_df = sum(cat * df for cat, df in self.cat_prob_dict.items())
         self.exp_score_df *= missing_mask
 
-        self.info_df = sum(((cat - self.exp_score_df) ** 2) * self.cat_prob_dict[cat]
-                           for cat in range(self.max_score + 1))
+        self.info_df = sum(df * (cat - self.exp_score_df) ** 2 for cat, df in self.cat_prob_dict.items())
         self.info_df *= missing_mask
 
-        self.kurtosis_df = sum(self.cat_prob_dict[cat] * ((cat - self.exp_score_df) ** 4)
-                               for cat in range(self.max_score + 1))
+        self.kurtosis_df = sum(df * (cat - self.exp_score_df) ** 4 for cat, df in self.cat_prob_dict.items())
         self.kurtosis_df *= missing_mask
 
         self.residual_df = df - self.exp_score_df
@@ -10736,11 +10737,11 @@ class MFRM(Rasch):
         if item in self.dataframe.columns:
 
             if rater is None:
-                return self.dataframe[item].value_counts().fillna(0).astype(int).iloc[:-1]
+                return self.dataframe[item].value_counts().fillna(0).astype(int)
 
             else:
                 if rater in self.raters:
-                    return self.dataframe.xs(rater)[item].value_counts().fillna(0).astype(int).iloc[:-1]
+                    return self.dataframe.xs(rater)[item].value_counts().fillna(0).astype(int)
 
                 else:
                     print('Invalid rater name')
@@ -10749,42 +10750,56 @@ class MFRM(Rasch):
             print('Invalid item name')
 
     def category_counts_df(self):
+        cat_counts_dict = {item: {} for item in self.items}
 
-        category_counts_df = pd.DataFrame(0, index=self.dataframe.columns, columns=np.arange(self.max_score + 1))
+        for item in self.items:
+            for score in range(self.max_score + 1):
+                if score in self.category_counts_item(item).keys():
+                    if self.category_counts_item(item)[score] == self.category_counts_item(item)[score]:
+                        cat_counts_dict[item][score] = int(self.category_counts_item(item)[score])
+                    else:
+                        cat_counts_dict[item][score] = 0
+                else:
+                    cat_counts_dict[item][score] = 0
 
-        for item in self.dataframe.columns:
-            for score, count in self.category_counts_item(item).items():
-                category_counts_df.loc[item, int(score)] = count
+        category_counts_df = pd.DataFrame(cat_counts_dict).T
 
         category_counts_df['Total'] = self.dataframe.count()
         category_counts_df['Missing'] = self.dataframe.shape[0] - category_counts_df['Total']
 
         category_counts_df = category_counts_df.astype(int)
+
         category_counts_df.loc['Total'] = category_counts_df.sum()
 
         self.category_counts = category_counts_df
 
-        self.category_counts_raters = {}
+        self.category_counts_raters = {rater: {item: {} for item in self.items}
+                                       for rater in self.raters}
 
         for rater in self.raters:
+            for item in self.items:
+                for score in range(self.max_score + 1):
+                    if score in self.category_counts_item(item, rater).keys():
+                        if (self.category_counts_item(item, rater)[score] ==
+                            self.category_counts_item(item, rater)[score]):
+                            self.category_counts_raters[rater][item][score] = int(self.category_counts_item(item, rater)[score])
+                        else:
+                            self.category_counts_raters[rater][item][score] = 0
+                    else:
+                        self.category_counts_raters[rater][item][score] = 0
 
-            category_counts_df = pd.DataFrame(0, index=self.dataframe.columns, columns=np.arange(self.max_score + 1))
+            self.category_counts_raters[rater] = pd.DataFrame(self.category_counts_raters[rater]).T
 
-            for item in self.dataframe.columns:
-                for score, count in self.category_counts_item(item, rater).items():
-                    category_counts_df.loc[item, int(score)] = count
+            self.category_counts_raters[rater]['Total'] = self.dataframe.xs(rater).count()
+            self.category_counts_raters[rater]['Missing'] = (len(self.dataframe.xs(rater).index) -
+                                                             self.category_counts_raters[rater]['Total'])
 
-            category_counts_df['Total'] = self.dataframe.xs(rater).count()
-            category_counts_df['Missing'] = len(self.dataframe.xs(rater).index) - category_counts_df['Total']
-
-            category_counts_df = category_counts_df.astype(int)
-
-            category_counts_df.loc['Total']= category_counts_df.sum()
-
-            self.category_counts_raters[rater] = category_counts_df
+            self.category_counts_raters[rater].loc['Total'] = self.category_counts_raters[rater].sum()
 
         self.category_counts_raters = pd.concat(self.category_counts_raters.values(),
                                                 keys=self.category_counts_raters.keys())
+
+        self.category_counts_raters = self.category_counts_raters.astype(int)
 
     def item_stats_df_global(self,
                              anchor_raters=None,
@@ -12820,13 +12835,14 @@ class MFRM(Rasch):
 
     def category_probability_dict_global(self,
                                          warm_corr=True,
+                                         trim_cat_prob_dict=False,
                                          tolerance=0.00001,
                                          max_iters=100,
                                          ext_score_adjustment=0.5,
                                          method='cos',
                                          constant=0.1,
                                          matrix_power=3,
-                                         log_lik_tol=0.000001):
+                                         log_lik_tol=0.000001,):
 
         if hasattr(self, 'thresholds_global') == False:
             self.calibrate_global(constant=constant, method=method, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
@@ -12835,29 +12851,40 @@ class MFRM(Rasch):
             self.person_abils_global(anchor=False, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                      ext_score_adjustment=ext_score_adjustment)
 
+        abilities = self.abils_global
         difficulties = self.diffs
         thresholds = self.thresholds
         severities = self.severities_global
 
-        cat_prob_dict = {cat: {rater: {item: {person: self.cat_prob_global(abil, item, difficulties, rater, severities,
-                                                                           cat, thresholds)
-                                              for person, abil in self.abils_global.items()}
-                                       for item in self.dataframe.columns}
-                               for rater in self.raters}
-                         for cat in range(self.max_score + 1)}
+        c_p_df = {item: abilities - difficulties.loc[item]
+                  for item in self.items}
+        c_p_df = pd.DataFrame(c_p_df)
+
+        self.cat_prob_dict_global = {cat: {rater: (cat * (c_p_df - severities.loc[rater]) -
+                                                   sum(thresholds[:cat + 1]))
+                                           for rater in self.raters}
+                                     for cat in range(self.max_score + 1)}
 
         for cat in range(self.max_score + 1):
-            for rater in self.raters:
-                cat_prob_dict[cat][rater] = pd.DataFrame(cat_prob_dict[cat][rater])
+            self.cat_prob_dict_global[cat] = pd.concat(self.cat_prob_dict_global[cat].values(),
+                                                       keys=self.cat_prob_dict_global[cat].keys())
+            self.cat_prob_dict_global[cat] = np.exp(self.cat_prob_dict_global[cat])
+
+        den = sum(self.cat_prob_dict_global[cat] for cat in range(self.max_score + 1))
 
         for cat in range(self.max_score + 1):
-            cat_prob_dict[cat] = pd.concat(cat_prob_dict[cat].values(),
-                                           keys=cat_prob_dict[cat].keys())
+            self.cat_prob_dict_global[cat] /= den
 
-        self.cat_prob_dict_global = cat_prob_dict
+        for cat in range(self.max_score + 1):
+            self.cat_prob_dict_global[cat].index.set_names(['Rater', 'Person'], inplace=True)
+
+        if trim_cat_prob_dict:
+            for cat in range(self.max_score + 1):
+                self.cat_prob_dict_global[cat] = self.cat_prob_dict_global[cat].loc[df.index]
 
     def category_probability_dict_items(self,
                                         warm_corr=True,
+                                        trim_cat_prob_dict=False,
                                         tolerance=0.00001,
                                         max_iters=100,
                                         ext_score_adjustment=0.5,
@@ -12873,29 +12900,46 @@ class MFRM(Rasch):
             self.person_abils_items(anchor=False, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                     ext_score_adjustment=ext_score_adjustment)
 
+        abilities = self.abils_items
         difficulties = self.diffs
         thresholds = self.thresholds
         severities = self.severities_items
 
-        cat_prob_dict = {cat: {rater: {item: {person: self.cat_prob_items(abil, item, difficulties, rater,
-                                                             severities, cat, thresholds)
-                                              for person, abil in self.abils_items.items()}
-                                       for item in self.dataframe.columns}
-                               for rater in self.raters}
-                         for cat in range(self.max_score + 1)}
+        c_p_df = {item: abilities - difficulties.loc[item]
+                  for item in self.items}
+        c_p_df = pd.DataFrame(c_p_df)
+        c_p_dict = {rater: c_p_df.copy() for rater in self.raters}
+
+        for rater in self.raters:
+            for item in self.items:
+                c_p_dict[rater][item] -= severities[rater][item]
+
+        self.cat_prob_dict_items = {cat: {rater: ((cat * c_p_dict[rater]) -
+                                                  sum(thresholds[:cat + 1]))
+                                          for rater in self.raters}
+                                    for cat in range(self.max_score + 1)}
 
         for cat in range(self.max_score + 1):
-            for rater in self.raters:
-                cat_prob_dict[cat][rater] = pd.DataFrame(cat_prob_dict[cat][rater])
+            self.cat_prob_dict_items[cat] = pd.concat(self.cat_prob_dict_items[cat].values(),
+                                                       keys=self.cat_prob_dict_items[cat].keys())
+            self.cat_prob_dict_items[cat] = np.exp(self.cat_prob_dict_items[cat])
+
+        den = sum(self.cat_prob_dict_items[cat] for cat in range(self.max_score + 1))
 
         for cat in range(self.max_score + 1):
-            cat_prob_dict[cat] = pd.concat(cat_prob_dict[cat].values(),
-                                           keys=cat_prob_dict[cat].keys())
+            self.cat_prob_dict_items[cat] /= den
 
-        self.cat_prob_dict_items = cat_prob_dict
+        for cat in range(self.max_score + 1):
+            self.cat_prob_dict_items[cat].index.set_names(['Rater', 'Person'], inplace=True)
+
+        if trim_cat_prob_dict:
+            for cat in range(self.max_score + 1):
+                self.cat_prob_dict_items[cat] = self.cat_prob_dict_items[cat].loc[df.index]
+
 
     def category_probability_dict_thresholds(self,
                                              warm_corr=True,
+                                             trim_cat_prob_dict=False,
                                              tolerance=0.00001,
                                              max_iters=100,
                                              ext_score_adjustment=0.5,
@@ -12912,29 +12956,41 @@ class MFRM(Rasch):
             self.person_abils_thresholds(anchor=False, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                          ext_score_adjustment=ext_score_adjustment)
 
+        abilities = self.abils_thresholds
         difficulties = self.diffs
         thresholds = self.thresholds
         severities = self.severities_thresholds
 
-        cat_prob_dict = {cat: {rater: {item: {person: self.cat_prob_thresholds(abil, item, difficulties, rater,
-                                                                               severities, cat, thresholds)
-                                              for person, abil in self.abils_thresholds.items()}
-                                       for item in self.dataframe.columns}
-                               for rater in self.raters}
-                         for cat in range(self.max_score + 1)}
+        c_p_df = {item: abilities - difficulties.loc[item]
+                  for item in self.items}
+        c_p_df = pd.DataFrame(c_p_df)
+
+        self.cat_prob_dict_thresholds = {cat: {rater: (cat * c_p_df -
+                                                       sum(thresholds[:cat + 1]) -
+                                                       sum(severities[rater][:cat + 1]))
+                                               for rater in self.raters}
+                                         for cat in range(self.max_score + 1)}
 
         for cat in range(self.max_score + 1):
-            for rater in self.raters:
-                cat_prob_dict[cat][rater] = pd.DataFrame(cat_prob_dict[cat][rater])
+            self.cat_prob_dict_thresholds[cat] = pd.concat(self.cat_prob_dict_thresholds[cat].values(),
+                                                       keys=self.cat_prob_dict_thresholds[cat].keys())
+            self.cat_prob_dict_thresholds[cat] = np.exp(self.cat_prob_dict_thresholds[cat])
+
+        den = sum(self.cat_prob_dict_thresholds[cat] for cat in range(self.max_score + 1))
 
         for cat in range(self.max_score + 1):
-            cat_prob_dict[cat] = pd.concat(cat_prob_dict[cat].values(),
-                                           keys=cat_prob_dict[cat].keys())
+            self.cat_prob_dict_thresholds[cat] /= den
 
-        self.cat_prob_dict_thresholds = cat_prob_dict
+        for cat in range(self.max_score + 1):
+            self.cat_prob_dict_thresholds[cat].index.set_names(['Rater', 'Person'], inplace=True)
+
+        if trim_cat_prob_dict:
+            for cat in range(self.max_score + 1):
+                self.cat_prob_dict_thresholds[cat] = self.cat_prob_dict_thresholds[cat].loc[df.index]
 
     def category_probability_dict_matrix(self,
                                          warm_corr=True,
+                                         trim_cat_prob_dict=False,
                                          tolerance=0.00001,
                                          max_iters=100,
                                          ext_score_adjustment=0.5,
@@ -12950,30 +13006,41 @@ class MFRM(Rasch):
             self.person_abils_matrix(anchor=False, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                      ext_score_adjustment=ext_score_adjustment)
 
-        '''
-        Create matrices of expected scores, variances, kurtosis, residuals etc. to generate fit statistics
-        '''
-
+        abilities = self.abils_matrix
         difficulties = self.diffs
         thresholds = self.thresholds
         severities = self.severities_matrix
 
-        cat_prob_dict = {cat: {rater: {item: {person: self.cat_prob_matrix(abil, item, difficulties, rater, severities,
-                                                                           cat, thresholds)
-                                              for person, abil in self.abils_matrix.items()}
-                                       for item in self.dataframe.columns}
-                               for rater in self.raters}
-                         for cat in range(self.max_score + 1)}
+        c_p_df = {item: abilities - difficulties.loc[item]
+                  for item in self.items}
+        c_p_df = pd.DataFrame(c_p_df)
+
+        self.cat_prob_dict_matrix = {cat: {rater: (cat * c_p_df -
+                                                   sum(thresholds[:cat + 1]))
+                                           for rater in self.raters}
+                                     for cat in range(self.max_score + 1)}
 
         for cat in range(self.max_score + 1):
             for rater in self.raters:
-                cat_prob_dict[cat][rater] = pd.DataFrame(cat_prob_dict[cat][rater])
+                for item in self.items:
+                    self.cat_prob_dict_matrix[cat][rater][item] -= sum(severities[rater][item][:cat + 1])
 
         for cat in range(self.max_score + 1):
-            cat_prob_dict[cat] = pd.concat(cat_prob_dict[cat].values(),
-                                           keys=cat_prob_dict[cat].keys())
+            self.cat_prob_dict_matrix[cat] = pd.concat(self.cat_prob_dict_matrix[cat].values(),
+                                                       keys=self.cat_prob_dict_matrix[cat].keys())
+            self.cat_prob_dict_matrix[cat] = np.exp(self.cat_prob_dict_matrix[cat])
 
-        self.cat_prob_dict_matrix = cat_prob_dict
+        den = sum(self.cat_prob_dict_matrix[cat] for cat in range(self.max_score + 1))
+
+        for cat in range(self.max_score + 1):
+            self.cat_prob_dict_matrix[cat] /= den
+
+        for cat in range(self.max_score + 1):
+            self.cat_prob_dict_matrix[cat].index.set_names(['Rater', 'Person'], inplace=True)
+
+        if trim_cat_prob_dict:
+            for cat in range(self.max_score + 1):
+                self.cat_prob_dict_matrix[cat] = self.cat_prob_dict_matrix[cat].loc[df.index]
 
     def fit_matrices(self,
                      cat_prob_dict):
@@ -12983,32 +13050,31 @@ class MFRM(Rasch):
         residuals etc. to generate fit statistics
         '''
 
-        missing_mask = (self.dataframe + 1) / (self.dataframe + 1)
+        df = self.dataframe.copy()
+        max_scores = ((df == df) * self.max_score).sum(axis=1)
+        scores = df.sum(axis=1)
 
-        exp_score_df = sum([cat * df for cat, df in cat_prob_dict.items()])
+        df = df[(scores > 0) & (scores < max_scores)]
+        missing_mask = (df + 1) / (df + 1)
+        missing_mask.index.set_names(['Rater', 'Person'], inplace=True)
+
+        exp_score_df = sum(cat * cat_df for cat, cat_df in cat_prob_dict.items())
+        exp_score_df = exp_score_df.loc[df.index]
+        exp_score_df.index.set_names(['Rater', 'Person'], inplace=True)
         exp_score_df *= missing_mask
 
-        info_df = sum([df * (cat - exp_score_df) ** 2 for cat, df in cat_prob_dict.items()])
+        info_df = sum(cat_df * (cat - exp_score_df) ** 2 for cat, cat_df in cat_prob_dict.items())
+        info_df = info_df.loc[df.index]
+        info_df.index.set_names(['Rater', 'Person'], inplace=True)
         info_df *= missing_mask
 
-        kurtosis_df = sum([df * (cat - exp_score_df) ** 4 for cat, df in cat_prob_dict.items()])
+        kurtosis_df = sum(cat_df * (cat - exp_score_df) ** 4 for cat, cat_df in cat_prob_dict.items())
+        kurtosis_df = kurtosis_df.loc[df.index]
+        kurtosis_df.index.set_names(['Rater', 'Person'], inplace=True)
         kurtosis_df *= missing_mask
 
-        residual_df = self.dataframe - exp_score_df
+        residual_df = df - exp_score_df
         std_residual_df = residual_df / (info_df ** 0.5)
-
-        scores = self.dataframe.sum(axis=1)
-        max_scores = self.dataframe.count(axis=1) * self.max_score
-
-        extreme_mask = (scores > 0) & (scores < max_scores)
-        extreme_mask = pd.Series(extreme_mask)
-        extreme_mask.index = self.dataframe.index
-
-        exp_score_df = exp_score_df.loc[extreme_mask]
-        info_df = info_df.loc[extreme_mask]
-        kurtosis_df = kurtosis_df.loc[extreme_mask]
-        residual_df = residual_df.loc[extreme_mask]
-        std_residual_df = std_residual_df.loc[extreme_mask]
 
         return exp_score_df, info_df, kurtosis_df, residual_df, std_residual_df
 
@@ -14328,6 +14394,7 @@ class MFRM(Rasch):
                               warm_corr=True,
                               se=True,
                               test_stats=True,
+                              trim_cat_prob_dict=False,
                               tolerance=0.00001,
                               max_iters=100,
                               ext_score_adjustment=0.5,
@@ -14355,7 +14422,8 @@ class MFRM(Rasch):
             self.person_abils_global(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                      ext_score_adjustment=ext_score_adjustment)
 
-        self.category_probability_dict_global(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
+        self.category_probability_dict_global(warm_corr=warm_corr, trim_cat_prob_dict=trim_cat_prob_dict,
+                                              tolerance=tolerance, max_iters=max_iters,
                                               ext_score_adjustment=ext_score_adjustment, method=method,
                                               constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
@@ -14375,6 +14443,7 @@ class MFRM(Rasch):
                              warm_corr=True,
                              se=True,
                              test_stats=True,
+                             trim_cat_prob_dict=False,
                              tolerance=0.00001,
                              max_iters=100,
                              ext_score_adjustment=0.5,
@@ -14401,7 +14470,8 @@ class MFRM(Rasch):
             self.person_abils_items(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                     ext_score_adjustment=ext_score_adjustment)
 
-        self.category_probability_dict_items(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
+        self.category_probability_dict_items(warm_corr=warm_corr, trim_cat_prob_dict=trim_cat_prob_dict,
+                                             tolerance=tolerance, max_iters=max_iters,
                                               ext_score_adjustment=ext_score_adjustment, method=method,
                                               constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
@@ -14421,6 +14491,7 @@ class MFRM(Rasch):
                                   warm_corr=True,
                                   se=True,
                                   test_stats=True,
+                                  trim_cat_prob_dict=False,
                                   tolerance=0.00001,
                                   max_iters=100,
                                   ext_score_adjustment=0.5,
@@ -14447,7 +14518,8 @@ class MFRM(Rasch):
             self.person_abils_thresholds(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                          ext_score_adjustment=ext_score_adjustment)
 
-        self.category_probability_dict_thresholds(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
+        self.category_probability_dict_thresholds(warm_corr=warm_corr, trim_cat_prob_dict=trim_cat_prob_dict,
+                                                  tolerance=tolerance, max_iters=max_iters,
                                                   ext_score_adjustment=ext_score_adjustment, method=method,
                                                   constant=constant)
 
@@ -14467,6 +14539,7 @@ class MFRM(Rasch):
                               warm_corr=True,
                               se=True,
                               test_stats=True,
+                              trim_cat_prob_dict=False,
                               tolerance=0.00001,
                               max_iters=100,
                               ext_score_adjustment=0.5,
@@ -14493,7 +14566,8 @@ class MFRM(Rasch):
             self.person_abils_matrix(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                      ext_score_adjustment=ext_score_adjustment)
 
-        self.category_probability_dict_matrix(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
+        self.category_probability_dict_matrix(warm_corr=warm_corr, trim_cat_prob_dict=trim_cat_prob_dict,
+                                              tolerance=tolerance, max_iters=max_iters,
                                               ext_score_adjustment=ext_score_adjustment, method=method,
                                               constant=constant)
 
@@ -21116,7 +21190,7 @@ variants of the Rasch model family.
 
 class Rasch_Sim:
 
-    def __init__():
+    def __init__(self):
 
         pass
 
@@ -21617,7 +21691,7 @@ class RSM_Sim(Rasch_Sim):
 
 class MFRM_Sim(Rasch_Sim):
 
-    def __init__():
+    def __init__(self):
 
         pass
 
@@ -21725,6 +21799,7 @@ class MFRM_Sim_Global(MFRM_Sim):
                  max_disorder=0,
                  offset=0,
                  missing=0,
+                 shared_missing=True,
                  manual_abilities=None,
                  manual_diffs=None,
                  manual_thresholds=None,
@@ -21768,31 +21843,41 @@ class MFRM_Sim_Global(MFRM_Sim):
         if self.raters is not None:
             assert len(self.raters) == self.no_of_raters, 'Length of rater names must match number of raters.'
 
+        if manual_person_names is not None:
+            self.persons = manual_person_names
+
+        else:
+            self.persons = [f'Person_{person + 1}' for person in range(self.no_of_persons)]
+
         if self.abilities is None:
             self.abilities = np.random.normal(0, self.person_sd, self.no_of_persons)
             self.abilities -= np.mean(self.abilities)
             self.abilities += self.offset
-            self.abilities = {f'Person_{person + 1}': ability for person, ability in enumerate(self.abilities)}
-            self.abilities = pd.Series(self.abilities)
 
         else:
             assert len(self.abilities) == self.no_of_persons, 'Length of manual abilities must match number of persons.'
             self.abilities = np.array(self.abilities)
-            self.abilities = {f'Person_{person + 1}': ability for person, ability in enumerate(self.abilities)}
-            self.abilities = pd.Series(self.abilities)
+
+        self.abilities = {person: ability for person, ability in zip(self.persons, self.abilities)}
+        self.abilities = pd.Series(self.abilities)
+
+        if manual_item_names is not None:
+            self.items = manual_item_names
+
+        else:
+            self.items = [f'Item_{item + 1}' for item in range(self.no_of_items)]
 
         if self.diffs is None:
             self.diffs = np.random.uniform(0, 1, self.no_of_items)
             self.diffs *= (self.item_range / (np.max(self.diffs) - np.min(self.diffs)))
             self.diffs -= np.mean(self.diffs)
-            self.diffs = {f'Item_{item + 1}': diff for item, diff in enumerate(self.diffs)}
-            self.diffs = pd.Series(self.diffs)
 
         else:
             assert len(self.diffs) == self.no_of_items, 'Length of manual difficulties must match number of items.'
             self.diffs = np.array(self.diffs)
-            self.diffs = {f'Item_{item + 1}': diff for item, diff in enumerate(self.diffs)}
-            self.diffs = pd.Series(self.diffs)
+
+        self.diffs = {item: diff for item, diff in zip(self.items, self.diffs)}
+        self.diffs = pd.Series(self.diffs)
 
         if self.thresholds is None:
             category_widths = np.random.uniform(self.max_disorder,
@@ -21809,6 +21894,15 @@ class MFRM_Sim_Global(MFRM_Sim):
             assert self.thresholds[0] == 0, 'First threshold in manual thresholds must have value zero.'
             assert sum(manual_thresholds) == 0 , ('Manual thresholds must sum to zero.')
             self.thresholds = np.array(self.thresholds)
+
+        if manual_rater_names is not None:
+            if self.manual_severities is not None:
+                assert (set(manual_rater_names) ==
+                        set(manual_severities.keys())), 'Manual rater names do not match rater names in manual severities'
+            self.raters = manual_rater_names
+
+        else:
+            self.raters = [f'Rater_{rater + 1}' for rater in range(self.no_of_raters)]
         
         if self.severities is None:
             self.severities = truncnorm.rvs(-1.96, 1.96, size = self.no_of_raters)
@@ -21825,83 +21919,51 @@ class MFRM_Sim_Global(MFRM_Sim):
             self.severities = pd.Series(self.severities)
         
         '''
-        Calculates probability of a response in each category
-        for each person on each item
+        Calculates probability of a response in each category for each person on each item
         '''
 
-        self.persons = self.abilities.index.tolist()
-        self.items = self.diffs.index.tolist()
-        self.raters = self.severities.index.tolist()
+        c_p_df = {item: self.abilities - self.diffs.loc[item]
+                  for item in self.items}
+        c_p_df = pd.DataFrame(c_p_df)
 
-        self.cat_probs = [[[[self.mfrm.cat_prob_global(ability, item, self.diffs, rater, self.severities, category,
-                                                       self.thresholds)
-                             for category in range(self.max_score + 1)]
-                            for rater in self.raters]
-                           for item in self.items]
-                          for ability in self.abilities]
+        self.cat_probs = {cat: {rater: (cat * (c_p_df - self.severities.loc[rater]) -
+                                        sum(self.thresholds[:cat + 1]))
+                                for rater in self.raters}
+                          for cat in range(self.max_score + 1)}
 
-        self.cat_probs = np.array(self.cat_probs)
+        for cat in range(self.max_score + 1):
+            self.cat_probs[cat] = pd.concat(self.cat_probs[cat].values(),
+                                            keys=self.cat_probs[cat].keys())
+            self.cat_probs[cat] = np.exp(self.cat_probs[cat])
+
+        den = sum(self.cat_probs[cat] for cat in range(self.max_score + 1))
+
+        for cat in range(self.max_score + 1):
+            self.cat_probs[cat] /= den
         
         '''
         Calculated scores and removes required amount of missing data
         '''
-        
-        scoring_randoms = np.array([self.randoms()
-                                    for rater in range(self.no_of_raters)])
-        scoring_randoms = np.swapaxes(scoring_randoms, 0, 2)
-        scoring_randoms = np.swapaxes(scoring_randoms, 0, 1)
-            
-        cat_scores = np.zeros((self.no_of_persons,
-                               self.no_of_items,
-                               self.no_of_raters,
-                               self.max_score + 1))
-        
-        for rater in range(self.no_of_raters):
-            for cat in range(self.max_score):
-            
-                cat_scores[:, :, rater, cat] = (scoring_randoms[:, :, rater] >
-                                                np.sum(self.cat_probs[:, :, rater, :cat + 1],
-                                                       axis=2)).astype(np.float64)
-        
-        self.scores = np.sum(cat_scores, axis=3)
-        
-        missing_randoms = self.randoms()
-        
+
+        scoring_randoms = {rater: pd.DataFrame(self.randoms(), columns=self.items, index=self.persons)
+                           for rater in self.raters}
+        scoring_randoms = pd.concat(scoring_randoms.values(), keys=scoring_randoms.keys())
+
+        self.scores = sum(scoring_randoms < sum(self.cat_probs[category]
+                                                for category in range(cat, self.max_score + 1))
+                          for cat in range(1, self.max_score + 1))
+
+        if shared_missing:
+            missing_randoms = pd.DataFrame(self.randoms(), columns=self.items, index=self.persons)
+            missing_randoms = {rater: missing_randoms for rater in self.raters}
+
+        else:
+            missing_randoms = {rater: pd.DataFrame(self.randoms(), columns=self.items, index=self.persons)
+                               for rater in self.raters}
+
+        missing_randoms = pd.concat(missing_randoms.values(), keys=missing_randoms.keys())
+
         self.scores[missing_randoms < self.missing] = np.nan
-        
-        cols = [f'Item_{item + 1}' for item in range(self.no_of_items)]
-        
-        final = {f'Rater_{rater + 1}': pd.DataFrame(self.scores[:, :, rater], columns=cols)
-                 for rater in range(self.no_of_raters)}
-        
-        self.scores = pd.concat(final.values(), keys=final.keys())
-
-        if manual_person_names is not None:
-            self.scores.index = self.scores.index.set_levels(manual_person_names, level=1)
-
-        else:
-            person_list = [f'Person_{person + 1}' for person in range(self.no_of_persons)]
-            self.scores.index = self.scores.index.set_levels(person_list, level=1)
-
-        if manual_item_names is not None:
-            self.scores.rename(columns={old: new for old, new in zip(self.dataframe.columns, manual_item_names)},
-                               inplace=True)
-
-        else:
-            for item in range(self.no_of_items):
-                self.scores.rename(columns={item: f'Item_{item + 1}'},
-                                   inplace=True)
-
-        if manual_rater_names is not None:
-            self.scores.index = self.scores.index.set_levels(manual_rater_names, level=0)
-
-        else:
-            rater_list = [f'Rater_{rater + 1}' for rater in range(self.no_of_raters)]
-            self.scores.index = self.scores.index.set_levels(rater_list, level=0)
-
-        self.raters = self.scores.index.get_level_values(0).unique().tolist()
-        self.persons = self.scores.index.get_level_values(1).unique().tolist()
-        self.items = self.scores.columns.tolist()
 
 class MFRM_Sim_Items(MFRM_Sim):
     
@@ -21922,6 +21984,7 @@ class MFRM_Sim_Items(MFRM_Sim):
                  max_disorder=0,
                  offset=0,
                  missing=0,
+                 shared_missing=True,
                  manual_abilities=None,
                  manual_diffs=None,
                  manual_thresholds=None,
@@ -21965,38 +22028,48 @@ class MFRM_Sim_Items(MFRM_Sim):
         if self.raters is not None:
             assert len(self.raters) == self.no_of_raters, 'Length of rater names must match number of raters.'
 
+        if manual_person_names is not None:
+            self.persons = manual_person_names
+
+        else:
+            self.persons = [f'Person_{person + 1}' for person in range(self.no_of_persons)]
+
         if self.abilities is None:
             self.abilities = np.random.normal(0, self.person_sd, self.no_of_persons)
             self.abilities -= np.mean(self.abilities)
             self.abilities += self.offset
-            self.abilities = {f'Person_{person + 1}': ability for person, ability in enumerate(self.abilities)}
-            self.abilities = pd.Series(self.abilities)
 
         else:
             assert len(self.abilities) == self.no_of_persons, 'Length of manual abilities must match number of persons.'
             self.abilities = np.array(self.abilities)
-            self.abilities = {f'Person_{person + 1}': ability for person, ability in enumerate(self.abilities)}
-            self.abilities = pd.Series(self.abilities)
+
+        self.abilities = {person: ability for person, ability in zip(self.persons, self.abilities)}
+        self.abilities = pd.Series(self.abilities)
+
+        if manual_item_names is not None:
+            self.items = manual_item_names
+
+        else:
+            self.items = [f'Item_{item + 1}' for item in range(self.no_of_items)]
 
         if self.diffs is None:
             self.diffs = np.random.uniform(0, 1, self.no_of_items)
             self.diffs *= (self.item_range / (np.max(self.diffs) - np.min(self.diffs)))
             self.diffs -= np.mean(self.diffs)
-            self.diffs = {f'Item_{item + 1}': diff for item, diff in enumerate(self.diffs)}
-            self.diffs = pd.Series(self.diffs)
 
         else:
             assert len(self.diffs) == self.no_of_items, 'Length of manual difficulties must match number of items.'
             self.diffs = np.array(self.diffs)
-            self.diffs = {f'Item_{item + 1}': diff for item, diff in enumerate(self.diffs)}
-            self.diffs = pd.Series(self.diffs)
+
+        self.diffs = {item: diff for item, diff in zip(self.items, self.diffs)}
+        self.diffs = pd.Series(self.diffs)
 
         if self.thresholds is None:
             category_widths = np.random.uniform(self.max_disorder,
                                                 2 * self.category_base - self.max_disorder,
                                                 self.max_score)
             self.thresholds = [np.sum(category_widths[:category])
-                          for category in range(self.max_score)]
+                               for category in range(self.max_score)]
             self.thresholds = np.array(self.thresholds)
             self.thresholds -= np.mean(self.thresholds)
             self.thresholds = np.insert(self.thresholds, 0, 0)
@@ -22006,6 +22079,15 @@ class MFRM_Sim_Items(MFRM_Sim):
             assert self.thresholds[0] == 0, 'First threshold in manual thresholds must have value zero.'
             assert sum(manual_thresholds) == 0 , ('Manual thresholds must sum to zero.')
             self.thresholds = np.array(self.thresholds)
+
+        if manual_rater_names is not None:
+            if self.manual_severities is not None:
+                assert (set(manual_rater_names) ==
+                        set(manual_severities.keys())), 'Manual rater names do not match rater names in manual severities'
+            self.raters = manual_rater_names
+
+        else:
+            self.raters = [f'Rater_{rater + 1}' for rater in range(self.no_of_raters)]
         
         if self.severities is None:
             severities = [truncnorm.rvs(-1.96, 1.96, size=self.no_of_items)
@@ -22033,87 +22115,53 @@ class MFRM_Sim_Items(MFRM_Sim):
         for each person on each item
         '''
 
-        self.persons = self.abilities.index.tolist()
-        self.items = self.diffs.index.tolist()
-        self.raters = list(self.severities.keys())
+        c_p_df = {item: self.abilities - self.diffs.loc[item]
+                  for item in self.items}
+        c_p_df = pd.DataFrame(c_p_df)
+        c_p_dict = {rater: c_p_df.copy() for rater in self.raters}
 
-        items =[f'Item_{item + 1}' for item in range(self.no_of_items)]
+        for rater in self.raters:
+            for item in self.items:
+                c_p_dict[rater][item] -= self.severities[rater][item]
 
-        cat_probs = [[[[self.mfrm.cat_prob_items(ability,
-                                                 item,
-                                                 self.diffs,
-                                                 rater,
-                                                 self.severities,
-                                                 category,
-                                                 self.thresholds)
-                        for category in range(self.max_score + 1)]
-                       for rater in self.raters]
-                      for item in items]
-                     for ability in self.abilities]
+        self.cat_probs = {cat: {rater: ((cat * c_p_dict[rater]) -
+                                        sum(self.thresholds[:cat + 1]))
+                                for rater in self.raters}
+                          for cat in range(self.max_score + 1)}
 
-        self.cat_probs = np.array(cat_probs)
+        for cat in range(self.max_score + 1):
+            self.cat_probs[cat] = pd.concat(self.cat_probs[cat].values(),
+                                            keys=self.cat_probs[cat].keys())
+            self.cat_probs[cat] = np.exp(self.cat_probs[cat])
+
+        den = sum(self.cat_probs[cat] for cat in range(self.max_score + 1))
+
+        for cat in range(self.max_score + 1):
+            self.cat_probs[cat] /= den
         
         '''
         Calculates scores and removes required amount of missing data
         '''
-        
-        scoring_randoms = np.array([self.randoms()
-                                    for rater in range(self.no_of_raters)])
-        scoring_randoms = np.swapaxes(scoring_randoms, 0, 2)
-        scoring_randoms = np.swapaxes(scoring_randoms, 0, 1)
-            
-        cat_scores = np.zeros((self.no_of_persons,
-                               self.no_of_items,
-                               self.no_of_raters,
-                               self.max_score + 1))
-        
-        for rater in range(self.no_of_raters):
-            for cat in range(self.max_score):
-            
-                cat_scores[:, :, rater, cat] = (scoring_randoms[:, :, rater] >
-                                                np.sum(self.cat_probs[:, :, rater, :cat + 1],
-                                                       axis=2)).astype(np.float64)
 
-        self.scores = np.sum(cat_scores, axis=3)
-        
-        missing_randoms = self.randoms()
-        
+        scoring_randoms = {rater: pd.DataFrame(self.randoms(), columns=self.items, index=self.persons)
+                           for rater in self.raters}
+        scoring_randoms = pd.concat(scoring_randoms.values(), keys=scoring_randoms.keys())
+
+        self.scores = sum(scoring_randoms < sum(self.cat_probs[category]
+                                                for category in range(cat, self.max_score + 1))
+                          for cat in range(1, self.max_score + 1))
+
+        if shared_missing:
+            missing_randoms = pd.DataFrame(self.randoms(), columns=self.items, index=self.persons)
+            missing_randoms = {rater: missing_randoms for rater in self.raters}
+
+        else:
+            missing_randoms = {rater: pd.DataFrame(self.randoms(), columns=self.items, index=self.persons)
+                               for rater in self.raters}
+
+        missing_randoms = pd.concat(missing_randoms.values(), keys=missing_randoms.keys())
+
         self.scores[missing_randoms < self.missing] = np.nan
-        
-        cols = [f'Item_{item + 1}' for item in range(self.no_of_items)]
-        
-        final = {rater: pd.DataFrame(self.scores[:, :, i],
-                                     columns=cols, index=self.persons)
-                 for i, rater in enumerate(self.raters)}
-        
-        self.scores = pd.concat(final.values(), keys=final.keys())
-
-        if manual_person_names is not None:
-            self.scores.index = self.scores.index.set_levels(manual_person_names, level=1)
-
-        else:
-            person_list = [f'Person_{person + 1}' for person in range(self.no_of_persons)]
-            self.scores.index = self.scores.index.set_levels(person_list, level=1)
-
-        if manual_item_names is not None:
-            self.scores.rename(columns={old: new for old, new in zip(self.dataframe.columns, manual_item_names)},
-                               inplace=True)
-
-        else:
-            for item in range(self.no_of_items):
-                self.scores.rename(columns={item: f'Item_{item + 1}'},
-                                   inplace=True)
-
-        if manual_rater_names is not None:
-            self.scores.index = self.scores.index.set_levels(manual_rater_names, level=0)
-
-        else:
-            rater_list = [f'Rater_{rater + 1}' for rater in range(self.no_of_raters)]
-            self.scores.index = self.scores.index.set_levels(rater_list, level=0)
-
-        self.raters = self.scores.index.get_level_values(0).unique().tolist()
-        self.persons = self.scores.index.get_level_values(1).unique().tolist()
-        self.items = self.scores.columns.tolist()
     
 class MFRM_Sim_Thresholds(MFRM_Sim):
     
@@ -22134,6 +22182,7 @@ class MFRM_Sim_Thresholds(MFRM_Sim):
                  max_disorder=0,
                  offset=0,
                  missing=0,
+                 shared_missing=True,
                  manual_abilities=None,
                  manual_diffs=None,
                  manual_thresholds=None,
@@ -22177,32 +22226,41 @@ class MFRM_Sim_Thresholds(MFRM_Sim):
         if self.raters is not None:
             assert len(self.raters) == self.no_of_raters, 'Length of rater names must match number of raters.'
 
+        if manual_person_names is not None:
+            self.persons = manual_person_names
+
+        else:
+            self.persons = [f'Person_{person + 1}' for person in range(self.no_of_persons)]
+
         if self.abilities is None:
             self.abilities = np.random.normal(0, self.person_sd, self.no_of_persons)
             self.abilities -= np.mean(self.abilities)
             self.abilities += self.offset
-            self.abilities = {f'Person_{person + 1}': ability for person, ability in enumerate(self.abilities)}
-            self.abilities = pd.Series(self.abilities)
 
         else:
             assert len(self.abilities) == self.no_of_persons, 'Length of manual abilities must match number of persons.'
             self.abilities = np.array(self.abilities)
-            self.abilities = {f'Person_{person + 1}': ability for person, ability in enumerate(self.abilities)}
-            self.abilities = pd.Series(self.abilities)
+
+        self.abilities = {person: ability for person, ability in zip(self.persons, self.abilities)}
+        self.abilities = pd.Series(self.abilities)
+
+        if manual_item_names is not None:
+            self.items = manual_item_names
+
+        else:
+            self.items = [f'Item_{item + 1}' for item in range(self.no_of_items)]
 
         if self.diffs is None:
             self.diffs = np.random.uniform(0, 1, self.no_of_items)
-            self.diffs *= (self.item_range /
-                           (np.max(self.diffs) - np.min(self.diffs)))
+            self.diffs *= (self.item_range / (np.max(self.diffs) - np.min(self.diffs)))
             self.diffs -= np.mean(self.diffs)
-            self.diffs = {f'Item_{item + 1}': diff for item, diff in enumerate(self.diffs)}
-            self.diffs = pd.Series(self.diffs)
 
         else:
             assert len(self.diffs) == self.no_of_items, 'Length of manual difficulties must match number of items.'
             self.diffs = np.array(self.diffs)
-            self.diffs = {f'Item_{item + 1}': diff for item, diff in enumerate(self.diffs)}
-            self.diffs = pd.Series(self.diffs)
+
+        self.diffs = {item: diff for item, diff in zip(self.items, self.diffs)}
+        self.diffs = pd.Series(self.diffs)
 
         if self.thresholds is None:
             category_widths = np.random.uniform(self.max_disorder,
@@ -22219,6 +22277,15 @@ class MFRM_Sim_Thresholds(MFRM_Sim):
             assert self.thresholds[0] == 0, 'First threshold in manual thresholds must have value zero.'
             assert sum(manual_thresholds) == 0 , ('Manual thresholds must sum to zero.')
             self.thresholds = np.array(self.thresholds)
+
+        if manual_rater_names is not None:
+            if self.manual_severities is not None:
+                assert (set(manual_rater_names) ==
+                        set(manual_severities.keys())), 'Manual rater names do not match rater names in manual severities'
+            self.raters = manual_rater_names
+
+        else:
+            self.raters = [f'Rater_{rater + 1}' for rater in range(self.no_of_raters)]
         
         if self.severities is None:
             severities = [truncnorm.rvs(-1.96, 1.96, size = self.max_score)
@@ -22228,10 +22295,11 @@ class MFRM_Sim_Thresholds(MFRM_Sim):
             severities -= np.mean(severities)
             severities = np.insert(severities, 0, 0, axis = 1)
 
-            self.severities = {f'Rater_{rater + 1}': severities[rater, :]
-                               for rater in range(self.no_of_raters)}
+            self.severities = {rater: severities[i, :]
+                               for i, rater in enumerate(self.raters)}
             
         else:
+            self.raters = manual_severities.keys()
             assert len(manual_severities) == self.no_of_raters, 'Length of manual severities must match number of raters.'
             for rater in manual_severities.keys():
                 assert len(manual_severities[rater]) == self.max_score + 1, ('Length of all sets of manual severities' +
@@ -22239,88 +22307,56 @@ class MFRM_Sim_Thresholds(MFRM_Sim):
                 assert manual_severities[rater][0] == 0, ('First threshold in every set of manual severities must ' +
                                                           'have value zero.')
 
-            self.severities = {f'Rater_{i + 1}': manual_severities[rater]
-                               for i, rater in enumerate(manual_severities.keys())}
+            self.severities = {rater: severities for rater, severities in manual_severities.items()}
         
         '''
         Calculates probability of a response in each category
         for each person on each item
         '''
 
-        self.persons = self.abilities.index.tolist()
-        self.items = self.diffs.index.tolist()
-        self.raters = list(self.severities.keys())
+        c_p_df = {item: self.abilities - self.diffs.loc[item]
+                  for item in self.items}
+        c_p_df = pd.DataFrame(c_p_df)
 
-        cat_probs = [[[[self.mfrm.cat_prob_thresholds(ability, item, self.diffs, rater, self.severities, category,
-                                                      self.thresholds)
-                        for category in range(self.max_score + 1)]
-                       for rater in self.raters]
-                      for item in self.items]
-                     for ability in self.abilities]
+        self.cat_probs = {cat: {rater: (cat * c_p_df -
+                                        sum(self.thresholds[:cat + 1]) -
+                                        sum(self.severities[rater][:cat + 1]))
+                                for rater in self.raters}
+                          for cat in range(self.max_score + 1)}
 
-        self.cat_probs = np.array(cat_probs)
+        for cat in range(self.max_score + 1):
+            self.cat_probs[cat] = pd.concat(self.cat_probs[cat].values(),
+                                            keys=self.cat_probs[cat].keys())
+            self.cat_probs[cat] = np.exp(self.cat_probs[cat])
+
+        den = sum(self.cat_probs[cat] for cat in range(self.max_score + 1))
+
+        for cat in range(self.max_score + 1):
+            self.cat_probs[cat] /= den
         
         '''
         Calculates scores and removes required amount of missing data
         '''
-        
-        scoring_randoms = np.array([self.randoms()
-                                    for rater in range(self.no_of_raters)])
-        scoring_randoms = np.swapaxes(scoring_randoms, 0, 2)
-        scoring_randoms = np.swapaxes(scoring_randoms, 0, 1)
-            
-        cat_scores = np.zeros((self.no_of_persons,
-                               self.no_of_items,
-                               self.no_of_raters,
-                               self.max_score + 1))
-        
-        for rater in range(self.no_of_raters):
-            for cat in range(self.max_score):
-            
-                cat_scores[:, :, rater, cat] = (scoring_randoms[:, :, rater] >
-                                                np.sum(self.cat_probs[:, :, rater, :cat + 1],
-                                                       axis=2)).astype(np.float64)
-        
-        self.scores = np.sum(cat_scores, axis=3)
-        
-        missing_randoms = self.randoms()
-        
+
+        scoring_randoms = {rater: pd.DataFrame(self.randoms(), columns=self.items, index=self.persons)
+                           for rater in self.raters}
+        scoring_randoms = pd.concat(scoring_randoms.values(), keys=scoring_randoms.keys())
+
+        self.scores = sum(scoring_randoms < sum(self.cat_probs[category]
+                                                for category in range(cat, self.max_score + 1))
+                          for cat in range(1, self.max_score + 1))
+
+        if shared_missing:
+            missing_randoms = pd.DataFrame(self.randoms(), columns=self.items, index=self.persons)
+            missing_randoms = {rater: missing_randoms for rater in self.raters}
+
+        else:
+            missing_randoms = {rater: pd.DataFrame(self.randoms(), columns=self.items, index=self.persons)
+                               for rater in self.raters}
+
+        missing_randoms = pd.concat(missing_randoms.values(), keys=missing_randoms.keys())
+
         self.scores[missing_randoms < self.missing] = np.nan
-        
-        cols = [f'Item_{item + 1}' for item in range(self.no_of_items)]
-        
-        final = {rater: pd.DataFrame(self.scores[:, :, i],
-                                     columns=cols, index=self.persons)
-                 for i, rater in enumerate(self.raters)}
-        
-        self.scores = pd.concat(final.values(), keys=final.keys())
-
-        if manual_person_names is not None:
-            self.scores.index = self.scores.index.set_levels(manual_person_names, level=1)
-
-        else:
-            person_list = [f'Person_{person + 1}' for person in range(self.no_of_persons)]
-            self.scores.index = self.scores.index.set_levels(person_list, level=1)
-
-        if manual_item_names is not None:
-            self.scores.rename(columns={old: new for old, new in zip(self.dataframe.columns, manual_item_names)},
-                               inplace=True)
-
-        else:
-            for item in range(self.no_of_items):
-                self.scores.rename(columns={item: f'Item_{item + 1}'},
-                                   inplace=True)
-
-        if manual_rater_names is not None:
-            self.scores.index = self.scores.index.set_levels(manual_rater_names, level=0)
-
-        else:
-            rater_list = [f'Rater_{rater + 1}' for rater in range(self.no_of_raters)]
-            self.scores.index = self.scores.index.set_levels(rater_list, level=0)
-
-        self.raters = self.scores.index.get_level_values(0).unique().tolist()
-        self.persons = self.scores.index.get_level_values(1).unique().tolist()
-        self.items = self.scores.columns.tolist()
 
 class MFRM_Sim_Matrix(MFRM_Sim):
     
@@ -22341,6 +22377,7 @@ class MFRM_Sim_Matrix(MFRM_Sim):
                  max_disorder=0,
                  offset=0,
                  missing=0,
+                 shared_missing=True,
                  manual_abilities=None,
                  manual_diffs=None,
                  manual_thresholds=None,
@@ -22384,32 +22421,41 @@ class MFRM_Sim_Matrix(MFRM_Sim):
         if self.raters is not None:
             assert len(self.raters) == self.no_of_raters, 'Length of rater names must match number of raters.'
 
+        if manual_person_names is not None:
+            self.persons = manual_person_names
+
+        else:
+            self.persons = [f'Person_{person + 1}' for person in range(self.no_of_persons)]
+
         if self.abilities is None:
             self.abilities = np.random.normal(0, self.person_sd, self.no_of_persons)
             self.abilities -= np.mean(self.abilities)
             self.abilities += self.offset
-            self.abilities = {f'Person_{person + 1}': ability for person, ability in enumerate(self.abilities)}
-            self.abilities = pd.Series(self.abilities)
 
         else:
             assert len(self.abilities) == self.no_of_persons, 'Length of manual abilities must match number of persons.'
             self.abilities = np.array(self.abilities)
-            self.abilities = {f'Person_{person + 1}': ability for person, ability in enumerate(self.abilities)}
-            self.abilities = pd.Series(self.abilities)
+
+        self.abilities = {person: ability for person, ability in zip(self.persons, self.abilities)}
+        self.abilities = pd.Series(self.abilities)
+
+        if manual_item_names is not None:
+            self.items = manual_item_names
+
+        else:
+            self.items = [f'Item_{item + 1}' for item in range(self.no_of_items)]
 
         if self.diffs is None:
             self.diffs = np.random.uniform(0, 1, self.no_of_items)
-            self.diffs *= (self.item_range /
-                           (np.max(self.diffs) - np.min(self.diffs)))
+            self.diffs *= (self.item_range / (np.max(self.diffs) - np.min(self.diffs)))
             self.diffs -= np.mean(self.diffs)
-            self.diffs = {f'Item_{item + 1}': diff for item, diff in enumerate(self.diffs)}
-            self.diffs = pd.Series(self.diffs)
 
         else:
             assert len(self.diffs) == self.no_of_items, 'Length of manual difficulties must match number of items.'
             self.diffs = np.array(self.diffs)
-            self.diffs = {f'Item_{item + 1}': diff for item, diff in enumerate(self.diffs)}
-            self.diffs = pd.Series(self.diffs)
+
+        self.diffs = {item: diff for item, diff in zip(self.items, self.diffs)}
+        self.diffs = pd.Series(self.diffs)
 
         if self.thresholds is None:
             category_widths = np.random.uniform(self.max_disorder,
@@ -22426,6 +22472,15 @@ class MFRM_Sim_Matrix(MFRM_Sim):
             assert self.thresholds[0] == 0, 'First threshold in manual thresholds must have value zero.'
             assert sum(manual_thresholds) == 0 , ('Manual thresholds must sum to zero.')
             self.thresholds = np.array(self.thresholds)
+
+        if manual_rater_names is not None:
+            if self.manual_severities is not None:
+                assert (set(manual_rater_names) ==
+                        set(manual_severities.keys())), 'Manual rater names do not match rater names in manual severities'
+            self.raters = manual_rater_names
+
+        else:
+            self.raters = [f'Rater_{rater + 1}' for rater in range(self.no_of_raters)]
         
         if self.severities is None:
             severities = [[truncnorm.rvs(-1.96, 1.96, size = self.max_score)
@@ -22436,9 +22491,9 @@ class MFRM_Sim_Matrix(MFRM_Sim):
             severities -= np.mean(severities)
             severities = np.insert(severities, 0, 0, axis = 2)
 
-            self.severities = {f'Rater_{rater + 1}': {f'Item_{item + 1}': severities[rater, item, :]
-                                                      for item in range(self.no_of_items)}
-                               for rater in range(self.no_of_raters)}
+            self.severities = {rater: {f'Item_{item + 1}': severities[i, item, :]
+                                       for item in range(self.no_of_items)}
+                               for i, rater in enumerate(self.raters)}
             
         else:
             assert len(manual_severities) == self.no_of_raters, 'Length of manual severities must match number of raters.'
@@ -22451,92 +22506,60 @@ class MFRM_Sim_Matrix(MFRM_Sim):
                     assert manual_severities[rater][item][0] == 0, ('First threshold in each set of manual ' +
                                                                     'threshold severities must have value zero.')
 
-            self.severities = {f'Rater_{i + 1}': {f'Item_{j + 1}': manual_severities[rater][item]
+            self.severities = {rater: {f'Item_{j + 1}': manual_severities[rater][item]
                                                       for j, item in enumerate(manual_severities[rater].keys())}
-                               for i, rater in enumerate(manual_severities.keys())}
+                               for rater in self.raters}
 
         '''
         Calculates probability of a response in each category
         for each person on each item
         '''
 
-        self.persons = self.abilities.index.tolist()
-        self.items = self.diffs.index.tolist()
-        self.raters = list(self.severities.keys())
+        c_p_df = {item: self.abilities - self.diffs.loc[item]
+                  for item in self.items}
+        c_p_df = pd.DataFrame(c_p_df)
 
-        cat_probs = [[[[self.mfrm.cat_prob_matrix(ability,
-                                                  item,
-                                                  self.diffs,
-                                                  rater,
-                                                  self.severities,
-                                                  category,
-                                                  self.thresholds)
-                        for category in range(self.max_score + 1)]
-                       for rater in self.raters]
-                      for item in self.diffs.keys()]
-                     for ability in self.abilities]
+        self.cat_probs = {cat: {rater: (cat * c_p_df - sum(self.thresholds[:cat + 1]))
+                                for rater in self.raters}
+                          for cat in range(self.max_score + 1)}
 
-        self.cat_probs = np.array(cat_probs)
+        for cat in range(self.max_score + 1):
+            for rater in self.raters:
+                for item in self.items:
+                    self.cat_probs[cat][rater][item] -= sum(self.severities[rater][item][:cat + 1])
+
+        for cat in range(self.max_score + 1):
+            self.cat_probs[cat] = pd.concat(self.cat_probs[cat].values(),
+                                            keys=self.cat_probs[cat].keys())
+            self.cat_probs[cat] = np.exp(self.cat_probs[cat])
+
+        den = sum(self.cat_probs[cat] for cat in range(self.max_score + 1))
+
+        for cat in range(self.max_score + 1):
+            self.cat_probs[cat] /= den
         
         '''
         Calculates scores and removes required amount of missing data
         '''
-        
-        scoring_randoms = np.array([self.randoms()
-                                    for rater in range(self.no_of_raters)])
-        scoring_randoms = np.swapaxes(scoring_randoms, 0, 2)
-        scoring_randoms = np.swapaxes(scoring_randoms, 0, 1)
-            
-        cat_scores = np.zeros((self.no_of_persons,
-                               self.no_of_items,
-                               self.no_of_raters,
-                               self.max_score + 1))
-        
-        for rater in range(self.no_of_raters):
-            
-            for cat in range(self.max_score):
-            
-                cat_scores[:, :, rater, cat] = (scoring_randoms[:, :, rater] >
-                                                np.sum(self.cat_probs[:, :, rater, :cat + 1],
-                                                       axis=2)).astype(np.float64)
-        
-        self.scores = np.sum(cat_scores, axis=3)
-        
-        missing_randoms = self.randoms()
-        
+
+        scoring_randoms = {rater: pd.DataFrame(self.randoms(), columns=self.items, index=self.persons)
+                           for rater in self.raters}
+        scoring_randoms = pd.concat(scoring_randoms.values(), keys=scoring_randoms.keys())
+
+        self.scores = sum(scoring_randoms < sum(self.cat_probs[category]
+                                                for category in range(cat, self.max_score + 1))
+                          for cat in range(1, self.max_score + 1))
+
+        if shared_missing:
+            missing_randoms = pd.DataFrame(self.randoms(), columns=self.items, index=self.persons)
+            missing_randoms = {rater: missing_randoms for rater in self.raters}
+
+        else:
+            missing_randoms = {rater: pd.DataFrame(self.randoms(), columns=self.items, index=self.persons)
+                               for rater in self.raters}
+
+        missing_randoms = pd.concat(missing_randoms.values(), keys=missing_randoms.keys())
+
         self.scores[missing_randoms < self.missing] = np.nan
-        
-        cols = [f'Item_{item + 1}' for item in range(self.no_of_items)]
-        
-        final = {rater: pd.DataFrame(self.scores[:, :, i],
-                                     columns=cols, index=self.persons)
-                 for i, rater in enumerate(self.raters)}
 
-        self.scores = pd.concat(final.values(), keys=final.keys())
-
-        if manual_person_names is not None:
-            self.scores.index = self.scores.index.set_levels(manual_person_names, level=1)
-
-        else:
-            person_list = [f'Person_{person + 1}' for person in range(self.no_of_persons)]
-            self.scores.index = self.scores.index.set_levels(person_list, level=1)
-
-        if manual_item_names is not None:
-            self.scores.rename(columns={old: new for old, new in zip(self.dataframe.columns, manual_item_names)},
-                               inplace=True)
-
-        else:
-            for item in range(self.no_of_items):
-                self.scores.rename(columns={item: f'Item_{item + 1}'},
-                                   inplace=True)
-
-        if manual_rater_names is not None:
-            self.scores.index = self.scores.index.set_levels(manual_rater_names, level=0)
-
-        else:
-            rater_list = [f'Rater_{rater + 1}' for rater in range(self.no_of_raters)]
-            self.scores.index = self.scores.index.set_levels(rater_list, level=0)
-
-        self.raters = self.scores.index.get_level_values(0).unique().tolist()
-        self.persons = self.scores.index.get_level_values(1).unique().tolist()
-        self.items = self.scores.columns.tolist()
+        # THE END :)
