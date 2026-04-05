@@ -3315,7 +3315,7 @@ class PCM(Rasch):
 
         den_df = sum(self.cat_prob_dict[cat] for cat in range(max_max_score + 1))
 
-        for cat in range(self.max_score_vector[item]):
+        for cat in range(max_max_score + 1):
             self.cat_prob_dict[cat] /= den_df
 
         if trim_cat_prob_dict:
