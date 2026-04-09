@@ -893,7 +893,7 @@ class SLM(Rasch):
         self.item_bootstrap.index = [f'Sample {i + 1}' for i in range (no_of_samples)]
 
     def abil(self,
-             person,
+             persons,
              items=None,
              warm_corr=True,
              tolerance=0.00001,
@@ -905,64 +905,74 @@ class SLM(Rasch):
         Newton-Raphson for ML with optional Warm (1989) bias correction.
         '''
 
+        if isinstance(persons, str):
+            if persons == 'all':
+                persons = self.persons
+
+            else:
+                persons = [persons]
+
         if isinstance(items, str):
             if items == 'all':
-                items = None
+                items = self.items
 
-            if items == 'none':
-                items = None
+            else:
+                items = [items]
 
         if items is None:
+            items = self.items
             difficulties = self.diffs
-            person_data = self.dataframe.loc[person]
+            person_data = self.dataframe.loc[persons]
 
         else:
             difficulties = self.diffs.loc[items]
-            person_data = self.dataframe.loc[person, items]
+            person_data = self.dataframe.loc[persons, items]
 
         person_filter = (person_data + 1) / (person_data + 1)
-        score = np.nansum(person_data)
+        scores = person_data.sum(axis=1).astype(float)
+        ext_scores = person_filter.sum(axis=1)
 
-        ext_score = np.nansum(person_filter)
+        scores[scores == 0] += ext_score_adjustment
+        scores[scores == ext_scores] -= ext_score_adjustment
 
-        if score == 0:
-            score = ext_score_adjustment
-
-        elif score == ext_score:
-            score -= ext_score_adjustment
+        diff_df = pd.concat([difficulties for person in persons], axis=1).T
+        diff_df.index = persons
+        diff_df *= person_filter
 
         try:
-            estimate = (log(score) -
-                        log(ext_score - score) +
-                        difficulties[person_filter == 1].mean())
-            change = 1
+            estimates = np.log(scores) - np.log(ext_scores - scores) + diff_df.mean(axis=1)
+            changes = pd.Series({person: 1 for person in persons})
             iters = 0
 
-            while (abs(change) > tolerance) & (iters <= max_iters):
+            while (abs(changes).max() > tolerance) & (iters <= max_iters):
 
-                person_exp_list = [self.exp_score(estimate, difficulty)
-                                   for flag, difficulty in zip(person_filter, difficulties)
-                                   if flag == 1]
-                result = sum(person_exp_list)
+                exp_score_df = {item: diff - estimates for item, diff in difficulties.items()}
+                exp_score_df = pd.DataFrame(exp_score_df)
+                exp_score_df = 1 / (1 + np.exp(exp_score_df))
 
-                person_info_list = [self.variance(estimate, difficulty)
-                                    for flag, difficulty in zip(person_filter, difficulties)
-                                    if flag == 1]
-                info = sum(person_info_list)
+                info_df = exp_score_df * (1 - exp_score_df)
 
-                change = max(-1, min(1, (result - score) / info))
-                estimate -= change
+                exp_score_df *= person_filter
+                info_df *= person_filter
+
+                result_list = exp_score_df.sum(axis=1)
+                info_list = info_df.sum(axis=1)
+
+                changes = (result_list - scores) / info_list
+                changes = changes.clip(-1, 1)
+                estimates -= changes
+                iters += 1
 
             if warm_corr:
-                estimate += self.warm(estimate, difficulties, person_filter)
+                estimates += self.warm(estimates, difficulties, person_filter)
 
             if iters >= max_iters:
                 print('Maximum iterations reached before convergence.')
 
         except:
-            estimate = np.nan
+            estimates = np.nan
 
-        return estimate
+        return estimates
 
     def person_abils(self,
                      items=None,
@@ -976,14 +986,8 @@ class SLM(Rasch):
         estimation, includes optional Warm (1989) bias correction.
         '''
 
-        if items is None:
-            items = self.dataframe.columns
-
-        estimates = {person: self.abil(person, items, warm_corr=warm_corr, tolerance=tolerance,
-                                       max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
-                     for person in self.dataframe.index}
-
-        self.person_abilities = pd.Series(estimates)
+        self.person_abilities = self.abil(self.persons, items=items, warm_corr=warm_corr, tolerance=tolerance,
+                                          max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
 
     def score_abil(self,
                    score,
@@ -999,7 +1003,11 @@ class SLM(Rasch):
         '''
 
         if items is None:
-            items = self.dataframe.columns
+            items = self.items
+
+        if isinstance(items, str):
+            if items == 'all':
+                items = self.items
 
         difficulties = self.diffs.loc[items]
 
@@ -1028,6 +1036,7 @@ class SLM(Rasch):
 
             change = max(-1, min(1, (result - score) / info))
             estimate -= change
+            iters += 1
 
         if warm_corr:
             estimate += self.warm(estimate, difficulties, person_filter)
@@ -1045,35 +1054,81 @@ class SLM(Rasch):
                           max_iters=100,
                           ext_score_adjustment=0.5):
 
-        if items is None:
-            items = self.dataframe.columns
-
         if isinstance(items, str):
             if items == 'all':
-                items = None
+                items = self.items
+
+            else:
+                items = [items]
+
+        if items is None:
+            items = self.items
+
+        no_of_items = len(items)
+        difficulties = self.diffs.loc[items]
             
         if ext_scores:
-            score_range = range(len(items) + 1)
+            scores = np.array([score for score in range(no_of_items + 1)])
+
+            used_scores = scores.astype(float)
+            used_scores[0] += ext_score_adjustment
+            used_scores[-1] -= ext_score_adjustment
             
         else:
-            score_range = range(1, len(items))
+            scores = np.array([score + 1 for score in range(no_of_items - 1)])
+            used_scores = scores.astype(float)
 
-        abil_table = {score: self.score_abil(score, items=items, warm_corr=warm_corr, tolerance=tolerance,
-                                             max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
-                      for score in score_range}
-        abil_table = pd.Series(abil_table)
+        estimates = {score: np.log(used_score) - np.log(no_of_items - used_score) + difficulties.mean()
+                     for score, used_score in zip(scores, used_scores)}
+        estimates = pd.Series(estimates, index=scores)
 
-        self.abil_table = abil_table
+        changes = pd.Series(1, index=scores)
+        iters = 0
+
+        while (abs(changes).max() > tolerance) & (iters <= max_iters):
+            exp_score_df = {item: diff - estimates for item, diff in difficulties.items()}
+            exp_score_df = pd.DataFrame(exp_score_df)
+            exp_score_df = 1 / (1 + np.exp(exp_score_df))
+
+            info_df = exp_score_df * (1 - exp_score_df)
+
+            result_list = exp_score_df.sum(axis=1)
+            info_list = info_df.sum(axis=1)
+
+            changes = (result_list - used_scores) / info_list
+            changes = changes.clip(-1, 1)
+            estimates -= changes
+
+        if warm_corr:
+            person_filter = pd.DataFrame(1, columns=items, index=scores)
+            estimates += self.warm(estimates, difficulties, person_filter)
+
+        self.abil_table = estimates
 
     def warm(self,
-             ability,
+             abilities,
              difficulties,
              person_filter):
 
         '''
-        Warm's (1989) bias correction for ML abiity estimates.
+        Warm's (1989) bias correction for ML ability estimates.
         '''
 
+        exp_score_df = {item: diff - abilities for item, diff in difficulties.items()}
+        exp_score_df = pd.DataFrame(exp_score_df)
+        exp_score_df = 1 / (1 + np.exp(exp_score_df))
+
+        info_df = exp_score_df * (1 - exp_score_df)
+
+        exp_score_df *= person_filter
+        info_df *= person_filter
+
+        i = info_df.sum(axis=1)
+
+        j_df = info_df * (1 - 2 * exp_score_df)
+        j = j_df.sum(axis=1)
+
+        '''
         j_list = [self.variance(ability, difficulty) * (1 - 2 * self.exp_score(ability, difficulty))
                   for flag, difficulty in zip(person_filter, difficulties)
                   if flag == flag]
@@ -1083,6 +1138,7 @@ class SLM(Rasch):
                   for flag, difficulty in zip(person_filter, difficulties)
                   if flag == flag]
         i = sum(i_list)
+        '''
 
         return j / (2 * i ** 2)
 
@@ -1120,7 +1176,10 @@ class SLM(Rasch):
                              item):
 
         if item in self.dataframe.columns:
-            return self.dataframe[item].value_counts().fillna(0).astype(int)
+            counts = self.dataframe[item].value_counts().fillna(0).astype(int)
+            counts.sort_index(inplace=True)
+
+            return counts
 
         else:
             print('Invalid item name')
@@ -1174,16 +1233,12 @@ class SLM(Rasch):
         Create matrices of expected scores, variances, kurtosis, residuals etc. to generate fit statistics
         '''
 
-        abil_matrix = [[self.person_abilities[person] for item in self.dataframe.columns]
-                       for person in self.dataframe.index]
-        abil_df = pd.DataFrame(abil_matrix)
-        abil_df.index = self.dataframe.index
-        abil_df.columns = self.dataframe.columns
+        abil_df = pd.concat([self.person_abilities for item in self.items], axis=1)
+        abil_df.columns = self.items
 
-        diff_matrix = [self.diffs for person in self.dataframe.index]
-        diff_df = pd.DataFrame(diff_matrix)
-        diff_df.index = self.dataframe.index
-        diff_df.columns = self.dataframe.columns
+        diff_df = pd.concat([self.diffs for person in self.persons], axis=1)
+        diff_df = diff_df.T
+        diff_df.index = self.persons
 
         item_count = (self.dataframe == self.dataframe).sum(axis=0)
         person_count = (self.dataframe == self.dataframe).sum(axis=1)
@@ -1273,9 +1328,9 @@ class SLM(Rasch):
         self.person_infit_zstd = ((self.person_infit_ms ** (1/3)) - 1) * (3 / person_infit_q) + (person_infit_q / 3)
         self.person_infit_zstd.name = 'Infit Z'
 
-        differences = pd.DataFrame()
-        for item in self.dataframe.columns:
-            differences[item] = self.person_abilities - self.diffs[item]
+        differences = pd.concat([self.person_abilities - self.diffs.loc[item]
+                                 for item in self.items], axis=1)
+        differences.columns = self.items
         num = (differences * self.residual_df).sum(axis=0)
         den = (self.info_df * (differences ** 2)).sum(axis=0)
         self.discrimination = 1 + num / den
@@ -2899,7 +2954,7 @@ class PCM(Rasch):
 
 
     def abil(self,
-             person,
+             persons,
              items=None,
              warm_corr=True,
              tolerance=0.00001,
@@ -2911,59 +2966,116 @@ class PCM(Rasch):
         Uses Newton-Raphson for ML with optional Warm (1989) bias correction.
         '''
 
-        if items is None:
-            thresholds = self.thresholds_uncentred
+        if isinstance(persons, str):
+            if persons == 'all':
+                persons = self.persons
 
-        elif isinstance(items, str):
+            else:
+                persons = [persons]
+
+        if isinstance(items, str):
             if items == 'all':
                 thresholds = self.thresholds_uncentred
+
+            else:
+                items = [items]
+
+        if items is None:
+            items = self.items
+            thresholds = self.thresholds_uncentred
 
         else:
             thresholds = {item: self.thresholds_uncentred[item] for item in items}
 
-        person_data = self.dataframe.loc[person]
+        person_data = self.dataframe.loc[persons, items]
         person_filter = (person_data + 1) / (person_data + 1)
-        score = np.nansum(person_data)
 
-        ext_score = np.nansum(self.max_score_vector * person_filter)[items].sum()
+        scores = person_data.sum(axis=1).astype(float)
 
-        if score == 0:
-            score = ext_score_adjustment
+        ext_scores = person_filter.mul(self.max_score_vector, axis=1)
+        ext_scores = ext_scores.sum(axis=1)
 
-        elif score == ext_score:
-            score -= ext_score_adjustment
+        scores[scores == 0] += ext_score_adjustment
+        scores[scores == ext_scores] -= ext_score_adjustment
+
+        thresh_sums = {item: value.sum() for item, value in thresholds.items()}
+        thresh_sums = pd.Series(thresh_sums)
+
+        thresh_sum_df = pd.concat([thresh_sums for person in self.persons], axis=1).T
+        thresh_sum_df.index = self.persons
+        thresh_sum_df *= person_filter
+
+        max_score_df = pd.concat([self.max_score_vector.loc[items] for person in self.persons], axis=1).T
+        max_score_df.index = self.persons
+        max_score_df *= person_filter
+
+        max_max_score = self.max_score_vector.max()
+
+        mean_diffs = thresh_sum_df.sum(axis=1) / max_score_df.sum(axis=1)
 
         try:
-            estimate = (log(score) -
-                        log(ext_score - score) +
-                        statistics.mean(self.threshold_list))
-            change = 1
+            estimates = np.log(scores) - np.log(ext_scores - scores) + mean_diffs
+            changes = pd.Series({person: 1 for person in persons})
             iters = 0
 
-            while (abs(change) > tolerance) & (iters <= max_iters):
+            while (abs(changes).max() > tolerance) & (iters <= max_iters):
 
-                result = sum(self.exp_score_uncentred(estimate, item_thresholds)
-                             for item, item_thresholds in thresholds.items()
-                             if person_filter[item] == 1)
+                cat_prob_dict = {cat: pd.DataFrame(0, index=persons, columns=items)
+                                      for cat in range(max_max_score + 1)}
 
-                info = sum(self.variance_uncentred(estimate, item_thresholds)
-                           for item, item_thresholds in thresholds.items()
-                           if person_filter[item] == 1)
+                for item in items:
+                    for cat in range(self.max_score_vector[item] + 1):
+                        cat_prob_dict[cat][item] = sum(estimates - thresholds[item].iloc[category]
+                                                       for category in range(cat))
+                        cat_prob_dict[cat][item] = np.exp(cat_prob_dict[cat][item])
 
-                change = max(-1, min(1, (result - score) / info))
-                estimate -= change
+                den_df = sum(cat_prob_dict[cat] for cat in range(max_max_score + 1))
+
+                for cat in range(max_max_score + 1):
+                    cat_prob_dict[cat] /= den_df
+
+                exp_score_df = sum(cat * df for cat, df in cat_prob_dict.items())
+
+                info_df = sum(((cat - exp_score_df) ** 2) * cat_prob_dict[cat]
+                              for cat in range(max_max_score + 1))
+
+                exp_score_df *= person_filter
+                info_df *= person_filter
+
+                result_list = exp_score_df.sum(axis=1)
+                info_list = info_df.sum(axis=1)
+
+                changes = (result_list - scores) / info_list
+                changes = changes.clip(-1, 1)
+                estimates -= changes
                 iters += 1
 
             if warm_corr:
-                estimate += self.warm(estimate, thresholds, person_filter)
+                estimates += self.warm(estimates, items, person_filter)
 
             if iters >= max_iters:
                 print('Maximum iterations reached before convergence.')
 
         except:
-            estimate = np.nan
+            estimates = np.nan
 
-        return estimate
+        return estimates
+
+    def person_abils(self,
+                     items=None,
+                     warm_corr=True,
+                     tolerance=0.00001,
+                     max_iters=100,
+                     ext_score_adjustment=0.5):
+
+        '''
+        Creates raw score to ability estimate look-up table. Newton-Raphson ML
+        estimation, includes optional Warm (1989) bias correction.
+        '''
+
+        self.person_abilities = self.abil(self.persons, items=items, warm_corr=warm_corr, tolerance=tolerance,
+                                          max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
+
 
     def score_abil(self,
                    score,
@@ -2989,13 +3101,14 @@ class PCM(Rasch):
                 thresholds = self.thresholds_uncentred
 
             else:
-                thresholds = {items: self.thresholds_uncentred[items]}
+                thresholds = {items: self.thresholds_uncentred[item] for item in items}
 
         else:
             thresholds = {item: self.thresholds_uncentred[item]
                           for item in items}
 
-        thresold_list = [threshold for item in items for threshold in thresholds[item]]
+        #threshold_list = [threshold for item in items for threshold in thresholds[item]]
+        mean_diff = pd.concat([thresh for thresh in thresholds.values()]).mean()
 
         person_filter_dict = {item: True for item in items}
 
@@ -3007,9 +3120,7 @@ class PCM(Rasch):
         elif score == ext_score:
             score -= ext_score_adjustment
 
-        estimate = (log(score) -
-                    log(ext_score - score) +
-                    np.mean(thresold_list))
+        estimate = (log(score) - log(ext_score - score) + mean_diff)
 
         change = 1
         iters = 0
@@ -3052,71 +3163,123 @@ class PCM(Rasch):
             else:
                 items = [items]
 
-        if ext_scores:
-            if items is None:
-                score_range = range(self.max_score_vector.sum() + 1)
-                
-            else:
-                score_range = range(self.max_score_vector[items].sum() + 1)
-
-        else:
-            if items is None:
-                score_range = range(1, self.max_score_vector.sum())
-                
-            else:
-                score_range = range(1, self.max_score_vector[items].sum())
-
         if items is None:
-            abil_table = {score: self.score_abil(score, items=self.dataframe.columns, warm_corr=warm_corr,
-                                                 tolerance=tolerance, max_iters=max_iters,
-                                                 ext_score_adjustment=ext_score_adjustment)
-                          for score in score_range}
+            items = self.items
+
+        no_of_items = len(items)
+        thresholds = {item: self.thresholds_uncentred[item] for item in items}
+
+        if ext_scores:
+            scores = np.array([score for score in range(self.max_score_vector.loc[items].sum() + 1)])
+
+            used_scores = scores.astype(float)
+            used_scores[0] += ext_score_adjustment
+            used_scores[-1] -= ext_score_adjustment
 
         else:
-            abil_table = {score: self.score_abil(score, items=items, warm_corr=warm_corr, tolerance=tolerance,
-                                                 max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
-                          for score in score_range}
+            scores = np.array([score for score in range(1, self.max_score_vector[items].sum())])
+            used_scores = scores.astype(float)
 
-        abil_table = pd.Series(abil_table)
+        mean_diff = pd.concat([thresh for thresh in thresholds.values()]).mean()
 
-        self.abil_table = abil_table
+        estimates = {score: np.log(used_score) - np.log(self.max_score_vector.loc[items].sum() - used_score) + mean_diff
+                     for score, used_score in zip(scores, used_scores)}
+        estimates = pd.Series(estimates, index=scores)
+
+        changes = pd.Series(1, index=scores)
+        iters = 0
+
+        max_max_score = self.max_score_vector.loc[items].max()
+
+        while (abs(changes).max() > tolerance) & (iters <= max_iters):
+
+            cat_prob_dict = {cat: pd.DataFrame(0, index=scores, columns=items)
+                                  for cat in range(max_max_score + 1)}
+
+            for item in items:
+                for cat in range(self.max_score_vector[item] + 1):
+                    cat_prob_dict[cat][item] = sum(estimates - thresholds[item].iloc[category]
+                                                   for category in range(cat))
+                    cat_prob_dict[cat][item] = np.exp(cat_prob_dict[cat][item])
+
+            den_df = sum(cat_prob_dict[cat] for cat in range(max_max_score + 1))
+
+            for cat in range(max_max_score + 1):
+                cat_prob_dict[cat] /= den_df
+
+            exp_score_df = sum(cat * df for cat, df in cat_prob_dict.items())
+
+            info_df = sum(((cat - exp_score_df) ** 2) * cat_prob_dict[cat]
+                                for cat in range(max_max_score + 1))
+
+            result_list = exp_score_df.sum(axis=1)
+            info_list = info_df.sum(axis=1)
+
+            changes = (result_list - used_scores) / info_list
+            changes = changes.clip(-1, 1)
+            estimates -= changes
+
+        if warm_corr:
+            person_filter = pd.DataFrame(1, columns=items, index=scores)
+
+            estimates += self.warm(estimates, items, person_filter)
+
+        self.abil_table = estimates
 
     def warm(self,
-             ability,
-             thresholds_uncentred,
+             abilities,
+             items,
              person_filter):
 
         '''
-        Warm's (1989) bias correction for ML abiity estimates
+        Warm's (1989) bias correction for ML ability estimates
         '''
 
-        exp_scores = [self.exp_score_uncentred(ability, thresholds)
-                      for item, thresholds in thresholds_uncentred.items()
-                      if person_filter[item] == 1]
+        thresholds = {item: self.thresholds_uncentred[item] for item in items}
 
-        variances = [self.variance_uncentred(ability, thresholds)
-                      for item, thresholds in thresholds_uncentred.items()
-                      if person_filter[item] == 1]
+        max_max_score = self.max_score_vector.loc[items].max()
 
-        part_1 = sum(sum((category ** 3) * self.cat_prob_uncentred(ability, category, thresholds)
-                         for category in range(self.max_score_vector[item] + 1))
-                      for item, thresholds in thresholds_uncentred.items()
-                      if person_filter[item] == 1)
+        cat_prob_dict = {cat: pd.DataFrame(0, index=abilities.index, columns=items)
+                              for cat in range(max_max_score + 1)}
 
-        part_2 = 3 * sum((info + (exp_score ** 2)) * exp_score
-                         for info, exp_score in zip(variances, exp_scores))
+        for item in items:
+            for cat in range(self.max_score_vector[item] + 1):
+                cat_prob_dict[cat][item] = sum(abilities - thresholds[item].iloc[category]
+                                               for category in range(cat))
+                cat_prob_dict[cat][item] = np.exp(cat_prob_dict[cat][item])
 
-        part_3 = sum(2 * (exp_score ** 3) for exp_score in exp_scores)
+        den_df = sum(cat_prob_dict[cat] for cat in range(max_max_score + 1))
 
-        warm_correction = ((part_1 - part_2 + part_3) /
-                           (2 * (sum(variances) ** 2)))
+        for cat in range(max_max_score + 1):
+            cat_prob_dict[cat] /= den_df
+
+        for cat in range(max_max_score + 1):
+            cat_prob_dict[cat] *= person_filter
+
+        exp_score_df = sum(cat * df for cat, df in cat_prob_dict.items())
+        exp_score_df *= person_filter
+
+        info_df = sum(((cat - exp_score_df) ** 2) * cat_prob_dict[cat]
+                            for cat in range(max_max_score + 1))
+        info_df *= person_filter
+
+        part_1 = sum((cat ** 3) * cat_prob_dict[cat].sum(axis=1)
+                     for cat in range(max_max_score + 1))
+
+        part_2 = 3 * ((info_df + (exp_score_df ** 2)) * exp_score_df).sum(axis=1)
+
+        part_3 = (2 * (exp_score_df ** 3)).sum(axis=1)
+
+        den = 2 * (info_df.sum(axis=1) ** 2)
+
+        warm_correction = (part_1 - part_2 + part_3) / den
 
         return warm_correction
 
-    def csem_uncentred(self,
-                       person,
-                       abilities=None,
-                       items=None):
+    def csem(self,
+             persons=None,
+             abilities=None,
+             items=None):
 
         '''
         Calculates conditional standard error of measurement for an ability.
@@ -3124,6 +3287,23 @@ class PCM(Rasch):
 
         if abilities is None:
             abilities = self.person_abilities
+
+        if isinstance(abilities, int):
+            abilities = abilities.astype(float)
+
+        if isinstance(abilities, float):
+            abilities = {f'Ability {abilities}': abilities}
+            abilities = pd.Series(abilities)
+
+        if isinstance(abilities, list):
+            abilities = {f'Ability {ability}': ability
+                         for ability in abilities}
+            abilities = pd.Series(abilities)
+
+        if persons is not None:
+            abilities = self.person_abilities.loc[persons]
+
+        persons = abilities.index
 
         if items is None:
             thresholds = self.thresholds_uncentred
@@ -3133,74 +3313,37 @@ class PCM(Rasch):
                 thresholds = self.thresholds_uncentred
 
         else:
-            thresholds = {item: self.thresholds_uncentred[item] for item in items}
+            thresholds = self.thresholds_uncentred[items]
 
-        person_data = self.dataframe.loc[person].to_numpy()
+        max_max_score = self.max_score_vector.loc[items].max()
+
+        person_data = self.dataframe.loc[persons, items]
         person_filter = (person_data + 1) / (person_data + 1)
-        person_filter_dict = {item: flag for item, flag in zip(self.dataframe.columns, person_filter)}
 
-        total_info = sum(self.variance_uncentred(abilities[person], item_thresholds)
-                         for item, item_thresholds in thresholds.items()
-                         if person_filter_dict[item] == person_filter_dict[item])
+        cat_prob_dict = {cat: pd.DataFrame(0, index=persons, columns=items)
+                         for cat in range(max_max_score + 1)}
 
-        cond_sem = 1 / (total_info ** 0.5)
+        for item in items:
+            for cat in range(self.max_score_vector[item] + 1):
+                cat_prob_dict[cat][item] = sum(abilities - thresholds[item].iloc[category]
+                                               for category in range(cat))
+                cat_prob_dict[cat][item] = np.exp(cat_prob_dict[cat][item])
+
+        den_df = sum(cat_prob_dict[cat] for cat in range(max_max_score + 1))
+
+        for cat in range(max_max_score + 1):
+            cat_prob_dict[cat] /= den_df
+
+        exp_score_df = sum(cat * df for cat, df in cat_prob_dict.items())
+        exp_score_df *= person_filter
+
+        info_df = sum(((cat - exp_score_df) ** 2) * cat_prob_dict[cat]
+                            for cat in range(max_max_score + 1))
+        info_df *= person_filter
+
+        cond_sem = 1 / (info_df.sum(axis=1) ** 0.5)
 
         return cond_sem
-
-    def csem_centred(self,
-                     person,
-                     abilities=None,
-                     thresholds=None):
-
-        '''
-        Calculates conditional standard error of measurement for an ability.
-        '''
-
-        if abilities is None:
-            abilities = self.person_abilities
-
-        if thresholds is None:
-            thresholds = self.thresholds_centred
-
-        person_data = self.dataframe.loc[person].to_numpy()
-        person_filter = (person_data + 1) / (person_data + 1)
-        person_filter_dict = {item: flag for item, flag in zip(self.dataframe.columns, person_filter)}
-
-        total_info = sum(self.variance_centred(abilities[person], item_thresholds)
-                         for item, item_thresholds in thresholds.items()
-                         if person_filter_dict[item] == person_filter_dict[item])
-
-        cond_sem = 1 / (total_info ** 0.5)
-
-        return cond_sem
-
-    def person_abils(self,
-                     items=None,
-                     warm_corr=True,
-                     tolerance=0.00001,
-                     max_iters=100,
-                     ext_score_adjustment=0.5):
-
-        '''
-        Creates raw score to ability estimate look-up table. Newton-Raphson ML
-        estimation, includes optional Warm (1989) bias correction.
-        '''
-
-        if items is None:
-            thresholds = self.thresholds_uncentred
-
-        elif isinstance(items, str):
-            if items == 'all':
-                thresholds = self.thresholds_uncentred
-
-        else:
-            items = {item: self.thresholds_uncentred[item] for item in items}
-
-        estimates = {person: self.abil(person, items=items, warm_corr=warm_corr, tolerance=tolerance,
-                                       max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
-                     for person in self.dataframe.index}
-
-        self.person_abilities = pd.Series(estimates)
 
     def category_counts_item(self,
                              item):
@@ -3231,30 +3374,6 @@ class PCM(Rasch):
         category_counts_df = category_counts_df.replace(-1, '')
 
         self.category_counts = category_counts_df
-
-    '''
-        max_score = max(self.max_score_vector)
-        category_counts_df = pd.DataFrame(-1, index=self.dataframe.columns, columns=np.arange(max_score + 1))
-
-        for item in self.dataframe.columns:
-            for score, count in self.category_counts_item(item).items():
-                category_counts_df.loc[item].iloc[int(score)] = count
-
-            for score in range(self.max_score_vector[item] + 1):
-                if (category_counts_df.loc[item].iloc[score] == -1):
-                        category_counts_df.loc[item].iloc[score] = 0
-
-        category_counts_df['Total'] = self.dataframe.count()
-        category_counts_df['Missing'] = self.no_of_persons - category_counts_df['Total']
-
-        category_counts_df = category_counts_df.astype(int)
-
-        category_counts_df.loc['Total']= category_counts_df.sum()
-
-        category_counts_df = category_counts_df.replace(-1, 'n/a')
-
-        self.category_counts = category_counts_df
-        '''
 
     def fit_statistics(self,
                        warm_corr=True,
@@ -3305,12 +3424,12 @@ class PCM(Rasch):
         max_max_score = self.max_score_vector.max()
 
         self.cat_prob_dict = {cat: pd.DataFrame(0, index=self.person_abilities.index, columns=self.items)
-						for cat in range(max_max_score + 1)}
+                              for cat in range(max_max_score + 1)}
 
         for item in self.items:
             for cat in range(self.max_score_vector[item] + 1):
                 self.cat_prob_dict[cat][item] = sum(self.person_abilities - self.thresholds_uncentred[item].iloc[category]
-                                                        for category in range(cat))
+                                                    for category in range(cat))
                 self.cat_prob_dict[cat][item] = np.exp(self.cat_prob_dict[cat][item])
 
         den_df = sum(self.cat_prob_dict[cat] for cat in range(max_max_score + 1))
@@ -4444,10 +4563,10 @@ class PCM(Rasch):
                                 facecolor='blue', alpha=0.2)
 
                 else:
-                    if (self.thresholds_uncentred[items][cat_highlight] >
-                        self.thresholds_uncentred[items][cat_highlight - 1]):
-                        plt.axvspan(self.thresholds_uncentred[items][cat_highlight - 1],
-                                    self.thresholds_uncentred[items][cat_highlight],
+                    if (self.thresholds_uncentred[items].iloc[cat_highlight] >
+                        self.thresholds_uncentred[items].iloc[cat_highlight - 1]):
+                        plt.axvspan(self.thresholds_uncentred[items].iloc[cat_highlight - 1],
+                                    self.thresholds_uncentred[items].iloc[cat_highlight],
                                     facecolor='blue', alpha=0.2)
 
         if y_max <= 0:
@@ -5332,7 +5451,7 @@ class RSM(Rasch):
         self.cat_width_high = cat_width_high
 
     def abil(self,
-             person,
+             persons,
              items=None,
              warm_corr=True,
              tolerance=0.00001,
@@ -5345,58 +5464,86 @@ class RSM(Rasch):
         optional Warm (1989) bias correction.
         '''
 
+        if isinstance(persons, str):
+            if persons == 'all':
+                persons = self.persons
+
+            else:
+                persons = [persons]
+
+        if isinstance(items, str):
+            if items == 'all':
+                items = self.items
+
+            else:
+                items = [items]
+
         if items is None:
             items = self.items
             difficulties = self.diffs
+            person_data = self.dataframe.loc[persons]
 
         else:
             difficulties = self.diffs.loc[items]
+            person_data = self.dataframe.loc[persons, items]
 
-        person_data = self.dataframe.loc[person].to_numpy()
         person_filter = (person_data + 1) / (person_data + 1)
-        score = np.nansum(person_data)
+        scores = person_data.sum(axis=1).astype(float)
+        ext_scores = person_filter.sum(axis=1) * self.max_score
 
-        ext_score = np.nansum(person_filter) * self.max_score
+        scores[scores == 0] = ext_score_adjustment
+        scores[scores == ext_scores] -= ext_score_adjustment
 
-        if score == 0:
-            score = ext_score_adjustment
-
-        elif score == ext_score:
-            score -= ext_score_adjustment
+        diff_df = pd.concat([difficulties for person in persons], axis=1).T
+        diff_df.index = persons
+        diff_df *= person_filter
 
         try:
-            estimate = (log(score) -
-                        log(ext_score - score) +
-                        statistics.mean(difficulties))
-            change = 1
+            estimates = np.log(scores) - np.log(ext_scores - scores) + diff_df.mean(axis=1)
+            changes = pd.Series({person: 1 for person in persons})
             iters = 0
 
-            while (abs(change) > tolerance) & (iters <= max_iters):
+            while (abs(changes).max() > tolerance) & (iters <= max_iters):
 
-                person_exp_list = [self.exp_score(estimate, difficulty, self.thresholds)
-                                   for flag, difficulty in zip(person_filter, difficulties)
-                                   if flag == flag]
-                result = sum(person_exp_list)
+                c_p_df = {item: estimates - difficulties[item] for item in items}
+                c_p_df = pd.DataFrame(c_p_df)
 
-                person_info_list = [self.variance(estimate, difficulty, self.thresholds)
-                                    for flag, difficulty in zip(person_filter, difficulties)
-                                    if flag == flag]
-                info = sum(person_info_list)
+                cat_prob_dict = {cat: (cat * c_p_df) - sum(self.thresholds[:cat + 1])
+                                 for cat in range(self.max_score + 1)}
 
-                change = max(-1, min(1, (result - score) / info))
-                estimate -= change
+                for cat in range(self.max_score + 1):
+                    cat_prob_dict[cat] = np.exp(cat_prob_dict[cat])
+
+                den = sum(cat_prob_dict[cat] for cat in range(self.max_score + 1))
+
+                for cat in range(self.max_score + 1):
+                    cat_prob_dict[cat] /= den
+                    cat_prob_dict[cat] *= person_filter
+
+                exp_score_df = sum(cat * df for cat, df in cat_prob_dict.items())
+                exp_score_df *= person_filter
+
+                info_df = sum(df * (cat - exp_score_df) ** 2 for cat, df in cat_prob_dict.items())
+                info_df *= person_filter
+
+                result_list = exp_score_df.sum(axis=1)
+                info_list = info_df.sum(axis=1)
+
+                changes = (result_list - scores) / info_list
+                changes = changes.clip(-1, 1)
+                estimates -= changes
                 iters += 1
 
             if warm_corr:
-                estimate += self.warm(estimate, person_filter, difficulties)
+                estimates += self.warm(estimates, items, person_filter)
 
             if iters >= max_iters:
                 print('Maximum iterations reached before convergence.')
 
         except:
-            estimate =np.nan
+            estimates = np.nan
 
-        return estimate
+        return estimates
 
     def person_abils(self,
                      items=None,
@@ -5410,14 +5557,8 @@ class RSM(Rasch):
         estimation, includes optional Warm (1989) bias correction.
         '''
 
-        if items is None:
-            items = self.items
-
-        estimates = {person: self.abil(person, items=items, warm_corr=warm_corr, tolerance=tolerance,
-                                       max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
-                     for person in self.dataframe.index}
-
-        self.person_abilities = pd.Series(estimates)
+        self.person_abilities = self.abil(self.persons, items=items, warm_corr=warm_corr, tolerance=tolerance,
+                                          max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
 
     def score_abil(self,
                    score,
@@ -5437,6 +5578,10 @@ class RSM(Rasch):
             items = self.items
             difficulties = self.diffs
 
+        if isinstance(items, str):
+            if items == 'all':
+                items = self.items
+
         else:
             difficulties = self.diffs.loc[items]
 
@@ -5449,8 +5594,7 @@ class RSM(Rasch):
         elif score == ext_score:
             score -= ext_score_adjustment
 
-        estimate = (log(score) - log(ext_score - score) +
-                    statistics.mean(difficulties))
+        estimate = log(score) - log(ext_score - score) + difficulties.mean()
         change = 1
         iters = 0
 
@@ -5471,7 +5615,7 @@ class RSM(Rasch):
             iters += 1
 
         if warm_corr:
-            estimate += self.warm(estimate, person_filter, difficulties)
+            estimate += self.warm(pd.Series({score: estimate}), items, person_filter)
 
         if iters >= max_iters:
             print('Maximum iterations reached before convergence.')
@@ -5488,71 +5632,114 @@ class RSM(Rasch):
 
         if isinstance(items, str):
             if items == 'all':
-                items = None
-
-            elif items == 'none':
-                items = None
+                items = self.items
 
             else:
                 items = [items]
 
         if items is None:
-            no_of_items = self.no_of_items
+            items = self.items
 
-        else:
-            if isinstance(items, list):
-                no_of_items = len(items)
-
-            else:
-                no_of_items = 1
+        no_of_items = len(items)
 
         if ext_scores:
-            score_range = range(no_of_items * self.max_score + 1)
+            scores = np.array([score for score in range(no_of_items + 1)])
+
+            used_scores = scores.astype(float)
+            used_scores[0] += ext_score_adjustment
+            used_scores[-1] -= ext_score_adjustment
 
         else:
-            score_range = range(1, no_of_items * self.max_score)
+            scores = np.array([score + 1 for score in range(no_of_items - 1)])
+            used_scores = scores.astype(float)
 
-        abil_table = {score: self.score_abil(score, items=items, warm_corr=warm_corr, tolerance=tolerance,
-                                             max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
-                      for score in score_range}
-        abil_table = pd.Series(abil_table)
+        estimates = {score: np.log(used_score) - np.log(no_of_items - used_score) + self.diffs.loc[items].mean()
+                     for score, used_score in zip(scores, used_scores)}
+        estimates = pd.Series(estimates, index=scores)
 
-        self.abil_table = abil_table
+        changes = pd.Series(1, index=scores)
+        iters = 0
+
+        while (abs(changes).max() > tolerance) & (iters <= max_iters):
+
+                c_p_df = {item: estimates - self.diffs[item] for item in items}
+                c_p_df = pd.DataFrame(c_p_df)
+
+                cat_prob_dict = {cat: (cat * c_p_df) - sum(self.thresholds[:cat + 1])
+                                 for cat in range(self.max_score + 1)}
+
+                for cat in range(self.max_score + 1):
+                    cat_prob_dict[cat] = np.exp(cat_prob_dict[cat])
+
+                den = sum(cat_prob_dict[cat] for cat in range(self.max_score + 1))
+
+                for cat in range(self.max_score + 1):
+                    cat_prob_dict[cat] /= den
+
+                exp_score_df = sum(cat * df for cat, df in cat_prob_dict.items())
+
+                info_df = sum(df * (cat - exp_score_df) ** 2 for cat, df in cat_prob_dict.items())
+
+                result_list = exp_score_df.sum(axis=1)
+                info_list = info_df.sum(axis=1)
+
+                changes = (result_list - used_scores) / info_list
+                changes = changes.clip(-1, 1)
+                estimates -= changes
+
+        if warm_corr:
+            person_filter = pd.DataFrame(1, columns=items, index=scores)
+            estimates += self.warm(estimates, items, person_filter)
+
+        self.abil_table = estimates
 
     def warm(self,
-             ability,
-             person_filter,
-             difficulties):
+             abilities,
+             items,
+             person_filter):
 
         '''
         Warm's (1989) bias correction for ML ability estimates
         '''
 
-        exp_scores = [self.exp_score(ability, difficulty, self.thresholds)
-                      for flag, difficulty in zip(person_filter, difficulties)
-                      if flag == flag]
+        difficulties = self.diffs.loc[items]
 
-        variances = [self.variance(ability, difficulty, self.thresholds)
-                     for flag, difficulty in zip(person_filter, difficulties)
-                     if flag == flag]
+        c_p_df = {item: abilities - difficulties[item] for item in items}
+        c_p_df = pd.DataFrame(c_p_df)
 
-        part_1 = sum(sum((category ** 3) * self.cat_prob(ability, difficulty, category, self.thresholds)
-                         for category in range(self.max_score + 1))
-                     for flag, difficulty in zip(person_filter, difficulties)
-                     if flag == flag)
+        cat_prob_dict = {cat: (cat * c_p_df) - sum(self.thresholds[:cat + 1])
+                         for cat in range(self.max_score + 1)}
 
-        part_2 = 3 * sum((variance + (exp_score ** 2)) * exp_score
-                         for variance, exp_score in zip(variances, exp_scores))
+        for cat in range(self.max_score + 1):
+            cat_prob_dict[cat] = np.exp(cat_prob_dict[cat])
 
-        part_3 = sum(2 * (exp_score ** 3) for exp_score in exp_scores)
+        den = sum(cat_prob_dict[cat] for cat in range(self.max_score + 1))
 
-        warm_correction = ((part_1 - part_2 + part_3) /
-                           (2 * (sum(variances) ** 2)))
+        for cat in range(self.max_score + 1):
+            cat_prob_dict[cat] /= den
+            cat_prob_dict[cat] *= person_filter
+
+        exp_score_df = sum(cat * df for cat, df in cat_prob_dict.items())
+        exp_score_df *= person_filter
+
+        info_df = sum(df * (cat - exp_score_df) ** 2 for cat, df in cat_prob_dict.items())
+        info_df *= person_filter
+
+        part_1 = sum((cat ** 3) * cat_prob_dict[cat].sum(axis=1)
+                     for cat in range(self.max_score + 1))
+
+        part_2 = 3 * ((info_df + (exp_score_df ** 2)) * exp_score_df).sum(axis=1)
+
+        part_3 = (2 * (exp_score_df ** 3)).sum(axis=1)
+
+        den = 2 * (info_df.sum(axis=1) ** 2)
+
+        warm_correction = (part_1 - part_2 + part_3) / den
 
         return warm_correction
 
     def csem(self,
-             person,
+             persons=None,
              abilities=None,
              items=None):
 
@@ -5560,24 +5747,60 @@ class RSM(Rasch):
         Calculates conditional standard error of measurement for an ability.
         '''
 
-        if items is None:
-            items = self.items
-            difficulties = self.diffs
-
-        else:
-            difficulties = self.diffs.loc[items]
-
         if abilities is None:
             abilities = self.person_abilities
 
-        person_data = self.dataframe.loc[person, items].to_numpy()
+        if isinstance(abilities, int):
+            abilities = abilities.astype(float)
+
+        if isinstance(abilities, float):
+            abilities = {f'Ability {abilities}': abilities}
+            abilities = pd.Series(abilities)
+
+        if isinstance(abilities, list):
+            abilities = {f'Ability {ability}': ability
+                         for ability in abilities}
+            abilities = pd.Series(abilities)
+
+        if persons is not None:
+            abilities = self.person_abilities.loc[persons]
+
+        persons = abilities.index
+
+        if items is None:
+            items = self.items
+
+        if isinstance(items, str):
+            if items == 'all':
+                items = self.items
+
+        difficulties = self.diffs[items]
+
+        person_data = self.dataframe.loc[persons, items]
         person_filter = (person_data + 1) / (person_data + 1)
 
-        total_info = sum(self.variance(abilities[person], difficulty, self.thresholds)
-                         for flag, difficulty in zip(person_filter, difficulties)
-                         if flag == flag)
+        c_p_df = {item: abilities - difficulties[item] for item in items}
+        c_p_df = pd.DataFrame(c_p_df)
 
-        cond_sem = 1 / (total_info ** 0.5)
+        cat_prob_dict = {cat: (cat * c_p_df) - sum(self.thresholds[:cat + 1])
+                         for cat in range(self.max_score + 1)}
+
+        for cat in range(self.max_score + 1):
+            cat_prob_dict[cat] = np.exp(cat_prob_dict[cat])
+
+        den = sum(cat_prob_dict[cat] for cat in range(self.max_score + 1))
+
+        for cat in range(self.max_score + 1):
+            cat_prob_dict[cat] /= den
+            cat_prob_dict[cat] *= person_filter
+
+        exp_score_df = sum(cat * df for cat, df in cat_prob_dict.items())
+        exp_score_df *= person_filter
+
+        info_df = sum(df * (cat - exp_score_df) ** 2 for cat, df in cat_prob_dict.items())
+        info_df *= person_filter
+
+        cond_sem = 1 / (info_df.sum(axis=1) ** 0.5)
 
         return cond_sem
 
