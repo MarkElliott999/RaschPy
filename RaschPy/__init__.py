@@ -5643,7 +5643,7 @@ class RSM(Rasch):
         no_of_items = len(items)
 
         if ext_scores:
-            scores = np.array([score for score in range(no_of_items + 1)])
+            scores = np.array([score for score in range(no_of_items * self.max_score + 1)])
 
             used_scores = scores.astype(float)
             used_scores[0] += ext_score_adjustment
@@ -5655,7 +5655,7 @@ class RSM(Rasch):
 
         estimates = {score: np.log(used_score) - np.log(no_of_items - used_score) + self.diffs.loc[items].mean()
                      for score, used_score in zip(scores, used_scores)}
-        estimates = pd.Series(estimates, index=scores)
+        estimates = pd.Series(estimates)
 
         changes = pd.Series(1, index=scores)
         iters = 0
@@ -9371,7 +9371,7 @@ class MFRM(Rasch):
         self.anchor_raters_matrix = anchor_raters
 
     def abil_global(self,
-                    person,
+                    persons,
                     anchor=False,
                     items=None,
                     raters=None,
@@ -9380,88 +9380,134 @@ class MFRM(Rasch):
                     max_iters=100,
                     ext_score_adjustment=0.5):
 
+        '''
+        Creates a raw score to ability estimate look-up table for a set
+        of items using ML estimation (Newton-Raphson procedure) with
+        optional Warm (1989) bias correction.
+        '''
+
+        if isinstance(persons, str):
+            if persons == 'all':
+                persons = self.persons
+
+            else:
+                persons = [persons]
+
+        if persons is None:
+            persons = self.persons
+
         if isinstance(items, str):
             if items == 'all':
                 items = self.items.tolist()
+
+            else:
+                items = [items]
                 
         if items is None:
-            items = self.items.tolist()
+            items = self.items
          
         if raters is None:
-            raters = self.raters.tolist()
+            raters = self.raters
          
         if isinstance(raters, str):
             if raters == 'all':
-                raters = self.raters.tolist()
-                
+                raters = self.raters
+
         if isinstance(raters, pd.core.indexes.base.Index):
             raters = raters.tolist()
 
         if anchor:
             if hasattr(self, 'anchor_diffs_global'):
-                difficulties = self.anchor_diffs_global
+                difficulties = self.anchor_diffs_global.loc[items]
                 thresholds = self.anchor_thresholds_global
-                severities = self.anchor_severities_global
+                severities = self.anchor_severities_global.loc[raters]
 
             else:
                 print('Anchor calibration required')
                 return
 
         else:
-            difficulties = self.diffs
+            difficulties = self.diffs.loc[items]
             thresholds = self.thresholds
-            severities = self.severities_global
+            severities = self.severities_global.loc[raters]
           
-        person_data = self.dataframe[items].swaplevel().loc[person].loc[raters, :]
+        person_data = self.dataframe.loc[(raters, persons), items]
         person_filter = (person_data + 1) / (person_data + 1)
-        score = np.nansum(person_data)
 
-        ext_score = np.nansum(person_filter) * self.max_score
+        scores = {rater: person_data.loc[rater].sum(axis=1).astype(float)
+                  for rater in raters}
+        scores = sum(scores.values())
 
-        if score == 0:
-            score = ext_score_adjustment
+        ext_scores = {rater: person_filter.loc[rater].sum(axis=1) * self.max_score
+                      for rater in raters}
+        ext_scores = sum(ext_scores.values())
 
-        elif score == ext_score:
-            score -= ext_score_adjustment
+        scores[scores == 0] = ext_score_adjustment
+        scores[scores == ext_scores] -= ext_score_adjustment
+
+        diff_df = pd.concat([difficulties for person in persons], axis=1).T
+        diff_df.index = persons
+
+        mean_diffs = {rater: diff_df * person_filter.loc[rater]
+                      for rater in raters}
+        mean_diffs = sum(mean_diffs[rater].sum(axis=1)
+                         for rater in raters)
+
+        item_count = {rater: person_filter.loc[rater]
+                      for rater in raters}
+        item_count = sum(item_count[rater].sum(axis=1)
+                         for rater in raters)
+
+        mean_diffs /= item_count
 
         try:
-            estimate = log(score) - log(ext_score - score) + np.mean(difficulties)
-
-            change = 1
+            estimates = np.log(scores) - np.log(ext_scores - scores) + mean_diffs
+            changes = pd.Series({person: 1 for person in persons})
             iters = 0
 
-            while (abs(change) > tolerance) & (iters <= max_iters):
+            while (abs(changes).max() > tolerance) & (iters <= max_iters):
 
-                person_exp_matrix = [[self.exp_score_global(estimate, item, difficulties,
-                                                            rater, severities, thresholds)
-                                      for item in items]
-                                     for rater in raters]
-                person_exp_matrix = np.array(person_exp_matrix)
-                person_exp_matrix *= person_filter
-                result = np.nansum(person_exp_matrix)
+                c_p_df = {item: estimates - difficulties[item] for item in items}
+                c_p_df = {rater: pd.DataFrame(c_p_df) - severities.loc[rater]
+                          for rater in raters}
+                c_p_df = pd.concat(c_p_df.values(), keys=c_p_df.keys())
 
-                person_info_matrix = [[self.variance_global(estimate, item, difficulties,
-                                                            rater, severities, thresholds)
-                                      for item in items]
-                                     for rater in raters]
-                person_info_matrix = np.array(person_info_matrix)
-                person_info_matrix *= person_filter
-                info = np.nansum(person_info_matrix)
+                cat_prob_dict = {cat: (cat * c_p_df) - sum(thresholds[:cat + 1])
+                                 for cat in range(self.max_score + 1)}
 
-                change = max(-1, min(1, (result - score) / info))
-                estimate -= change
+                for cat in range(self.max_score + 1):
+                    cat_prob_dict[cat] = np.exp(cat_prob_dict[cat])
+
+                den = sum(cat_prob_dict[cat] for cat in range(self.max_score + 1))
+
+                for cat in range(self.max_score + 1):
+                    cat_prob_dict[cat] /= den
+                    cat_prob_dict[cat] *= person_filter
+
+                exp_score_df = sum(cat * df for cat, df in cat_prob_dict.items())
+                exp_score_df *= person_filter
+
+                info_df = sum(df * (cat - exp_score_df) ** 2 for cat, df in cat_prob_dict.items())
+                info_df *= person_filter
+
+                result_list = sum(exp_score_df.loc[rater].sum(axis=1) for rater in raters)
+                info_list = sum(info_df.loc[rater].sum(axis=1) for rater in raters)
+
+                changes = (result_list - scores) / info_list
+                changes = changes.clip(-1, 1)
+                estimates -= changes
                 iters += 1
 
             if warm_corr:
-                estimate += self.warm_global(estimate, person_filter, difficulties, thresholds, severities)
+                estimates += self.warm_global(estimates, items, raters, severities, person_filter)
 
             if iters >= max_iters:
                 print('Maximum iterations reached before convergence.')
 
         except:
-            estimate = np.nan
+            estimates = np.nan
 
-        return estimate
+        return estimates
 
     def person_abils_global(self,
                             anchor=False,
@@ -9477,29 +9523,15 @@ class MFRM(Rasch):
         estimation, includes optional Warm (1989) bias correction.
         '''
 
-        if items is None:
-            items = self.dataframe.columns.tolist()
-
-        if raters is None:
-            raters = self.raters.tolist()
+        estimates = self.abil_global(persons=None, anchor=anchor, items=items, raters=raters,
+                                     warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
+                                     ext_score_adjustment=ext_score_adjustment)
 
         if anchor:
-            if hasattr(self, 'anchor_diffs_global') == False:
-                print('Anchor calibration required')
-                return
-
-        estimates = [self.abil_global(person, anchor=anchor, items=items, raters=raters, warm_corr=warm_corr,
-                                      tolerance=tolerance, max_iters=max_iters,
-                                      ext_score_adjustment=ext_score_adjustment)
-                     for person in self.persons]
-
-        estimates = {person: estimate for person, estimate in zip(self.persons, estimates)}
-
-        if anchor:
-            self.anchor_abils_global = pd.Series(estimates)
+            self.anchor_abils_global = estimates
 
         else:
-            self.abils_global = pd.Series(estimates)
+            self.abils_global = estimates
 
     def score_abil_global(self,
                           score,
@@ -9513,13 +9545,22 @@ class MFRM(Rasch):
 
         if isinstance(items, str):
             if items == 'all':
-                items = None
+                items = self.items
             else:
                 items = [items]
 
+        if items is None:
+            items = self.items
+
+        if isinstance(raters, str):
+            if raters == 'all':
+                raters = [rater for rater in self.raters]
+            else:
+                raters = [raters]
+
         if anchor:
             if hasattr(self, 'anchor_diffs_global'):
-                difficulties = self.anchor_diffs_global
+                difficulties = self.anchor_diffs_global.loc[items]
                 thresholds = self.anchor_thresholds_global
                 severities = self.anchor_severities_global
 
@@ -9528,19 +9569,14 @@ class MFRM(Rasch):
                 return
 
         else:
-            difficulties = self.diffs
+            difficulties = self.diffs.loc[items]
             thresholds = self.thresholds
             severities = self.severities_global
 
-        dummy_sevs = pd.Series({'dummy_rater': 0})
-
-        if isinstance(raters, str):
-            if raters == 'all':
-                raters = [rater for rater in self.raters]
-            else:
-                raters = [raters]
-
         if raters is None:
+            severities = pd.Series({'dummy_rater': 0})
+            raters = ['dummy_rater']
+
             if items is None:
                 person_filter = np.array([1 for item in self.dataframe.columns])
 
@@ -9556,6 +9592,8 @@ class MFRM(Rasch):
                 person_filter = np.array([[1 for item in items]
                                           for rater in raters])
 
+        severities = severities.loc[raters]
+
         ext_score = person_filter.sum() * self.max_score
 
         if score == 0:
@@ -9564,8 +9602,7 @@ class MFRM(Rasch):
         elif score == ext_score:
             score -= ext_score_adjustment
 
-        estimate = log(score) - log(ext_score - score)
-
+        estimate = log(score) - log(ext_score - score) + difficulties.mean()
         change = 1
         iters = 0
 
@@ -9621,37 +9658,45 @@ class MFRM(Rasch):
             else:
                 sevs = severities
                 
-            estimate += self.warm_global(estimate, person_filter, difficulties, thresholds, sevs)
+            estimate += self.warm_global(pd.Series({score: estimate}), items, raters, sevs, person_filter)
 
         if iters >= max_iters:
             print('Maximum iterations reached before convergence.')
 
-        return estimate
+        if isinstance(estimate, pd.Series):
+            return estimate.iloc[0]
+
+        else:
+            return estimate
 
     def abil_lookup_table_global(self,
                                  anchor=False,
+                                 attribute=True,
                                  items=None,
                                  raters=None,
+                                 ext_scores=True,
                                  warm_corr=True,
                                  tolerance=0.00001,
                                  max_iters=100,
                                  ext_score_adjustment=0.5):
 
         if items is None:
+            items = self.items
+
             if raters is None:
-                person_filter = np.array([1 for item in self.dataframe.columns])
+                person_filter = np.array([1 for item in self.items])
 
             else:
-                person_filter = np.array([[1 for item in self.dataframe.columns]
+                person_filter = np.array([[1 for item in self.items]
                                           for rater in raters])
 
         elif isinstance(items, str):
             if items == 'all':
                 if raters is None:
-                    person_filter = np.array([1 for item in self.dataframe.columns])
+                    person_filter = np.array([1 for item in self.items])
 
                 else:
-                    person_filter = np.array([[1 for item in self.dataframe.columns]
+                    person_filter = np.array([[1 for item in self.items]
                                               for rater in raters])
 
             else:
@@ -9671,59 +9716,89 @@ class MFRM(Rasch):
 
         ext_score = person_filter.sum() * self.max_score
 
-        abil_table = {score: self.score_abil_global(score, anchor=anchor, items=items, raters=raters,
+        if ext_scores:
+            scores = np.array([score for score in range(ext_score + 1)])
+
+            used_scores = scores.astype(float)
+            used_scores[0] += ext_score_adjustment
+            used_scores[-1] -= ext_score_adjustment
+
+        else:
+            scores = np.array([score + 1 for score in range(ext_score - 1)])
+            used_scores = scores.astype(float)
+
+        abil_table = {score: self.score_abil_global(used_score, anchor=anchor, items=items, raters=raters,
                                                     warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                                     ext_score_adjustment=ext_score_adjustment)
-                      for score in range(ext_score + 1)}
+                      for score, used_score in zip(scores, used_scores)}
 
-        self.abil_table_global = pd.Series(abil_table)
+        if attribute:
+            self.abil_table_global = pd.Series(abil_table)
+
+        else:
+            return pd.Series(abil_table)
 
     def warm_global(self,
-                    estimate,
+                    abilities,
+                    items,
+                    raters,
+                    severities,
                     person_filter,
-                    difficulties,
-                    thresholds,
-                    severities):
+                    anchor=False):
 
         '''
         Warm's (1989) bias correction for ML abiity estimates
         '''
 
-        exp_matrix = [[self.exp_score_global(estimate, item, difficulties, rater, severities, thresholds)
-                       for item in difficulties.keys()]
-                      for rater in severities.keys()]
-        exp_matrix = np.array(exp_matrix)
-        exp_matrix *= person_filter
+        if isinstance(raters, str):
+            if raters == 'all':
+                raters = self.raters
 
-        info_matrix = [[self.variance_global(estimate, item, difficulties, rater, severities, thresholds)
-                        for item in difficulties.keys()]
-                       for rater in severities.keys()]
-        info_matrix = np.array(info_matrix)
-        info_matrix *= person_filter
+        difficulties = self.diffs.loc[items]
+        severities = severities.loc[raters]
 
-        cat_prob_dict = {category + 1: [[self.cat_prob_global(estimate, item, difficulties, rater, severities,
-                                                              category + 1, thresholds)
-                                         for item in difficulties.keys()]
-                                        for rater in severities.keys()]
-                         for category in range(self.max_score)}
+        c_p_df = {item: abilities - difficulties[item] for item in items}
+        c_p_df = {rater: pd.DataFrame(c_p_df) - severities.loc[rater]
+                  for rater in raters}
+        c_p_df = pd.concat(c_p_df.values(), keys=c_p_df.keys())
 
-        for category in range(self.max_score):
-            cat_prob_dict[category + 1] = np.array(cat_prob_dict[category + 1])
-            cat_prob_dict[category + 1] *= person_filter
+        cat_prob_dict = {cat: (cat * c_p_df) - sum(self.thresholds[:cat + 1])
+                         for cat in range(self.max_score + 1)}
 
-        part_1 = sum(((category + 1) ** 3) * np.nansum(cat_prob_dict[category + 1])
-                     for category in range(self.max_score))
+        for cat in range(self.max_score + 1):
+            cat_prob_dict[cat] = np.exp(cat_prob_dict[cat])
 
-        part_2 = 3 * np.nansum((info_matrix + (exp_matrix ** 2)) * exp_matrix)
+        den = sum(cat_prob_dict[cat] for cat in range(self.max_score + 1))
 
-        part_3 = np.nansum(2 * (exp_matrix ** 3))
+        for cat in range(self.max_score + 1):
+            cat_prob_dict[cat] /= den
+            cat_prob_dict[cat] *= person_filter
 
-        warm_correction = 0.5 * (part_1 - part_2 + part_3) / (np.nansum(info_matrix) ** 2)
+        exp_score_df = sum(cat * df for cat, df in cat_prob_dict.items())
+        exp_score_df *= person_filter
+
+        info_df = sum(df * (cat - exp_score_df) ** 2 for cat, df in cat_prob_dict.items())
+        info_df *= person_filter
+
+        part_1 = sum((cat ** 3) * cat_prob_dict[cat].sum(axis=1)
+                     for cat in range(self.max_score + 1))
+        part_1 = sum(part_1.loc[rater] for rater in raters)
+
+        part_2 = 3 * ((info_df + (exp_score_df ** 2)) * exp_score_df).sum(axis=1)
+        part_2 = sum(part_2.loc[rater] for rater in raters)
+
+        part_3 = (2 * (exp_score_df ** 3)).sum(axis=1)
+        part_3 = sum(part_3.loc[rater] for rater in raters)
+
+        den = 2 * (sum(info_df.loc[rater].sum(axis=1) for rater in raters) ** 2)
+
+        warm_correction = (part_1 - part_2 + part_3) / den
 
         return warm_correction
 
     def csem_global(self,
-                    person,
+                    persons=None,
+                    abilities=None,
                     anchor=False,
                     items=None,
                     raters=None,
@@ -9756,20 +9831,49 @@ class MFRM(Rasch):
         difficulties = difficulties.loc[items]
         severities = severities[raters]
 
-        ability = self.abil_global(person, anchor=anchor, items=items, raters=raters, warm_corr=warm_corr,
-                                   tolerance=tolerance, max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
+        if persons is not None:
+            if anchor:
+                abilities = self.anchor_abils_global.loc[persons]
+            else:
+                abilities = self.abils_global.loc[persons]
 
-        info_list = [self.variance_global(ability, item, difficulties, rater, severities, thresholds)
-                     for item in items for rater in raters
-                     if self.dataframe.loc[(rater, person), item] == self.dataframe.loc[(rater, person), item]]
+            person_data = self.dataframe.loc[persons, items]
+            person_filter = (person_data + 1) / (person_data + 1)
 
-        total_info = sum(info_list)
-        csem = 1 / (total_info ** 0.5)
+        if abilities is not None:
+            abilities = {f'Ability_{abil}': abil for abil in abilities}
+            abilities = pd.Series(abilities)
+            person_filter = pd.DataFrame(1, index=abilities.index, columns=items)
 
-        return csem
+        c_p_df = {item: abilities - difficulties[item] for item in items}
+        c_p_df = {rater: pd.DataFrame(c_p_df) - severities.loc[rater]
+                  for rater in raters}
+        c_p_df = pd.concat(c_p_df.values(), keys=c_p_df.keys())
+
+        cat_prob_dict = {cat: (cat * c_p_df) - sum(self.thresholds[:cat + 1])
+                         for cat in range(self.max_score + 1)}
+
+        for cat in range(self.max_score + 1):
+            cat_prob_dict[cat] = np.exp(cat_prob_dict[cat])
+
+        den = sum(cat_prob_dict[cat] for cat in range(self.max_score + 1))
+
+        for cat in range(self.max_score + 1):
+            cat_prob_dict[cat] /= den
+            cat_prob_dict[cat] *= person_filter
+
+        exp_score_df = sum(cat * df for cat, df in cat_prob_dict.items())
+        exp_score_df *= person_filter
+
+        info_df = sum(df * (cat - exp_score_df) ** 2 for cat, df in cat_prob_dict.items())
+        info_df *= person_filter
+
+        cond_sems = 1 / (info_df.sum(axis=1) ** 0.5)
+
+        return cond_sems
 
     def abil_items(self,
-                   person,
+                   persons,
                    anchor=False,
                    items=None,
                    raters=None,
@@ -9778,15 +9882,34 @@ class MFRM(Rasch):
                    max_iters=100,
                    ext_score_adjustment=0.5):
 
+        '''
+        Creates a raw score to ability estimate look-up table for a set
+        of items using ML estimation (Newton-Raphson procedure) with
+        optional Warm (1989) bias correction.
+        '''
+
+        if isinstance(persons, str):
+            if persons == 'all':
+                persons = self.persons
+
+            else:
+                persons = [persons]
+
+        if persons is None:
+            persons = self.persons
+
         if isinstance(items, str):
             if items == 'all':
                 items = self.items.tolist()
+
+            else:
+                items = [items]
                 
         if items is None:
-            items = self.items.tolist()
+            items = self.items
          
         if raters is None:
-            raters = self.raters.tolist()
+            raters = self.raters
          
         if isinstance(raters, str):
             if raters == 'all':
@@ -9797,68 +9920,102 @@ class MFRM(Rasch):
 
         if anchor:
             if hasattr(self, 'anchor_diffs_items'):
-                difficulties = self.anchor_diffs_items
+                difficulties = self.anchor_diffs_items.loc[items]
                 thresholds = self.anchor_thresholds_items
-                severities = self.anchor_severities_items
+                severities = {rater: self.anchor_severities_items[rater]
+                              for rater in raters}
 
             else:
                 print('Anchor calibration required')
                 return
 
         else:
-            difficulties = self.diffs
+            difficulties = self.diffs.loc[items]
             thresholds = self.thresholds
-            severities = self.severities_items
-         
-        person_data = self.dataframe[items].swaplevel().loc[person].loc[raters, :]
+            severities = {rater: self.severities_items[rater]
+                          for rater in raters}
+
+        person_data = self.dataframe.loc[(raters, persons), items]
         person_filter = (person_data + 1) / (person_data + 1)
-        score = np.nansum(person_data)
 
-        ext_score = np.nansum(person_filter) * self.max_score
+        scores = {rater: person_data.loc[rater].sum(axis=1).astype(float)
+                  for rater in raters}
+        scores = sum(scores.values())
 
-        if score == 0:
-            score = ext_score_adjustment
+        ext_scores = {rater: person_filter.loc[rater].sum(axis=1) * self.max_score
+                      for rater in raters}
+        ext_scores = sum(ext_scores.values())
 
-        elif score == ext_score:
-            score -= ext_score_adjustment
+        scores[scores == 0] = ext_score_adjustment
+        scores[scores == ext_scores] -= ext_score_adjustment
+
+        diff_df = pd.concat([difficulties for person in persons], axis=1).T
+        diff_df.index = persons
+
+        mean_diffs = {rater: diff_df * person_filter.loc[rater]
+                      for rater in raters}
+        mean_diffs = sum(mean_diffs[rater].sum(axis=1)
+                         for rater in raters)
+
+        item_count = {rater: person_filter.loc[rater]
+                      for rater in raters}
+        item_count = sum(item_count[rater].sum(axis=1)
+                         for rater in raters)
+
+        mean_diffs /= item_count
+
         try:
-            estimate = log(score) - log(ext_score - score) + np.mean(difficulties)
-
-            change = 1
+            estimates = np.log(scores) - np.log(ext_scores - scores) + mean_diffs
+            changes = pd.Series({person: 1 for person in persons})
             iters = 0
 
-            while (abs(change) > tolerance) & (iters <= max_iters):
+            while (abs(changes).max() > tolerance) & (iters <= max_iters):
 
-                person_exp_matrix = [[self.exp_score_items(estimate, item, difficulties,
-                                                           rater, severities, thresholds)
-                                      for item in items]
-                                     for rater in raters]
-                person_exp_matrix = np.array(person_exp_matrix)
-                person_exp_matrix *= person_filter
-                result = np.nansum(person_exp_matrix)
+                c_p_df = {rater: {item: estimates - difficulties[item] - severities[rater][item]
+                                  for item in items}
+                          for rater in raters}
 
-                person_info_matrix = [[self.variance_items(estimate, item, difficulties,
-                                                           rater, severities, thresholds)
-                                       for item in items]
-                                      for rater in raters]
-                person_info_matrix = np.array(person_info_matrix)
-                person_info_matrix *= person_filter
-                info = np.nansum(person_info_matrix)
+                for rater in self.raters:
+                    c_p_df[rater] = pd.DataFrame(c_p_df[rater])
 
-                change = max(-1, min(1, (result - score) / info))
-                estimate -= change
+                c_p_df = pd.concat(c_p_df.values(), keys=c_p_df.keys())
+
+                cat_prob_dict = {cat: (cat * c_p_df) - sum(thresholds[:cat + 1])
+                                 for cat in range(self.max_score + 1)}
+
+                for cat in range(self.max_score + 1):
+                    cat_prob_dict[cat] = np.exp(cat_prob_dict[cat])
+
+                den = sum(cat_prob_dict[cat] for cat in range(self.max_score + 1))
+
+                for cat in range(self.max_score + 1):
+                    cat_prob_dict[cat] /= den
+                    cat_prob_dict[cat] *= person_filter
+
+                exp_score_df = sum(cat * df for cat, df in cat_prob_dict.items())
+                exp_score_df *= person_filter
+
+                info_df = sum(df * (cat - exp_score_df) ** 2 for cat, df in cat_prob_dict.items())
+                info_df *= person_filter
+
+                result_list = sum(exp_score_df.loc[rater].sum(axis=1) for rater in raters)
+                info_list = sum(info_df.loc[rater].sum(axis=1) for rater in raters)
+
+                changes = (result_list - scores) / info_list
+                changes = changes.clip(-1, 1)
+                estimates -= changes
                 iters += 1
 
             if warm_corr:
-                estimate += self.warm_items(estimate, person_filter, difficulties, thresholds, severities)
+                estimates += self.warm_items(estimates, items, raters, severities, person_filter)
 
             if iters >= max_iters:
                 print('Maximum iterations reached before convergence.')
 
         except:
-            estimate = np.nan
+            estimates = np.nan
 
-        return estimate
+        return estimates
 
     def person_abils_items(self,
                            anchor=False,
@@ -9874,29 +10031,20 @@ class MFRM(Rasch):
         estimation, includes optional Warm (1989) bias correction.
         '''
 
-        if items is None:
-            items = self.dataframe.columns.tolist()
+        '''
+        Creates raw score to ability estimate look-up table. Newton-Raphson ML
+        estimation, includes optional Warm (1989) bias correction.
+        '''
 
-        if raters is None:
-            raters = self.raters.tolist()
-
-        if anchor:
-            if hasattr(self, 'anchor_diffs_items') == False:
-                print('Anchor calibration required')
-                return
-
-        estimates = [self.abil_items(person, anchor=anchor, items=items, raters=raters, warm_corr=warm_corr,
-                                     tolerance=tolerance, max_iters=max_iters,
-                                     ext_score_adjustment=ext_score_adjustment)
-                     for person in self.persons]
-
-        estimates = {person: estimate for person, estimate in zip(self.persons, estimates)}
+        estimates = self.abil_items(persons=None, anchor=anchor, items=items, raters=raters,
+                                    warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
+                                    ext_score_adjustment=ext_score_adjustment)
 
         if anchor:
-            self.anchor_abils_items = pd.Series(estimates)
+            self.anchor_abils_items = estimates
 
         else:
-            self.abils_items = pd.Series(estimates)
+            self.abils_items = estimates
 
     def score_abil_items(self,
                          score,
@@ -9910,33 +10058,43 @@ class MFRM(Rasch):
         
         if isinstance(items, str):
            if items == 'all':
-               items = None
+               items = self.items
            else:
                items = [items]
+
+        if items is None:
+            items = self.items
+
+        if isinstance(raters, str):
+            if raters == 'all':
+                raters = [rater for rater in self.raters]
+            else:
+                raters = [raters]
  
         if anchor:
             if hasattr(self, 'anchor_diffs_items'):
-                difficulties = self.anchor_diffs_items
+                difficulties = self.anchor_diffs_items.loc[items]
                 thresholds = self.anchor_thresholds_items
-                severities = self.anchor_severities_items
+
+                if raters is None:
+                    severities = pd.Series({'dummy_rater': {item: 0 for item in self.dataframe.columns}})
+
+                else:
+                    severities = {rater: self.anchor_severities_items[rater] for rater in raters}
  
             else:
                 print('Anchor calibration required')
                 return
  
         else:
-            difficulties = self.diffs
+            difficulties = self.diffs.loc[items]
             thresholds = self.thresholds
-            severities = self.severities_items
- 
-        dummy_sevs = pd.Series({'dummy_rater': {item: 0
-                                                for item in self.dataframe.columns}})
- 
-        if isinstance(raters, str):
-            if raters == 'all':
-                raters = [rater for rater in self.raters]
+
+            if raters is None:
+                severities = pd.Series({'dummy_rater': {item: 0 for item in self.dataframe.columns}})
+
             else:
-                raters = [raters]
+                severities = {rater: self.severities_items[rater] for rater in raters}
 
         if raters is None:
             if items is None:
@@ -9954,6 +10112,9 @@ class MFRM(Rasch):
                 person_filter = np.array([[1 for item in items]
                                           for rater in raters])
 
+        if raters is None:
+            raters = ['dummy_rater']
+
         ext_score = person_filter.sum() * self.max_score
 
         if score == 0:
@@ -9962,8 +10123,7 @@ class MFRM(Rasch):
         elif score == ext_score:
             score -= ext_score_adjustment
 
-        estimate = log(score) - log(ext_score - score)
-
+        estimate = log(score) - log(ext_score - score) + difficulties.mean()
         change = 1
         iters = 0
 
@@ -9972,20 +10132,20 @@ class MFRM(Rasch):
             if raters is None:
                 if items is None:
                     exp_list = [self.exp_score_items(estimate, item, difficulties, 'dummy_rater',
-                                                      dummy_sevs, thresholds)
+                                                      severities, thresholds)
                                 for item in self.dataframe.columns]
 
                     info_list = [self.variance_items(estimate, item, difficulties, 'dummy_rater',
-                                                      dummy_sevs, thresholds)
+                                                      severities, thresholds)
                                  for item in self.dataframe.columns]
 
                 else:
                     exp_list = [self.exp_score_items(estimate, item, difficulties, 'dummy_rater',
-                                                      dummy_sevs, thresholds)
+                                                      severities, thresholds)
                                 for item in items]
 
                     info_list = [self.variance_items(estimate, item, difficulties, 'dummy_rater',
-                                                      dummy_sevs, thresholds)
+                                                      severities, thresholds)
                                  for item in items]
 
             else:
@@ -10014,34 +10174,37 @@ class MFRM(Rasch):
             iters += 1
 
         if warm_corr:
-            if raters is None:
-                dummy_sevs = {'dummy_rater': {item: 0 for item in self.dataframe.columns}}
-                estimate += self.warm_items(estimate, person_filter, difficulties, thresholds, dummy_sevs)
-
-            else:
-                sevs = dict((rater, severities[rater]) for rater in raters)
-                estimate += self.warm_items(estimate, person_filter, difficulties, thresholds, sevs)
+            estimate += self.warm_items(pd.Series({score: estimate}), items, raters, severities, person_filter)
 
         if iters >= max_iters:
             print('Maximum iterations reached before convergence.')
 
-        return estimate
+        if isinstance(estimate, pd.Series):
+            return estimate.iloc[0]
+
+        else:
+            return estimate
 
     def abil_lookup_table_items(self,
                                 anchor=False,
+                                attribute=True,
                                 items=None,
                                 raters=None,
+                                ext_scores=True,
                                 warm_corr=True,
                                 tolerance=0.00001,
                                 max_iters=100,
                                 ext_score_adjustment=0.5):
 
         if items is None:
+            items = self.items
+
+        if items is None:
             if raters is None:
-                person_filter = np.array([1 for item in self.dataframe.columns])
+                person_filter = np.array([1 for item in self.items])
 
             else:
-                person_filter = np.array([[1 for item in self.dataframe.columns]
+                person_filter = np.array([[1 for item in self.items]
                                           for rater in raters])
 
         elif isinstance(items, str):
@@ -10070,59 +10233,100 @@ class MFRM(Rasch):
 
         ext_score = person_filter.sum() * self.max_score
 
-        abil_table = {score: self.score_abil_items(score, anchor=anchor, items=items, raters=raters,
+        if ext_scores:
+            scores = np.array([score for score in range(ext_score + 1)])
+
+            used_scores = scores.astype(float)
+            used_scores[0] += ext_score_adjustment
+            used_scores[-1] -= ext_score_adjustment
+
+        else:
+            scores = np.array([score + 1 for score in range(ext_score - 1)])
+            used_scores = scores.astype(float)
+
+        abil_table = {score: self.score_abil_items(used_score, anchor=anchor, items=items, raters=raters,
                                                    warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                                    ext_score_adjustment=ext_score_adjustment)
-                      for score in range(ext_score + 1)}
+                      for score, used_score in zip(scores, used_scores)}
 
-        self.abil_table_items = pd.Series(abil_table)
+        if attribute:
+            self.abil_table_items = pd.Series(abil_table)
+
+        else:
+            return pd.Series(abil_table)
 
     def warm_items(self,
-                   estimate,
+                   abilities,
+                   items,
+                   raters,
+                   severities,
                    person_filter,
-                   difficulties,
-                   thresholds,
-                   severities):
+                   anchor=False):
 
         '''
         Warm's (1989) bias correction for ML abiity estimates
         '''
 
-        exp_matrix = [[self.exp_score_items(estimate, item, difficulties, rater, severities, thresholds)
-                       for item in difficulties.keys()]
-                      for rater in severities.keys()]
-        exp_matrix = np.array(exp_matrix)
-        exp_matrix *= person_filter
+        if isinstance(raters, str):
+            if raters == 'all':
+                raters = self.raters
 
-        info_matrix = [[self.variance_items(estimate, item, difficulties, rater, severities, thresholds)
-                        for item in difficulties.keys()]
-                       for rater in severities.keys()]
-        info_matrix = np.array(info_matrix)
-        info_matrix *= person_filter
+        if anchor:
+            difficulties = self.anchor_diffs_items.loc[items]
+            thresholds = self.anchor_thresholds_items
 
-        cat_prob_dict = {category + 1: [[self.cat_prob_items(estimate, item, difficulties, rater,
-                                                             severities, category + 1, thresholds)
-                                         for item in difficulties.keys()]
-                                        for rater in severities.keys()]
-                         for category in range(self.max_score)}
+        else:
+            difficulties = self.diffs.loc[items]
+            thresholds = self.thresholds
 
-        for category in range(self.max_score):
-            cat_prob_dict[category + 1] = np.array(cat_prob_dict[category + 1])
-            cat_prob_dict[category + 1] *= person_filter
+        severities = {rater: severities[rater] for rater in raters}
 
-        part_1 = sum(((category + 1) ** 3) * np.nansum(cat_prob_dict[category + 1])
-                     for category in range(self.max_score))
+        if isinstance(abilities, (float, np.float64)):
+            abilities = pd.Series({'dummy': abilities})
 
-        part_2 = 3 * np.nansum((info_matrix + (exp_matrix ** 2)) * exp_matrix)
+        c_p_df = {rater: {item: abilities - difficulties.loc[item] - severities[rater][item]
+                          for item in items}
+                  for rater in raters}
+        c_p_df = {rater: pd.DataFrame(c_p_df[rater]) for rater in raters}
+        c_p_df = pd.concat(c_p_df.values(), keys=c_p_df.keys())
 
-        part_3 = np.nansum(2 * (exp_matrix ** 3))
+        cat_prob_dict = {cat: (cat * c_p_df) - sum(thresholds[:cat + 1])
+                         for cat in range(self.max_score + 1)}
 
-        warm_correction = 0.5 * (part_1 - part_2 + part_3) / (np.nansum(info_matrix) ** 2)
+        for cat in range(self.max_score + 1):
+            cat_prob_dict[cat] = np.exp(cat_prob_dict[cat])
+
+        den = sum(cat_prob_dict[cat] for cat in range(self.max_score + 1))
+
+        for cat in range(self.max_score + 1):
+            cat_prob_dict[cat] /= den
+            cat_prob_dict[cat] *= person_filter
+
+        exp_score_df = sum(cat * df for cat, df in cat_prob_dict.items())
+        exp_score_df *= person_filter
+
+        info_df = sum(df * (cat - exp_score_df) ** 2 for cat, df in cat_prob_dict.items())
+        info_df *= person_filter
+
+        part_1 = sum((cat ** 3) * cat_prob_dict[cat].sum(axis=1)
+                     for cat in range(self.max_score + 1))
+        part_1 = sum(part_1.loc[rater] for rater in raters)
+
+        part_2 = 3 * ((info_df + (exp_score_df ** 2)) * exp_score_df).sum(axis=1)
+        part_2 = sum(part_2.loc[rater] for rater in raters)
+
+        part_3 = (2 * (exp_score_df ** 3)).sum(axis=1)
+        part_3 = sum(part_3.loc[rater] for rater in raters)
+
+        den = 2 * (sum(info_df.loc[rater].sum(axis=1) for rater in raters) ** 2)
+
+        warm_correction = (part_1 - part_2 + part_3) / den
 
         return warm_correction
 
     def csem_items(self,
-                   person,
+                   persons=None,
+                   abilities=None,
                    anchor=False,
                    items=None,
                    raters=None,
@@ -10155,20 +10359,52 @@ class MFRM(Rasch):
         difficulties = difficulties.loc[items]
         severities = severities[raters]
 
-        ability = self.abil_items(person, anchor=anchor, items=items, raters=raters, warm_corr=warm_corr,
-                                   tolerance=tolerance, max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
+        if persons is not None:
+            if anchor:
+                abilities = self.anchor_abils_items.loc[persons]
+            else:
+                abilities = self.abils_items.loc[persons]
 
-        info_list = [self.variance_items(ability, item, difficulties, rater, severities, thresholds)
-                     for item in items for rater in raters
-                     if self.dataframe.loc[(rater, person), item] == self.dataframe.loc[(rater, person), item]]
+            person_data = self.dataframe.loc[persons, items]
+            person_filter = (person_data + 1) / (person_data + 1)
 
-        total_info = sum(info_list)
-        csem = 1 / (total_info ** 0.5)
+        if abilities is not None:
+            abilities = {f'Ability_{abil}': abil for abil in abilities}
+            abilities = pd.Series(abilities)
+            person_filter = pd.DataFrame(1, index=abilities.index, columns=items)
 
-        return csem
+        c_p_df = {rater: {item: abilities - difficulties[item] - severities[rater][item]
+                          for item in self.items}
+                  for rater in self.raters}
+        for rater in self.raters:
+            c_p_df[rater] = pd.DataFrame(c_p_df[rater])
+
+        c_p_df = pd.concat(c_p_df.values(), keys=c_p_df.keys())
+
+        cat_prob_dict = {cat: (cat * c_p_df) - sum(self.thresholds[:cat + 1])
+                         for cat in range(self.max_score + 1)}
+
+        for cat in range(self.max_score + 1):
+            cat_prob_dict[cat] = np.exp(cat_prob_dict[cat])
+
+        den = sum(cat_prob_dict[cat] for cat in range(self.max_score + 1))
+
+        for cat in range(self.max_score + 1):
+            cat_prob_dict[cat] /= den
+            cat_prob_dict[cat] *= person_filter
+
+        exp_score_df = sum(cat * df for cat, df in cat_prob_dict.items())
+        exp_score_df *= person_filter
+
+        info_df = sum(df * (cat - exp_score_df) ** 2 for cat, df in cat_prob_dict.items())
+        info_df *= person_filter
+
+        cond_sems = 1 / (info_df.sum(axis=1) ** 0.5)
+
+        return cond_sems
 
     def abil_thresholds(self,
-                        person,
+                        persons,
                         anchor=False,
                         items=None,
                         raters=None,
@@ -10177,88 +10413,137 @@ class MFRM(Rasch):
                         max_iters=100,
                         ext_score_adjustment=0.5):
 
+        '''
+        Creates a raw score to ability estimate look-up table for a set
+        of items using ML estimation (Newton-Raphson procedure) with
+        optional Warm (1989) bias correction.
+        '''
+
+        if isinstance(persons, str):
+            if persons == 'all':
+                persons = self.persons
+
+            else:
+                persons = [persons]
+
+        if persons is None:
+            persons = self.persons
+
         if isinstance(items, str):
             if items == 'all':
                 items = self.items.tolist()
-                
+
+            else:
+                items = [items]
+
         if items is None:
-            items = self.items.tolist()
+            items = self.items
 
         if raters is None:
-            raters = self.raters.tolist()
+            raters = self.raters
 
         if isinstance(raters, str):
             if raters == 'all':
-                raters = self.raters.tolist()
-                
+                raters = self.raters
+
         if isinstance(raters, pd.core.indexes.base.Index):
             raters = raters.tolist()
 
         if anchor:
             if hasattr(self, 'anchor_diffs_thresholds'):
-                difficulties = self.anchor_diffs_thresholds
+                difficulties = self.anchor_diffs_thresholds.loc[items]
                 thresholds = self.anchor_thresholds_thresholds
-                severities = self.anchor_severities_thresholds
+                severities = {rater: self.anchor_severities_thresholds[rater]
+                              for rater in raters}
 
             else:
                 print('Anchor calibration required')
                 return
 
         else:
-            difficulties = self.diffs
+            difficulties = self.diffs.loc[items]
             thresholds = self.thresholds
-            severities = self.severities_thresholds
+            severities = {rater: self.severities_thresholds[rater]
+                          for rater in raters}
 
-        person_data = self.dataframe[items].swaplevel().loc[person].loc[raters, :]
+        person_data = self.dataframe.loc[(raters, persons), items]
         person_filter = (person_data + 1) / (person_data + 1)
-        score = np.nansum(person_data)
 
-        ext_score = np.nansum(person_filter) * self.max_score
+        scores = {rater: person_data.loc[rater].sum(axis=1).astype(float)
+                  for rater in raters}
+        scores = sum(scores.values())
 
-        if score == 0:
-            score = ext_score_adjustment
+        ext_scores = {rater: person_filter.loc[rater].sum(axis=1) * self.max_score
+                      for rater in raters}
+        ext_scores = sum(ext_scores.values())
 
-        elif score == ext_score:
-            score -= ext_score_adjustment
+        scores[scores == 0] = ext_score_adjustment
+        scores[scores == ext_scores] -= ext_score_adjustment
+
+        diff_df = pd.concat([difficulties for person in persons], axis=1).T
+        diff_df.index = persons
+
+        mean_diffs = {rater: diff_df * person_filter.loc[rater]
+                      for rater in raters}
+        mean_diffs = sum(mean_diffs[rater].sum(axis=1)
+                         for rater in raters)
+
+        item_count = {rater: person_filter.loc[rater]
+                      for rater in raters}
+        item_count = sum(item_count[rater].sum(axis=1)
+                         for rater in raters)
+
+        mean_diffs /= item_count
 
         try:
-            estimate = log(score) - log(ext_score - score) + np.mean(difficulties)
-
-            change = 1
+            estimates = np.log(scores) - np.log(ext_scores - scores) + mean_diffs
+            changes = pd.Series({person: 1 for person in persons})
             iters = 0
 
-            while (abs(change) > tolerance) & (iters <= max_iters):
+            while (abs(changes).max() > tolerance) & (iters <= max_iters):
 
-                person_exp_matrix = [[self.exp_score_thresholds(estimate, item, difficulties, rater, severities,
-                                                                thresholds)
-                                      for item in difficulties.keys()]
-                                     for rater in raters]
-                person_exp_matrix = np.array(person_exp_matrix)
-                person_exp_matrix *= person_filter
-                result = np.nansum(person_exp_matrix)
+                c_p_df = {item: estimates - difficulties.loc[item]
+                          for item in items}
+                c_p_df = pd.DataFrame(c_p_df)
 
-                person_info_matrix = [[self.variance_thresholds(estimate, item, difficulties, rater, severities,
-                                                                thresholds)
-                                       for item in difficulties.keys()]
-                                      for rater in raters]
-                person_info_matrix = np.array(person_info_matrix)
-                person_info_matrix *= person_filter
-                info = np.nansum(person_info_matrix)
+                cat_probs = {cat: {rater: (cat * c_p_df - sum(thresholds[:cat + 1]) - sum(severities[rater][:cat + 1]))
+                                   for rater in raters}
+                             for cat in range(self.max_score + 1)}
 
-                change = max(-1, min(1, (result - score) / info))
-                estimate -= change
+                for cat in range(self.max_score + 1):
+                    cat_probs[cat] = pd.concat(cat_probs[cat].values(), keys=cat_probs[cat].keys())
+                    cat_probs[cat] = np.exp(cat_probs[cat])
+
+                den = sum(cat_probs[cat] for cat in range(self.max_score + 1))
+
+                for cat in range(self.max_score + 1):
+                    cat_probs[cat] /= den
+                    cat_probs[cat] *= person_filter
+
+                exp_score_df = sum(cat * df for cat, df in cat_probs.items())
+                exp_score_df *= person_filter
+
+                info_df = sum(df * (cat - exp_score_df) ** 2 for cat, df in cat_probs.items())
+                info_df *= person_filter
+
+                result_list = sum(exp_score_df.loc[rater].sum(axis=1) for rater in raters)
+                info_list = sum(info_df.loc[rater].sum(axis=1) for rater in raters)
+
+                changes = (result_list - scores) / info_list
+                changes = changes.clip(-1, 1)
+                estimates -= changes
                 iters += 1
 
             if warm_corr:
-                estimate += self.warm_thresholds(estimate, person_filter, difficulties, thresholds, severities)
+                estimates += self.warm_thresholds(estimates, items, raters, severities, person_filter, anchor=anchor)
 
             if iters >= max_iters:
                 print('Maximum iterations reached before convergence.')
 
         except:
-            estimate = np.nan
+            estimates = np.nan
 
-        return estimate
+        return estimates
 
     def person_abils_thresholds(self,
                                 anchor=False,
@@ -10274,29 +10559,15 @@ class MFRM(Rasch):
         estimation, includes optional Warm (1989) bias correction.
         '''
 
-        if items is None:
-            items = self.dataframe.columns.tolist()
-
-        if raters is None:
-            raters = self.raters.tolist()
+        estimates = self.abil_thresholds(persons=None, anchor=anchor, items=items, raters=raters,
+                                         warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
+                                         ext_score_adjustment=ext_score_adjustment)
 
         if anchor:
-            if hasattr(self, 'anchor_diffs_thresholds') == False:
-                print('Anchor calibration required')
-                return
-
-        estimates = [self.abil_thresholds(person, anchor=anchor, items=items, raters=raters, warm_corr=warm_corr,
-                                          tolerance=tolerance, max_iters=max_iters,
-                                          ext_score_adjustment=ext_score_adjustment)
-                     for person in self.persons]
-
-        estimates = {person: estimate for person, estimate in zip(self.persons, estimates)}
-
-        if anchor:
-            self.anchor_abils_thresholds = pd.Series(estimates)
+            self.anchor_abils_thresholds = estimates
 
         else:
-            self.abils_thresholds = pd.Series(estimates)
+            self.abils_thresholds = estimates
 
     def score_abil_thresholds(self,
                               score,
@@ -10310,33 +10581,43 @@ class MFRM(Rasch):
 
         if isinstance(items, str):
             if items == 'all':
-                items = None
+                items = self.items
             else:
                 items = [items]
 
-        if anchor:
-            if hasattr(self, 'anchor_diffs_thresholds'):
-                difficulties = self.anchor_diffs_thresholds
-                thresholds = self.anchor_thresholds_thresholds
-                severities = self.anchor_severities_thresholds
-
-            else:
-                print('Anchor calibration required')
-                return
-
-        else:
-            difficulties = self.diffs
-            thresholds = self.thresholds
-            severities = self.severities_thresholds
-
-        dummy_sevs = pd.Series({'dummy_rater':
-                                [0 for threshold in range(self.max_score + 1)]})
+        if items is None:
+            items = self.items
 
         if isinstance(raters, str):
             if raters == 'all':
                 raters = [rater for rater in self.raters]
             else:
                 raters = [raters]
+
+        if anchor:
+            if hasattr(self, 'anchor_diffs_matrix'):
+                difficulties = self.anchor_diffs_thresholds.loc[items]
+                thresholds = self.anchor_thresholds_thresholds
+
+                if raters is None:
+                    severities = {'dummy_rater': [0 for threshold in range(self.max_score + 1)]}
+
+                else:
+                    severities = {rater: self.anchor_severities_thresholds[rater] for rater in raters}
+
+            else:
+                print('Anchor calibration required')
+                return
+
+        else:
+            difficulties = self.diffs.loc[items]
+            thresholds = self.thresholds
+
+            if raters is None:
+                severities = {'dummy_rater': [0 for threshold in range(self.max_score + 1)]}
+
+            else:
+                severities = {rater: self.severities_thresholds[rater] for rater in raters}
 
         if raters is None:
             if items is None:
@@ -10352,6 +10633,9 @@ class MFRM(Rasch):
             else:
                 person_filter = np.array([[1 for item in items] for rater in raters])
 
+        if raters is None:
+            raters = ['dummy_rater']
+
         ext_score = person_filter.sum() * self.max_score
 
         if score == 0:
@@ -10360,8 +10644,7 @@ class MFRM(Rasch):
         elif score == ext_score:
             score -= ext_score_adjustment
 
-        estimate = log(score) - log(ext_score - score)
-
+        estimate = log(score) - log(ext_score - score) + difficulties.mean()
         change = 1
         iters = 0
 
@@ -10369,21 +10652,21 @@ class MFRM(Rasch):
 
             if raters is None:
                 if items is None:
-                    exp_list = [self.exp_score_thresholds(estimate, item, difficulties, 'dummy_rater',
-                                                          dummy_sevs, thresholds)
+                    exp_list = [self.exp_score_thresholds(estimate, item, difficulties, raters,
+                                                          severities, thresholds)
                                 for item in self.dataframe.columns]
 
-                    info_list = [self.variance_thresholds(estimate, item, difficulties, 'dummy_rater',
-                                                          dummy_sevs, thresholds)
+                    info_list = [self.variance_thresholds(estimate, item, difficulties, raters,
+                                                          severities, thresholds)
                                  for item in self.dataframe.columns]
 
                 else:
-                    exp_list = [self.exp_score_thresholds(estimate, item, difficulties, 'dummy_rater',
-                                                          dummy_sevs, thresholds)
+                    exp_list = [self.exp_score_thresholds(estimate, item, difficulties, raters,
+                                                          severities, thresholds)
                                 for item in items]
 
-                    info_list = [self.variance_thresholds(estimate, item, difficulties, 'dummy_rater',
-                                                          dummy_sevs, thresholds)
+                    info_list = [self.variance_thresholds(estimate, item, difficulties, raters,
+                                                          severities, thresholds)
                                  for item in items]
 
             else:
@@ -10412,24 +10695,32 @@ class MFRM(Rasch):
             iters += 1
 
         if warm_corr:
-            sevs = dict((rater, severities[rater]) for rater in raters)
-            estimate += self.warm_thresholds(estimate, person_filter, difficulties, thresholds, sevs)
+            severities = dict((rater, severities[rater]) for rater in raters)
+            estimate += self.warm_thresholds(pd.Series({score: estimate}), items, raters, severities,
+                                             person_filter, anchor=anchor)
 
         if iters >= max_iters:
             print('Maximum iterations reached before convergence.')
 
-        return estimate
+        if isinstance(estimate, pd.Series):
+            return estimate.iloc[0]
+
+        else:
+            return estimate
 
     def abil_lookup_table_thresholds(self,
                                      anchor=False,
                                      items=None,
                                      raters=None,
+                                     ext_scores=True,
                                      warm_corr=True,
                                      tolerance=0.00001,
                                      max_iters=100,
                                      ext_score_adjustment=0.5):
 
         if items is None:
+            items = self.items
+
             if raters is None:
                 person_filter = np.array([1 for item in self.dataframe.columns])
 
@@ -10463,59 +10754,100 @@ class MFRM(Rasch):
 
         ext_score = person_filter.sum() * self.max_score
 
-        abil_table = {score: self.score_abil_thresholds(score, anchor=anchor, items=items, raters=raters,
+        if ext_scores:
+            scores = np.array([score for score in range(ext_score + 1)])
+
+            used_scores = scores.astype(float)
+            used_scores[0] += ext_score_adjustment
+            used_scores[-1] -= ext_score_adjustment
+
+        else:
+            scores = np.array([score + 1 for score in range(ext_score - 1)])
+            used_scores = scores.astype(float)
+
+        abil_table = {score: self.score_abil_thresholds(used_score, anchor=anchor, items=items, raters=raters,
                                                         warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                                         ext_score_adjustment=ext_score_adjustment)
-                      for score in range(ext_score + 1)}
+                      for score, used_score in zip(scores, used_scores)}
 
         self.abil_table_thresholds = pd.Series(abil_table)
 
     def warm_thresholds(self,
-                        estimate,
+                        abilities,
+                        items,
+                        raters,
+                        severities,
                         person_filter,
-                        difficulties,
-                        thresholds,
-                        severities):
+                        anchor=False):
 
         '''
         Warm's (1989) bias correction for ML abiity estimates
         '''
 
-        exp_matrix = [[self.exp_score_thresholds(estimate, item, difficulties, rater, severities, thresholds)
-                       for item in difficulties.keys()]
-                      for rater in severities.keys()]
-        exp_matrix = np.array(exp_matrix)
-        exp_matrix *= person_filter
+        if isinstance(raters, str):
+            if raters == 'all':
+                raters = self.raters
 
-        info_matrix = [[self.variance_thresholds(estimate, item, difficulties, rater, severities, thresholds)
-                        for item in difficulties.keys()]
-                       for rater in severities.keys()]
-        info_matrix = np.array(info_matrix)
-        info_matrix *= person_filter
+            else:
+                raters = [raters]
 
-        cat_prob_dict = {category + 1: [[self.cat_prob_thresholds(estimate, item, difficulties, rater, severities,
-                                                                  category + 1, thresholds)
-                                         for item in difficulties.keys()]
-                                        for rater in severities.keys()]
-                         for category in range(self.max_score)}
+        if anchor:
+            difficulties = self.anchor_diffs_thresholds.loc[items]
+            thresholds = self.anchor_thresholds_thresholds
 
-        for category in range(self.max_score):
-            cat_prob_dict[category + 1] = np.array(cat_prob_dict[category + 1])
-            cat_prob_dict[category + 1] *= person_filter
+        else:
+            difficulties = self.diffs.loc[items]
+            thresholds = self.thresholds
 
-        part_1 = sum(((category + 1) ** 3) * np.nansum(cat_prob_dict[category + 1])
-                     for category in range(self.max_score))
+        severities = {rater: severities[rater] for rater in raters}
 
-        part_2 = 3 * np.nansum((info_matrix + (exp_matrix ** 2)) * exp_matrix)
+        if isinstance(abilities, (float, np.float64)):
+            abilities = pd.Series({'dummy': abilities})
 
-        part_3 = np.nansum(2 * (exp_matrix ** 3))
+        c_p_df = {item: abilities - difficulties.loc[item]
+                  for item in items}
 
-        warm_correction = 0.5 * (part_1 - part_2 + part_3) / (np.nansum(info_matrix) ** 2)
+        c_p_df = pd.DataFrame(c_p_df)
+
+        cat_probs = {cat: {rater: (cat * c_p_df - sum(thresholds[:cat + 1]) - sum(severities[rater][:cat + 1]))
+                           for rater in raters}
+                     for cat in range(self.max_score + 1)}
+
+        for cat in range(self.max_score + 1):
+            cat_probs[cat] = pd.concat(cat_probs[cat].values(), keys=cat_probs[cat].keys())
+            cat_probs[cat] = np.exp(cat_probs[cat])
+
+        den = sum(cat_probs[cat] for cat in range(self.max_score + 1))
+
+        for cat in range(self.max_score + 1):
+            cat_probs[cat] /= den
+            cat_probs[cat] *= person_filter
+
+        exp_score_df = sum(cat * df for cat, df in cat_probs.items())
+        exp_score_df *= person_filter
+
+        info_df = sum(df * (cat - exp_score_df) ** 2 for cat, df in cat_probs.items())
+        info_df *= person_filter
+
+        part_1 = sum((cat ** 3) * cat_probs[cat].sum(axis=1)
+                     for cat in range(self.max_score + 1))
+        part_1 = sum(part_1.loc[rater] for rater in raters)
+
+        part_2 = 3 * ((info_df + (exp_score_df ** 2)) * exp_score_df).sum(axis=1)
+        part_2 = sum(part_2.loc[rater] for rater in raters)
+
+        part_3 = (2 * (exp_score_df ** 3)).sum(axis=1)
+        part_3 = sum(part_3.loc[rater] for rater in raters)
+
+        den = 2 * (sum(info_df.loc[rater].sum(axis=1) for rater in raters) ** 2)
+
+        warm_correction = (part_1 - part_2 + part_3) / den
 
         return warm_correction
 
     def csem_thresholds(self,
-                        person,
+                        persons=None,
+                        abilities=None,
                         anchor=False,
                         items=None,
                         raters=None,
@@ -10546,22 +10878,52 @@ class MFRM(Rasch):
             severities = self.severities_thresholds
 
         difficulties = difficulties.loc[items]
-        severities = severities[raters]
+        severities = {rater: severities[rater] for rater in raters}
 
-        ability = self.abil_thresholds(person, anchor=anchor, items=items, raters=raters, warm_corr=warm_corr,
-                                   tolerance=tolerance, max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
+        if persons is not None:
+            if anchor:
+                abilities = self.anchor_abils_thresholds.loc[persons]
+            else:
+                abilities = self.abils_thresholds.loc[persons]
 
-        info_list = [self.variance_thresholds(ability, item, difficulties, rater, severities, thresholds)
-                     for item in items for rater in raters
-                     if self.dataframe.loc[(rater, person), item] == self.dataframe.loc[(rater, person), item]]
+            person_data = self.dataframe.loc[persons, items]
+            person_filter = (person_data + 1) / (person_data + 1)
 
-        total_info = sum(info_list)
-        csem = 1 / (total_info ** 0.5)
+        if abilities is not None:
+            abilities = {f'Ability_{abil}': abil for abil in abilities}
+            abilities = pd.Series(abilities)
+            person_filter = pd.DataFrame(1, index=abilities.index, columns=items)
 
-        return csem
+        c_p_df = {item: estimates - difficulties.loc[item]
+                  for item in items}
+        c_p_df = pd.DataFrame(c_p_df)
+
+        cat_probs = {cat: {rater: (cat * c_p_df - sum(thresholds[:cat + 1]) - sum(severities[rater][:cat + 1]))
+                           for rater in raters}
+                     for cat in range(self.max_score + 1)}
+
+        for cat in range(self.max_score + 1):
+            cat_probs[cat] = pd.concat(cat_probs[cat].values(), keys=cat_probs[cat].keys())
+            cat_probs[cat] = np.exp(cat_probs[cat])
+
+        den = sum(cat_probs[cat] for cat in range(self.max_score + 1))
+
+        for cat in range(self.max_score + 1):
+            cat_probs[cat] /= den
+            cat_probs[cat] *= person_filter
+
+        exp_score_df = sum(cat * df for cat, df in cat_probs.items())
+        exp_score_df *= person_filter
+
+        info_df = sum(df * (cat - exp_score_df) ** 2 for cat, df in cat_probs.items())
+        info_df *= person_filter
+
+        cond_sems = 1 / (info_df.sum(axis=1) ** 0.5)
+
+        return cond_sems
 
     def abil_matrix(self,
-                    person,
+                    persons,
                     anchor=False,
                     items=None,
                     raters=None,
@@ -10570,86 +10932,142 @@ class MFRM(Rasch):
                     max_iters=100,
                     ext_score_adjustment=0.5):
 
+        '''
+        Creates a raw score to ability estimate look-up table for a set
+        of items using ML estimation (Newton-Raphson procedure) with
+        optional Warm (1989) bias correction.
+        '''
+
+        if isinstance(persons, str):
+            if persons == 'all':
+                persons = self.persons
+
+            else:
+                persons = [persons]
+
+        if persons is None:
+            persons = self.persons
+
         if isinstance(items, str):
             if items == 'all':
                 items = self.items.tolist()
-                
+
+            else:
+                items = [items]
+
         if items is None:
-            items = self.items.tolist()
+            items = self.items
 
         if raters is None:
-            raters = self.raters.tolist()
+            raters = self.raters
 
         if isinstance(raters, str):
             if raters == 'all':
-                raters = self.raters.tolist()
-                
+                raters = self.raters
+
         if isinstance(raters, pd.core.indexes.base.Index):
             raters = raters.tolist()
 
         if anchor:
-            if hasattr(self, 'anchor_diffs_matrix'):
-                difficulties = self.anchor_diffs_matrix
+            if hasattr(self, 'anchor_diffs_global'):
+                difficulties = self.anchor_diffs_matrix.loc[items]
                 thresholds = self.anchor_thresholds_matrix
-                severities = self.anchor_severities_matrix
+                severities = {rater: self.anchor_severities_matrix[rater]
+                              for rater in raters}
 
             else:
                 print('Anchor calibration required')
                 return
 
         else:
-            difficulties = self.diffs
+            difficulties = self.diffs.loc[items]
             thresholds = self.thresholds
-            severities = self.severities_matrix
+            severities = {rater: self.severities_matrix[rater]
+                          for rater in raters}
 
-        person_data = self.dataframe[items].swaplevel().loc[person].loc[raters, :]
+        person_data = self.dataframe.loc[(raters, persons), items]
         person_filter = (person_data + 1) / (person_data + 1)
-        score = np.nansum(person_data)
 
-        ext_score = np.nansum(person_filter) * self.max_score
+        scores = {rater: person_data.loc[rater].sum(axis=1).astype(float)
+                  for rater in raters}
+        scores = sum(scores.values())
 
-        if score == 0:
-            score = ext_score_adjustment
+        ext_scores = {rater: person_filter.loc[rater].sum(axis=1) * self.max_score
+                      for rater in raters}
+        ext_scores = sum(ext_scores.values())
 
-        elif score == ext_score:
-            score -= ext_score_adjustment
+        scores[scores == 0] = ext_score_adjustment
+        scores[scores == ext_scores] -= ext_score_adjustment
+
+        diff_df = pd.concat([difficulties for person in persons], axis=1).T
+        diff_df.index = persons
+
+        mean_diffs = {rater: diff_df * person_filter.loc[rater]
+                      for rater in raters}
+        mean_diffs = sum(mean_diffs[rater].sum(axis=1)
+                         for rater in raters)
+
+        item_count = {rater: person_filter.loc[rater]
+                      for rater in raters}
+        item_count = sum(item_count[rater].sum(axis=1)
+                         for rater in raters)
+
+        mean_diffs /= item_count
 
         try:
-            estimate = log(score) - log(ext_score - score) + np.mean(difficulties)
-
-            change = 1
+            estimates = np.log(scores) - np.log(ext_scores - scores) + mean_diffs
+            changes = pd.Series({person: 1 for person in persons})
             iters = 0
 
-            while (abs(change) > tolerance) & (iters <= max_iters):
+            while (abs(changes).max() > tolerance) & (iters <= max_iters):
 
-                person_exp_matrix = [[self.exp_score_matrix(estimate, item, difficulties, rater, severities, thresholds)
-                                      for item in difficulties.keys()]
-                                     for rater in raters]
-                person_exp_matrix = np.array(person_exp_matrix)
-                person_exp_matrix *= person_filter
-                result = np.nansum(person_exp_matrix)
+                c_p_df = {item: estimates - difficulties.loc[item]
+                          for item in items}
+                c_p_df = pd.DataFrame(c_p_df)
 
-                person_info_matrix = [[self.variance_matrix(estimate, item, difficulties, rater, severities, thresholds)
-                                       for item in difficulties.keys()]
-                                      for rater in raters]
-                person_info_matrix = np.array(person_info_matrix)
-                person_info_matrix *= person_filter
-                info = np.nansum(person_info_matrix)
+                cat_probs = {cat: {rater: (cat * c_p_df - sum(thresholds[:cat + 1]))
+                                   for rater in raters}
+                             for cat in range(self.max_score + 1)}
 
-                change = max(-1, min(1, (result - score) / info))
-                estimate -= change
+                for cat in range(self.max_score + 1):
+                    for rater in raters:
+                        for item in items:
+                            cat_probs[cat][rater][item] -= sum(severities[rater][item][:cat + 1])
+
+                for cat in range(self.max_score + 1):
+                    cat_probs[cat] = pd.concat(cat_probs[cat].values(), keys=cat_probs[cat].keys())
+                    cat_probs[cat] = np.exp(cat_probs[cat])
+
+                den = sum(cat_probs[cat] for cat in range(self.max_score + 1))
+
+                for cat in range(self.max_score + 1):
+                    cat_probs[cat] /= den
+                    cat_probs[cat] *= person_filter
+
+                exp_score_df = sum(cat * df for cat, df in cat_probs.items())
+                exp_score_df *= person_filter
+
+                info_df = sum(df * (cat - exp_score_df) ** 2 for cat, df in cat_probs.items())
+                info_df *= person_filter
+
+                result_list = sum(exp_score_df.loc[rater].sum(axis=1) for rater in raters)
+                info_list = sum(info_df.loc[rater].sum(axis=1) for rater in raters)
+
+                changes = (result_list - scores) / info_list
+                changes = changes.clip(-1, 1)
+                estimates -= changes
                 iters += 1
 
             if warm_corr:
-                estimate += self.warm_matrix(estimate, person_filter, difficulties, thresholds, severities)
+                estimates += self.warm_matrix(estimates, items, raters, severities, person_filter, anchor=anchor)
 
             if iters >= max_iters:
                 print('Maximum iterations reached before convergence.')
 
         except:
-            estimate = np.nan
+            estimates = np.nan
 
-        return estimate
+        return estimates
 
     def person_abils_matrix(self,
                             anchor=False,
@@ -10665,29 +11083,15 @@ class MFRM(Rasch):
         estimation, includes optional Warm (1989) bias correction.
         '''
 
-        if items is None:
-            items = self.dataframe.columns.tolist()
-
-        if raters is None:
-            raters = self.raters.tolist()
+        estimates = self.abil_matrix(persons=None, anchor=anchor, items=items, raters=raters,
+                                     warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
+                                     ext_score_adjustment=ext_score_adjustment)
 
         if anchor:
-            if hasattr(self, 'anchor_diffs_matrix') == False:
-                print('Anchor calibration required')
-                return
-
-        estimates = [self.abil_matrix(person, anchor=anchor, items=items, raters=raters, warm_corr=warm_corr,
-                                      tolerance=tolerance, max_iters=max_iters,
-                                      ext_score_adjustment=ext_score_adjustment)
-                     for person in self.persons]
-
-        estimates = {person: estimate for person, estimate in zip(self.persons, estimates)}
-
-        if anchor:
-            self.anchor_abils_matrix = pd.Series(estimates)
+            self.anchor_abils_matrix = estimates
 
         else:
-            self.abils_matrix = pd.Series(estimates)
+            self.abils_matrix = estimates
 
     def score_abil_matrix(self,
                           score,
@@ -10701,35 +11105,48 @@ class MFRM(Rasch):
 
         if isinstance(items, str):
             if items == 'all':
-                items = None
+                items = self.items
             else:
                 items = [items]
 
-        if anchor:
-            if hasattr(self, 'anchor_diffs_matrix'):
-                difficulties = self.anchor_diffs_matrix
-                thresholds = self.anchor_thresholds_matrix
-                severities = self.anchor_severities_matrix
-
-            else:
-                print('Anchor calibration required')
-                return
-
-        else:
-            difficulties = self.diffs
-            thresholds = self.thresholds
-            severities = self.severities_matrix
-
-        dummy_sevs = pd.Series({'dummy_rater':
-                                {item:
-                                 [0 for threshold in range(self.max_score + 1)]
-                                 for item in self.dataframe.columns}})
+        if items is None:
+            items = self.items
 
         if isinstance(raters, str):
             if raters == 'all':
                 raters = [rater for rater in self.raters]
             else:
                 raters = [raters]
+
+        if anchor:
+            if hasattr(self, 'anchor_diffs_matrix'):
+                difficulties = self.anchor_diffs_matrix.loc[items]
+                thresholds = self.anchor_thresholds_matrix
+
+                if raters is None:
+                    severities = pd.Series({'dummy_rater': {item: [0 for threshold in range(self.max_score + 1)]
+                                                            for item in self.dataframe.columns}})
+
+                else:
+                    severities = {rater: self.anchor_severities_matrix[rater] for rater in raters}
+
+            else:
+                print('Anchor calibration required')
+                return
+
+        else:
+            difficulties = self.diffs.loc[items]
+            thresholds = self.thresholds
+
+            if raters is None:
+                severities = pd.Series({'dummy_rater': {item: [0 for threshold in range(self.max_score + 1)]
+                                                        for item in self.dataframe.columns}})
+
+            else:
+                severities = {rater: self.severities_matrix[rater] for rater in raters}
+
+        if raters is None:
+            raters = ['dummy_rater']
 
         if raters is None:
             if items is None:
@@ -10806,23 +11223,31 @@ class MFRM(Rasch):
 
         if warm_corr:
             sevs = dict((rater, severities[rater]) for rater in raters)
-            estimate += self.warm_matrix(estimate, person_filter, difficulties, thresholds, sevs)
+            estimate += self.warm_matrix(pd.Series({score: estimate}), items, raters, sevs,
+                                         person_filter, anchor=anchor)
 
         if iters >= max_iters:
             print('Maximum iterations reached before convergence.')
 
-        return estimate
+        if isinstance(estimate, pd.Series):
+            return estimate.iloc[0]
+
+        else:
+            return estimate
 
     def abil_lookup_table_matrix(self,
                                  anchor=False,
                                  items=None,
                                  raters=None,
+                                 ext_scores=True,
                                  warm_corr=True,
                                  tolerance=0.00001,
                                  max_iters=100,
                                  ext_score_adjustment=0.5):
 
         if items is None:
+            items = self.items
+
             if raters is None:
                 person_filter = np.array([1 for item in self.dataframe.columns])
 
@@ -10856,59 +11281,95 @@ class MFRM(Rasch):
 
         ext_score = person_filter.sum() * self.max_score
 
-        abil_table = {score: self.score_abil_matrix(score, anchor=anchor, items=items, raters=raters,
+        if ext_scores:
+            scores = np.array([score for score in range(ext_score + 1)])
+
+            used_scores = scores.astype(float)
+            used_scores[0] += ext_score_adjustment
+            used_scores[-1] -= ext_score_adjustment
+
+        else:
+            scores = np.array([score + 1 for score in range(ext_score - 1)])
+            used_scores = scores.astype(float)
+
+        abil_table = {score: self.score_abil_matrix(used_score, anchor=anchor, items=items, raters=raters,
                                                     warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                                     ext_score_adjustment=ext_score_adjustment)
-                      for score in range(ext_score + 1)}
+                      for score, used_score in zip(scores, used_scores)}
 
         self.abil_table_matrix = pd.Series(abil_table)
 
     def warm_matrix(self,
-                    estimate,
+                    abilities,
+                    items,
+                    raters,
+                    severities,
                     person_filter,
-                    difficulties,
-                    thresholds,
-                    severities):
+                    anchor=False):
 
         '''
         Warm's (1989) bias correction for ML abiity estimates
         '''
 
-        exp_matrix = [[self.exp_score_matrix(estimate, item, difficulties, rater, severities, thresholds)
-                       for item in difficulties.keys()]
-                      for rater in severities.keys()]
-        exp_matrix = np.array(exp_matrix)
-        exp_matrix *= person_filter
+        if isinstance(raters, str):
+            if raters == 'all':
+                raters = self.raters
 
-        info_matrix = [[self.variance_matrix(estimate, item, difficulties, rater, severities, thresholds)
-                        for item in difficulties.keys()]
-                       for rater in severities.keys()]
-        info_matrix = np.array(info_matrix)
-        info_matrix *= person_filter
+        if anchor:
+            difficulties = self.anchor_diffs_matrix.loc[items]
+            thresholds = self.anchor_thresholds_matrix
 
-        cat_prob_dict = {category + 1: [[self.cat_prob_matrix(estimate, item, difficulties, rater,
-                                                              severities, category + 1, thresholds)
-                                         for item in difficulties.keys()]
-                                        for rater in severities.keys()]
-                         for category in range(self.max_score)}
+        else:
+            difficulties = self.diffs.loc[items]
+            thresholds = self.thresholds
 
-        for category in range(self.max_score):
-            cat_prob_dict[category + 1] = np.array(cat_prob_dict[category + 1])
-            cat_prob_dict[category + 1] *= person_filter
+        c_p_df = {item: abilities - difficulties.loc[item] for item in items}
+        c_p_df = pd.DataFrame(c_p_df)
 
-        part_1 = sum(((category + 1) ** 3) * np.nansum(cat_prob_dict[category + 1])
-                     for category in range(self.max_score))
+        cat_probs = {cat: {rater: (cat * c_p_df - sum(thresholds[:cat + 1]))
+                           for rater in raters}
+                     for cat in range(self.max_score + 1)}
 
-        part_2 = 3 * np.nansum((info_matrix + (exp_matrix ** 2)) * exp_matrix)
+        for cat in range(self.max_score + 1):
+            for rater in raters:
+                for item in items:
+                    cat_probs[cat][rater][item] -= sum(severities[rater][item][:cat + 1])
 
-        part_3 = np.nansum(2 * (exp_matrix ** 3))
+        for cat in range(self.max_score + 1):
+            cat_probs[cat] = pd.concat(cat_probs[cat].values(), keys=cat_probs[cat].keys())
+            cat_probs[cat] = np.exp(cat_probs[cat])
 
-        warm_correction = 0.5 * (part_1 - part_2 + part_3) / (np.nansum(info_matrix) ** 2)
+        den = sum(cat_probs[cat] for cat in range(self.max_score + 1))
+
+        for cat in range(self.max_score + 1):
+            cat_probs[cat] /= den
+            cat_probs[cat] *= person_filter
+
+        exp_score_df = sum(cat * df for cat, df in cat_probs.items())
+        exp_score_df *= person_filter
+
+        info_df = sum(df * (cat - exp_score_df) ** 2 for cat, df in cat_probs.items())
+        info_df *= person_filter
+
+        part_1 = sum((cat ** 3) * cat_probs[cat].sum(axis=1)
+                     for cat in range(self.max_score + 1))
+        part_1 = sum(part_1.loc[rater] for rater in raters)
+
+        part_2 = 3 * ((info_df + (exp_score_df ** 2)) * exp_score_df).sum(axis=1)
+        part_2 = sum(part_2.loc[rater] for rater in raters)
+
+        part_3 = (2 * (exp_score_df ** 3)).sum(axis=1)
+        part_3 = sum(part_3.loc[rater] for rater in raters)
+
+        den = 2 * (sum(info_df.loc[rater].sum(axis=1) for rater in raters) ** 2)
+
+        warm_correction = (part_1 - part_2 + part_3) / den
 
         return warm_correction
 
     def csem_matrix(self,
-                    person,
+                    persons=None,
+                    abilities=None,
                     anchor=False,
                     items=None,
                     raters=None,
@@ -10939,19 +11400,54 @@ class MFRM(Rasch):
             severities = self.severities_matrix
 
         difficulties = difficulties.loc[items]
-        severities = severities[raters]
+        severities = {rater: severities[rater] for rater in raters}
 
-        ability = self.abil_matrix(person, anchor=anchor, items=items, raters=raters, warm_corr=warm_corr,
-                                   tolerance=tolerance, max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
+        if persons is not None:
+            if anchor:
+                abilities = self.anchor_abils_matrix.loc[persons]
+            else:
+                abilities = self.abils_matrix.loc[persons]
 
-        info_list = [self.variance_matrix(ability, item, difficulties, rater, severities, thresholds)
-                     for item in items for rater in raters
-                     if self.dataframe.loc[(rater, person), item] == self.dataframe.loc[(rater, person), item]]
+            person_data = self.dataframe.loc[persons, items]
+            person_filter = (person_data + 1) / (person_data + 1)
 
-        total_info = sum(info_list)
-        csem = 1 / (total_info ** 0.5)
+        if abilities is not None:
+            abilities = {f'Ability_{abil}': abil for abil in abilities}
+            abilities = pd.Series(abilities)
+            person_filter = pd.DataFrame(1, index=abilities.index, columns=items)
 
-        return csem
+        c_p_df = {item: abilities - difficulties.loc[item] for item in items}
+        c_p_df = pd.DataFrame(c_p_df)
+
+        cat_prob_dict_matrix = {cat: {rater: (cat * c_p_df - sum(thresholds[:cat + 1]))
+                                      for rater in raters}
+                                for cat in range(self.max_score + 1)}
+
+        for cat in range(self.max_score + 1):
+            for rater in raters:
+                for item in items:
+                    cat_prob_dict_matrix[cat][rater][item] -= sum(severities[rater][item][:cat + 1])
+
+        for cat in range(self.max_score + 1):
+            cat_prob_dict_matrix[cat] = pd.concat(cat_prob_dict_matrix[cat].values(),
+                                                  keys=cat_prob_dict_matrix[cat].keys())
+            cat_prob_dict_matrix[cat] = np.exp(cat_prob_dict_matrix[cat])
+
+        den = sum(cat_prob_dict_matrix[cat] for cat in range(self.max_score + 1))
+
+        for cat in range(self.max_score + 1):
+            cat_prob_dict_matrix[cat] /= den
+            cat_prob_dict_matrix[cat] *= person_filter
+
+        exp_score_df = sum(cat * df for cat, df in cat_prob_dict.items())
+        exp_score_df *= person_filter
+
+        info_df = sum(df * (cat - exp_score_df) ** 2 for cat, df in cat_prob_dict.items())
+        info_df *= person_filter
+
+        cond_sems = 1 / (info_df.sum(axis=1) ** 0.5)
+
+        return csems
 
     def category_counts_item(self,
                              item,
@@ -11027,6 +11523,7 @@ class MFRM(Rasch):
     def item_stats_df_global(self,
                              anchor_raters=None,
                              full=False,
+                             ext_scores=True,
                              zstd=False,
                              point_measure_corr=False,
                              dp=3,
@@ -11073,9 +11570,10 @@ class MFRM(Rasch):
                                        log_lik_tol=log_lik_tol)
 
         if hasattr(self, 'item_outfit_ms_global') == False:
-            self.item_fit_statistics_global(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
-                                            ext_score_adjustment=ext_score_adjustment, method=method,
-                                            constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
+            self.item_fit_statistics_global(warm_corr=warm_corr, ext_scores=ext_scores, tolerance=tolerance,
+                                            max_iters=max_iters, ext_score_adjustment=ext_score_adjustment,
+                                            method=method, constant=constant, matrix_power=matrix_power,
+                                            log_lik_tol=log_lik_tol)
 
         if anchor_raters is not None:
             difficulties = self.anchor_diffs_global
@@ -13058,7 +13556,7 @@ class MFRM(Rasch):
 
     def category_probability_dict_global(self,
                                          warm_corr=True,
-                                         trim_cat_prob_dict=False,
+                                         ext_scores=True,
                                          tolerance=0.00001,
                                          max_iters=100,
                                          ext_score_adjustment=0.5,
@@ -13067,47 +13565,60 @@ class MFRM(Rasch):
                                          matrix_power=3,
                                          log_lik_tol=0.000001,):
 
-        if hasattr(self, 'thresholds_global') == False:
+        if hasattr(self, 'thresholds') == False:
             self.calibrate_global(constant=constant, method=method, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         if hasattr(self, 'abils_global') == False:
-            self.person_abils_global(anchor=False, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
-                                     ext_score_adjustment=ext_score_adjustment)
+            self.person_abils_global(anchor=False, items=None, raters=None, warm_corr=warm_corr, tolerance=tolerance,
+                                     max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
 
-        abilities = self.abils_global
         difficulties = self.diffs
-        thresholds = self.thresholds
         severities = self.severities_global
 
-        c_p_df = {item: abilities - difficulties.loc[item]
-                  for item in self.items}
-        c_p_df = pd.DataFrame(c_p_df)
+        scores = {rater: self.dataframe.loc[rater].sum(axis=1).astype(float)
+                  for rater in self.raters}
+        scores = sum(scores.values())
 
-        self.cat_prob_dict_global = {cat: {rater: (cat * (c_p_df - severities.loc[rater]) -
-                                                   sum(thresholds[:cat + 1]))
-                                           for rater in self.raters}
-                                     for cat in range(self.max_score + 1)}
+        person_filter = (self.dataframe + 1) / (self.dataframe + 1)
+
+        if ext_scores:
+            abilities = self.abils_global
+            df = self.dataframe
+
+        else:
+            ext_scores = {rater: person_filter.loc[rater].sum(axis=1) * self.max_score
+                          for rater in self.raters}
+            ext_scores = sum(ext_scores.values())
+
+            abilities = self.abils_global[scores > 0]
+            abilities = abilities[scores < ext_scores]
+
+            df = self.dataframe.loc[(slice(None), abilities.index), :]
+
+        person_filter = (df + 1) / (df + 1)
+
+        c_p_df = {item: abilities - difficulties[item] for item in self.items}
+        c_p_df = {rater: pd.DataFrame(c_p_df) - severities.loc[rater]
+                  for rater in self.raters}
+        c_p_df = pd.concat(c_p_df.values(), keys=c_p_df.keys())
+
+        cat_prob_dict = {cat: (cat * c_p_df) - sum(self.thresholds[:cat + 1])
+                         for cat in range(self.max_score + 1)}
 
         for cat in range(self.max_score + 1):
-            self.cat_prob_dict_global[cat] = pd.concat(self.cat_prob_dict_global[cat].values(),
-                                                       keys=self.cat_prob_dict_global[cat].keys())
-            self.cat_prob_dict_global[cat] = np.exp(self.cat_prob_dict_global[cat])
+            cat_prob_dict[cat] = np.exp(cat_prob_dict[cat])
 
-        den = sum(self.cat_prob_dict_global[cat] for cat in range(self.max_score + 1))
+        den = sum(cat_prob_dict[cat] for cat in range(self.max_score + 1))
 
         for cat in range(self.max_score + 1):
-            self.cat_prob_dict_global[cat] /= den
+            cat_prob_dict[cat] /= den
+            cat_prob_dict[cat] *= person_filter
 
-        for cat in range(self.max_score + 1):
-            self.cat_prob_dict_global[cat].index.set_names(['Rater', 'Person'], inplace=True)
-
-        if trim_cat_prob_dict:
-            for cat in range(self.max_score + 1):
-                self.cat_prob_dict_global[cat] = self.cat_prob_dict_global[cat].loc[df.index]
+        self.cat_prob_dict_global = cat_prob_dict
 
     def category_probability_dict_items(self,
                                         warm_corr=True,
-                                        trim_cat_prob_dict=False,
+                                        ext_scores=True,
                                         tolerance=0.00001,
                                         max_iters=100,
                                         ext_score_adjustment=0.5,
@@ -13123,46 +13634,56 @@ class MFRM(Rasch):
             self.person_abils_items(anchor=False, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                     ext_score_adjustment=ext_score_adjustment)
 
-        abilities = self.abils_items
         difficulties = self.diffs
-        thresholds = self.thresholds
         severities = self.severities_items
 
-        c_p_df = {item: abilities - difficulties.loc[item]
-                  for item in self.items}
-        c_p_df = pd.DataFrame(c_p_df)
-        c_p_dict = {rater: c_p_df.copy() for rater in self.raters}
+        scores = {rater: self.dataframe.loc[rater].sum(axis=1).astype(float)
+                  for rater in self.raters}
+        scores = sum(scores.values())
 
+        person_filter = (self.dataframe + 1) / (self.dataframe + 1)
+
+        if ext_scores:
+            abilities = self.abils_items
+            df = self.dataframe
+
+        else:
+            ext_scores = {rater: person_filter.loc[rater].sum(axis=1) * self.max_score
+                          for rater in self.raters}
+            ext_scores = sum(ext_scores.values())
+
+            abilities = self.abils_global[scores > 0]
+            abilities = abilities[scores < ext_scores]
+
+            df = self.dataframe.loc[(slice(None), abilities.index), :]
+
+        person_filter = (df + 1) / (df + 1)
+
+        c_p_df = {rater: {item: abilities - difficulties[item] - severities[rater][item]
+                          for item in self.items}
+                  for rater in self.raters}
         for rater in self.raters:
-            for item in self.items:
-                c_p_dict[rater][item] -= severities[rater][item]
+            c_p_df[rater] = pd.DataFrame(c_p_df[rater])
 
-        self.cat_prob_dict_items = {cat: {rater: ((cat * c_p_dict[rater]) -
-                                                  sum(thresholds[:cat + 1]))
-                                          for rater in self.raters}
-                                    for cat in range(self.max_score + 1)}
+        c_p_df = pd.concat(c_p_df.values(), keys=c_p_df.keys())
 
-        for cat in range(self.max_score + 1):
-            self.cat_prob_dict_items[cat] = pd.concat(self.cat_prob_dict_items[cat].values(),
-                                                       keys=self.cat_prob_dict_items[cat].keys())
-            self.cat_prob_dict_items[cat] = np.exp(self.cat_prob_dict_items[cat])
-
-        den = sum(self.cat_prob_dict_items[cat] for cat in range(self.max_score + 1))
+        cat_prob_dict = {cat: (cat * c_p_df) - sum(self.thresholds[:cat + 1])
+                         for cat in range(self.max_score + 1)}
 
         for cat in range(self.max_score + 1):
-            self.cat_prob_dict_items[cat] /= den
+            cat_prob_dict[cat] = np.exp(cat_prob_dict[cat])
+
+        den = sum(cat_prob_dict[cat] for cat in range(self.max_score + 1))
 
         for cat in range(self.max_score + 1):
-            self.cat_prob_dict_items[cat].index.set_names(['Rater', 'Person'], inplace=True)
+            cat_prob_dict[cat] /= den
+            cat_prob_dict[cat] *= person_filter
 
-        if trim_cat_prob_dict:
-            for cat in range(self.max_score + 1):
-                self.cat_prob_dict_items[cat] = self.cat_prob_dict_items[cat].loc[df.index]
-
+        self.cat_prob_dict_items = cat_prob_dict
 
     def category_probability_dict_thresholds(self,
                                              warm_corr=True,
-                                             trim_cat_prob_dict=False,
+                                             ext_scores=False,
                                              tolerance=0.00001,
                                              max_iters=100,
                                              ext_score_adjustment=0.5,
@@ -13179,41 +13700,54 @@ class MFRM(Rasch):
             self.person_abils_thresholds(anchor=False, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                          ext_score_adjustment=ext_score_adjustment)
 
-        abilities = self.abils_thresholds
         difficulties = self.diffs
-        thresholds = self.thresholds
         severities = self.severities_thresholds
+
+        scores = {rater: self.dataframe.loc[rater].sum(axis=1).astype(float)
+                  for rater in self.raters}
+        scores = sum(scores.values())
+
+        person_filter = (self.dataframe + 1) / (self.dataframe + 1)
+
+        if ext_scores:
+            abilities = self.abils_thresholds
+            df = self.dataframe
+
+        else:
+            ext_scores = {rater: person_filter.loc[rater].sum(axis=1) * self.max_score
+                          for rater in self.raters}
+            ext_scores = sum(ext_scores.values())
+
+            abilities = self.abils_thresholds[scores > 0]
+            abilities = abilities[scores < ext_scores]
+
+            df = self.dataframe.loc[(slice(None), abilities.index), :]
+
+        person_filter = (df + 1) / (df + 1)
 
         c_p_df = {item: abilities - difficulties.loc[item]
                   for item in self.items}
         c_p_df = pd.DataFrame(c_p_df)
 
-        self.cat_prob_dict_thresholds = {cat: {rater: (cat * c_p_df -
-                                                       sum(thresholds[:cat + 1]) -
-                                                       sum(severities[rater][:cat + 1]))
-                                               for rater in self.raters}
-                                         for cat in range(self.max_score + 1)}
+        cat_probs = {cat: {rater: (cat * c_p_df - sum(self.thresholds[:cat + 1]) - sum(severities[rater][:cat + 1]))
+                           for rater in self.raters}
+                     for cat in range(self.max_score + 1)}
 
         for cat in range(self.max_score + 1):
-            self.cat_prob_dict_thresholds[cat] = pd.concat(self.cat_prob_dict_thresholds[cat].values(),
-                                                       keys=self.cat_prob_dict_thresholds[cat].keys())
-            self.cat_prob_dict_thresholds[cat] = np.exp(self.cat_prob_dict_thresholds[cat])
+            cat_probs[cat] = pd.concat(cat_probs[cat].values(), keys=cat_probs[cat].keys())
+            cat_probs[cat] = np.exp(cat_probs[cat])
 
-        den = sum(self.cat_prob_dict_thresholds[cat] for cat in range(self.max_score + 1))
-
-        for cat in range(self.max_score + 1):
-            self.cat_prob_dict_thresholds[cat] /= den
+        den = sum(cat_probs[cat] for cat in range(self.max_score + 1))
 
         for cat in range(self.max_score + 1):
-            self.cat_prob_dict_thresholds[cat].index.set_names(['Rater', 'Person'], inplace=True)
+            cat_probs[cat] /= den
+            cat_probs[cat] *= person_filter
 
-        if trim_cat_prob_dict:
-            for cat in range(self.max_score + 1):
-                self.cat_prob_dict_thresholds[cat] = self.cat_prob_dict_thresholds[cat].loc[df.index]
+            self.cat_prob_dict_thresholds = cat_probs
 
     def category_probability_dict_matrix(self,
                                          warm_corr=True,
-                                         trim_cat_prob_dict=False,
+                                         ext_scores=True,
                                          tolerance=0.00001,
                                          max_iters=100,
                                          ext_score_adjustment=0.5,
@@ -13229,17 +13763,37 @@ class MFRM(Rasch):
             self.person_abils_matrix(anchor=False, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                      ext_score_adjustment=ext_score_adjustment)
 
-        abilities = self.abils_matrix
         difficulties = self.diffs
-        thresholds = self.thresholds
         severities = self.severities_matrix
+
+        scores = {rater: self.dataframe.loc[rater].sum(axis=1).astype(float)
+                  for rater in self.raters}
+        scores = sum(scores.values())
+
+        person_filter = (self.dataframe + 1) / (self.dataframe + 1)
+
+        if ext_scores:
+            abilities = self.abils_matrix
+            df = self.dataframe
+
+        else:
+            ext_scores = {rater: person_filter.loc[rater].sum(axis=1) * self.max_score
+                          for rater in self.raters}
+            ext_scores = sum(ext_scores.values())
+
+            abilities = self.abils_matrix[scores > 0]
+            abilities = abilities[scores < ext_scores]
+
+            df = self.dataframe.loc[(slice(None), abilities.index), :]
+
+        person_filter = (df + 1) / (df + 1)
 
         c_p_df = {item: abilities - difficulties.loc[item]
                   for item in self.items}
         c_p_df = pd.DataFrame(c_p_df)
 
         self.cat_prob_dict_matrix = {cat: {rater: (cat * c_p_df -
-                                                   sum(thresholds[:cat + 1]))
+                                                   sum(self.thresholds[:cat + 1]))
                                            for rater in self.raters}
                                      for cat in range(self.max_score + 1)}
 
@@ -13257,13 +13811,7 @@ class MFRM(Rasch):
 
         for cat in range(self.max_score + 1):
             self.cat_prob_dict_matrix[cat] /= den
-
-        for cat in range(self.max_score + 1):
-            self.cat_prob_dict_matrix[cat].index.set_names(['Rater', 'Person'], inplace=True)
-
-        if trim_cat_prob_dict:
-            for cat in range(self.max_score + 1):
-                self.cat_prob_dict_matrix[cat] = self.cat_prob_dict_matrix[cat].loc[df.index]
+            self.cat_prob_dict_matrix[cat] *= person_filter
 
     def fit_matrices(self,
                      cat_prob_dict):
@@ -13273,36 +13821,18 @@ class MFRM(Rasch):
         residuals etc. to generate fit statistics
         '''
 
-        df = self.dataframe.copy()
-        max_scores = ((df == df) * self.max_score).sum(axis=1)
-        scores = df.sum(axis=1)
-
-        df = df[(scores > 0) & (scores < max_scores)]
-        missing_mask = (df + 1) / (df + 1)
-        missing_mask.index.set_names(['Rater', 'Person'], inplace=True)
-
-        exp_score_df = sum(cat * cat_df for cat, cat_df in cat_prob_dict.items())
-        exp_score_df = exp_score_df.loc[df.index]
-        exp_score_df.index.set_names(['Rater', 'Person'], inplace=True)
-        exp_score_df *= missing_mask
-
-        info_df = sum(cat_df * (cat - exp_score_df) ** 2 for cat, cat_df in cat_prob_dict.items())
-        info_df = info_df.loc[df.index]
-        info_df.index.set_names(['Rater', 'Person'], inplace=True)
-        info_df *= missing_mask
-
+        exp_score_df = sum(cat * df for cat, df in cat_prob_dict.items())
+        info_df = sum(df * (cat - exp_score_df) ** 2 for cat, df in cat_prob_dict.items())
         kurtosis_df = sum(cat_df * (cat - exp_score_df) ** 4 for cat, cat_df in cat_prob_dict.items())
-        kurtosis_df = kurtosis_df.loc[df.index]
-        kurtosis_df.index.set_names(['Rater', 'Person'], inplace=True)
-        kurtosis_df *= missing_mask
 
-        residual_df = df - exp_score_df
+        residual_df = self.dataframe.loc[exp_score_df.index] - exp_score_df
         std_residual_df = residual_df / (info_df ** 0.5)
 
         return exp_score_df, info_df, kurtosis_df, residual_df, std_residual_df
 
     def fit_matrices_global(self,
                             warm_corr=True,
+                            ext_scores=True,
                             tolerance=0.00001,
                             max_iters=100,
                             ext_score_adjustment=0.5,
@@ -13312,9 +13842,10 @@ class MFRM(Rasch):
                             log_lik_tol=0.000001):
 
         if hasattr(self, 'cat_prob_dict_global') == False:
-            self.category_probability_dict_global(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
-                                                  ext_score_adjustment=ext_score_adjustment, method=method,
-                                                  constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
+            self.category_probability_dict_global(warm_corr=warm_corr, ext_scores=ext_scores, tolerance=tolerance,
+                                                  max_iters=max_iters, ext_score_adjustment=ext_score_adjustment,
+                                                  method=method, constant=constant, matrix_power=matrix_power,
+                                                  log_lik_tol=log_lik_tol)
 
         (self.exp_score_df_global,
          self.info_df_global,
@@ -13324,6 +13855,7 @@ class MFRM(Rasch):
 
     def fit_matrices_items(self,
                            warm_corr=True,
+                           ext_scores=True,
                            tolerance=0.00001,
                            max_iters=100,
                            ext_score_adjustment=0.5,
@@ -13333,9 +13865,10 @@ class MFRM(Rasch):
                            log_lik_tol=0.000001):
 
         if hasattr(self, 'cat_prob_dict_items') == False:
-            self.category_probability_dict_items(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
-                                                 ext_score_adjustment=ext_score_adjustment, method=method,
-                                                 constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
+            self.category_probability_dict_items(warm_corr=warm_corr, ext_scores=ext_scores, tolerance=tolerance,
+                                                 max_iters=max_iters, ext_score_adjustment=ext_score_adjustment,
+                                                 method=method, constant=constant, matrix_power=matrix_power,
+                                                 log_lik_tol=log_lik_tol)
 
         (self.exp_score_df_items,
          self.info_df_items,
@@ -13345,6 +13878,7 @@ class MFRM(Rasch):
 
     def fit_matrices_thresholds(self,
                                 warm_corr=True,
+                                ext_scores=True,
                                 tolerance=0.00001,
                                 max_iters=100,
                                 ext_score_adjustment=0.5,
@@ -13354,9 +13888,9 @@ class MFRM(Rasch):
                                 log_lik_tol=0.000001):
 
         if hasattr(self, 'cat_prob_dict_thresholds') == False:
-            self.category_probability_dict_thresholds(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
-                                                      ext_score_adjustment=ext_score_adjustment, method=method,
-                                                      constant=constant, matrix_power=matrix_power,
+            self.category_probability_dict_thresholds(warm_corr=warm_corr, ext_scores=ext_scores, tolerance=tolerance,
+                                                      max_iters=max_iters, ext_score_adjustment=ext_score_adjustment,
+                                                      method=method, constant=constant, matrix_power=matrix_power,
                                                       log_lik_tol=log_lik_tol)
 
         (self.exp_score_df_thresholds,
@@ -13367,6 +13901,7 @@ class MFRM(Rasch):
 
     def fit_matrices_matrix(self,
                             warm_corr=True,
+                            ext_scores=True,
                             tolerance=0.00001,
                             max_iters=100,
                             ext_score_adjustment=0.5,
@@ -13376,9 +13911,10 @@ class MFRM(Rasch):
                             log_lik_tol=0.000001):
 
         if hasattr(self, 'cat_prob_dict_matrix') == False:
-            self.category_probability_dict_matrix(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
-                                                  ext_score_adjustment=ext_score_adjustment, method=method,
-                                                  constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
+            self.category_probability_dict_matrix(warm_corr=warm_corr, ext_scores=ext_scores, tolerance=tolerance,
+                                                  max_iters=max_iters, ext_score_adjustment=ext_score_adjustment,
+                                                  method=method, constant=constant, matrix_power=matrix_power,
+                                                  log_lik_tol=log_lik_tol)
 
         (self.exp_score_df_matrix,
          self.info_df_matrix,
@@ -13431,6 +13967,7 @@ class MFRM(Rasch):
 
     def item_fit_statistics_global(self,
                                    warm_corr=True,
+                                   ext_scores=True,
                                    tolerance=0.00001,
                                    max_iters=100,
                                    ext_score_adjustment=0.5,
@@ -13440,9 +13977,9 @@ class MFRM(Rasch):
                                    log_lik_tol=0.000001):
 
         if hasattr(self, 'exp_score_df_global') == False:
-            self.fit_matrices_global(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
-                                     ext_score_adjustment=ext_score_adjustment, method=method, constant=constant,
-                                     matrix_power=matrix_power, log_lik_tol=log_lik_tol)
+            self.fit_matrices_global(warm_corr=warm_corr, ext_scores=ext_scores, tolerance=tolerance,
+                                     max_iters=max_iters, ext_score_adjustment=ext_score_adjustment, method=method,
+                                     constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
         (self.item_outfit_ms_global,
          self.item_outfit_zstd_global,
@@ -14617,7 +15154,7 @@ class MFRM(Rasch):
                               warm_corr=True,
                               se=True,
                               test_stats=True,
-                              trim_cat_prob_dict=False,
+                              ext_scores=True,
                               tolerance=0.00001,
                               max_iters=100,
                               ext_score_adjustment=0.5,
@@ -14645,7 +15182,7 @@ class MFRM(Rasch):
             self.person_abils_global(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                      ext_score_adjustment=ext_score_adjustment)
 
-        self.category_probability_dict_global(warm_corr=warm_corr, trim_cat_prob_dict=trim_cat_prob_dict,
+        self.category_probability_dict_global(warm_corr=warm_corr, ext_scores=ext_scores,
                                               tolerance=tolerance, max_iters=max_iters,
                                               ext_score_adjustment=ext_score_adjustment, method=method,
                                               constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
@@ -14666,7 +15203,7 @@ class MFRM(Rasch):
                              warm_corr=True,
                              se=True,
                              test_stats=True,
-                             trim_cat_prob_dict=False,
+                             ext_scores=True,
                              tolerance=0.00001,
                              max_iters=100,
                              ext_score_adjustment=0.5,
@@ -14693,7 +15230,7 @@ class MFRM(Rasch):
             self.person_abils_items(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                     ext_score_adjustment=ext_score_adjustment)
 
-        self.category_probability_dict_items(warm_corr=warm_corr, trim_cat_prob_dict=trim_cat_prob_dict,
+        self.category_probability_dict_items(warm_corr=warm_corr, ext_scores=ext_scores,
                                              tolerance=tolerance, max_iters=max_iters,
                                               ext_score_adjustment=ext_score_adjustment, method=method,
                                               constant=constant, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
@@ -14714,7 +15251,7 @@ class MFRM(Rasch):
                                   warm_corr=True,
                                   se=True,
                                   test_stats=True,
-                                  trim_cat_prob_dict=False,
+                                  ext_scores=True,
                                   tolerance=0.00001,
                                   max_iters=100,
                                   ext_score_adjustment=0.5,
@@ -14741,7 +15278,7 @@ class MFRM(Rasch):
             self.person_abils_thresholds(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                          ext_score_adjustment=ext_score_adjustment)
 
-        self.category_probability_dict_thresholds(warm_corr=warm_corr, trim_cat_prob_dict=trim_cat_prob_dict,
+        self.category_probability_dict_thresholds(warm_corr=warm_corr, ext_scores=ext_scores,
                                                   tolerance=tolerance, max_iters=max_iters,
                                                   ext_score_adjustment=ext_score_adjustment, method=method,
                                                   constant=constant)
@@ -14762,7 +15299,7 @@ class MFRM(Rasch):
                               warm_corr=True,
                               se=True,
                               test_stats=True,
-                              trim_cat_prob_dict=False,
+                              ext_scores=True,
                               tolerance=0.00001,
                               max_iters=100,
                               ext_score_adjustment=0.5,
@@ -14789,7 +15326,7 @@ class MFRM(Rasch):
             self.person_abils_matrix(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
                                      ext_score_adjustment=ext_score_adjustment)
 
-        self.category_probability_dict_matrix(warm_corr=warm_corr, trim_cat_prob_dict=trim_cat_prob_dict,
+        self.category_probability_dict_matrix(warm_corr=warm_corr, ext_scores=ext_scores,
                                               tolerance=tolerance, max_iters=max_iters,
                                               ext_score_adjustment=ext_score_adjustment, method=method,
                                               constant=constant)
@@ -22317,7 +22854,8 @@ class MFRM_Sim_Items(MFRM_Sim):
                                for rater in range(self.no_of_raters)]
             severities = np.array(severities)
             severities *= (self.rater_range / (np.max(severities) - np.min(severities)))
-            severities -= np.mean(severities)
+            for item in range(self.no_of_items):
+                severities[:, item] -= np.mean( severities[:, item])
 
             self.severities = {f'Rater_{rater + 1}': {f'Item_{item + 1}': severities[rater, item]
                                                       for item in range(self.no_of_items)}
@@ -22338,23 +22876,18 @@ class MFRM_Sim_Items(MFRM_Sim):
         for each person on each item
         '''
 
-        c_p_df = {item: self.abilities - self.diffs.loc[item]
-                  for item in self.items}
-        c_p_df = pd.DataFrame(c_p_df)
-        c_p_dict = {rater: c_p_df.copy() for rater in self.raters}
-
+        c_p_df = {rater: {item: self.abilities - self.diffs.loc[item] - self.severities[rater][item]
+                          for item in self.items}
+                  for rater in self.raters}
         for rater in self.raters:
-            for item in self.items:
-                c_p_dict[rater][item] -= self.severities[rater][item]
+            c_p_df[rater] = pd.DataFrame(c_p_df[rater])
 
-        self.cat_probs = {cat: {rater: ((cat * c_p_dict[rater]) -
-                                        sum(self.thresholds[:cat + 1]))
-                                for rater in self.raters}
+        c_p_df = pd.concat(c_p_df.values(), keys=c_p_df.keys())
+
+        self.cat_probs = {cat: (cat * c_p_df) - sum(self.thresholds[:cat + 1])
                           for cat in range(self.max_score + 1)}
 
         for cat in range(self.max_score + 1):
-            self.cat_probs[cat] = pd.concat(self.cat_probs[cat].values(),
-                                            keys=self.cat_probs[cat].keys())
             self.cat_probs[cat] = np.exp(self.cat_probs[cat])
 
         den = sum(self.cat_probs[cat] for cat in range(self.max_score + 1))
@@ -22711,7 +23244,9 @@ class MFRM_Sim_Matrix(MFRM_Sim):
                                for rater in range(self.no_of_raters)]
             severities = np.array(severities)
             severities *= (self.rater_range / (np.max(severities) - np.min(severities)))
-            severities -= np.mean(severities)
+            for j in range (self.max_score):
+                for i, item in enumerate(self.items):
+                    severities[i, j, :] -= np.mean(severities[i, j, :])
             severities = np.insert(severities, 0, 0, axis = 2)
 
             self.severities = {rater: {f'Item_{item + 1}': severities[i, item, :]
