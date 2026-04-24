@@ -1272,7 +1272,7 @@ class SLM(Rasch):
                                for cat in range(self.max_score + 1))
         self.kurtosis_df *= missing_mask
 
-        self.residual_df = df - self.exp_score_df
+        self.residual_df = self.dataframe - self.exp_score_df
         self.std_residual_df = self.residual_df / (self.info_df ** 0.5)
 
         self.exp_score_df = self.exp_score_df[(scores > 0) & (scores < max_scores)]
@@ -2896,9 +2896,12 @@ class PCM(Rasch):
 
         self.threshold_bootstrap = threshold_bootstrap
 
-        cat_width_bootstrap = {}
+        cat_width_bootstrap = {item: pd.DataFrame() for item in self.items}
         for item in self.items:
-            if self.max_score_vector[item] > 1:
+            if self.max_score_vector[item] == 1:
+                cat_width_bootstrap[item][1] = pd.Series({f'Sample {i + 1}': 0 for i in range(no_of_samples)})
+
+            else:
                 cat_width_bootstrap[item] = pd.DataFrame()
     
                 for score in range(self.max_score_vector[item] - 1):
@@ -2925,7 +2928,7 @@ class PCM(Rasch):
         
 
         self.cat_width_se = {item: np.std(self.cat_width_bootstrap[item], axis=0)
-                             for item in self.dataframe.columns}
+                             for item in self.items}
 
         if interval is not None:
             self.cat_width_low = {item: np.percentile(self.cat_width_bootstrap[item], (1 - interval) * 50, axis=0)
@@ -3452,8 +3455,14 @@ class PCM(Rasch):
                                for cat in range(max_max_score + 1))
         self.kurtosis_df *= missing_mask
 
-        self.residual_df = df - self.exp_score_df
+        self.residual_df = self.dataframe - self.exp_score_df
         self.std_residual_df = self.residual_df / (self.info_df ** 0.5)
+
+        self.exp_score_df = self.exp_score_df[(scores > 0) & (scores < max_scores)]
+        self.info_df = self.info_df[(scores > 0) & (scores < max_scores)]
+        self.kurtosis_df = self.kurtosis_df[(scores > 0) & (scores < max_scores)]
+        self.residual_df = self.residual_df[(scores > 0) & (scores < max_scores)]
+        self.std_residual_df = self.std_residual_df[(scores > 0) & (scores < max_scores)]
 
         '''
         Item fit statistics
@@ -3855,7 +3864,7 @@ class PCM(Rasch):
             self.item_stats['PM corr'] = self.point_measure.astype(float).round(dp)
             self.item_stats['Exp PM corr'] = self.exp_point_measure.astype(float).round(dp)
 
-        self.item_stats.index = self.dataframe.columns
+        self.item_stats.index = self.items
 
     def threshold_stats_df(self,
                            full=False,
@@ -5901,8 +5910,14 @@ class RSM(Rasch):
         self.kurtosis_df = sum(df * (cat - self.exp_score_df) ** 4 for cat, df in self.cat_prob_dict.items())
         self.kurtosis_df *= missing_mask
 
-        self.residual_df = df - self.exp_score_df
+        self.residual_df = self.dataframe - self.exp_score_df
         self.std_residual_df = self.residual_df / (self.info_df ** 0.5)
+
+        self.exp_score_df = self.exp_score_df[(scores > 0) & (scores < max_scores)]
+        self.info_df = self.info_df[(scores > 0) & (scores < max_scores)]
+        self.kurtosis_df = self.kurtosis_df[(scores > 0) & (scores < max_scores)]
+        self.residual_df = self.residual_df[(scores > 0) & (scores < max_scores)]
+        self.std_residual_df = self.std_residual_df[(scores > 0) & (scores < max_scores)]
 
         '''
         Item fit statistics
