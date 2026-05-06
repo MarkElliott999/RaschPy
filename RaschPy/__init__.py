@@ -1378,7 +1378,7 @@ class SLM(Rasch):
                                 ext_score_adjustment=ext_score_adjustment, constant=constant, method=method,
                                 matrix_power=matrix_power, log_lik_tol=log_lik_tol)
 
-        self.residual_correlations = self.std_residual_df.corr(numeric_only=False)
+        self.residual_correlations = self.residual_df.corr(numeric_only=False)
 
         pca = PCA()
         try:
@@ -3778,7 +3778,7 @@ class PCM(Rasch):
                                 matrix_power=matrix_power, log_lik_tol=log_lik_tol, no_of_samples=no_of_samples,
                                 interval=interval)
 
-        self.residual_correlations = self.std_residual_df.corr(numeric_only=False)
+        self.residual_correlations = self.residual_df.corr(numeric_only=False)
 
         pca = PCA()
         try:
@@ -6141,7 +6141,7 @@ class RSM(Rasch):
                                 matrix_power=matrix_power, log_lik_tol=log_lik_tol, no_of_samples=no_of_samples,
                                 interval=interval)
 
-        self.residual_correlations = self.std_residual_df.corr(numeric_only=False)
+        self.residual_correlations = self.residual_df.corr(numeric_only=False)
 
         pca = PCA()
         
@@ -14780,15 +14780,17 @@ class MFRM(Rasch):
                                                                    self.residual_df_matrix, self.std_residual_df_matrix)
 
     def rater_res_corr_analysis(self,
+                                residual_df,
                                 std_residual_df):
 
+        rater_residual_df = self.rater_pivot(residual_df)
         rater_std_residual_df = self.rater_pivot(std_residual_df)
-        rater_residual_correlations = rater_std_residual_df.corr(numeric_only=False)
+        rater_residual_correlations = rater_residual_df.corr(numeric_only=False)
 
         pca = PCA()
 
         try:
-            pca.fit(rater_residual_correlations)
+            pca.fit(rater_std_residual_df.corr(numeric_only=False))
 
             rater_eigenvectors = pd.DataFrame(pca.components_)
             rater_eigenvectors.columns = [f'Eigenvector {pc + 1}' for pc in range(self.no_of_raters)]
@@ -14827,7 +14829,8 @@ class MFRM(Rasch):
          self.rater_eigenvectors_global,
          self.rater_eigenvalues_global,
          self.rater_variance_explained_global,
-         self.rater_loadings_global) = self.rater_res_corr_analysis(self.std_residual_df_global)
+         self.rater_loadings_global) = self.rater_res_corr_analysis(self.residual_df_global,
+                                                                    self.std_residual_df_global)
 
     def rater_res_corr_analysis_items(self):
 
@@ -14835,7 +14838,8 @@ class MFRM(Rasch):
          self.rater_eigenvectors_items,
          self.rater_eigenvalues_items,
          self.rater_variance_explained_items,
-         self.rater_loadings_items) = self.rater_res_corr_analysis(self.std_residual_df_items)
+         self.rater_loadings_items) = self.rater_res_corr_analysis(self.residual_df_items,
+                                                                   self.std_residual_df_items)
 
     def rater_res_corr_analysis_thresholds(self):
 
@@ -14843,7 +14847,8 @@ class MFRM(Rasch):
          self.rater_eigenvectors_thresholds,
          self.rater_eigenvalues_thresholds,
          self.rater_variance_explained_thresholds,
-         self.rater_loadings_thresholds) = self.rater_res_corr_analysis(self.std_residual_df_thresholds)
+         self.rater_loadings_thresholds) = self.rater_res_corr_analysis(self.residual_df_thresholds,
+                                                                        self.std_residual_df_thresholds)
 
     def rater_res_corr_analysis_matrix(self):
 
@@ -14851,7 +14856,8 @@ class MFRM(Rasch):
          self.rater_eigenvectors_matrix,
          self.rater_eigenvalues_matrix,
          self.rater_variance_explained_matrix,
-         self.rater_loadings_matrix) = self.rater_res_corr_analysis(self.std_residual_df_matrix)
+         self.rater_loadings_matrix) = self.rater_res_corr_analysis(self.residual_df_matrix,
+                                                                    self.std_residual_df_matrix)
 
     def person_fit_statistics(self,
                               info_df,
@@ -23241,11 +23247,11 @@ class MFRM_Sim_Matrix(MFRM_Sim):
         else:
             assert len(self.thresholds) == self.max_score + 1, 'Number of manual thresholds must be max score plus 1.'
             assert self.thresholds[0] == 0, 'First threshold in manual thresholds must have value zero.'
-            assert sum(manual_thresholds) == 0 , ('Manual thresholds must sum to zero.')
+            assert sum(manual_thresholds) < 0.00000001 , ('Manual thresholds must sum to zero.')
             self.thresholds = np.array(self.thresholds)
 
         if manual_rater_names is not None:
-            if self.manual_severities is not None:
+            if manual_severities is not None:
                 assert (set(manual_rater_names) ==
                         set(manual_severities.keys())), 'Manual rater names do not match rater names in manual severities'
             self.raters = manual_rater_names
@@ -23259,9 +23265,10 @@ class MFRM_Sim_Matrix(MFRM_Sim):
                                for rater in range(self.no_of_raters)]
             severities = np.array(severities)
             severities *= (self.rater_range / (np.max(severities) - np.min(severities)))
-            for j in range (self.max_score):
-                for i, item in enumerate(self.items):
-                    severities[i, j, :] -= np.mean(severities[i, j, :])
+
+            for rater in range(self.no_of_raters):
+                for item in range(self.no_of_items):
+                    severities[rater, item, :] -= np.mean(severities[rater, item, :])
             severities = np.insert(severities, 0, 0, axis = 2)
 
             self.severities = {rater: {f'Item_{item + 1}': severities[i, item, :]
