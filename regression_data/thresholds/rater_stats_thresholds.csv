@@ -1,5 +1,4 @@
-,Threshold 1,Threshold 1,Threshold 2,Threshold 2,Threshold 3,Threshold 3,Overall statistics,Overall statistics,Overall statistics
-,Estimate,SE,Estimate,SE,Estimate,SE,Count,Infit MS,Outfit MS
+,Threshold 1 | Estimate,Threshold 1 | SE,Threshold 2 | Estimate,Threshold 2 | SE,Threshold 3 | Estimate,Threshold 3 | SE,Overall statistics | Count,Overall statistics | Infit MS,Overall statistics | Outfit MS
 Rater_1,0.374,0.099,-0.087,0.079,0.008,0.093,1200.0,0.989,0.986
 Rater_2,0.059,0.082,0.148,0.083,0.16,0.093,1200.0,0.941,0.942
 Rater_3,0.023,0.088,0.453,0.076,-0.157,0.09,1200.0,0.896,0.886
