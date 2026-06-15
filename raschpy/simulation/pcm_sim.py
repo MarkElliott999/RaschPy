@@ -10,10 +10,78 @@ from raschpy.simulation.base_sim import Rasch_Sim
 from raschpy.pcm import PCM
 
 class PCM_Sim(Rasch_Sim):
-    
-    '''
-    Generates simulated data accoding to the Partial Credit Model (PCM).
-    '''
+    """
+    Simulate polytomous response data according to the Partial Credit Model (PCM).
+
+    Generates item difficulties, per-item Rasch-Andrich thresholds, and person
+    abilities, then computes category probabilities and samples scores. Unlike
+    the RSM, each item has its own independent threshold structure. Simulation
+    runs automatically on instantiation; access results via self.scores.
+
+    Parameters
+    ----------
+    no_of_items : int
+        Number of items to simulate.
+    no_of_persons : int
+        Number of persons to simulate.
+    max_score_vector : list of int
+        Maximum possible score for each item, in item order. Length must
+        equal no_of_items. Items may have different maximum scores.
+    item_range : float, default 3
+        Total spread of item difficulties in logits.
+    category_base : float, default 1
+        Base width of each rating category per item. Larger values produce
+        wider, more ordered categories.
+    person_sd : float, default 1.5
+        Standard deviation of the person ability distribution (normal).
+    max_disorder : float, default 0
+        Maximum threshold disorder per item. 0 produces perfectly ordered
+        thresholds; values > 0 introduce random disordering.
+    offset : float, default 0
+        Mean shift applied to person abilities after centring.
+    missing : float, default 0
+        Proportion of responses to set as missing at random, in [0, 1).
+    manual_abilities : array-like or None, default None
+        Custom person abilities. Length must equal no_of_persons.
+    manual_diffs : array-like or None, default None
+        Custom item difficulties. Length must equal no_of_items.
+    manual_thresholds : list of array-like or None, default None
+        Custom per-item threshold vectors. Must be a list of no_of_items
+        arrays, each of length max_score_vector[i] + 1, beginning with 0
+        and summing to 0.
+    manual_person_names : list of str or None, default None
+        Custom person labels. If None, labels are 'Person_1', 'Person_2', etc.
+    manual_item_names : list of str or None, default None
+        Custom item labels. If None, labels are 'Item_1', 'Item_2', etc.
+
+    Attributes set
+    --------------
+    scores : pandas.DataFrame
+        Simulated response matrix, shape (no_of_persons, no_of_items).
+        Values are integers in [0, max_score_vector[i]] or NaN (missing).
+    abilities : pandas.Series
+        True person ability parameters, indexed by person.
+    diffs : pandas.Series
+        True item difficulty parameters (central difficulties), indexed by item.
+    thresholds_centred : dict
+        {item: numpy.ndarray} of centred Rasch-Andrich threshold offsets per item,
+        length max_score_vector[i] + 1, with index 0 = 0.
+    thresholds_uncentred : dict
+        {item: numpy.ndarray} of uncentred (absolute) thresholds per item,
+        length max_score_vector[i].
+    cat_probs : dict
+        {cat: DataFrame} of category probabilities used for simulation.
+    persons : list of str
+        Person labels.
+    items : list of str
+        Item labels.
+    no_of_items : int
+        Number of items.
+    no_of_persons : int
+        Number of persons.
+    max_score_vector : list of int
+        Maximum score per item.
+    """
 
     def __init__(self,
                  no_of_items,
@@ -47,9 +115,7 @@ class PCM_Sim(Rasch_Sim):
         self.dataframe = pd.DataFrame([1])
         self.pcm = PCM(self.dataframe, self.max_score_vector)
         
-        '''
-        Generates person, item and threshold parameters.
-        '''
+        # Generate person, item, and threshold parameters
 
         assert len(self.max_score_vector) == self.no_of_items, 'Length of max score vector must match number of items.'
 
@@ -139,9 +205,7 @@ class PCM_Sim(Rasch_Sim):
             self.diffs[item] -= threshold_mean
             self.thresholds_uncentred[item] -= threshold_mean
             
-        '''
-        Calculates probability of a response in each category for each person on each item
-        '''
+        # Calculate category probabilities for each person-item combination
 
         max_max_score = max(self.max_score_vector)
 
@@ -158,9 +222,7 @@ class PCM_Sim(Rasch_Sim):
             for cat in range(self.max_score_vector[i] + 1):
                 self.cat_probs[cat][item] /= den_vector
         
-        '''
-        Calculates scores and removes required amount of missing data
-        '''
+        # Calculate scores and apply missing data
 
         scoring_randoms = pd.DataFrame(self.randoms(), columns=self.items, index=self.persons)
 

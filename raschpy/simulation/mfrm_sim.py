@@ -1,4 +1,5 @@
 import itertools
+import warnings
 from math import exp, log, sqrt, floor
 import statistics
 
@@ -11,37 +12,95 @@ from raschpy.mfrm import MFRM
 
 
 class MFRM_Sim(Rasch_Sim):
-    '''
-    Generates simulated data for the Many-Facet Rasch Model (MFRM)
-    under four rater severity parameterisations:
-      'global'     — scalar severity per rater
-      'items'      — severity vector per (rater, item)
-      'thresholds' — severity vector per (rater, threshold)
-      'matrix'     — full severity tensor per (rater, item, threshold)
+    """
+    Simulate polytomous response data for the Many-Facet Rasch Model (MFRM).
+
+    Generates item difficulties, shared Rasch-Andrich thresholds, person
+    abilities, and rater severity parameters under one of four parameterisations,
+    then computes category probabilities and samples scores for every
+    rater-person-item combination. Simulation runs automatically on instantiation;
+    access results via self.scores.
 
     Parameters
     ----------
-    no_of_items     : int
-    no_of_persons   : int
-    no_of_raters    : int
-    max_score       : int
-    model           : str, one of 'global', 'items', 'thresholds', 'matrix'
-    item_range      : float, spread of item difficulties
-    rater_range     : float, spread of rater severities
-    category_base   : float, base width of rating categories
-    person_sd       : float, SD of person ability distribution
-    max_disorder    : float, maximum threshold disorder (0 = ordered)
-    offset          : float, shift of person distribution relative to items
-    missing         : float, proportion of missing responses [0, 1)
-    shared_missing  : bool, if True the same persons are missing across raters
-    manual_abilities    : array-like, optional
-    manual_diffs        : array-like, optional
-    manual_thresholds   : array-like, optional
-    manual_severities   : dict or array-like, optional (structure depends on model)
-    manual_person_names : list of str, optional
-    manual_item_names   : list of str, optional
-    manual_rater_names  : list of str, optional
-    '''
+    no_of_items : int
+        Number of items to simulate.
+    no_of_persons : int
+        Number of persons to simulate.
+    no_of_raters : int
+        Number of raters to simulate.
+    max_score : int
+        Maximum possible score per item (number of categories minus 1).
+    model : str, default 'global'
+        Rater severity parameterisation. One of:
+        'global'     — single scalar severity per rater;
+        'items'      — separate severity per (rater, item);
+        'thresholds' — separate severity per (rater, threshold);
+        'matrix'     — full severity per (rater, item, threshold).
+    item_range : float, default 2
+        Total spread of item difficulties in logits.
+    rater_range : float, default 2
+        Total spread of rater severities in logits.
+    category_base : float, default 1
+        Base width of each rating category. Larger values produce wider,
+        more ordered categories.
+    person_sd : float, default 1.5
+        Standard deviation of the person ability distribution (normal).
+    max_disorder : float, default 0
+        Maximum threshold disorder. 0 produces perfectly ordered thresholds.
+    offset : float, default 0
+        Mean shift applied to person abilities after centring.
+    missing : float, default 0
+        Proportion of responses to set as missing at random, in [0, 1).
+    shared_missing : bool, default True
+        If True, the same persons are missing across all raters (correlated
+        missingness). If False, missingness is independent across raters.
+    manual_abilities : array-like or None, default None
+        Custom person abilities. Length must equal no_of_persons.
+    manual_diffs : array-like or None, default None
+        Custom item difficulties. Length must equal no_of_items.
+    manual_thresholds : array-like or None, default None
+        Custom threshold vector, length max_score + 1. Must satisfy
+        thresholds[0] == 0 and sum(thresholds) == 0.
+    manual_severities : dict or array-like or None, default None
+        Custom rater severity parameters. Structure must match the chosen model:
+        global — array-like of length no_of_raters;
+        items  — {rater: {item: float}};
+        thresholds — {rater: array of length max_score};
+        matrix — {rater: {item: array of length max_score}}.
+    manual_person_names : list of str or None, default None
+        Custom person labels. If None, labels are 'Person_1', 'Person_2', etc.
+    manual_item_names : list of str or None, default None
+        Custom item labels. If None, labels are 'Item_1', 'Item_2', etc.
+    manual_rater_names : list of str or None, default None
+        Custom rater labels. If None, labels are 'Rater_1', 'Rater_2', etc.
+
+    Attributes set
+    --------------
+    scores : pandas.DataFrame
+        Simulated response matrix with (Rater, Person) MultiIndex and items
+        as columns. Values are integers in [0, max_score] or NaN (missing).
+        This is the primary output — pass directly to MFRM(scores).
+    abilities : pandas.Series
+        True person ability parameters, indexed by person.
+    diffs : pandas.Series
+        True item difficulty parameters, indexed by item.
+    thresholds : numpy.ndarray
+        True Rasch-Andrich threshold vector, length max_score + 1,
+        with thresholds[0] = 0.
+    severities : pandas.Series or dict
+        True rater severity parameters. Structure depends on model.
+    cat_probs : dict
+        {cat: DataFrame} of category probabilities used for simulation.
+    persons : list of str
+        Person labels.
+    items : list of str
+        Item labels.
+    raters : list of str
+        Rater labels.
+    model : str
+        Rater parameterisation used for simulation.
+    """
 
     def __init__(self,
                  no_of_items,
@@ -375,26 +434,53 @@ class MFRM_Sim(Rasch_Sim):
     # ------------------------------------------------------------------
 
     def rename_rater(self, old, new):
+        """
+        Rename a single rater in the simulated scores DataFrame.
+
+        Parameters
+        ----------
+        old : str
+            Current rater name.
+        new : str
+            Desired new rater name.
+        """
+
         if old == new:
-            print('New rater name is the same as old rater name.')
+            warnings.warn('New rater name is the same as the old rater name.',
+                          UserWarning, stacklevel=2)
         elif new in self.raters:
-            print('New rater name is a duplicate of an existing rater name')
+            warnings.warn('New rater name is a duplicate of an existing rater name.',
+                          UserWarning, stacklevel=2)
         if old not in self.raters:
-            print(f'Old rater name "{old}" not found in data. Please check')
+            warnings.warn(f'Old rater name {old!r} not found in data.',
+                          UserWarning, stacklevel=2)
         elif not isinstance(new, str):
-            print('Rater names must be strings')
+            warnings.warn('Rater names must be strings.',
+                          UserWarning, stacklevel=2)
         else:
             new_names = [new if r == old else r for r in self.raters]
             self.rename_raters_all(new_names)
 
     def rename_raters_all(self, new_names):
+        """
+        Rename all raters at once.
+
+        Parameters
+        ----------
+        new_names : list of str
+            New rater names in the same order as self.raters.
+        """
+
         if len(new_names) != len(set(new_names)):
-            print('List of new rater names contains duplicates.')
+            warnings.warn('List of new rater names contains duplicates.',
+                          UserWarning, stacklevel=2)
         elif len(new_names) != self.no_of_raters:
-            print(f'Incorrect number of rater names. {len(new_names)} in list, '
-                  f'{self.no_of_raters} raters in data.')
+            warnings.warn(f'Incorrect number of rater names: {len(new_names)} provided, '
+                          f'{self.no_of_raters} raters in data.',
+                          UserWarning, stacklevel=2)
         elif not all(isinstance(n, str) for n in new_names):
-            print('Rater names must be strings')
+            warnings.warn('Rater names must be strings.',
+                          UserWarning, stacklevel=2)
         else:
             df_dict = {new: self.scores.xs(old)
                        for old, new in zip(self.raters, new_names)}
@@ -402,26 +488,54 @@ class MFRM_Sim(Rasch_Sim):
         self.raters = self.scores.index.get_level_values(0).unique().tolist()
 
     def rename_person(self, old, new):
+        """
+        Rename a single person in the simulated scores DataFrame.
+
+        Parameters
+        ----------
+        old : str
+            Current person name.
+        new : str
+            Desired new person name.
+        """
+
         if old == new:
-            print('New person name is the same as old person name.')
+            warnings.warn('New person name is the same as the old person name.',
+                          UserWarning, stacklevel=2)
         elif new in self.scores.index.get_level_values(1):
-            print('New person name is a duplicate of an existing person name')
+            warnings.warn('New person name is a duplicate of an existing person name.',
+                          UserWarning, stacklevel=2)
         if old not in self.scores.index.get_level_values(1):
-            print(f'Old person name "{old}" not found in data. Please check')
+            warnings.warn(f'Old person name {old!r} not found in data.',
+                          UserWarning, stacklevel=2)
         elif not isinstance(new, str):
-            print('Person names must be strings')
+            warnings.warn('Person names must be strings.',
+                          UserWarning, stacklevel=2)
         else:
             self.scores.rename(index={old: new}, inplace=True)
         self.persons = self.scores.index.get_level_values(1).unique().tolist()
 
     def rename_persons_all(self, new_names):
+        """
+        Rename all persons at once.
+
+        Parameters
+        ----------
+        new_names : list of str
+            New person names in the same order as self.persons.
+        """
+
         old_names = self.scores.index.get_level_values(1)
         if len(new_names) != len(set(new_names)):
-            print('List of new person names contains duplicates.')
+            warnings.warn('List of new person names contains duplicates.',
+                          UserWarning, stacklevel=2)
         elif len(new_names) != self.no_of_persons:
-            print(f'Incorrect number of person names.')
+            warnings.warn(f'Incorrect number of person names: {len(new_names)} provided, '
+                          f'{self.no_of_persons} persons in data.',
+                          UserWarning, stacklevel=2)
         elif not all(isinstance(n, str) for n in new_names):
-            print('Person names must be strings')
+            warnings.warn('Person names must be strings.',
+                          UserWarning, stacklevel=2)
         else:
             self.scores.rename(
                 index={old: new for old, new in zip(old_names, new_names)},
@@ -435,28 +549,52 @@ class MFRM_Sim(Rasch_Sim):
 # ------------------------------------------------------------------
 
 class MFRM_Sim_Global(MFRM_Sim):
-    '''MFRM simulation — global (scalar) rater severity parameterisation.'''
+    """
+    MFRM simulation — global (scalar) rater severity parameterisation.
+
+    Convenience subclass of MFRM_Sim with model='global' fixed.
+    Each rater has a single scalar severity estimate applied equally
+    across all items and thresholds. See MFRM_Sim for full parameter docs.
+    """
     def __init__(self, no_of_items, no_of_persons, no_of_raters, max_score, **kw):
         super().__init__(no_of_items, no_of_persons, no_of_raters, max_score,
                          model='global', **kw)
 
 
 class MFRM_Sim_Items(MFRM_Sim):
-    '''MFRM simulation — items (vector per rater×item) severity parameterisation.'''
+    """
+    MFRM simulation — items (per rater×item) severity parameterisation.
+
+    Convenience subclass of MFRM_Sim with model='items' fixed.
+    Each rater has a separate severity for each item, constant across
+    thresholds. See MFRM_Sim for full parameter docs.
+    """
     def __init__(self, no_of_items, no_of_persons, no_of_raters, max_score, **kw):
         super().__init__(no_of_items, no_of_persons, no_of_raters, max_score,
                          model='items', **kw)
 
 
 class MFRM_Sim_Thresholds(MFRM_Sim):
-    '''MFRM simulation — thresholds (vector per rater×threshold) severity parameterisation.'''
+    """
+    MFRM simulation — thresholds (per rater×threshold) severity parameterisation.
+
+    Convenience subclass of MFRM_Sim with model='thresholds' fixed.
+    Each rater has a separate severity for each threshold, constant across
+    items. See MFRM_Sim for full parameter docs.
+    """
     def __init__(self, no_of_items, no_of_persons, no_of_raters, max_score, **kw):
         super().__init__(no_of_items, no_of_persons, no_of_raters, max_score,
                          model='thresholds', **kw)
 
 
 class MFRM_Sim_Matrix(MFRM_Sim):
-    '''MFRM simulation — matrix (full rater×item×threshold tensor) severity parameterisation.'''
+    """
+    MFRM simulation — matrix (full rater×item×threshold tensor) parameterisation.
+
+    Convenience subclass of MFRM_Sim with model='matrix' fixed.
+    Each rater has a separate severity for every (item, threshold) combination.
+    See MFRM_Sim for full parameter docs.
+    """
     def __init__(self, no_of_items, no_of_persons, no_of_raters, max_score, **kw):
         super().__init__(no_of_items, no_of_persons, no_of_raters, max_score,
                          model='matrix', **kw)

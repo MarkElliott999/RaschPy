@@ -20,15 +20,41 @@ sns.set_style('whitegrid')
 
 
 class Rasch:
+    """
+    Abstract base class for all RaschPy model objects.
+
+    Provides shared infrastructure used by SLM, PCM, RSM, and MFRM:
+    data connectivity validation, priority vector extraction for PAIR
+    calibration, point-measure correlation computation, item and person
+    rename utilities, and the standardised residuals histogram.
+
+    Not intended to be instantiated directly — use the concrete subclasses
+    SLM, PCM, RSM, or MFRM instead.
+    """
 
     def __init__(self):
         pass
 
     def check_data_connectivity(self):
         """
-        AUTOMATIC DATA VALIDATION CHECK
-        Validates if the item response graph is structurally connected.
-        Can be called immediately after assigning self.dataframe in child classes.
+        Validate whether the item response network is fully connected.
+
+        Constructs an undirected adjacency graph where two items are connected
+        if at least one person responded to both. Uses BFS to find connected
+        components. A disconnected network means item difficulties are estimated
+        independently per component and cannot be placed on a common scale.
+
+        Called automatically by SLM.__init__() when validate=True.
+
+        Returns
+        -------
+        dict
+            Always contains:
+            - 'connected' : bool — True if the network is fully connected.
+            - 'components_count' : int — number of connected components.
+            If disconnected, also contains:
+            - 'isolated_items' : list — items forming singleton components.
+            - 'all_sub_groups' : list of lists — all components.
         """
         if not hasattr(self, 'dataframe') or self.dataframe is None:
             return {"connected": False, "reason": "No dataframe loaded."}
@@ -93,9 +119,37 @@ class Rasch:
                         log_lik_tol=0.000001,
                         pcm=False,
                         raters=False):
-        '''
-        Optimised priority vector method (Choppin-compatible, zero-safe, loop-free).
-        '''
+        """
+        Extract a priority vector (item difficulty estimates) from a pairwise matrix.
+
+        Implements the Choppin (1968) PAIR algorithm: given a matrix where
+        entry (i, j) counts persons who passed item i and failed item j, extracts
+        a log-scale priority vector proportional to item difficulty. Three methods
+        are supported, all producing zero-centred logit estimates.
+
+        Parameters
+        ----------
+        matrix : numpy.ndarray
+            Square pairwise comparison matrix, shape (n, n).
+        method : str, default 'cos'
+            Priority vector extraction method:
+            'cos'      — cosine (geometric mean) normalisation. Fast and robust.
+            'ls'       — least squares (row mean of reciprocal matrix).
+            'log-lik'  — iterative maximum likelihood (Bradley-Terry model).
+            'evm'      — eigenvector method via PCA. Requires scikit-learn.
+        log_lik_tol : float, default 0.000001
+            Convergence tolerance for the 'log-lik' method.
+        pcm : bool, default False
+            If True, names output using item-threshold labels for PCM calibration.
+        raters : bool, default False
+            If True, names output using rater labels for MFRM calibration.
+
+        Returns
+        -------
+        pandas.Series
+            Item difficulty (or rater severity) estimates, zero-centred logits,
+            indexed by item (or rater) name. Returns None if 'evm' fails.
+        """
         matrix_dim = matrix.shape[0]
 
         if pcm:
@@ -125,7 +179,8 @@ class Rasch:
                 measures -= np.mean(measures)
                 measures = pd.Series(measures.real, index=names)
             except Exception:
-                print('EVM method failed. Try another method.')
+                warnings.warn('EVM priority vector method failed. Try another method.',
+                              UserWarning, stacklevel=2)
                 return None
 
         elif method == 'log-lik':
@@ -175,9 +230,29 @@ class Rasch:
         return measures
 
     def pt_meas(self, abils, exp_score_df, info_df):
-        '''
-        Optimised Point-Measure and Expected Point-Measure Correlations.
-        '''
+        """
+        Compute observed and expected point-measure correlations.
+
+        Point-measure correlation is the Pearson correlation between observed
+        item scores and person ability estimates. Expected point-measure
+        correlation uses modelled expected scores corrected for shrinkage.
+
+        Parameters
+        ----------
+        abils : pandas.Series
+            Person ability estimates indexed by person identifier.
+        exp_score_df : pandas.DataFrame
+            Expected scores for non-extreme persons, shape (persons, items).
+        info_df : pandas.DataFrame
+            Fisher information values, shape (persons, items).
+
+        Returns
+        -------
+        pt_measure : pandas.Series
+            Observed point-measure correlations per item.
+        exp_pt_measure : pandas.Series
+            Expected point-measure correlations per item.
+        """
         abil_dev_df = pd.DataFrame(
             np.tile(abils.values[:, np.newaxis] - np.mean(abils),
                     (1, len(self.dataframe.columns))),
@@ -206,54 +281,104 @@ class Rasch:
 
         return pt_measure, exp_pt_measure
 
-    # Item / Person renaming modules
     def rename_item(self, old, new):
+        """
+        Rename a single item in self.dataframe.
+
+        Parameters
+        ----------
+        old : str
+            Current item name (must be a column in self.dataframe).
+        new : str
+            Desired new item name. Must be a string and not already in use.
+        """
         if old not in self.dataframe.columns:
-            print(f'Old item name "{old}" not found in data. Please check.')
+            warnings.warn(f'Old item name {old!r} not found in data.',
+                          UserWarning, stacklevel=2)
             return
         if not isinstance(new, str):
-            print('Item names must be strings.')
+            warnings.warn('Item names must be strings.',
+                          UserWarning, stacklevel=2)
             return
         if old == new:
-            print('New item name is the same as old item name.')
+            warnings.warn('New item name is the same as the old item name.',
+                          UserWarning, stacklevel=2)
             return
         if new in self.dataframe.columns:
-            print('New item name is a duplicate of an existing item name.')
+            warnings.warn('New item name is a duplicate of an existing item name.',
+                          UserWarning, stacklevel=2)
             return
         self.dataframe.rename(columns={old: new}, inplace=True)
 
     def rename_items_all(self, new_names):
+        """
+        Rename all items at once.
+
+        Parameters
+        ----------
+        new_names : list of str
+            New item names in column order. Must match item count with no duplicates.
+        """
         list_length = len(new_names)
         if len(new_names) != len(set(new_names)):
-            print('List of new item names contains duplicates.')
+            warnings.warn('List of new item names contains duplicates.',
+                          UserWarning, stacklevel=2)
         elif list_length != self.no_of_items:
-            print(f'Incorrect token dimensions: Expected {self.no_of_items}.')
+            warnings.warn(f'Incorrect number of item names: {list_length} provided, '
+                          f'{self.no_of_items} items in data.',
+                          UserWarning, stacklevel=2)
         else:
             self.dataframe.rename(columns=dict(zip(self.dataframe.columns, new_names)), inplace=True)
 
     def rename_person(self, old, new):
+        """
+        Rename a single person in self.dataframe.
+
+        Parameters
+        ----------
+        old : str
+            Current person name (must be in self.dataframe.index).
+        new : str
+            Desired new person name. Must be a string and not already in use.
+        """
         if old not in self.dataframe.index:
-            print(f'Old person name "{old}" not found in data.')
+            warnings.warn(f'Old person name {old!r} not found in data.',
+                          UserWarning, stacklevel=2)
             return
         if not isinstance(new, str):
-            print('Person names must be strings.')
+            warnings.warn('Person names must be strings.',
+                          UserWarning, stacklevel=2)
             return
         if old == new:
-            print('New person name is the same as old person name.')
+            warnings.warn('New person name is the same as the old person name.',
+                          UserWarning, stacklevel=2)
             return
         if new in self.dataframe.index:
-            print('New person name is a duplicate of an existing person name.')
+            warnings.warn('New person name is a duplicate of an existing person name.',
+                          UserWarning, stacklevel=2)
             return
         self.dataframe.rename(index={old: new}, inplace=True)
 
     def rename_persons_all(self, new_names):
+        """
+        Rename all persons at once.
+
+        Parameters
+        ----------
+        new_names : list of str
+            New person names in index order. Must match person count with no duplicates.
+        """
         list_length = len(new_names)
         if len(new_names) != len(set(new_names)):
-            print('List contains duplicates.')
+            warnings.warn('List of new person names contains duplicates.',
+                          UserWarning, stacklevel=2)
         elif list_length != self.no_of_persons:
-            print(f'Incorrect token dimensions: Expected {self.no_of_persons}.')
+            warnings.warn(f'Incorrect number of person names: {list_length} provided, '
+                          f'{self.no_of_persons} persons in data.',
+                          UserWarning, stacklevel=2)
         elif not all(isinstance(name, str) for name in new_names):
-            print('Person names must be strings.')
+            warnings.warn('Person names must be strings.',
+                          UserWarning, stacklevel=2)
         else:
             self.dataframe.rename(index=dict(zip(self.dataframe.index, new_names)), inplace=True)
 
@@ -273,30 +398,51 @@ class Rasch:
                            filename=None,
                            file_format='png',
                            plot_density=300):
-        '''
-        Plots histogram of standardised residuals for SLM, with optional
-        overplotting of Standard Normal Distribution.
+        """
+        Plot a histogram of standardised residuals with an optional Normal overlay.
 
-        Performance fixes applied:
-        1. plt.show() -> plt.show(block=False) + plt.pause(0.001)
-           The original plt.show() blocks the process on all interactive
-           backends (TkAgg, Qt5Agg, MacOSX) until the window is closed.
-           This was the primary cause of the ~6s wall time. block=False
-           renders and returns immediately, matching behaviour of other
-           RaschPy plot methods.
+        Shared implementation called by std_residuals_plot() in SLM, PCM, RSM,
+        and MFRM. Under a well-fitting Rasch model, standardised residuals should
+        approximate a standard normal distribution.
 
-        2. font set via rc_context, not fontname= per text object.
-           Each fontname= kwarg triggers an individual findfont() lookup.
-           With 2-3 text objects per call, that is 2-3 font scans per plot.
-           On machines where Times New Roman is not cached, each scan can
-           cost 100-500ms (Windows with large font libraries). Setting font
-           once via rc_context resolves it in a single lookup.
+        Parameters
+        ----------
+        std_residual_list : pandas.Series
+            Flat Series of standardised residuals (unstacked, NaNs dropped).
+        bin_width : float, default 0.5
+            Width of histogram bins.
+        x_min : float, default -6
+            Left x-axis limit.
+        x_max : float, default 6
+            Right x-axis limit.
+        normal : bool, default False
+            If True, overlays a standard normal density curve.
+        title : str or None, default None
+            Plot title. If None, no title is shown.
+        plot_style : str, default 'white'
+            Background style: 'white' (whitegrid) or 'dark' (darkgrid).
+        black : bool, default False
+            If True, renders in grey with a black normal curve.
+        font : str, default 'Times New Roman'
+            Font family. Set via rc_context to avoid repeated findfont() calls.
+        title_font_size : int, default 15
+            Title font size in points.
+        axis_font_size : int, default 12
+            Axis label font size in points.
+        labelsize : int, default 12
+            Tick label font size in points.
+        filename : str or None, default None
+            If provided, saves the plot to this path.
+        file_format : str, default 'png'
+            Output file format.
+        plot_density : int, default 300
+            Output resolution in dots per inch.
 
-        3. plt.style.use() + sns.set_style() moved to module level.
-           Calling these on every plot invocation re-parses and re-applies
-           the full stylesheet unnecessarily. They now run once on import.
-           plot_style parameter is honoured via rc_context when non-default.
-        '''
+        Returns
+        -------
+        None
+            Displays and closes the figure. Use filename to save.
+        """
         color = 'gray' if black else 'steelblue'
         line_color = 'black' if black else 'maroon'
         n_bins = floor((std_residual_list.max() - std_residual_list.min()) / bin_width)

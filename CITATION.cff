@@ -1,0 +1,53 @@
+cff-version: 1.2.0
+message: "If you use RaschPy in published research, please cite it as below."
+type: software
+title: "RaschPy"
+abstract: "A Python package for Rasch measurement, implementing the Simple Logistic Model (SLM), Partial Credit Model (PCM), Rating Scale Model (RSM), and Many-Facet Rasch Model (MFRM) with extended rater representations."
+authors:
+  - family-names: Elliott
+    given-names: Mark
+repository-code: "https://github.com/MarkElliott999/RaschPy"
+license: Apache-2.0
+version: "0.1.0"
+date-released: "2025-01-01"
+
+preferred-citation:
+  type: article
+  authors:
+    - family-names: Elliott
+      given-names: Mark
+    - family-names: Buttery
+      given-names: Paula J.
+  title: "Extended rater representations in the many-facet Rasch model"
+  journal: "Journal of Applied Measurement"
+  volume: 22
+  issue: 1
+  start: 133
+  end: 160
+  year: 2022
+
+references:
+  - type: article
+    authors:
+      - family-names: Elliott
+        given-names: Mark
+      - family-names: Buttery
+        given-names: Paula J.
+    title: "Non-iterative conditional pairwise estimation for the rating scale model"
+    journal: "Educational and Psychological Measurement"
+    volume: 82
+    issue: 5
+    start: 989
+    end: 1019
+    year: 2022
+  - type: article
+    authors:
+      - family-names: Choppin
+        given-names: Bruce
+    title: "Item bank using sample-free calibration"
+    journal: "Nature"
+    volume: 219
+    issue: 5156
+    start: 870
+    end: 872
+    year: 1968

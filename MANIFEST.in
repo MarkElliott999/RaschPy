@@ -1,0 +1,10 @@
+include README.md
+include LICENSE
+include CITATION.cff
+include pyproject.toml
+recursive-include raschpy *.py
+recursive-exclude * __pycache__
+recursive-exclude * *.pyc
+recursive-exclude * *.pyo
+exclude tests/
+exclude regression_data/

@@ -549,7 +549,9 @@ class PCM(Rasch):
             sd_ratio = np.std(keep_x) / np.std(keep_y)
 
         if fail:
-            print('Anchoring failed: too few anchors. Please review data and parameters.')
+            warnings.warn('Anchoring failed: too few valid anchor items remain after '
+                          'outlier exclusion. Please review data and parameters.',
+                          UserWarning, stacklevel=2)
             return
 
         drop_x = pd.Series(drop_x).sort_index()
@@ -839,8 +841,11 @@ class PCM(Rasch):
 
             if iters >= max_iters and active.any():
                 n_nc = int(active.sum())
-                print(f'Warning: {n_nc} person(s) did not converge and will be '
-                      f'set to NaN. Check for near-extreme scorers or increase max_iters.')
+                warnings.warn(
+                    f'{n_nc} person(s) did not converge in abil() and will be set to NaN. '
+                    f'Consider increasing max_iters or checking for degenerate response patterns.',
+                    UserWarning, stacklevel=2
+                )
                 estimates[active] = np.nan
 
             if warm_corr:
@@ -854,7 +859,9 @@ class PCM(Rasch):
                     )
 
         except Exception as e:
-            print(f'abil() failed: {e}')
+            warnings.warn(f'abil() failed with exception: {e}. '
+                          'Returning NaN for all persons.',
+                          UserWarning, stacklevel=2)
             estimates = pd.Series(np.nan, index=persons)
 
         return estimates
@@ -962,7 +969,11 @@ class PCM(Rasch):
                                   pd.DataFrame(person_filter, index=['score'])).iloc[0]
 
         if iters >= max_iters:
-            print('Maximum iterations reached before convergence.')
+            warnings.warn(
+                'Maximum iterations reached before convergence in score_abil(). '
+                'Returned estimate may be inaccurate.',
+                UserWarning, stacklevel=2
+            )
 
         return estimate
 
@@ -1151,7 +1162,8 @@ class PCM(Rasch):
 
     def category_counts_item(self, item):
         if item not in self.dataframe.columns:
-            print('Invalid item name')
+            warnings.warn(f'Invalid item name: {item!r}. Returning None.',
+                          UserWarning, stacklevel=2)
             return None
         counts = (self.dataframe[item]
                   .value_counts()
@@ -1641,7 +1653,9 @@ class PCM(Rasch):
             )
         except Exception:
             self.pca_fail = True
-            print('PCA of residuals failed.')
+            warnings.warn('PCA of standardised residuals failed. '
+                          'Eigenvectors and loadings set to None.',
+                          UserWarning, stacklevel=2)
             self.eigenvectors = None
             self.eigenvalues = None
             self.variance_explained = None
@@ -2271,7 +2285,9 @@ class PCM(Rasch):
                             ax.text(abil + (x_max - x_min) / 100, y_max / 50, str(round(abil, 2)))
                             ax.text(x_min + (x_max - x_min) / 100, s + y_max / 50, str(s))
                 else:
-                    print('Invalid score for score line.')
+                    warnings.warn('Invalid score for score line: values must be '
+                                  'strictly between 0 and the item maximum score.',
+                                  UserWarning, stacklevel=2)
 
             if score_lines_test is not None:
                 max_score = (sum(self.max_score_vector) if items is None
@@ -2287,7 +2303,9 @@ class PCM(Rasch):
                             ax.text(abil + (x_max - x_min) / 100, y_max / 50, str(round(abil, 2)))
                             ax.text(x_min + (x_max - x_min) / 100, s + y_max / 50, str(s))
                 else:
-                    print('Invalid score for score line.')
+                    warnings.warn('Invalid score for score line: values must be '
+                                  'strictly between 0 and the test maximum score.',
+                                  UserWarning, stacklevel=2)
 
             if point_info_lines_item[1] is not None:
                 item = point_info_lines_item[0]
@@ -2503,7 +2521,9 @@ class PCM(Rasch):
             xobsdata, yobsdata = mean_abilities, obs_props
             if obs != 'all':
                 if not all(c in np.arange(self.max_score_vector[item] + 1) for c in obs):
-                    print("Invalid 'obs'. Valid values are None, 'all', or list of categories.")
+                    warnings.warn("Invalid 'obs' value. Valid values are None, 'all', "
+                                  'or a list of category indices.',
+                                  UserWarning, stacklevel=2)
                     return
                 yobsdata = yobsdata[:, obs]
 
@@ -2579,7 +2599,9 @@ class PCM(Rasch):
             xobsdata, yobsdata = mean_abilities, obs_props
             if obs != 'all':
                 if not all(c in np.arange(self.max_score_vector[item]) + 1 for c in obs):
-                    print("Invalid 'obs'. Valid values are None, 'all', or list of categories.")
+                    warnings.warn("Invalid 'obs' value. Valid values are None, 'all', "
+                                  'or a list of threshold indices.',
+                                  UserWarning, stacklevel=2)
                     return
                 obs_idx = [o - 1 for o in obs]
                 xobsdata = xobsdata[:, obs_idx]

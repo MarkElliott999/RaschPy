@@ -76,10 +76,34 @@ def loadup_slm(filename,
                item_names=True,
                person_names=True,
                long=False):
-    '''
-    Load and clean data for the Simple Logistic (dichotomous Rasch) Model.
-    Accepts CSV, Excel (.xlsx), or JSON. Returns (responses, invalid_responses).
-    '''
+    """
+    Load and validate response data for the Simple Logistic Model (SLM).
+
+    Reads a response matrix from CSV, Excel (.xlsx), or JSON, coerces values
+    to numeric, and replaces any value that is not 0 or 1 with NaN. Splits
+    the result into valid rows (at least one non-NaN) and invalid rows (all NaN).
+
+    Parameters
+    ----------
+    filename : str
+        Path to the data file. Format inferred from extension:
+        '.xlsx' -> Excel; '.json' -> JSON; anything else -> CSV.
+    item_names : bool, default True
+        If True, first row is used as item names.
+        If False, items are labelled 'Item_1', 'Item_2', etc.
+    person_names : bool, default True
+        If True, first column is used as person names.
+        If False, persons are labelled 'Person_1', 'Person_2', etc.
+    long : bool, default False
+        If True, expects long format with 'Person', 'Item', 'Score' columns.
+
+    Returns
+    -------
+    responses : pandas.DataFrame
+        Valid responses, shape (persons, items). Values are 0, 1, or NaN.
+    invalid_responses : pandas.DataFrame
+        Rows with entirely missing data, excluded from responses.
+    """
     header = 0 if item_names else None
     index_col = 0 if person_names else None
 
@@ -103,10 +127,38 @@ def loadup_pcm(filename,
                item_names=True,
                person_names=True,
                long=False):
-    '''
-    Load and clean data for the Partial Credit Model.
-    Accepts CSV, Excel (.xlsx), or JSON. Returns (responses, invalid_responses).
-    '''
+    """
+    Load and validate response data for the Partial Credit Model (PCM).
+
+    Reads a response matrix, coerces values to numeric, and replaces any value
+    that is not a non-negative integer at or below each item's maximum score
+    with NaN. Splits into valid and invalid (all-NaN) rows.
+
+    Parameters
+    ----------
+    filename : str
+        Path to the data file (.xlsx, .json, or CSV).
+    max_score_vector : list, pandas.Series, or None, default None
+        Maximum possible score for each item, in column order. If None,
+        the maximum observed value per column is used. Supply explicitly
+        if any item's maximum is never observed in the data.
+    item_names : bool, default True
+        If True, first row is used as item names.
+        If False, items are labelled 'Item_1', 'Item_2', etc.
+    person_names : bool, default True
+        If True, first column is used as person names.
+        If False, persons are labelled 'Person_1', 'Person_2', etc.
+    long : bool, default False
+        If True, expects long format with 'Person', 'Item', 'Score' columns.
+
+    Returns
+    -------
+    responses : pandas.DataFrame
+        Valid responses, shape (persons, items). Values are non-negative integers
+        up to max_score_vector[item], or NaN.
+    invalid_responses : pandas.DataFrame
+        Rows with entirely missing data.
+    """
     header = 0 if item_names else None
     index_col = 0 if person_names else None
 
@@ -138,10 +190,36 @@ def loadup_rsm(filename,
                item_names=True,
                person_names=True,
                long=False):
-    '''
-    Load and clean data for the Rating Scale Model.
-    Accepts CSV, Excel (.xlsx), or JSON. Returns (responses, invalid_responses).
-    '''
+    """
+    Load and validate response data for the Rating Scale Model (RSM).
+
+    Reads a response matrix, coerces values to numeric, and replaces any value
+    outside [0, max_score] with NaN. Splits into valid and invalid (all-NaN) rows.
+
+    Parameters
+    ----------
+    filename : str
+        Path to the data file (.xlsx, .json, or CSV).
+    max_score : int or None, default None
+        Maximum possible score (shared across all items). If None, inferred
+        from the data. Supply explicitly if the maximum is never observed.
+    item_names : bool, default True
+        If True, first row is used as item names.
+        If False, items are labelled 'Item_1', 'Item_2', etc.
+    person_names : bool, default True
+        If True, first column is used as person names.
+        If False, persons are labelled 'Person_1', 'Person_2', etc.
+    long : bool, default False
+        If True, expects long format with 'Person', 'Item', 'Score' columns.
+
+    Returns
+    -------
+    responses : pandas.DataFrame
+        Valid responses, shape (persons, items). Values are integers in
+        [0, max_score] or NaN.
+    invalid_responses : pandas.DataFrame
+        Rows with entirely missing data.
+    """
     header = 0 if item_names else None
     index_col = 0 if person_names else None
 
@@ -168,11 +246,33 @@ def loadup_mfrm_single(filename,
                        max_score=None,
                        item_names=True,
                        long=False):
-    '''
-    Load and clean data for the Many-Facet Rasch Model from a single file
-    with a (Rater, Person) MultiIndex.
-    Accepts CSV or Excel (.xlsx). Returns (responses, invalid_responses).
-    '''
+    """
+    Load MFRM data from a single file with a (Rater, Person) MultiIndex.
+
+    The file must have two index columns: Rater (level 0) and Person (level 1).
+    Reindexes to a full Rater x Person grid (filling absent combinations with
+    NaN), validates scores, and splits into valid and invalid rows.
+
+    Parameters
+    ----------
+    filename : str
+        Path to the data file (.xlsx or CSV).
+    max_score : int or None, default None
+        Maximum possible score per item. If None, inferred from the data.
+    item_names : bool, default True
+        If True, first row is used as item names.
+        If False, items are labelled 'Item_1', 'Item_2', etc.
+    long : bool, default False
+        If True, expects long format with 'Rater', 'Person', 'Item', 'Score' columns.
+
+    Returns
+    -------
+    responses : pandas.DataFrame
+        Valid responses with (Rater, Person) MultiIndex and items as columns.
+        Values are integers in [0, max_score] or NaN.
+    invalid_responses : pandas.DataFrame
+        Rows with entirely missing data.
+    """
     header = 0 if item_names else None
     f = filename.lower()
 
@@ -213,11 +313,36 @@ def loadup_mfrm_xlsx_tabs(filename,
                           item_names=True,
                           missing=None,
                           long=False):
-    '''
-    Load and clean MFRM data from multiple tabs of a single .xlsx workbook.
-    Each tab corresponds to one rater. Returns (responses, invalid_responses).
-    BUG FIX (original): missing= parameter was accepted but never applied.
-    '''
+    """
+    Load MFRM data from multiple sheets of a single Excel workbook.
+
+    Each sheet corresponds to one rater; sheet names become rater identifiers.
+    Merges all sheets into a (Rater, Person) MultiIndex DataFrame, validates
+    scores, and splits into valid and invalid rows.
+
+    Parameters
+    ----------
+    filename : str
+        Path to the .xlsx file.
+    max_score : int
+        Maximum possible score per item. Values outside [0, max_score] become NaN.
+    item_names : bool, default True
+        If True, first row of each sheet is used as item names.
+        If False, items are labelled 'Item_1', 'Item_2', etc.
+    missing : str, int, float, list, or None, default None
+        Value(s) in the raw data to treat as missing (NaN) before coercion.
+        Useful for codes such as -99 or 'M'.
+    long : bool, default False
+        If True, each sheet is in long format with 'Rater', 'Person', 'Item',
+        'Score' columns.
+
+    Returns
+    -------
+    responses : pandas.DataFrame
+        Valid responses with (Rater, Person) MultiIndex and items as columns.
+    invalid_responses : pandas.DataFrame
+        Rows with entirely missing data.
+    """
     header = 0 if item_names else None
 
     sheets = pd.read_excel(filename, sheet_name=None, header=header,
@@ -259,13 +384,35 @@ def loadup_mfrm_multiple(filename_dict,
                          item_names=True,
                          missing=None,
                          long=False):
-    '''
-    Load and clean MFRM data from multiple separate files, one per rater.
-    filename_dict maps {rater_name: filepath}.
-    Returns (responses, invalid_responses).
-    BUG FIX (original): missing= handler referenced responses.columns but
-    responses was a dict at that point — AttributeError when missing is not None.
-    '''
+    """
+    Load MFRM data from multiple separate files, one per rater.
+
+    Reads one file per rater, merges into a (Rater, Person) MultiIndex
+    DataFrame, validates scores, and splits into valid and invalid rows.
+    Supports CSV, Excel (.xlsx), and JSON per rater.
+
+    Parameters
+    ----------
+    filename_dict : dict
+        Mapping of {rater_name: filepath}. All files must have the same
+        item structure.
+    max_score : int
+        Maximum possible score per item. Values outside [0, max_score] become NaN.
+    item_names : bool, default True
+        If True, first row of each file is used as item names.
+        If False, items are labelled 'Item_1', 'Item_2', etc.
+    missing : str, int, float, list, or None, default None
+        Value(s) to treat as missing before numeric coercion.
+    long : bool, default False
+        If True, each file is in long format with 'Person', 'Item', 'Score' columns.
+
+    Returns
+    -------
+    responses : pandas.DataFrame
+        Valid responses with (Rater, Person) MultiIndex and items as columns.
+    invalid_responses : pandas.DataFrame
+        Rows with entirely missing data.
+    """
     header = 0 if item_names else None
 
     sheets = {}

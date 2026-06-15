@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "raschpy"
+version = "0.1.0"
+description = "Rasch measurement in Python: SLM, PCM, RSM, and Many-Facet Rasch models"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Mark Elliott" }
+]
+keywords = ["rasch", "psychometrics", "item response theory", "measurement"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Education",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "pandas>=1.5",
+    "scipy>=1.9",
+    "scikit-learn>=1.1",
+    "matplotlib>=3.6",
+    "seaborn>=0.12",
+    "openpyxl>=3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+]
+
+[project.urls]
+Homepage = "https://github.com/MarkElliott999/RaschPy"
+Repository = "https://github.com/MarkElliott999/RaschPy"
+Issues = "https://github.com/MarkElliott999/RaschPy/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["raschpy*"]
+
+[tool.setuptools.package-data]
+raschpy = ["py.typed"]

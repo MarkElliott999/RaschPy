@@ -10,10 +10,73 @@ from raschpy.simulation.base_sim import Rasch_Sim
 from raschpy.rsm import RSM
 
 class RSM_Sim(Rasch_Sim):
-    
-    '''
-    Generates simulated data accoding to the Rating Scale Model (RSM).
-    '''
+    """
+    Simulate polytomous response data according to the Rating Scale Model (RSM).
+
+    Generates item difficulties, shared Rasch-Andrich thresholds, and person
+    abilities, then computes category probabilities and samples scores. All items
+    share the same threshold structure. Simulation runs automatically on
+    instantiation; access results via self.scores.
+
+    Parameters
+    ----------
+    no_of_items : int
+        Number of items to simulate.
+    no_of_persons : int
+        Number of persons to simulate.
+    max_score : int
+        Maximum possible score per item (number of categories minus 1).
+    item_range : float, default 3
+        Total spread of item difficulties in logits.
+    category_base : float, default 1
+        Base width of each rating category. Larger values produce wider,
+        more ordered categories.
+    person_sd : float, default 1.5
+        Standard deviation of the person ability distribution (normal).
+    max_disorder : float, default 0
+        Maximum threshold disorder allowed. 0 produces perfectly ordered
+        thresholds; values > 0 introduce random disordering up to this limit.
+    offset : float, default 0
+        Mean shift applied to person abilities after centring.
+    missing : float, default 0
+        Proportion of responses to set as missing at random, in [0, 1).
+    manual_abilities : array-like or None, default None
+        Custom person abilities. Length must equal no_of_persons.
+    manual_diffs : array-like or None, default None
+        Custom item difficulties. Length must equal no_of_items.
+    manual_thresholds : array-like or None, default None
+        Custom threshold vector of length max_score + 1. Must satisfy:
+        thresholds[0] == 0 and sum(thresholds) == 0.
+    manual_person_names : list of str or None, default None
+        Custom person labels. If None, labels are 'Person_1', 'Person_2', etc.
+    manual_item_names : list of str or None, default None
+        Custom item labels. If None, labels are 'Item_1', 'Item_2', etc.
+
+    Attributes set
+    --------------
+    scores : pandas.DataFrame
+        Simulated response matrix, shape (no_of_persons, no_of_items).
+        Values are integers in [0, max_score] or NaN (missing).
+    abilities : pandas.Series
+        True person ability parameters, indexed by person.
+    diffs : pandas.Series
+        True item difficulty parameters, indexed by item.
+    thresholds : numpy.ndarray
+        True Rasch-Andrich threshold vector, length max_score + 1,
+        with thresholds[0] = 0.
+    cat_probs : dict
+        {cat: DataFrame} of category probabilities used for simulation.
+    persons : list of str
+        Person labels.
+    items : list of str
+        Item labels.
+    no_of_items : int
+        Number of items.
+    no_of_persons : int
+        Number of persons.
+    max_score : int
+        Maximum score per item.
+    """
 
     def __init__(self,
                  no_of_items,
@@ -48,9 +111,7 @@ class RSM_Sim(Rasch_Sim):
         self.dataframe = pd.DataFrame([self.max_score])
         self.rsm = RSM(self.dataframe, self.max_score)
 
-        '''
-        Generates person, item and threshold parameters.
-        '''
+        # Generate person, item, and threshold parameters
 
         if self.persons is not None:
             assert len(self.persons) == self.no_of_persons, 'Length of person names must match number of persons.'
@@ -110,9 +171,7 @@ class RSM_Sim(Rasch_Sim):
             assert sum(manual_thresholds) == 0 , ('Manual thresholds must sum to zero.')
             self.thresholds = np.array(self.thresholds)
 
-        '''
-        Calculates probability of a response in each category for each person on each item
-        '''
+        # Calculate category probabilities for each person-item combination
 
         c_p_df = {item: self.abilities - self.diffs[item]
                   for item in self.items}
@@ -128,9 +187,7 @@ class RSM_Sim(Rasch_Sim):
         for cat in range(self.max_score + 1):
             self.cat_probs[cat] /= den
 
-        '''
-        Calculated scores and removes required amount of missing data
-        '''
+        # Calculate scores and apply missing data
 
         scoring_randoms = pd.DataFrame(self.randoms(), columns=self.items, index=self.persons)
 

@@ -610,8 +610,11 @@ class RSM(Rasch):
 
             if iters >= max_iters and active.any():
                 n_nc = int(active.sum())
-                print(f'Warning: {n_nc} person(s) did not converge '
-                      f'and will be set to NaN.')
+                warnings.warn(
+                    f'{n_nc} person(s) did not converge in abil() and will be set to NaN. '
+                    f'Consider increasing max_iters or checking for degenerate response patterns.',
+                    UserWarning, stacklevel=2
+                )
                 estimates[active] = np.nan
 
             if warm_corr:
@@ -623,7 +626,9 @@ class RSM(Rasch):
                     )
 
         except Exception as e:
-            print(f'abil() failed: {e}')
+            warnings.warn(f'abil() failed with exception: {e}. '
+                          'Returning NaN for all persons.',
+                          UserWarning, stacklevel=2)
             estimates = pd.Series(np.nan, index=list(persons))
 
         return estimates
@@ -728,7 +733,11 @@ class RSM(Rasch):
             estimate += float(self.warm(pd.Series({score: estimate}), items, pf).iloc[0])
 
         if iters >= max_iters:
-            print('Maximum iterations reached before convergence.')
+            warnings.warn(
+                'Maximum iterations reached before convergence in score_abil(). '
+                'Returned estimate may be inaccurate.',
+                UserWarning, stacklevel=2
+            )
 
         return estimate
 
@@ -950,7 +959,8 @@ class RSM(Rasch):
         """
 
         if item not in self.dataframe.columns:
-            print('Invalid item name')
+            warnings.warn(f'Invalid item name: {item!r}. Returning None.',
+                          UserWarning, stacklevel=2)
             return None
         return (self.dataframe[item]
                 .value_counts()
@@ -1448,7 +1458,9 @@ class RSM(Rasch):
             )
         except Exception:
             self.pca_fail = True
-            print('PCA of item residuals failed.')
+            warnings.warn('PCA of standardised residuals failed. '
+                          'Eigenvectors and loadings set to None.',
+                          UserWarning, stacklevel=2)
             self.eigenvectors = self.eigenvalues = None
             self.variance_explained = self.loadings = None
 
@@ -2297,7 +2309,9 @@ class RSM(Rasch):
                             ax.text(abil + (x_max - x_min) / 100, y_max / 50, str(round(abil, 2)))
                             ax.text(x_min + (x_max - x_min) / 100, s + y_max / 50, str(s))
                 else:
-                    print('Invalid score for score line.')
+                    warnings.warn('Invalid score for score line: value must be '
+                                  'strictly between 0 and the item maximum score.',
+                                  UserWarning, stacklevel=2)
 
             if score_lines_test is not None:
                 item_keys = (self.dataframe.columns if items is None
@@ -2313,7 +2327,9 @@ class RSM(Rasch):
                             ax.text(abil + (x_max - x_min) / 100, y_max / 50, str(round(abil, 2)))
                             ax.text(x_min + (x_max - x_min) / 100, s + y_max / 50, str(s))
                 else:
-                    print('Invalid score for score line.')
+                    warnings.warn('Invalid score for score line: value must be '
+                                  'strictly between 0 and the test maximum score.',
+                                  UserWarning, stacklevel=2)
 
             if point_info_lines_item[1] is not None:
                 item = point_info_lines_item[0]
@@ -2515,7 +2531,9 @@ class RSM(Rasch):
             if isinstance(obs, str) and obs == 'all':
                 obs = np.arange(self.max_score + 1)
             if not all(c in np.arange(self.max_score + 1) for c in obs):
-                print("Invalid 'obs'. Valid values are None, 'all' or list of categories.")
+                warnings.warn("Invalid 'obs' value. Valid values are None, 'all', "
+                              'or a list of category indices.',
+                              UserWarning, stacklevel=2)
                 return
             yobsdata = yobsdata[:, obs]
 
@@ -2596,7 +2614,9 @@ class RSM(Rasch):
             xobsdata, yobsdata = mean_abilities, obs_props
             if obs != 'all':
                 if not all(c in np.arange(self.max_score) + 1 for c in obs):
-                    print("Invalid 'obs'. Valid values are None, 'all' or list of thresholds.")
+                    warnings.warn("Invalid 'obs' value. Valid values are None, 'all', "
+                                  'or a list of threshold numbers.',
+                                  UserWarning, stacklevel=2)
                     return
                 obs_idx  = [o - 1 for o in obs]
                 xobsdata = xobsdata[:, obs_idx]

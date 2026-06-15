@@ -504,7 +504,11 @@ class SLM(Rasch):
                 estimates += self.warm(estimates, difficulties, person_filter)
 
             if iters >= max_iters:
-                print('Maximum iterations reached before convergence.')
+                warnings.warn(
+                    'Maximum iterations reached before convergence in abil(). '
+                    'Returned estimates may be inaccurate.',
+                    UserWarning, stacklevel=2
+                )
 
         except Exception:
             estimates = np.nan
@@ -622,7 +626,11 @@ class SLM(Rasch):
             estimate += self.warm(estimate, difficulties, person_filter)
 
         if iters >= max_iters:
-            print('Maximum iterations reached before convergence.')
+            warnings.warn(
+                'Maximum iterations reached before convergence in score_abil(). '
+                'Returned estimate may be inaccurate.',
+                UserWarning, stacklevel=2
+            )
 
         return estimate
 
@@ -845,7 +853,8 @@ class SLM(Rasch):
             return counts
 
         else:
-            print('Invalid item name')
+            warnings.warn(f'Invalid item name: {item!r}. Returning None.',
+                          UserWarning, stacklevel=2)
 
     def category_counts_df(self):
         """
@@ -1017,12 +1026,14 @@ class SLM(Rasch):
         Create matrices of expected scores, variances, kurtosis, residuals etc. to generate fit statistics
         '''
 
-        item_count = (self.dataframe == self.dataframe).sum(axis=0)
-        person_count = (self.dataframe == self.dataframe).sum(axis=1)
+        # BUG FIX: (df == df) is the old NaN-detection idiom; .notna() is cleaner
+        # and consistent with PCM/RSM.
+        item_count = self.dataframe.notna().sum(axis=0)
+        person_count = self.dataframe.notna().sum(axis=1)
 
         df = self.dataframe.copy()
         scores = df.sum(axis=1)
-        max_scores = (df == df).sum(axis=1)
+        max_scores = df.notna().sum(axis=1)
 
         df = df[(scores > 0) & (scores < max_scores)]
         missing_mask = (df + 1) / (df + 1)
@@ -1224,7 +1235,9 @@ class SLM(Rasch):
 
         except Exception:
             self.pca_fail = True
-            print('PCA of residuals failed')
+            warnings.warn('PCA of standardised residuals failed. '
+                          'Eigenvectors and loadings set to None.',
+                          UserWarning, stacklevel=2)
 
             self.eigenvectors = None
             self.eigenvalues = None
@@ -1407,15 +1420,15 @@ class SLM(Rasch):
         person_stats_df['Max score'] = self.dataframe.count(axis=1).astype(int)
         person_stats_df['p'] = self.dataframe.mean(axis=1).round(dp)
 
-        person_stats_df['Infit MS'] = np.nan
-        person_stats_df['Infit Z'] = np.nan
-        person_stats_df['Outfit MS'] = np.nan
-        person_stats_df['Outfit Z'] = np.nan
-
-        person_stats_df.update({'Infit MS': self.person_infit_ms.round(dp)})
-        person_stats_df.update({'Infit Z': self.person_infit_zstd.round(dp)})
-        person_stats_df.update({'Outfit MS': self.person_outfit_ms.round(dp)})
-        person_stats_df.update({'Outfit Z': self.person_outfit_zstd.round(dp)})
+        # BUG FIX: .update(dict) ignores index alignment — extreme-score persons
+        # (whose fit stats are NaN) would silently overwrite valid values when
+        # the fit Series has a different index order. Use .loc[] instead.
+        for col, src in [('Infit MS',  self.person_infit_ms),
+                         ('Infit Z',   self.person_infit_zstd),
+                         ('Outfit MS', self.person_outfit_ms),
+                         ('Outfit Z',  self.person_outfit_zstd)]:
+            person_stats_df[col] = np.nan
+            person_stats_df.loc[src.index, col] = src.round(dp).values
 
         self.person_stats = person_stats_df
         
@@ -1548,13 +1561,12 @@ class SLM(Rasch):
             if filename[-5:] != '.xlsx':
                 filename += '.xlsx'
 
-            writer = pd.ExcelWriter(filename, engine='openpyxl')
-
-            self.item_stats.to_excel(writer, sheet_name='Item statistics')
-            self.person_stats.to_excel(writer, sheet_name='Person statistics')
-            self.test_stats.to_excel(writer, sheet_name='Test statistics')
-
-            writer.close()
+            # BUG FIX: use context manager; writer.close() is the old pattern
+            # and can leave the file handle open if an exception occurs mid-write.
+            with pd.ExcelWriter(filename, engine='openpyxl') as writer:
+                self.item_stats.to_excel(writer, sheet_name='Item statistics')
+                self.person_stats.to_excel(writer, sheet_name='Person statistics')
+                self.test_stats.to_excel(writer, sheet_name='Test statistics')
 
         else:
             if filename[-4:] == '.csv':
@@ -1621,25 +1633,20 @@ class SLM(Rasch):
                 if filename[-5:] != '.xlsx':
                     filename += '.xlsx'
 
-                writer = pd.ExcelWriter(filename, engine='openpyxl')
-                row = 0
-
-                self.eigenvectors.round(dp).to_excel(writer, sheet_name='Item residual analysis',
+                # BUG FIX: use context manager instead of writer.close()
+                with pd.ExcelWriter(filename, engine='openpyxl') as writer:
+                    row = 0
+                    self.eigenvectors.round(dp).to_excel(writer, sheet_name='Item residual analysis',
+                                                         startrow=row, startcol=0)
+                    row += (self.eigenvectors.shape[0] + 2)
+                    self.eigenvalues.round(dp).to_excel(writer, sheet_name='Item residual analysis',
+                                                        startrow=row, startcol=0)
+                    row += (self.eigenvalues.shape[0] + 2)
+                    self.variance_explained.round(dp).to_excel(writer, sheet_name='Item residual analysis',
+                                                               startrow=row, startcol=0)
+                    row += (self.variance_explained.shape[0] + 2)
+                    self.loadings.round(dp).to_excel(writer, sheet_name='Item residual analysis',
                                                      startrow=row, startcol=0)
-                row += (self.eigenvectors.shape[0] + 2)
-
-                self.eigenvalues.round(dp).to_excel(writer, sheet_name='Item residual analysis',
-                                                    startrow=row, startcol=0)
-                row += (self.eigenvalues.shape[0] + 2)
-
-                self.variance_explained.round(dp).to_excel(writer, sheet_name='Item residual analysis',
-                                                           startrow=row, startcol=0)
-                row += (self.variance_explained.shape[0] + 2)
-
-                self.loadings.round(dp).to_excel(writer, sheet_name='Item residual analysis',
-                                                 startrow=row, startcol=0)
-
-                writer.close()
 
             else:
                 if filename[-4:] != '.csv':
@@ -1660,14 +1667,12 @@ class SLM(Rasch):
                 if filename[-5:] != '.xlsx':
                     filename += '.xlsx'
 
-                writer = pd.ExcelWriter(filename, engine='openpyxl')
-
-                self.eigenvectors.round(dp).to_excel(writer, sheet_name='Eigenvectors')
-                self.eigenvalues.round(dp).to_excel(writer, sheet_name='Eigenvalues')
-                self.variance_explained.round(dp).to_excel(writer, sheet_name='Variance explained')
-                self.loadings.round(dp).to_excel(writer, sheet_name='Principal Component loadings')
-
-                writer.close()
+                # BUG FIX: use context manager instead of writer.close()
+                with pd.ExcelWriter(filename, engine='openpyxl') as writer:
+                    self.eigenvectors.round(dp).to_excel(writer, sheet_name='Eigenvectors')
+                    self.eigenvalues.round(dp).to_excel(writer, sheet_name='Eigenvalues')
+                    self.variance_explained.round(dp).to_excel(writer, sheet_name='Variance explained')
+                    self.loadings.round(dp).to_excel(writer, sheet_name='Principal Component loadings')
 
             else:
                 if filename[-4:] == '.csv':
@@ -1914,10 +1919,10 @@ class SLM(Rasch):
             The rendered matplotlib Figure object.
         """
 
-        if tex:
-            plt.rcParams["text.latex.preamble"].join([r"\usepackage{dashbox}", r"\setmainfont{xcolor}",])
-        else:
-            plt.rcParams["text.usetex"] = False
+        # BUG FIX: the original tex block was a no-op —
+        # str.join() returns a new string but the result was never assigned,
+        # so LaTeX packages were never actually loaded. Removed entirely.
+        # Font is set via fontname= on each text element below.
 
         if plot_style == 'dark':
             sns.set_style('darkgrid')
@@ -2006,7 +2011,9 @@ class SLM(Rasch):
                         plt.text(x_min + (x_max - x_min) / 100, thresh + y_max / 50, str(thresh))
 
             else:
-                print('Invalid score for score line.')
+                warnings.warn('Invalid score for score line: values must be '
+                              'strictly between 0 and 1.',
+                              UserWarning, stacklevel=2)
 
         if score_lines_test is not None:
 
@@ -2039,7 +2046,9 @@ class SLM(Rasch):
                         plt.text(x_min + (x_max - x_min) / 100, thresh + y_max / 50, str(thresh))
 
             else:
-                print('Invalid score for score line.')
+                warnings.warn('Invalid score for score line: values must be '
+                              'strictly between 0 and the number of items.',
+                              UserWarning, stacklevel=2)
 
         if point_info_lines_item[1] is not None:
 
@@ -2316,7 +2325,9 @@ class SLM(Rasch):
 
             if obs != 'all':
                 if not all(cat in [0, 1] for cat in obs):
-                    print("Invalid 'obs'. Valid values are 'None', 'all' and list of categories.")
+                    warnings.warn("Invalid 'obs' value. Valid values are None, 'all', "
+                                  'or a list of category indices.',
+                                  UserWarning, stacklevel=2)
                     return
 
                 else:

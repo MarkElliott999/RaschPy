@@ -186,13 +186,17 @@ class MFRM(Rasch):
         """
 
         if old == new:
-            print('New rater name is the same as old rater name.')
+            warnings.warn('New rater name is the same as the old rater name.',
+                          UserWarning, stacklevel=2)
         elif new in self.raters:
-            print('New rater name is a duplicate of an existing rater name')
+            warnings.warn('New rater name is a duplicate of an existing rater name.',
+                          UserWarning, stacklevel=2)
         if old not in self.raters:
-            print(f'Old rater name "{old}" not found in data. Please check')
+            warnings.warn(f'Old rater name {old!r} not found in data.',
+                          UserWarning, stacklevel=2)
         elif not isinstance(new, str):
-            print('Rater names must be strings')
+            warnings.warn('Rater names must be strings.',
+                          UserWarning, stacklevel=2)
         else:
             new_names = [new if r == old else r for r in self.raters]
             self.rename_raters_all(new_names)
@@ -211,12 +215,15 @@ class MFRM(Rasch):
         """
 
         if len(new_names) != len(set(new_names)):
-            print('List of new rater names contains duplicates.')
+            warnings.warn('List of new rater names contains duplicates.',
+                          UserWarning, stacklevel=2)
         elif len(new_names) != self.no_of_raters:
-            print(f'Incorrect number of rater names. {len(new_names)} in list, '
-                  f'{self.no_of_raters} raters in data.')
+            warnings.warn(f'Incorrect number of rater names: {len(new_names)} provided, '
+                          f'{self.no_of_raters} raters in data.',
+                          UserWarning, stacklevel=2)
         elif not all(isinstance(n, str) for n in new_names):
-            print('Rater names must be strings')
+            warnings.warn('Rater names must be strings.',
+                          UserWarning, stacklevel=2)
         else:
             df_dict = {new: self.dataframe.xs(old)
                        for old, new in zip(self.raters, new_names)}
@@ -239,13 +246,17 @@ class MFRM(Rasch):
         """
 
         if old == new:
-            print('New person name is the same as old person name.')
+            warnings.warn('New person name is the same as the old person name.',
+                          UserWarning, stacklevel=2)
         elif new in self.persons:
-            print('New person name is a duplicate of an existing person name.')
+            warnings.warn('New person name is a duplicate of an existing person name.',
+                          UserWarning, stacklevel=2)
         if old not in self.persons:
-            print(f'Old person name "{old}" not found in data. Please check.')
+            warnings.warn(f'Old person name {old!r} not found in data.',
+                          UserWarning, stacklevel=2)
         elif not isinstance(new, str):
-            print('Person names must be strings')
+            warnings.warn('Person names must be strings.',
+                          UserWarning, stacklevel=2)
         else:
             self.dataframe = self.dataframe.rename(
                 index={old: new}, level=1
@@ -265,11 +276,15 @@ class MFRM(Rasch):
         """
 
         if len(new_names) != len(set(new_names)):
-            print('List of new person names contains duplicates.')
+            warnings.warn('List of new person names contains duplicates.',
+                          UserWarning, stacklevel=2)
         elif len(new_names) != self.no_of_persons:
-            print(f'Incorrect number of person names.')
+            warnings.warn(f'Incorrect number of person names: {len(new_names)} provided, '
+                          f'{self.no_of_persons} persons in data.',
+                          UserWarning, stacklevel=2)
         elif not all(isinstance(n, str) for n in new_names):
-            print('Person names must be strings')
+            warnings.warn('Person names must be strings.',
+                          UserWarning, stacklevel=2)
         else:
             rename_map = dict(zip(self.persons, new_names))
             self.dataframe = self.dataframe.rename(index=rename_map, level=1)
@@ -1391,8 +1406,11 @@ class MFRM(Rasch):
 
             if iters >= max_iters and active.any():
                 n_nc = int(active.sum())
-                print(f'Warning: {n_nc} person(s) did not converge in '
-                      f'abil(model={model!r}) and will be set to NaN.')
+                warnings.warn(
+                    f'{n_nc} person(s) did not converge in abil(model={model!r}) '
+                    f'and will be set to NaN. Consider increasing max_iters.',
+                    UserWarning, stacklevel=2
+                )
                 estimates[active] = np.nan
 
             if warm_corr:
@@ -1406,7 +1424,9 @@ class MFRM(Rasch):
                     )
 
         except Exception as e:
-            print(f'abil(model={model!r}) failed: {e}')
+            warnings.warn(f'abil(model={model!r}) failed with exception: {e}. '
+                          'Returning NaN for all persons.',
+                          UserWarning, stacklevel=2)
             estimates = pd.Series(np.nan, index=list(persons))
 
         return estimates
@@ -1683,7 +1703,11 @@ class MFRM(Rasch):
             ).iloc[0])
 
         if iters >= max_iters:
-            print('Maximum iterations reached before convergence.')
+            warnings.warn(
+                'Maximum iterations reached before convergence in score_abil(). '
+                'Returned estimate may be inaccurate.',
+                UserWarning, stacklevel=2
+            )
         return estimate
 
     # Backwards-compatible aliases
@@ -1795,7 +1819,8 @@ class MFRM(Rasch):
         """
 
         if item not in self.dataframe.columns:
-            print('Invalid item name')
+            warnings.warn(f'Invalid item name: {item!r}. Returning None.',
+                          UserWarning, stacklevel=2)
             return None
         if rater is None:
             return (self.dataframe[item]
@@ -1803,7 +1828,8 @@ class MFRM(Rasch):
                     .reindex(range(self.max_score + 1), fill_value=0)
                     .astype(int))
         if rater not in self.raters:
-            print('Invalid rater name')
+            warnings.warn(f'Invalid rater name: {rater!r}. Returning None.',
+                          UserWarning, stacklevel=2)
             return None
         return (self.dataframe.xs(rater)[item]
                 .value_counts()
@@ -2484,7 +2510,9 @@ class MFRM(Rasch):
                 index=self.dataframe.columns, columns=pc_labels
             )
         except Exception:
-            print('PCA of item residuals failed')
+            warnings.warn('PCA of item standardised residuals failed. '
+                          'Eigenvectors and loadings set to None.',
+                          UserWarning, stacklevel=2)
             eigenvectors = eigenvalues = variance_explained = loadings = None
         return (item_residual_correlations, eigenvectors, eigenvalues,
                 variance_explained, loadings)
@@ -2531,7 +2559,9 @@ class MFRM(Rasch):
                 index=self.raters, columns=pc_labels
             )
         except Exception:
-            print('PCA of rater residuals failed')
+            warnings.warn('PCA of rater standardised residuals failed. '
+                          'Eigenvectors and loadings set to None.',
+                          UserWarning, stacklevel=2)
             eigenvectors = eigenvalues = variance_explained = loadings = None
         return (correlations, eigenvectors, eigenvalues,
                 variance_explained, loadings)
@@ -3809,7 +3839,9 @@ class MFRM(Rasch):
                                     str(round(abil, 2)))
                             ax.text(x_min + (x_max - x_min) / 100, s + y_max / 50, str(s))
                 else:
-                    print('Invalid score for score line.')
+                    warnings.warn('Invalid score for score line: values must be '
+                                  'strictly between 0 and the item maximum score.',
+                                  UserWarning, stacklevel=2)
 
             if score_lines_test is not None:
                 item_keys = list(self.items) if items is None else (
@@ -3832,7 +3864,9 @@ class MFRM(Rasch):
                                     str(round(abil, 2)))
                             ax.text(x_min + (x_max - x_min) / 100, s + y_max / 50, str(s))
                 else:
-                    print('Invalid score for score line.')
+                    warnings.warn('Invalid score for score line: values must be '
+                                  'strictly between 0 and the test maximum score.',
+                                  UserWarning, stacklevel=2)
 
             if point_info_lines_item[1] is not None:
                 item = point_info_lines_item[0]
@@ -4017,7 +4051,9 @@ class MFRM(Rasch):
             if isinstance(obs, str) and obs == 'all':
                 obs = np.arange(self.max_score + 1)
             if not all(c in np.arange(self.max_score + 1) for c in obs):
-                print("Invalid 'obs'.")
+                warnings.warn("Invalid 'obs' value. Valid values are None, 'all', "
+                              'or a list of category indices.',
+                              UserWarning, stacklevel=2)
                 return
             yobsdata = yobsdata[obs, :]
         else:
@@ -4076,7 +4112,9 @@ class MFRM(Rasch):
             xobsdata, yobsdata = mean_abs, obs_props
             if obs != 'all':
                 if not all(c in np.arange(self.max_score) + 1 for c in obs):
-                    print("Invalid 'obs'.")
+                    warnings.warn("Invalid 'obs' value. Valid values are None, 'all', "
+                                  'or a list of threshold numbers.',
+                                  UserWarning, stacklevel=2)
                     return
                 obs_idx  = [o - 1 for o in obs]
                 xobsdata = xobsdata[obs_idx, :]
