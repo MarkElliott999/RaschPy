@@ -84,16 +84,57 @@ class MFRM(Rasch):
                  max_score=0,
                  extreme_persons=True,
                  no_of_classes=5):
-        '''
-        Many-Facet Rasch Model.
+        """
+        Initialise a Many-Facet Rasch Model (MFRM) object.
+
+        The MFRM extends the RSM/PCM to include rater facets. Four rater
+        parameterisations are supported, selected at calibrate() time:
+        'global' (single severity per rater), 'items' (per-item severities),
+        'thresholds' (per-threshold severities), 'matrix' (per-item-threshold).
 
         Parameters
         ----------
-        dataframe       : pd.DataFrame with (Rater, Person) MultiIndex × Items
-        max_score       : int, maximum possible score (0 = auto-detect)
-        extreme_persons : bool, whether to exclude all-missing persons
-        no_of_classes   : int, default number of class intervals for plots
-        '''
+        dataframe : pandas.DataFrame
+            Response data with a (Rater, Person) MultiIndex and items as
+            columns. Cell values should be non-negative integers from 0 to
+            max_score; NaN for missing responses.
+        max_score : int, default 0
+            Maximum possible score per item. 0 means auto-detect from the
+            data (np.nanmax). Supply explicitly to avoid issues when the
+            maximum is never observed.
+        extreme_persons : bool, default True
+            If True, removes only persons with entirely missing data across
+            all raters. If False, additionally removes persons with all-zero
+            or perfect total scores.
+        no_of_classes : int, default 5
+            Number of class intervals for observed-data overlays on plots.
+
+        Attributes set
+        --------------
+        dataframe : pandas.DataFrame
+            Filtered response data with (Rater, Person) MultiIndex.
+        invalid_responses : pandas.DataFrame
+            Rows removed based on the extreme_persons rule.
+        max_score : int
+            Maximum possible score per item.
+        no_of_persons : int
+            Number of unique persons after filtering.
+        no_of_items : int
+            Number of items (columns).
+        no_of_raters : int
+            Number of unique raters.
+        no_of_classes : int
+            Number of class intervals for plots.
+        items : pandas.Index
+            Item identifiers (column names).
+        raters : pandas.Index
+            Rater identifiers.
+        persons : pandas.Index
+            Person identifiers.
+        anchor_raters_{model} : list
+            Empty list per model (global/items/thresholds/matrix) for
+            anchor rater tracking.
+        """
         self.max_score = int(np.nanmax(dataframe)) if max_score == 0 else max_score
 
         unstacked_df = dataframe.unstack(level=0)
@@ -129,6 +170,21 @@ class MFRM(Rasch):
     # ------------------------------------------------------------------
 
     def rename_rater(self, old, new):
+        """
+        Rename a single rater in the dataframe.
+
+        Validates the rename (no duplicates, no self-rename, must be a string)
+        and updates self.raters. Prints a message rather than raising if
+        validation fails.
+
+        Parameters
+        ----------
+        old : str
+            Current rater name.
+        new : str
+            Desired new rater name.
+        """
+
         if old == new:
             print('New rater name is the same as old rater name.')
         elif new in self.raters:
@@ -142,6 +198,18 @@ class MFRM(Rasch):
             self.rename_raters_all(new_names)
 
     def rename_raters_all(self, new_names):
+        """
+        Rename all raters at once.
+
+        Validates the new name list (correct length, no duplicates, all strings)
+        and rebuilds the dataframe with the new rater index labels.
+
+        Parameters
+        ----------
+        new_names : list of str
+            New rater names in the same order as self.raters.
+        """
+
         if len(new_names) != len(set(new_names)):
             print('List of new rater names contains duplicates.')
         elif len(new_names) != self.no_of_raters:
@@ -156,6 +224,20 @@ class MFRM(Rasch):
             self.raters = self.dataframe.index.get_level_values(0).unique()
 
     def rename_person(self, old, new):
+        """
+        Rename a single person in the dataframe.
+
+        Validates the rename and updates the level-1 (Person) index.
+        Prints a message rather than raising if validation fails.
+
+        Parameters
+        ----------
+        old : str
+            Current person name.
+        new : str
+            Desired new person name.
+        """
+
         if old == new:
             print('New person name is the same as old person name.')
         elif new in self.persons:
@@ -171,6 +253,17 @@ class MFRM(Rasch):
             self.persons = self.dataframe.index.get_level_values(1).unique()
 
     def rename_persons_all(self, new_names):
+        """
+        Rename all persons at once.
+
+        Validates the new name list and rebuilds the level-1 (Person) index.
+
+        Parameters
+        ----------
+        new_names : list of str
+            New person names in the same order as self.persons.
+        """
+
         if len(new_names) != len(set(new_names)):
             print('List of new person names contains duplicates.')
         elif len(new_names) != self.no_of_persons:
@@ -188,7 +281,41 @@ class MFRM(Rasch):
 
     def cat_prob(self, ability, item, difficulties, rater, severities,
                  category, thresholds, model='global'):
-        '''Category probability for a single person/rater/item/category.'''
+        """
+        Compute the probability of a response category for a single observation.
+
+        Applies the MFRM log-numerator: k*(b - d_i) - cumsum(tau) - rater_severity,
+        where the severity term depends on the model parameterisation.
+        Numerically stabilised via log-sum-exp.
+
+        Parameters
+        ----------
+        ability : float
+            Person ability estimate on the logit scale.
+        item : str
+            Item identifier.
+        difficulties : pandas.Series
+            Item difficulty estimates indexed by item name.
+        rater : str
+            Rater identifier.
+        severities : Series or dict
+            Rater severity parameters. Structure depends on model:
+            global — Series indexed by rater;
+            items  — dict of Series {rater: Series(items)};
+            thresholds — dict of arrays {rater: array(thresholds)};
+            matrix — nested dict {rater: {item: array}}.
+        category : int
+            Response category (0 to max_score).
+        thresholds : array-like
+            Rasch-Andrich threshold vector, length max_score+1, thresholds[0]=0.
+        model : str, default 'global'
+            Rater parameterisation: 'global', 'items', 'thresholds', or 'matrix'.
+
+        Returns
+        -------
+        float
+            Probability of the specified category, in [0, 1].
+        """
         cats   = np.arange(len(thresholds), dtype=float)
         cumtau = np.cumsum(thresholds)
         log_nums = cats * (ability - difficulties.loc[item]) - cumtau
@@ -207,7 +334,34 @@ class MFRM(Rasch):
 
     def exp_score(self, ability, item, difficulties, rater, severities,
                   thresholds, model='global'):
-        '''Expected score for a single person/rater/item.'''
+        """
+        Compute the expected score for a single person/rater/item combination.
+
+        Calculates E[X | ability, item, rater, model] = sum(k * P(X=k)).
+        Used in scalar Newton-Raphson estimation and score_abil().
+
+        Parameters
+        ----------
+        ability : float
+            Person ability estimate on the logit scale.
+        item : str
+            Item identifier.
+        difficulties : pandas.Series
+            Item difficulty estimates.
+        rater : str
+            Rater identifier.
+        severities : Series or dict
+            Rater severity parameters (structure depends on model).
+        thresholds : array-like
+            Rasch-Andrich threshold vector, length max_score+1.
+        model : str, default 'global'
+            Rater parameterisation.
+
+        Returns
+        -------
+        float
+            Expected score in [0, max_score].
+        """
         cats = np.arange(len(thresholds), dtype=float)
         probs = np.array([self.cat_prob(ability, item, difficulties, rater,
                                         severities, cat, thresholds, model)
@@ -216,7 +370,34 @@ class MFRM(Rasch):
 
     def variance(self, ability, item, difficulties, rater, severities,
                  thresholds, model='global'):
-        '''Item Fisher information for a single person/rater/item.'''
+        """
+        Compute item variance (Fisher information) for a single observation.
+
+        Calculates Var[X | ability, item, rater, model] = sum((k - E[X])^2 * P(X=k)).
+        Used in scalar Newton-Raphson estimation and score_abil().
+
+        Parameters
+        ----------
+        ability : float
+            Person ability estimate on the logit scale.
+        item : str
+            Item identifier.
+        difficulties : pandas.Series
+            Item difficulty estimates.
+        rater : str
+            Rater identifier.
+        severities : Series or dict
+            Rater severity parameters.
+        thresholds : array-like
+            Rasch-Andrich threshold vector.
+        model : str, default 'global'
+            Rater parameterisation.
+
+        Returns
+        -------
+        float
+            Item variance / Fisher information. Always non-negative.
+        """
         cats  = np.arange(len(thresholds), dtype=float)
         probs = np.array([self.cat_prob(ability, item, difficulties, rater,
                                         severities, cat, thresholds, model)
@@ -226,7 +407,34 @@ class MFRM(Rasch):
 
     def kurtosis(self, ability, item, difficulties, rater, severities,
                  thresholds, model='global'):
-        '''Item kurtosis for a single person/rater/item.'''
+        """
+        Compute the fourth central moment for a single person/rater/item.
+
+        Calculates sum((k - E[X])^4 * P(X=k)). Used in Wilson-Hilferty
+        approximation for standardised fit statistics.
+
+        Parameters
+        ----------
+        ability : float
+            Person ability estimate on the logit scale.
+        item : str
+            Item identifier.
+        difficulties : pandas.Series
+            Item difficulty estimates.
+        rater : str
+            Rater identifier.
+        severities : Series or dict
+            Rater severity parameters.
+        thresholds : array-like
+            Rasch-Andrich threshold vector.
+        model : str, default 'global'
+            Rater parameterisation.
+
+        Returns
+        -------
+        float
+            Fourth central moment of the response distribution.
+        """
         cats  = np.arange(len(thresholds), dtype=float)
         probs = np.array([self.cat_prob(ability, item, difficulties, rater,
                                         severities, cat, thresholds, model)
@@ -1240,7 +1448,37 @@ class MFRM(Rasch):
 
     def warm(self, abilities, items, raters, severities, thresholds,
              person_filter, model='global'):
-        '''Warm (1989) bias correction for ML ability estimates.'''
+        """
+        Apply Warm's (1989) weighted maximum likelihood bias correction.
+
+        Computes the MFRM generalisation of the Warm correction, summing over
+        all raters and items. The correction is (J1 - J2 + J3) / (2 * I^2)
+        where I is total Fisher information and J1, J2, J3 are cubic moment
+        terms. Uses the vectorised _cat_probs_mfrm engine.
+
+        Parameters
+        ----------
+        abilities : pandas.Series
+            Current ability estimates, indexed by person.
+        items : list
+            Item subset to use.
+        raters : list
+            Rater subset to use.
+        severities : Series or dict
+            Rater severity parameters (structure depends on model).
+        thresholds : array-like
+            Rasch-Andrich threshold vector.
+        person_filter : pandas.DataFrame
+            Binary mask (1.0 = responded, NaN = missing), with (Rater, Person)
+            MultiIndex and items as columns.
+        model : str, default 'global'
+            Rater parameterisation.
+
+        Returns
+        -------
+        pandas.Series
+            Warm bias correction terms indexed by person, to add to ML estimates.
+        """
         probs_dict, cats = self._cat_probs_mfrm(
             abilities.values, items, raters, thresholds, model, severities
         )
@@ -1288,7 +1526,33 @@ class MFRM(Rasch):
 
     def csem(self, model='global', anchor=False, persons=None, abilities=None,
              items=None, raters=None):
-        '''Conditional standard error of measurement.'''
+        """
+        Compute the conditional standard error of measurement.
+
+        Calculates CSEM = 1 / sqrt(I) where I is total Fisher information
+        summed across all observed rater-item combinations for each person.
+        Uses the vectorised _cat_probs_mfrm engine.
+
+        Parameters
+        ----------
+        model : str, default 'global'
+            Rater parameterisation.
+        anchor : bool, default False
+            If True, uses anchor-calibrated parameters.
+        persons : list or None, default None
+            Subset of persons. None uses all persons.
+        abilities : pandas.Series or None, default None
+            Ability estimates. If None, uses stored abils_{model}.
+        items : list or None, default None
+            Item subset. None uses all items.
+        raters : list or None, default None
+            Rater subset. None uses all raters.
+
+        Returns
+        -------
+        pandas.Series
+            CSEM values indexed by person, in logits.
+        """
         difficulties, thresholds, severities = self._get_params(model, anchor)
 
         if abilities is None:
@@ -1331,7 +1595,40 @@ class MFRM(Rasch):
     def score_abil(self, score, model='global', anchor=False, items=None,
                    raters=None, warm_corr=True, tolerance=0.00001,
                    max_iters=100, ext_score_adjustment=0.5):
-        '''Single-score ability estimate for plot score lines.'''
+        """
+        Convert a raw total score to an ability estimate via Newton-Raphson ML.
+
+        Used internally to draw score lines on TCC plots. Sums expected scores
+        and information across all specified rater-item combinations using
+        scalar exp_score() and variance() methods.
+
+        Parameters
+        ----------
+        score : int or float
+            Raw total score to convert. Extreme scores adjusted by
+            ext_score_adjustment.
+        model : str, default 'global'
+            Rater parameterisation.
+        anchor : bool, default False
+            If True, uses anchor-calibrated parameters.
+        items : list or None, default None
+            Item subset. None uses all items.
+        raters : list or None, default None
+            Rater subset. None uses all raters.
+        warm_corr : bool, default True
+            If True, applies Warm's (1989) bias correction.
+        tolerance : float, default 0.00001
+            Newton-Raphson convergence tolerance.
+        max_iters : int, default 100
+            Maximum Newton-Raphson iterations.
+        ext_score_adjustment : float, default 0.5
+            Adjustment applied to extreme scores of 0 or maximum.
+
+        Returns
+        -------
+        float
+            Ability estimate in logits.
+        """
         difficulties, thresholds, severities = self._get_params(model, anchor)
 
         if items is None:
@@ -1403,7 +1700,41 @@ class MFRM(Rasch):
                           items=None, raters=None, ext_scores=True,
                           warm_corr=True, tolerance=0.00001,
                           max_iters=100, ext_score_adjustment=0.5):
-        '''Score-to-ability lookup table.'''
+        """
+        Build a score-to-ability lookup table for all possible raw scores.
+
+        Estimates the ability corresponding to every possible raw score across
+        the specified rater-item combination using Newton-Raphson, and stores
+        the result as self.abil_table.
+
+        Parameters
+        ----------
+        model : str, default 'global'
+            Rater parameterisation.
+        anchor : bool, default False
+            If True, uses anchor-calibrated parameters.
+        attribute : bool, default True
+            If True, stores result as self.abil_table.
+        items : list or None, default None
+            Item subset. None uses all items.
+        raters : list or None, default None
+            Rater subset. None uses all raters.
+        ext_scores : bool, default True
+            If True, includes extreme scores adjusted by ext_score_adjustment.
+        warm_corr : bool, default True
+            If True, applies Warm's (1989) bias correction.
+        tolerance : float, default 0.00001
+            Newton-Raphson convergence tolerance.
+        max_iters : int, default 100
+            Maximum Newton-Raphson iterations.
+        ext_score_adjustment : float, default 0.5
+            Adjustment for extreme scores.
+
+        Attributes set (if attribute=True)
+        -----------------------------------
+        abil_table : pandas.Series
+            Ability estimate for each possible raw score, indexed by score.
+        """
         if items is None:
             items = list(self.items)
         if raters is None:
@@ -1444,6 +1775,25 @@ class MFRM(Rasch):
     # ------------------------------------------------------------------
 
     def category_counts_item(self, item, rater=None):
+        """
+        Return response frequency counts for a single item.
+
+        Parameters
+        ----------
+        item : str
+            Item identifier (must be a column in self.dataframe).
+        rater : str or None, default None
+            If provided, returns counts for that rater only.
+            If None, aggregates across all raters.
+
+        Returns
+        -------
+        pandas.Series
+            Count of each response category (0 to max_score), indexed by
+            category value. Returns None and prints a message if item or
+            rater is invalid.
+        """
+
         if item not in self.dataframe.columns:
             print('Invalid item name')
             return None
@@ -1461,6 +1811,24 @@ class MFRM(Rasch):
                 .astype(int))
 
     def category_counts_df(self):
+        """
+        Build and store response frequency tables across all items.
+
+        Computes two tables: an overall table aggregated across all raters,
+        and a per-rater breakdown. Both include category counts (0 through
+        max_score), total valid responses, and missing responses per item.
+
+        Attributes set
+        --------------
+        category_counts : pandas.DataFrame
+            Overall (all-rater) frequency table with items as rows and
+            response categories plus Total and Missing as columns.
+            A Total row is appended. All values are integers.
+        category_counts_raters : pandas.DataFrame
+            Per-rater frequency table with a (Rater, Item) MultiIndex.
+            Same column structure as category_counts.
+        """
+
         # Overall category counts (across all raters)
         cat_counts = {
             item: {
@@ -1972,7 +2340,70 @@ class MFRM(Rasch):
                        ext_score_adjustment=0.5, method='cos',
                        constant=0.1, matrix_power=3, log_lik_tol=0.000001,
                        no_of_samples=100, interval=None):
-        '''Run all fit statistics for the specified model.'''
+        """
+        Compute all item, threshold, rater, person, and test-level fit statistics.
+
+        Top-level orchestrator that auto-triggers calibrate(), std_errors(),
+        person_abils(), and category_probability_dict() as needed, then runs
+        all fit statistic sub-routines for the specified model. Stores all
+        results as model-suffixed attributes.
+
+        Parameters
+        ----------
+        model : str, default 'global'
+            Rater parameterisation: 'global', 'items', 'thresholds', or 'matrix'.
+        anchor_raters : list or None, default None
+            Rater identifiers to treat as anchors for SE computation.
+        warm_corr : bool, default True
+            Warm bias correction for ability estimates.
+        se : bool, default True
+            If True, computes bootstrap SEs. Required for test-level stats.
+        test_stats : bool, default True
+            If True, computes ISI, PSI, strata, and reliability.
+        ext_scores : bool, default True
+            If True, includes extreme scorers in category probability dict.
+        tolerance : float, default 0.00001
+            Newton-Raphson convergence tolerance.
+        max_iters : int, default 100
+            Maximum Newton-Raphson iterations.
+        ext_score_adjustment : float, default 0.5
+            Extreme score adjustment.
+        method : str, default 'cos'
+            Priority vector extraction method for calibration.
+        constant : float, default 0.1
+            Additive smoothing constant for calibration.
+        matrix_power : int, default 3
+            Matrix power for calibration.
+        log_lik_tol : float, default 0.000001
+            Convergence tolerance for calibration.
+        no_of_samples : int, default 100
+            Bootstrap samples for SE estimation.
+        interval : float or None, default None
+            CI width for bootstrap estimates.
+
+        Attributes set (model-suffixed)
+        --------------------------------
+        exp_score_df_{model}, info_df_{model}, kurtosis_df_{model} : DataFrame
+            Expected scores, Fisher information, fourth moments.
+        residual_df_{model}, std_residual_df_{model} : DataFrame
+            Raw and standardised residuals.
+        item_infit_ms_{model}, item_outfit_ms_{model} : Series
+            Item infit and outfit mean-square.
+        item_infit_zstd_{model}, item_outfit_zstd_{model} : Series
+            Item Z statistics.
+        threshold_infit_ms_{model}, threshold_outfit_ms_{model} : Series
+            Threshold infit and outfit mean-square.
+        rater_infit_ms_{model}, rater_outfit_ms_{model} : Series
+            Rater infit and outfit mean-square.
+        person_infit_ms_{model}, person_outfit_ms_{model} : Series
+            Person infit and outfit mean-square.
+        csem_vector_{model}, rsem_vector_{model} : Series
+            Conditional and residual SEM per person.
+        isi_{model}, item_strata_{model}, item_reliability_{model} : float
+            Item separation index, strata, and reliability (if test_stats).
+        psi_{model}, person_strata_{model}, person_reliability_{model} : float
+            Person separation index, strata, and reliability (if test_stats).
+        """
         if not hasattr(self, f'severities_{model}'):
             self.calibrate(model=model, constant=constant, method=method,
                            matrix_power=matrix_power, log_lik_tol=log_lik_tol)
@@ -2016,7 +2447,23 @@ class MFRM(Rasch):
     # ------------------------------------------------------------------
 
     def item_res_corr_analysis(self, std_residual_df):
-        '''PCA of item residual correlations.'''
+        """
+        Analyse item standardised residual correlations.
+
+        Computes the inter-item correlation matrix of standardised residuals
+        and performs PCA to detect violations of local item independence.
+
+        Parameters
+        ----------
+        std_residual_df : pandas.DataFrame
+            Standardised residuals with (Rater, Person) MultiIndex and
+            items as columns.
+
+        Returns
+        -------
+        tuple of (correlations, eigenvectors, eigenvalues, variance_explained, loadings)
+            All are DataFrames (or None if PCA fails).
+        """
         item_residual_correlations = std_residual_df.corr(numeric_only=False)
         pca = PCA()
         try:
@@ -2043,7 +2490,25 @@ class MFRM(Rasch):
                 variance_explained, loadings)
 
     def rater_res_corr_analysis(self, residual_df, std_residual_df):
-        '''PCA of rater residual correlations.'''
+        """
+        Analyse rater residual correlations.
+
+        Pivots the residual DataFrame to (Person×Items, Raters) shape,
+        computes the inter-rater correlation matrix, and performs PCA.
+        A large first eigenvalue suggests systematic rater bias.
+
+        Parameters
+        ----------
+        residual_df : pandas.DataFrame
+            Raw residuals with (Rater, Person) MultiIndex.
+        std_residual_df : pandas.DataFrame
+            Standardised residuals with (Rater, Person) MultiIndex.
+
+        Returns
+        -------
+        tuple of (correlations, eigenvectors, eigenvalues, variance_explained, loadings)
+            All are DataFrames (or None if PCA fails).
+        """
         rater_res     = self.rater_pivot(residual_df)
         rater_std_res = self.rater_pivot(std_residual_df)
         correlations  = rater_res.corr(numeric_only=False)
@@ -2149,6 +2614,56 @@ class MFRM(Rasch):
                       ext_score_adjustment=0.5, method='cos', constant=0.1,
                       matrix_power=3, log_lik_tol=0.000001, no_of_samples=100,
                       interval=None):
+        """
+        Build and store the item statistics summary table.
+
+        Auto-triggers the full calibration/SE/fit chain if not yet run.
+        Stores result as self.item_stats_{model}.
+
+        Parameters
+        ----------
+        model : str, default 'global'
+            Rater parameterisation.
+        anchor_raters : list or None, default None
+            If provided, uses anchor-calibrated item difficulties.
+        full : bool, default False
+            If True, sets zstd=True, point_measure_corr=True, interval=0.95.
+        ext_scores : bool, default True
+            Include extreme scorers in fit computation.
+        zstd : bool, default False
+            If True, includes Infit Z and Outfit Z columns.
+        point_measure_corr : bool, default False
+            If True, includes point-measure correlation columns.
+        dp : int, default 3
+            Decimal places.
+        warm_corr : bool, default True
+            Warm bias correction.
+        tolerance : float, default 0.00001
+            Newton-Raphson convergence tolerance.
+        max_iters : int, default 100
+            Maximum iterations.
+        ext_score_adjustment : float, default 0.5
+            Extreme score adjustment.
+        method : str, default 'cos'
+            Priority vector extraction method.
+        constant : float, default 0.1
+            Additive smoothing constant.
+        matrix_power : int, default 3
+            Matrix power for calibration.
+        log_lik_tol : float, default 0.000001
+            Calibration convergence tolerance.
+        no_of_samples : int, default 100
+            Bootstrap samples for SE estimation.
+        interval : float or None, default None
+            CI width; if provided, percentile bound columns included.
+
+        Attributes set
+        --------------
+        item_stats_{model} : pandas.DataFrame
+            Item statistics with items as rows. Always contains Estimate,
+            SE, Count, Facility, Infit MS, Outfit MS.
+        """
+
         if full:
             zstd = point_measure_corr = True
             interval = interval or 0.95
@@ -2206,6 +2721,55 @@ class MFRM(Rasch):
                            ext_score_adjustment=0.5, method='cos',
                            constant=0.1, matrix_power=3, log_lik_tol=0.000001,
                            no_of_samples=100, interval=None):
+        """
+        Build and store the threshold statistics summary table.
+
+        Auto-triggers the full calibration/SE/fit chain if not yet run.
+        Stores result as self.threshold_stats_{model}.
+
+        Parameters
+        ----------
+        model : str, default 'global'
+            Rater parameterisation.
+        anchor_raters : list or None, default None
+            Anchor raters for SE computation.
+        full : bool, default False
+            If True, sets zstd=True, disc=True, point_measure_corr=True, interval=0.95.
+        zstd : bool, default False
+            If True, includes Infit Z and Outfit Z columns.
+        disc : bool, default False
+            If True, includes threshold discrimination column.
+        point_measure_corr : bool, default False
+            If True, includes point-measure correlation columns.
+        dp : int, default 3
+            Decimal places.
+        warm_corr : bool, default True
+            Warm bias correction.
+        tolerance : float, default 0.00001
+            Convergence tolerance.
+        max_iters : int, default 100
+            Maximum iterations.
+        ext_score_adjustment : float, default 0.5
+            Extreme score adjustment.
+        method : str, default 'cos'
+            Priority vector extraction method.
+        constant : float, default 0.1
+            Smoothing constant.
+        matrix_power : int, default 3
+            Matrix power.
+        log_lik_tol : float, default 0.000001
+            Calibration convergence tolerance.
+        no_of_samples : int, default 100
+            Bootstrap samples.
+        interval : float or None, default None
+            CI width.
+
+        Attributes set
+        --------------
+        threshold_stats_{model} : pandas.DataFrame
+            Threshold statistics, rows Threshold 1..Threshold max_score.
+        """
+
         if full:
             zstd = disc = point_measure_corr = True
             interval = interval or 0.95
@@ -2264,6 +2828,55 @@ class MFRM(Rasch):
                         ext_score_adjustment=0.5, method='cos',
                         constant=0.1, matrix_power=3, log_lik_tol=0.000001,
                         interval=None, no_of_samples=100):
+        """
+        Build and store the person statistics summary table.
+
+        Auto-triggers calibration and person ability estimation if not yet run.
+        Stores result as self.person_stats_{model}.
+
+        Parameters
+        ----------
+        model : str, default 'global'
+            Rater parameterisation.
+        anchor_raters : list or None, default None
+            If provided, uses anchor-calibrated abilities.
+        full : bool, default False
+            If True, sets rsem=True, zstd=True.
+        rsem : bool, default False
+            If True, includes Residual SEM (RSEM) column.
+        zstd : bool, default False
+            If True, includes Infit Z and Outfit Z columns.
+        dp : int, default 3
+            Decimal places.
+        warm_corr : bool, default True
+            Warm bias correction.
+        tolerance : float, default 0.00001
+            Convergence tolerance.
+        max_iters : int, default 100
+            Maximum iterations.
+        ext_score_adjustment : float, default 0.5
+            Extreme score adjustment.
+        method : str, default 'cos'
+            Priority vector extraction method.
+        constant : float, default 0.1
+            Smoothing constant.
+        matrix_power : int, default 3
+            Matrix power.
+        log_lik_tol : float, default 0.000001
+            Calibration convergence tolerance.
+        interval : float or None, default None
+            CI width (unused directly; passed to _ensure_calibrated).
+        no_of_samples : int, default 100
+            Bootstrap samples.
+
+        Attributes set
+        --------------
+        person_stats_{model} : pandas.DataFrame
+            Person statistics with persons as rows. Contains Estimate, CSEM,
+            Score, Max score, p, Infit MS, Outfit MS. Optional: RSEM, Infit Z,
+            Outfit Z.
+        """
+
         self._ensure_calibrated(model, warm_corr=warm_corr, tolerance=tolerance,
                                 max_iters=max_iters, ext_score_adjustment=ext_score_adjustment,
                                 constant=constant, method=method, matrix_power=matrix_power,
@@ -2314,6 +2927,44 @@ class MFRM(Rasch):
                       ext_score_adjustment=0.5, method='cos',
                       constant=0.1, matrix_power=3, log_lik_tol=0.000001,
                       no_of_samples=100):
+        """
+        Build and store the test-level summary statistics table.
+
+        Auto-triggers calibration and test fit statistics if not yet run.
+        Stores result as self.test_stats_{model}.
+
+        Parameters
+        ----------
+        model : str, default 'global'
+            Rater parameterisation.
+        dp : int, default 3
+            Decimal places.
+        warm_corr : bool, default True
+            Warm bias correction.
+        tolerance : float, default 0.00001
+            Convergence tolerance.
+        max_iters : int, default 100
+            Maximum iterations.
+        ext_score_adjustment : float, default 0.5
+            Extreme score adjustment.
+        method : str, default 'cos'
+            Priority vector extraction method.
+        constant : float, default 0.1
+            Smoothing constant.
+        matrix_power : int, default 3
+            Matrix power.
+        log_lik_tol : float, default 0.000001
+            Calibration convergence tolerance.
+        no_of_samples : int, default 100
+            Bootstrap samples.
+
+        Attributes set
+        --------------
+        test_stats_{model} : pandas.DataFrame
+            Two-column table (Items, Persons) with rows:
+            Mean, SD, Separation ratio, Strata, Reliability.
+        """
+
         self._ensure_calibrated(model, constant=constant, method=method,
                                 matrix_power=matrix_power, log_lik_tol=log_lik_tol)
         if not hasattr(self, f'psi_{model}'):
@@ -2347,6 +2998,62 @@ class MFRM(Rasch):
                        ext_score_adjustment=0.5, method='cos', constant=0.1,
                        matrix_power=3, log_lik_tol=0.000001,
                        no_of_samples=100, interval=None):
+        """
+        Build and store the rater statistics summary table.
+
+        Output structure varies substantially by model:
+          global     — one row per rater with scalar severity estimate and fit stats.
+          items      — MultiIndex columns (item, statistic), one row per rater.
+          thresholds — MultiIndex columns (threshold, statistic), one row per rater.
+          matrix     — marginal=True: twin-vector (per-item + per-threshold marginals
+                       recentred to zero); marginal=False: full (item, threshold)
+                       cell table.
+
+        Auto-triggers the full calibration/SE/fit chain if not yet run.
+        Stores result as self.rater_stats_{model}.
+
+        Parameters
+        ----------
+        model : str, default 'global'
+            Rater parameterisation.
+        anchor_raters : list or None, default None
+            Anchor raters for SE computation.
+        full : bool, default False
+            If True, sets zstd=True, interval=0.95.
+        zstd : bool, default False
+            If True, includes Infit Z and Outfit Z columns.
+        marginal : bool, default True
+            For matrix model only: if True returns marginal twin-vector
+            representation; if False returns full (item, threshold) cell table.
+        dp : int, default 3
+            Decimal places.
+        warm_corr : bool, default True
+            Warm bias correction.
+        tolerance : float, default 0.00001
+            Convergence tolerance.
+        max_iters : int, default 100
+            Maximum iterations.
+        ext_score_adjustment : float, default 0.5
+            Extreme score adjustment.
+        method : str, default 'cos'
+            Priority vector extraction method.
+        constant : float, default 0.1
+            Smoothing constant.
+        matrix_power : int, default 3
+            Matrix power.
+        log_lik_tol : float, default 0.000001
+            Calibration convergence tolerance.
+        no_of_samples : int, default 100
+            Bootstrap samples.
+        interval : float or None, default None
+            CI width.
+
+        Attributes set
+        --------------
+        rater_stats_{model} : pandas.DataFrame
+            Rater statistics table. Structure depends on model (see above).
+        """
+
         if full:
             zstd = True
             interval = interval or 0.95
@@ -2503,6 +3210,44 @@ class MFRM(Rasch):
                    ext_score_adjustment=0.5, method='cos', constant=0.1,
                    matrix_power=3, log_lik_tol=0.000001,
                    no_of_samples=100, interval=None):
+        """
+        Export item, threshold, rater, person, and test statistics to file.
+
+        Auto-triggers all stats_df methods if not yet run. Saves all five
+        tables to either a single Excel workbook or separate CSV files.
+
+        Parameters
+        ----------
+        model : str, default 'global'
+            Rater parameterisation.
+        filename : str, default ''
+            Output filename or path (without extension for CSV).
+        format : str, default 'csv'
+            'csv' saves five separate CSV files. 'xlsx' saves to a single
+            workbook with separate sheets.
+        dp : int, default 3
+            Decimal places.
+        warm_corr : bool, default True
+            Warm bias correction.
+        tolerance : float, default 0.00001
+            Convergence tolerance.
+        max_iters : int, default 100
+            Maximum iterations.
+        ext_score_adjustment : float, default 0.5
+            Extreme score adjustment.
+        method : str, default 'cos'
+            Priority vector extraction method.
+        constant : float, default 0.1
+            Smoothing constant.
+        matrix_power : int, default 3
+            Matrix power.
+        log_lik_tol : float, default 0.000001
+            Calibration convergence tolerance.
+        no_of_samples : int, default 100
+            Bootstrap samples.
+        interval : float or None, default None
+            CI width for SEs.
+        """
 
         kw = dict(dp=dp, warm_corr=warm_corr, tolerance=tolerance,
                   max_iters=max_iters, ext_score_adjustment=ext_score_adjustment,
@@ -2550,6 +3295,41 @@ class MFRM(Rasch):
     def save_residuals(self, eigenvectors, eigenvalues, variance_explained,
                        loadings, fit_statistics_method, eigenvector_string,
                        filename, format='csv', single=True, dp=3, **kw):
+        """
+        Export residual correlation analysis results to file.
+
+        Low-level method called by save_residuals_items_* and
+        save_residuals_raters_* aliases. Auto-triggers the fit statistics
+        method if the eigenvectors attribute is not yet set.
+
+        Parameters
+        ----------
+        eigenvectors : pandas.DataFrame or None
+            PCA eigenvectors to save.
+        eigenvalues : pandas.DataFrame or None
+            PCA eigenvalues to save.
+        variance_explained : pandas.DataFrame or None
+            PCA variance explained proportions to save.
+        loadings : pandas.DataFrame or None
+            PCA loadings to save.
+        fit_statistics_method : str
+            Name of the method to call if eigenvectors are not yet computed
+            (e.g. 'item_res_corr_analysis_global').
+        eigenvector_string : str
+            Attribute name to check for existence (e.g. 'item_eigenvectors_global').
+        filename : str
+            Output filename or path.
+        format : str, default 'csv'
+            'csv' or 'xlsx'.
+        single : bool, default True
+            If True, writes all tables to a single file/sheet.
+            If False, writes each to a separate file/sheet.
+        dp : int, default 3
+            Decimal places.
+        **kw
+            Additional keyword arguments passed to the fit statistics method.
+        """
+
         frames  = [eigenvectors, eigenvalues, variance_explained, loadings]
         if not hasattr(self, eigenvector_string):
             getattr(self, fit_statistics_method)(**kw)

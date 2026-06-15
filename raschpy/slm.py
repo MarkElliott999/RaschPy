@@ -19,6 +19,54 @@ class SLM(Rasch):
                  extreme_persons=True,
                  no_of_classes=5,
                  validate=True):
+        """
+        Initialise a Simple Logistic Model (Rasch model) object.
+
+        Parameters
+        ----------
+        dataframe : pandas.DataFrame
+            Response data with persons as rows and items as columns.
+            Cell values should be 0 (incorrect) or 1 (correct); NaN for
+            missing responses. The index is used as person identifiers and
+            the columns as item identifiers.
+        extreme_persons : bool, default True
+            If True, removes only persons with entirely missing data.
+            If False, additionally removes persons with all-zero or
+            perfect scores (extreme scores), which cannot be handled
+            by maximum likelihood estimation without adjustment.
+        no_of_classes : int, default 5
+            Number of class intervals used in observed-data overlays on
+            ICC and TCC plots.
+        validate : bool, default True
+            If True, checks whether the item response network is fully
+            connected (i.e. all items are linked via common persons).
+            Issues a UserWarning if the data is split into disconnected
+            sub-networks, which makes item difficulties incomparable
+            across sub-groups.
+
+        Attributes set
+        --------------
+        dataframe : pandas.DataFrame
+            Filtered response data (extreme/invalid persons removed).
+        invalid_responses : pandas.DataFrame
+            Rows removed from dataframe based on the extreme_persons rule.
+        no_of_items : int
+            Number of items in the filtered dataframe.
+        no_of_persons : int
+            Number of persons in the filtered dataframe.
+        items : pandas.Index
+            Item identifiers (column names of dataframe).
+        persons : pandas.Index
+            Person identifiers (index of dataframe).
+        no_of_classes : int
+            Number of class intervals (passed through for plot methods).
+        max_score : int
+            Always 1 for SLM (dichotomous model).
+        connectivity_status : dict
+            Result of check_data_connectivity(), present only if
+            validate=True. Contains at minimum a 'connected' key (bool)
+            and 'components_count' (int).
+        """
 
         super().__init__()
 
@@ -64,36 +112,98 @@ class SLM(Rasch):
                 )
 
     def exp_score(self, ability, difficulty):
-        '''
-        Expected score function (also probability of correct response).
-        Fully vectorised: Accepts scalars, 1D vectors, or 2D matrices.
-        '''
+        """
+        Compute the expected score (probability of correct response).
+
+        Implements the SLM response function P(X=1) = 1 / (1 + exp(d - b)),
+        where b is person ability and d is item difficulty. Fully vectorised:
+        accepts scalars, 1-D arrays, or 2-D arrays in any combination that
+        NumPy can broadcast.
+
+        Parameters
+        ----------
+        ability : float or array-like
+            Person ability estimate(s) on the logit scale.
+        difficulty : float or array-like
+            Item difficulty estimate(s) on the logit scale.
+
+        Returns
+        -------
+        float or numpy.ndarray
+            Expected score (probability of correct response), in [0, 1].
+        """
         return 1.0 / (1.0 + np.exp(difficulty - ability))
 
     def cat_prob(self, ability, difficulty, category):
-        '''
-        Category probability function which calculates the probability
-        of scoring 0 or 1 from person ability and item difficulty.
-        Vectorised to avoid list construction and explicit sums.
-        '''
+        """
+        Compute the probability of a given response category (0 or 1).
+
+        Returns P(X=category | ability, difficulty) using the SLM
+        response function. For category=1 this is identical to exp_score;
+        for category=0 it is 1 minus that probability.
+
+        Parameters
+        ----------
+        ability : float or array-like
+            Person ability estimate(s) on the logit scale.
+        difficulty : float or array-like
+            Item difficulty estimate(s) on the logit scale.
+        category : int
+            Response category: 0 (incorrect) or 1 (correct).
+
+        Returns
+        -------
+        float or numpy.ndarray
+            Probability of the specified response category, in [0, 1].
+        """
         p = self.exp_score(ability, difficulty)
         # For category 1: returns p. For category 0: returns (1 - p).
         return p if category == 1 else (1.0 - p)
 
     def variance(self, ability, difficulty):
-        '''
-        Calculates Fisher information function from person ability
-        and item difficulty. Also the variance and differential
-        of the expected score function.
-        '''
+        """
+        Compute the item response variance (Fisher information) at given ability.
+
+        For the SLM, variance equals P(X=1) * P(X=0) = p * (1 - p), which
+        is simultaneously the Fisher information, the variance of the response
+        distribution, and the first derivative of the expected score function
+        with respect to ability.
+
+        Parameters
+        ----------
+        ability : float or array-like
+            Person ability estimate(s) on the logit scale.
+        difficulty : float or array-like
+            Item difficulty estimate(s) on the logit scale.
+
+        Returns
+        -------
+        float or numpy.ndarray
+            Response variance / Fisher information, in [0, 0.25].
+        """
         expected = self.exp_score(ability, difficulty)
         return expected * (1.0 - expected)
 
     def kurtosis(self, ability, difficulty):
-        '''
-        Calculates kurtosis given person ability and item difficulty.
-        Vectorised to eliminate the loop structure over categories.
-        '''
+        """
+        Compute the fourth central moment (kurtosis) of the response distribution.
+
+        Used in the Wilson-Hilferty approximation for the standardised fit
+        statistics (Infit Z, Outfit Z). For the SLM:
+        kurtosis = p^4 * (1-p) + (1-p)^4 * p, where p = exp_score(ability, difficulty).
+
+        Parameters
+        ----------
+        ability : float or array-like
+            Person ability estimate(s) on the logit scale.
+        difficulty : float or array-like
+            Item difficulty estimate(s) on the logit scale.
+
+        Returns
+        -------
+        float or numpy.ndarray
+            Fourth central moment of the response distribution.
+        """
         expected = self.exp_score(ability, difficulty)
 
         # Category 0 term: ((0 - expected)**4) * (1 - expected)
@@ -109,10 +219,48 @@ class SLM(Rasch):
                   method='cos',
                   matrix_power=3,
                   log_lik_tol=0.000001):
-        '''
-        Produces central item difficulty estimates (or difficulties for SLM)
-        using Choppin's matrix power property to resolve structural zeroes.
-        '''
+        """
+        Estimate item difficulties using Choppin's pairwise matrix method.
+
+        Constructs a pairwise comparison matrix from the response data and
+        raises it to successive powers until all off-diagonal elements are
+        non-zero (resolving structural zeroes that arise from items never
+        administered together). A priority vector is then extracted from
+        the resolved matrix to obtain item difficulty estimates on the logit
+        scale, zero-centred across all items.
+
+        Issues a UserWarning if only one item is present (reduces to RSM)
+        or if constant=0 and any item has all-maximum scores (estimation
+        will fail without additive smoothing).
+
+        Parameters
+        ----------
+        constant : float, default 0.1
+            Additive smoothing constant added to structural zeroes remaining
+            after matrix power resolution. Use 0 to disable smoothing, but
+            note that this will cause estimation failure if any item has all
+            maximum or all minimum scores.
+        method : str, default 'cos'
+            Method for extracting the priority vector from the pairwise
+            matrix. 'cos' uses the cosine (geometric mean) method.
+            See base.priority_vector() for full list of supported methods.
+        matrix_power : int, default 3
+            Initial power to which the pairwise matrix is raised before
+            checking for structural zeroes. Higher values are more
+            expensive but resolve zeroes faster on sparse data.
+        log_lik_tol : float, default 0.000001
+            Log-likelihood convergence tolerance passed to priority_vector()
+            for methods that use iterative optimisation.
+
+        Attributes set
+        --------------
+        diffs : pandas.Series
+            Item difficulty estimates indexed by item name, in logits,
+            zero-centred across all items.
+        null_persons : pandas.Index
+            Persons dropped prior to calibration due to entirely missing
+            response patterns.
+        """
 
         if len(self.dataframe.columns) == 1:
             warnings.warn("Only one item detected. This model with a single item reduces to RSM "
@@ -173,9 +321,53 @@ class SLM(Rasch):
                    matrix_power=3,
                    log_lik_tol=0.000001):
         
-        '''
-        Bootstraped standard error estimates for item difficulties.
-        '''
+        """
+        Estimate bootstrap standard errors for item difficulty estimates.
+
+        Draws no_of_samples bootstrap resamples (with replacement) of the
+        person-level response data, calibrates each resample, and computes
+        the standard deviation of item difficulty estimates across samples
+        as the standard error. Optionally computes bootstrap confidence
+        intervals.
+
+        Parameters
+        ----------
+        interval : float or None, default None
+            Confidence interval width, e.g. 0.95 for 95% CI. If None,
+            only standard errors are computed. If provided, lower and
+            upper percentile bounds are also stored.
+        no_of_samples : int, default 500
+            Number of bootstrap resamples. More samples give more stable
+            SE estimates at the cost of computation time.
+        constant : float, default 0.1
+            Additive smoothing constant passed to calibrate() for each
+            bootstrap resample.
+        method : str, default 'cos'
+            Priority vector extraction method passed to calibrate().
+        matrix_power : int, default 3
+            Matrix power passed to calibrate().
+        log_lik_tol : float, default 0.000001
+            Convergence tolerance passed to calibrate().
+
+        Attributes set
+        --------------
+        item_se : pandas.Series
+            Bootstrap standard error for each item difficulty, indexed
+            by item name.
+        item_low : pandas.Series or None
+            Lower percentile bound of the bootstrap CI for each item,
+            or None if interval is None.
+        item_high : pandas.Series or None
+            Upper percentile bound of the bootstrap CI for each item,
+            or None if interval is None.
+        item_bootstrap : pandas.DataFrame
+            Full matrix of bootstrap item difficulty estimates, shape
+            (no_of_samples, no_of_items), with items as columns and
+            sample labels as index.
+        bootstrap_sample_diffs : dict
+            Dictionary of difficulty Series from each bootstrap resample,
+            keyed by 'Sample_1', 'Sample_2', etc.
+        """
 
         samples = [SLM(self.dataframe.sample(frac=1, replace=True), validate=False)
                    for sample in range(no_of_samples)]
@@ -215,11 +407,42 @@ class SLM(Rasch):
              tolerance=0.00001,
              max_iters=100,
              ext_score_adjustment=0.5):
+        """
+        Estimate person abilities using Newton-Raphson maximum likelihood.
 
-        '''
-        Creates raw score to ability estimate look-up. Uses
-        Newton-Raphson for ML with optional Warm (1989) bias correction.
-        '''
+        For each person, iteratively solves the likelihood equation
+        sum(P_i) = score for the ability estimate, where P_i is the
+        probability of a correct response on item i. Extreme scores
+        (all-zero or perfect) are adjusted by ext_score_adjustment before
+        estimation. Optionally applies Warm's (1989) bias correction.
+
+        Parameters
+        ----------
+        persons : str or list
+            Person identifier(s) to estimate abilities for. Pass 'all'
+            to estimate for all persons in the dataframe.
+        items : str or list or None, default None
+            Item subset to use for estimation. None uses all items.
+            Pass 'all' or a list of item names to restrict the item set.
+        warm_corr : bool, default True
+            If True, applies Warm's (1989) weighted maximum likelihood
+            bias correction after Newton-Raphson convergence.
+        tolerance : float, default 0.00001
+            Convergence criterion: iteration stops when the maximum
+            absolute change in ability estimates falls below this value.
+        max_iters : int, default 100
+            Maximum number of Newton-Raphson iterations. A warning is
+            printed (not raised) if this limit is reached before convergence.
+        ext_score_adjustment : float, default 0.5
+            Amount added to (or subtracted from) extreme scores of 0 or
+            maximum before estimation, to allow finite ability estimates.
+
+        Returns
+        -------
+        pandas.Series
+            Ability estimates indexed by person identifier, in logits.
+            Returns numpy.nan for persons where estimation fails.
+        """
 
         if isinstance(persons, str):
             if persons == 'all':
@@ -294,11 +517,32 @@ class SLM(Rasch):
                      tolerance=0.00001,
                      max_iters=100,
                      ext_score_adjustment=0.5):
+        """
+        Estimate abilities for all persons and store as an attribute.
 
-        '''
-        Creates raw score to ability estimate look-up table. Newton-Raphson ML
-        estimation, includes optional Warm (1989) bias correction.
-        '''
+        Convenience wrapper around abil() that estimates abilities for every
+        person in the dataframe and stores the result as self.person_abilities.
+
+        Parameters
+        ----------
+        items : str or list or None, default None
+            Item subset to use. None uses all items. Pass 'all' or a
+            list of item names to restrict the item set.
+        warm_corr : bool, default True
+            If True, applies Warm's (1989) bias correction.
+        tolerance : float, default 0.00001
+            Newton-Raphson convergence tolerance.
+        max_iters : int, default 100
+            Maximum Newton-Raphson iterations.
+        ext_score_adjustment : float, default 0.5
+            Adjustment applied to extreme scores before estimation.
+
+        Attributes set
+        --------------
+        person_abilities : pandas.Series
+            Ability estimates for all persons, indexed by person identifier,
+            in logits.
+        """
 
         self.person_abilities = self.abil(self.persons, items=items, warm_corr=warm_corr, tolerance=tolerance,
                                           max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
@@ -310,11 +554,35 @@ class SLM(Rasch):
                    tolerance=0.00001,
                    max_iters=100,
                    ext_score_adjustment=0.5):
+        """
+        Convert a raw score to an ability estimate via Newton-Raphson ML.
 
-        '''
-        Creates raw score to ability estimate look-up. Uses
-        Newton-Raphson for ML with optional Warm (1989) bias correction.
-        '''
+        Estimates the ability corresponding to a given integer raw score
+        on a specified item set. Unlike abil(), which operates on observed
+        person response patterns, this method works from a scalar score
+        and is used to draw score lines on TCC plots.
+
+        Parameters
+        ----------
+        score : int or float
+            Raw score to convert to an ability estimate. Extreme scores
+            of 0 or maximum are adjusted by ext_score_adjustment.
+        items : str or list or None, default None
+            Item subset defining the score scale. None uses all items.
+        warm_corr : bool, default True
+            If True, applies Warm's (1989) bias correction.
+        tolerance : float, default 0.00001
+            Newton-Raphson convergence tolerance.
+        max_iters : int, default 100
+            Maximum Newton-Raphson iterations.
+        ext_score_adjustment : float, default 0.5
+            Adjustment applied to extreme scores (0 or maximum).
+
+        Returns
+        -------
+        float
+            Ability estimate in logits corresponding to the given score.
+        """
 
         if items is None:
             items = self.items
@@ -365,6 +633,37 @@ class SLM(Rasch):
                           tolerance=0.00001,
                           max_iters=100,
                           ext_score_adjustment=0.5):
+        """
+        Build a score-to-ability lookup table for all possible raw scores.
+
+        Estimates the ability corresponding to every possible raw score on a
+        given item set using vectorised Newton-Raphson, and stores the result
+        as self.abil_table. Useful for converting raw scores to ability
+        estimates in batch without per-person response patterns.
+
+        Parameters
+        ----------
+        items : str or list or None, default None
+            Item subset to use. None uses all items. Pass 'all' or a
+            list of item names.
+        ext_scores : bool, default True
+            If True, includes extreme scores (0 and maximum) in the table,
+            adjusted by ext_score_adjustment. If False, only non-extreme
+            scores are included.
+        warm_corr : bool, default True
+            If True, applies Warm's (1989) bias correction.
+        tolerance : float, default 0.00001
+            Newton-Raphson convergence tolerance.
+        max_iters : int, default 100
+            Maximum Newton-Raphson iterations.
+        ext_score_adjustment : float, default 0.5
+            Adjustment applied to extreme scores when ext_scores=True.
+
+        Attributes set
+        --------------
+        abil_table : pandas.Series
+            Ability estimate for each possible raw score, indexed by score.
+        """
 
         if isinstance(items, str):
             if items == 'all':
@@ -421,10 +720,32 @@ class SLM(Rasch):
              abilities,
              difficulties,
              person_filter):
+        """
+        Apply Warm's (1989) weighted maximum likelihood bias correction.
 
-        '''
-        Warm's (1989) bias correction for ML ability estimates.
-        '''
+        Computes the correction term J / (2 * I^2) as described in
+        Warm (1989), where I is the total Fisher information and J is
+        the sum of the third derivatives of the log-likelihood. Fully
+        vectorised for simultaneous correction of multiple persons.
+        Accepts either scalar or array inputs for persons.
+
+        Parameters
+        ----------
+        abilities : float or pandas.Series
+            Current ability estimate(s). If a Series, index must match persons.
+        difficulties : pandas.Series
+            Item difficulty estimates, indexed by item name.
+        person_filter : numpy.ndarray or pandas.DataFrame
+            Binary mask indicating which items each person responded to
+            (1 = responded, NaN = missing). Shape must be compatible with
+            broadcasting against abilities and difficulties.
+
+        Returns
+        -------
+        float or pandas.Series
+            Warm bias correction term(s) to be added to the ML ability
+            estimate(s). Same type and shape as the abilities input.
+        """
 
         if np.isscalar(abilities):
             p = 1.0 / (1.0 + np.exp(difficulties.values - abilities))
@@ -454,10 +775,29 @@ class SLM(Rasch):
              person,
              abilities=None,
              items=None):
+        """
+        Compute the conditional standard error of measurement for a person.
 
-        '''
-        Calculates conditional standard error of measurement for an ability.
-        '''
+        Calculates CSEM = 1 / sqrt(I), where I is the total Fisher
+        information for the person given their item responses and ability
+        estimate. Missing responses are excluded via the person filter.
+
+        Parameters
+        ----------
+        person : str or int
+            Person identifier (index label in self.dataframe).
+        abilities : pandas.Series or None, default None
+            Ability estimates for all persons. If None, self.person_abils()
+            is called automatically to generate them.
+        items : list or None, default None
+            Item subset to use. None uses all items.
+
+        Returns
+        -------
+        float
+            Conditional standard error of measurement in logits for the
+            specified person.
+        """
 
         if items is None:
             items = self.dataframe.columns
@@ -482,6 +822,21 @@ class SLM(Rasch):
 
     def category_counts_item(self,
                              item):
+        """
+        Return response frequency counts for a single item.
+
+        Parameters
+        ----------
+        item : str
+            Item identifier (must be a column in self.dataframe).
+
+        Returns
+        -------
+        pandas.Series
+            Count of each observed response category (0 and 1) for the
+            item, sorted by category value. Returns None and prints a
+            message if the item name is not found.
+        """
 
         if item in self.dataframe.columns:
             counts = self.dataframe[item].value_counts().fillna(0).astype(int)
@@ -493,6 +848,21 @@ class SLM(Rasch):
             print('Invalid item name')
 
     def category_counts_df(self):
+        """
+        Build and store a response frequency table across all items.
+
+        Computes the number of 0 and 1 responses, total valid responses,
+        and missing responses for each item. Appends a 'Total' row summing
+        across all items.
+
+        Attributes set
+        --------------
+        category_counts : pandas.DataFrame
+            DataFrame with items as rows and response categories (0, 1),
+            'Responses', and 'Missing' as columns. All values are integers.
+            A 'Total' row is appended at the bottom.
+        """
+
         cat_counts_dict = {item: {int(score): count if count == count else 0
                                   for score, count in self.category_counts_item(item).items()}
                            for item in self.dataframe.columns}
@@ -521,6 +891,112 @@ class SLM(Rasch):
                        log_lik_tol=0.000001,
                        no_of_samples=500,
                        interval=None):
+        """
+        Compute all item, person, and test-level fit statistics.
+
+        This is the central computation method. It auto-triggers calibrate(),
+        std_errors(), and person_abils() if they have not already been run.
+        Computes expected scores, information, kurtosis, residuals, and
+        standardised residuals for all person-item combinations, then derives
+        Infit and Outfit mean-square and standardised (Z) statistics using
+        the Wilson-Hilferty approximation. Also computes person separation,
+        strata, and reliability if test_stats=True.
+
+        Parameters
+        ----------
+        warm_corr : bool, default True
+            If True, applies Warm's (1989) bias correction to ability
+            estimates used in fit computation.
+        se : bool, default True
+            If True, computes bootstrap standard errors (required for
+            test-level statistics). If False, test_stats is forced False.
+        test_stats : bool, default True
+            If True, computes test-level statistics (ISI, PSI, strata,
+            reliability). Requires se=True.
+        trim_cat_prob_dict : bool, default False
+            If True, restricts cat_prob_dict to persons with non-extreme
+            scores. Reduces memory usage on large datasets.
+        tolerance : float, default 0.00001
+            Newton-Raphson convergence tolerance for ability estimation.
+        max_iters : int, default 100
+            Maximum Newton-Raphson iterations for ability estimation.
+        ext_score_adjustment : float, default 0.5
+            Extreme score adjustment for ability estimation.
+        constant : float, default 0.1
+            Additive smoothing constant for calibration.
+        method : str, default 'cos'
+            Priority vector extraction method for calibration.
+        matrix_power : int, default 3
+            Matrix power for calibration.
+        log_lik_tol : float, default 0.000001
+            Log-likelihood tolerance for calibration.
+        no_of_samples : int, default 500
+            Bootstrap samples for standard error estimation.
+        interval : float or None, default None
+            Confidence interval width for bootstrap CIs.
+
+        Attributes set
+        --------------
+        cat_prob_dict : dict
+            {0: DataFrame, 1: DataFrame} of category probabilities for
+            all persons and items.
+        exp_score_df : pandas.DataFrame
+            Expected scores (non-extreme persons only), shape (persons, items).
+        info_df : pandas.DataFrame
+            Fisher information values, shape (persons, items).
+        kurtosis_df : pandas.DataFrame
+            Fourth central moments, shape (persons, items).
+        residual_df : pandas.DataFrame
+            Raw residuals (observed - expected), shape (persons, items).
+        std_residual_df : pandas.DataFrame
+            Standardised residuals (residual / sqrt(info)), shape (persons, items).
+        item_infit_ms : pandas.Series
+            Item infit mean-square statistics.
+        item_outfit_ms : pandas.Series
+            Item outfit mean-square statistics.
+        item_infit_zstd : pandas.Series
+            Item infit Z statistics (Wilson-Hilferty approximation).
+        item_outfit_zstd : pandas.Series
+            Item outfit Z statistics.
+        response_counts : pandas.Series
+            Number of valid responses per item.
+        item_facilities : pandas.Series
+            Mean response (proportion correct) per item.
+        point_measure : pandas.Series
+            Observed point-measure correlations per item.
+        exp_point_measure : pandas.Series
+            Expected point-measure correlations per item.
+        discrimination : pandas.Series
+            Item discrimination indices.
+        csem_vector : pandas.Series
+            Conditional SEM for each person.
+        rsem_vector : pandas.Series
+            Residual SEM for each person.
+        person_infit_ms : pandas.Series
+            Person infit mean-square statistics.
+        person_outfit_ms : pandas.Series
+            Person outfit mean-square statistics.
+        person_infit_zstd : pandas.Series
+            Person infit Z statistics.
+        person_outfit_zstd : pandas.Series
+            Person outfit Z statistics.
+        isi : float
+            Item separation index (if test_stats=True).
+        item_strata : float
+            Number of statistically distinct item strata (if test_stats=True).
+        item_reliability : float
+            Item reliability coefficient (if test_stats=True).
+        psi : float
+            Person separation index (if test_stats=True).
+        person_strata : float
+            Number of statistically distinct person strata (if test_stats=True).
+        person_reliability : float
+            Person reliability coefficient (if test_stats=True).
+        item_residual_corr : pandas.Series
+            Correlation of standardised residuals with item difficulties.
+        person_residual_corr : pandas.Series
+            Correlation of standardised residuals with person abilities.
+        """
 
         if hasattr(self, 'diffs') == False:
             self.calibrate(constant=constant, method=method, matrix_power=matrix_power, log_lik_tol=log_lik_tol)
@@ -667,11 +1143,56 @@ class SLM(Rasch):
                           method='cos',
                           matrix_power=3,
                           log_lik_tol=0.000001):
+        """
+        Analyse standardised residual correlations for local item dependence.
 
-        '''
-        Analysis of correlations of standardised residuals for violations of local item interdependence
-        and unidimensionality
-        '''
+        Computes the inter-item correlation matrix of standardised residuals
+        and performs a Principal Component Analysis (PCA) on it to detect
+        violations of local item independence and unidimensionality. A large
+        first eigenvalue (conventionally > 2.0) suggests a second dimension
+        in the data. Auto-triggers fit_statistics() if not yet run.
+
+        Parameters
+        ----------
+        warm_corr : bool, default True
+            Warm bias correction for ability estimates used in residuals.
+        tolerance : float, default 0.00001
+            Newton-Raphson convergence tolerance.
+        max_iters : int, default 100
+            Maximum Newton-Raphson iterations.
+        ext_score_adjustment : float, default 0.5
+            Extreme score adjustment for ability estimation.
+        constant : float, default 0.1
+            Additive smoothing constant for calibration.
+        method : str, default 'cos'
+            Priority vector extraction method for calibration.
+        matrix_power : int, default 3
+            Matrix power for calibration.
+        log_lik_tol : float, default 0.000001
+            Log-likelihood tolerance for calibration.
+
+        Attributes set
+        --------------
+        residual_correlations : pandas.DataFrame
+            Item-by-item correlation matrix of standardised residuals,
+            shape (no_of_items, no_of_items).
+        eigenvectors : pandas.DataFrame or None
+            PCA eigenvectors (principal component loadings matrix),
+            shape (no_of_items, no_of_items), columns labelled
+            'Eigenvector 1' etc. None if PCA fails.
+        eigenvalues : pandas.DataFrame or None
+            Eigenvalues for each principal component, shape (no_of_items, 1),
+            index labelled 'PC 1' etc. None if PCA fails.
+        variance_explained : pandas.DataFrame or None
+            Proportion of variance explained by each principal component,
+            shape (no_of_items, 1). None if PCA fails.
+        loadings : pandas.DataFrame or None
+            PCA loadings (eigenvectors scaled by sqrt(eigenvalue)),
+            shape (no_of_items, no_of_items), items as rows, PCs as columns.
+            None if PCA fails.
+        pca_fail : bool
+            Set to True (only) if PCA raises an exception.
+        """
 
         if hasattr(self, 'std_residual_df') == False:
             self.fit_statistics(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
@@ -724,6 +1245,55 @@ class SLM(Rasch):
                       constant=0.1,
                       no_of_samples=500,
                       interval=None):
+        """
+        Build and store the item statistics summary table.
+
+        Auto-triggers std_errors() and fit_statistics() if not yet run.
+        Always includes item difficulty estimates, SEs, response counts,
+        facilities, and Infit/Outfit MS. Additional columns (Z statistics,
+        discrimination, point-measure correlations, CI bounds) are
+        included based on flags or when full=True.
+
+        Parameters
+        ----------
+        full : bool, default False
+            If True, sets zstd=True, disc=True, point_measure_corr=True,
+            and interval=0.95. Overrides individual flags.
+        zstd : bool, default False
+            If True, includes Infit Z and Outfit Z columns.
+        disc : bool, default False
+            If True, includes item discrimination (Discrim) column.
+        point_measure_corr : bool, default False
+            If True, includes observed and expected point-measure
+            correlation columns (PM corr, Exp PM corr).
+        dp : int, default 3
+            Number of decimal places for rounding numeric output.
+        warm_corr : bool, default True
+            Warm bias correction for ability estimates.
+        tolerance : float, default 0.00001
+            Newton-Raphson convergence tolerance.
+        max_iters : int, default 100
+            Maximum Newton-Raphson iterations.
+        ext_score_adjustment : float, default 0.5
+            Extreme score adjustment for ability estimation.
+        method : str, default 'cos'
+            Priority vector extraction method for calibration.
+        constant : float, default 0.1
+            Additive smoothing constant for calibration.
+        no_of_samples : int, default 500
+            Bootstrap samples for SE estimation.
+        interval : float or None, default None
+            Confidence interval width for bootstrap CIs (e.g. 0.95).
+            If provided, lower and upper percentile columns are included.
+
+        Attributes set
+        --------------
+        item_stats : pandas.DataFrame
+            Item statistics table with items as rows. Always contains
+            'Estimate', 'SE', 'Count', 'Facility', 'Infit MS', 'Outfit MS'.
+            Optional columns: 'Infit Z', 'Outfit Z', 'Discrim',
+            'PM corr', 'Exp PM corr', CI bound columns.
+        """
 
         if full:
             zstd = True
@@ -780,12 +1350,42 @@ class SLM(Rasch):
                         ext_score_adjustment=0.5,
                         method='cos',
                         constant=0.1):
-        '''
+        """
+        Build and store the person statistics summary table.
 
-        Produces a person stats dataframe with raw score, ability estimate,
-        CSEM and RSEM for each person.
+        Auto-triggers fit_statistics() if not yet run. Produces one row
+        per person with ability estimate, CSEM, raw score, maximum possible
+        score, proportion correct, and Infit/Outfit MS and Z statistics.
+        Persons with extreme scores are included with NaN fit statistics.
 
-        '''
+        Parameters
+        ----------
+        full : bool, default False
+            If True, sets rsem=True. Overrides the rsem flag.
+        rsem : bool, default False
+            If True, includes the Residual SEM (RSEM) column.
+        dp : int, default 3
+            Number of decimal places for rounding numeric output.
+        warm_corr : bool, default True
+            Warm bias correction for ability estimates.
+        tolerance : float, default 0.00001
+            Newton-Raphson convergence tolerance.
+        max_iters : int, default 100
+            Maximum Newton-Raphson iterations.
+        ext_score_adjustment : float, default 0.5
+            Extreme score adjustment for ability estimation.
+        method : str, default 'cos'
+            Priority vector extraction method for calibration.
+        constant : float, default 0.1
+            Additive smoothing constant for calibration.
+
+        Attributes set
+        --------------
+        person_stats : pandas.DataFrame
+            Person statistics table with persons as rows. Always contains
+            'Estimate', 'CSEM', 'Score', 'Max score', 'p', 'Infit MS',
+            'Infit Z', 'Outfit MS', 'Outfit Z'. Optional: 'RSEM'.
+        """
 
         if hasattr(self, 'person_infit_ms') == False:
             self.fit_statistics(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
@@ -827,6 +1427,36 @@ class SLM(Rasch):
                       ext_score_adjustment=0.5,
                       method='cos',
                       constant=0.1):
+        """
+        Build and store the test-level summary statistics table.
+
+        Auto-triggers fit_statistics() if not yet run. Produces a compact
+        two-column table (Items, Persons) covering mean, SD, separation
+        ratio, strata, and reliability for both items and persons.
+
+        Parameters
+        ----------
+        dp : int, default 3
+            Number of decimal places for rounding numeric output.
+        warm_corr : bool, default True
+            Warm bias correction for ability estimates.
+        tolerance : float, default 0.00001
+            Newton-Raphson convergence tolerance.
+        max_iters : int, default 100
+            Maximum Newton-Raphson iterations.
+        ext_score_adjustment : float, default 0.5
+            Extreme score adjustment for ability estimation.
+        method : str, default 'cos'
+            Priority vector extraction method for calibration.
+        constant : float, default 0.1
+            Additive smoothing constant for calibration.
+
+        Attributes set
+        --------------
+        test_stats : pandas.DataFrame
+            Two-column table (Items, Persons) with rows:
+            Mean, SD, Separation ratio, Strata, Reliability.
+        """
 
         if hasattr(self, 'psi') == False:
             self.fit_statistics(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
@@ -862,6 +1492,43 @@ class SLM(Rasch):
                    constant=0.1,
                    no_of_samples=500,
                    interval=None):
+        """
+        Export item, person, and test statistics to file.
+
+        Auto-triggers item_stats_df(), person_stats_df(), and test_stats_df()
+        if not yet run. Saves all three tables to either a single Excel
+        workbook (one sheet per table) or three separate CSV files.
+
+        Parameters
+        ----------
+        filename : str
+            Output filename or path (without extension for CSV format;
+            '.xlsx' is appended automatically if needed for Excel format).
+        format : str, default 'csv'
+            Output format: 'csv' saves three separate CSV files suffixed
+            '_item_stats.csv', '_person_stats.csv', '_test_stats.csv'.
+            'xlsx' saves all three tables to separate sheets in a single
+            Excel workbook.
+        dp : int, default 3
+            Decimal places for rounding. Passed to the stats_df methods
+            if they have not yet been run.
+        warm_corr : bool, default True
+            Warm bias correction. Passed to stats_df methods if needed.
+        tolerance : float, default 0.00001
+            Newton-Raphson convergence tolerance.
+        max_iters : int, default 100
+            Maximum Newton-Raphson iterations.
+        ext_score_adjustment : float, default 0.5
+            Extreme score adjustment for ability estimation.
+        method : str, default 'cos'
+            Priority vector extraction method for calibration.
+        constant : float, default 0.1
+            Additive smoothing constant for calibration.
+        no_of_samples : int, default 500
+            Bootstrap samples for SE estimation.
+        interval : float or None, default None
+            Confidence interval width for item SEs.
+        """
 
         if hasattr(self, 'item_stats') == False:
             self.item_stats_df(dp=dp, warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
@@ -908,6 +1575,41 @@ class SLM(Rasch):
                        ext_score_adjustment=0.5,
                        method='cos',
                        constant=0.1):
+        """
+        Export residual correlation analysis results to file.
+
+        Auto-triggers fit_statistics() (which includes res_corr_analysis())
+        if not yet run. Saves eigenvectors, eigenvalues, variance explained,
+        and PCA loadings to either a single file or separate files.
+
+        Parameters
+        ----------
+        filename : str
+            Output filename or path (without extension for CSV; extension
+            is appended automatically).
+        format : str, default 'csv'
+            Output format: 'csv' or 'xlsx'.
+        single : bool, default True
+            If True and format='csv', writes all four tables sequentially
+            into a single CSV file separated by blank lines.
+            If True and format='xlsx', writes all tables to one Excel
+            sheet ('Item residual analysis') at successive row offsets.
+            If False, writes each table to a separate file or sheet.
+        dp : int, default 3
+            Decimal places for rounding.
+        warm_corr : bool, default True
+            Warm bias correction for ability estimates.
+        tolerance : float, default 0.00001
+            Newton-Raphson convergence tolerance.
+        max_iters : int, default 100
+            Maximum Newton-Raphson iterations.
+        ext_score_adjustment : float, default 0.5
+            Extreme score adjustment.
+        method : str, default 'cos'
+            Priority vector extraction method.
+        constant : float, default 0.1
+            Additive smoothing constant.
+        """
 
         if hasattr(self, 'eigenvectors') == False:
             self.fit_statistics(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
@@ -979,6 +1681,34 @@ class SLM(Rasch):
     def class_intervals(self,
                         items=None,
                         no_of_classes=5):
+        """
+        Compute class interval mean abilities and mean observed scores.
+
+        Partitions persons into quantile-based ability groups and computes
+        the mean ability and mean observed score within each group. Used to
+        generate observed-data overlays on TCC and ICC plots.
+
+        Requires person_abils() to have been run first (self.person_abilities
+        must exist).
+
+        Parameters
+        ----------
+        items : list or None, default None
+            Item subset to use for scoring. None uses all items. Only
+            persons with complete data on the specified items are included.
+        no_of_classes : int, default 5
+            Number of class intervals (quantile groups) to partition
+            persons into.
+
+        Returns
+        -------
+        mean_abilities : pandas.Series
+            Mean ability estimate within each class interval, indexed by
+            class label ('class_1', 'class_2', ...).
+        obs : pandas.Series
+            Mean observed total score within each class interval, indexed
+            by class label.
+        """
 
         class_groups = [f'class_{class_no + 1}' for class_no in range(no_of_classes)]
 
@@ -1017,6 +1747,32 @@ class SLM(Rasch):
     def class_intervals_cats(self,
                              item,
                              no_of_classes=5):
+        """
+        Compute class interval mean abilities and observed category proportions.
+
+        Partitions persons into quantile-based ability groups using all items,
+        then computes the proportion of 0 and 1 responses within each group
+        for a specified item. Used to generate observed-data overlays on ICC
+        plots for the SLM.
+
+        Requires person_abils() to have been run first.
+
+        Parameters
+        ----------
+        item : str
+            Item identifier for which to compute observed category proportions.
+        no_of_classes : int, default 5
+            Number of class intervals.
+
+        Returns
+        -------
+        mean_abilities : pandas.Series
+            Mean ability within each class interval.
+        obs_props : numpy.ndarray
+            Array of shape (no_of_classes, 2) where column 0 is the
+            proportion of 0 responses and column 1 is the proportion of
+            1 responses in each class interval.
+        """
 
         class_groups = [f'class_{class_no + 1}' for class_no in range(no_of_classes)]
 
@@ -1067,11 +1823,96 @@ class SLM(Rasch):
                   plot_density=300,
                   filename=None,
                   file_format='png'):
+        """
+        Core plotting engine for all SLM item and test characteristic curves.
 
-        '''
-        Basic plotting function to be called when plotting specific functions
-        of person ability for RSM.
-        '''
+        Renders one or more curves (y_data columns) against an x-axis
+        (typically ability), with optional observed-data overlays, score
+        lines, information lines, and CSEM lines. Called internally by
+        icc(), tcc(), test_info(), and test_csem(); not normally called
+        directly by users.
+
+        Parameters
+        ----------
+        x_data : array-like
+            X-axis values (typically a fine ability grid from -20 to 20).
+        y_data : numpy.ndarray
+            2-D array of shape (len(x_data), n_curves) containing the
+            curve values to plot. Each column is rendered as a separate line.
+        x_min : float, default -5
+            Left limit of the displayed x-axis.
+        x_max : float, default 5
+            Right limit of the displayed x-axis.
+        y_max : float, default 0
+            Upper limit of the y-axis. If 0, matplotlib auto-scales.
+        items : list or None, default None
+            Item subset, used to look up item difficulties for score lines
+            and threshold lines.
+        obs : bool, default False
+            If True, plots observed data overlays using x_obs_data and
+            y_obs_data.
+        x_obs_data : numpy.ndarray, default empty
+            X coordinates of observed data points.
+        y_obs_data : numpy.ndarray, default empty
+            Y coordinates of observed data points, shape (n_points, n_curves).
+        thresh_line : bool, default False
+            If True, draws a vertical dashed line at the item difficulty.
+        score_lines_item : list, default [None, None]
+            [item_name, list_of_proportions] for item-level score lines.
+            Draws vertical and horizontal dashed lines at each proportion.
+        score_lines_test : list or None, default None
+            List of raw scores for test-level score lines on the TCC.
+        point_info_lines_item : list, default [None, None]
+            Item-level information lines (not currently used by SLM methods).
+        point_info_lines_test : list or None, default None
+            Test-level information lines on the test information curve.
+        point_csem_lines : list or None, default None
+            CSEM values at which to draw horizontal reference lines.
+        score_labels : bool, default False
+            If True, annotates score line intersections with numeric values.
+        point_info_labels : bool, default False
+            If True, annotates information line intersections.
+        warm : bool, default True
+            Unused directly in this method; passed for API consistency.
+        cat_highlight : int or None, default None
+            Category to highlight (not used in SLM; relevant in RSM/PCM).
+        graph_title : str, default ''
+            Plot title string.
+        y_label : str, default ''
+            Y-axis label string.
+        plot_style : str, default 'white'
+            Seaborn style: 'white' (whitegrid) or 'dark' (darkgrid).
+        palette : str, default 'dark blue'
+            Colour palette name. Options: 'dark blue', 'light blue',
+            'dark red', 'light red', 'dark green', 'light green',
+            'dark grey', 'light grey', 'dark multi', 'light multi'.
+        black : bool, default False
+            If True, all curves are plotted in black regardless of palette.
+        figsize : tuple, default (8, 6)
+            Figure size in inches (width, height).
+        font : str, default 'Times New Roman'
+            Font family for plot text.
+        title_font_size : int, default 15
+            Font size for the plot title.
+        axis_font_size : int, default 12
+            Font size for axis labels.
+        labelsize : int, default 12
+            Font size for tick labels.
+        tex : bool, default True
+            If True, attempts to use LaTeX rendering for text.
+        plot_density : int, default 300
+            Output DPI when saving to file.
+        filename : str or None, default None
+            If provided, saves the plot to this path. Format determined
+            by file_format.
+        file_format : str, default 'png'
+            File format for saved plots (e.g. 'png', 'pdf', 'svg').
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+            The rendered matplotlib Figure object.
+        """
 
         if tex:
             plt.rcParams["text.latex.preamble"].join([r"\usepackage{dashbox}", r"\setmainfont{xcolor}",])
@@ -1296,10 +2137,63 @@ class SLM(Rasch):
             file_format='png',
             dpi=300):
 
-        '''
-        Plots Item Characteristic Curves for SLM, with optional overplotting
-        of observed data, threshold lines and expected score threshold lines.
-        '''
+        """
+        Plot the Item Characteristic Curve (ICC) for a single item.
+
+        Displays the modelled probability of a correct response as a function
+        of person ability (logistic curve). Optionally overlays observed
+        class-interval proportions and reference lines.
+
+        Parameters
+        ----------
+        item : str
+            Item identifier to plot. Must be a column in self.dataframe.
+        obs : bool, default False
+            If True, overlays observed class-interval mean proportions
+            correct as data points on the ICC curve.
+        no_of_classes : int, default 5
+            Number of class intervals for the observed data overlay.
+        title : str or None, default None
+            Plot title. If None, no title is shown.
+        thresh_line : bool, default False
+            If True, draws a vertical dashed line at the item difficulty.
+        score_lines : list or None, default None
+            List of proportions (between 0 and 1) at which to draw
+            horizontal and vertical reference lines on the ICC.
+        score_labels : bool, default False
+            If True, annotates score line intersections with numeric values.
+        cat_highlight : int or None, default None
+            Response category (0 or 1) to shade on the plot.
+        xmin : float, default -5
+            Left limit of the displayed ability axis.
+        xmax : float, default 5
+            Right limit of the displayed ability axis.
+        plot_style : str, default 'white'
+            Plot background style: 'white' or 'dark'.
+        palette : str, default 'dark blue'
+            Colour palette name (see plot_data() for options).
+        black : bool, default False
+            If True, renders all lines in black.
+        font : str, default 'Times New Roman'
+            Font family for all plot text.
+        title_font_size : int, default 15
+            Title font size in points.
+        axis_font_size : int, default 12
+            Axis label font size in points.
+        labelsize : int, default 12
+            Tick label font size in points.
+        filename : str or None, default None
+            If provided, saves the plot to this path.
+        file_format : str, default 'png'
+            Output file format (e.g. 'png', 'pdf', 'svg').
+        dpi : int, default 300
+            Output resolution in dots per inch.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+            The rendered ICC plot.
+        """
 
         if obs:
             if hasattr(self, 'person_abilities') == False:
@@ -1356,10 +2250,60 @@ class SLM(Rasch):
              file_format='png',
              dpi=300):
 
-        '''
-        Plots Category Response Curves for SLM, with optional overplotting
-        of observed data and threshold lines.
-        '''
+        """
+        Plot Category Response Curves (CRCs) for a single item.
+
+        Displays the probability of each response category (0 and 1) as a
+        function of person ability. For the SLM these are simply P(X=0)
+        and P(X=1) = 1 - P(X=0). Optionally overlays observed class-interval
+        proportions.
+
+        Parameters
+        ----------
+        item : str or None, default None
+            Item identifier to plot. Pass None to use mean difficulty 0.
+        obs : bool, list, or None, default None
+            If True or 'all', overlays observed proportions for all categories.
+            If a list of category indices (e.g. [0, 1]), overlays only those.
+            If None or False, no overlay is shown.
+        no_of_classes : int, default 5
+            Number of class intervals for the observed data overlay.
+        title : str or None, default None
+            Plot title. If None, no title is shown.
+        thresh_line : bool, default False
+            If True, draws a vertical dashed line at the item difficulty.
+        cat_highlight : int or None, default None
+            Category (0 or 1) to shade on the plot.
+        xmin : float, default -5
+            Left limit of the displayed ability axis.
+        xmax : float, default 5
+            Right limit of the displayed ability axis.
+        plot_style : str, default 'white'
+            Plot background style: 'white' or 'dark'.
+        palette : str, default 'dark blue'
+            Colour palette name (see plot_data() for options).
+        black : bool, default False
+            If True, renders all lines in black.
+        font : str, default 'Times New Roman'
+            Font family for all plot text.
+        title_font_size : int, default 15
+            Title font size in points.
+        axis_font_size : int, default 12
+            Axis label font size in points.
+        labelsize : int, default 12
+            Tick label font size in points.
+        filename : str or None, default None
+            If provided, saves the plot to this path.
+        file_format : str, default 'png'
+            Output file format.
+        dpi : int, default 300
+            Output resolution in dots per inch.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+            The rendered CRC plot.
+        """
 
         if item == 'none':
             item = None
@@ -1425,9 +2369,60 @@ class SLM(Rasch):
             file_format='png',
             dpi=300):
 
-        '''
-        Plots Item Information Curves.
-        '''
+        """
+        Plot the Item Information Curve (IIC) for a single item.
+
+        Displays Fisher information P(X=1) * P(X=0) as a function of
+        person ability. The peak information occurs at the item difficulty
+        where ability equals difficulty and equals 0.25.
+
+        Parameters
+        ----------
+        item : str
+            Item identifier to plot.
+        thresh_line : bool, default False
+            If True, draws a vertical dashed line at the item difficulty.
+        point_info_lines : list or None, default None
+            List of ability values at which to draw vertical and horizontal
+            reference lines showing the information at those abilities.
+        point_info_labels : bool, default False
+            If True, annotates point information line intersections.
+        cat_highlight : int or None, default None
+            Category to shade (not typically used for IIC).
+        xmin : float, default -5
+            Left limit of the displayed ability axis.
+        xmax : float, default 5
+            Right limit of the displayed ability axis.
+        ymax : float or None, default None
+            Upper limit of the y-axis. If None, auto-scaled to 110% of peak.
+        plot_style : str, default 'white'
+            Plot background style: 'white' or 'dark'.
+        palette : str, default 'dark blue'
+            Colour palette name.
+        black : bool, default False
+            If True, renders the curve in black.
+        title : str or None, default None
+            Plot title. If None, no title is shown.
+        font : str, default 'Times New Roman'
+            Font family for all plot text.
+        title_font_size : int, default 15
+            Title font size in points.
+        axis_font_size : int, default 12
+            Axis label font size in points.
+        labelsize : int, default 12
+            Tick label font size in points.
+        filename : str or None, default None
+            If provided, saves the plot to this path.
+        file_format : str, default 'png'
+            Output file format.
+        dpi : int, default 300
+            Output resolution in dots per inch.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+            The rendered IIC plot.
+        """
 
         abilities = np.arange(-20, 20, 0.1)
 
@@ -1474,9 +2469,60 @@ class SLM(Rasch):
             file_format='png',
             dpi=300):
 
-        '''
-        Plots Test Characteristic Curve for SLM.
-        '''
+        """
+        Plot the Test Characteristic Curve (TCC).
+
+        Displays the expected total score across all (or a subset of) items
+        as a function of person ability. Optionally overlays observed
+        class-interval mean total scores and draws reference lines at
+        specified raw scores.
+
+        Parameters
+        ----------
+        items : str, list, or None, default None
+            Item subset to include. None or 'all' uses all items.
+            Pass a single item name or list of names to restrict.
+        obs : bool, default False
+            If True, overlays observed class-interval mean total scores.
+        no_of_classes : int, default 5
+            Number of class intervals for the observed data overlay.
+        title : str or None, default None
+            Plot title. If None, no title is shown.
+        score_lines : list or None, default None
+            List of raw scores at which to draw vertical and horizontal
+            reference lines on the TCC.
+        score_labels : bool, default False
+            If True, annotates score line intersections with numeric values.
+        xmin : float, default -5
+            Left limit of the displayed ability axis.
+        xmax : float, default 5
+            Right limit of the displayed ability axis.
+        plot_style : str, default 'white'
+            Plot background style: 'white' or 'dark'.
+        palette : str, default 'dark blue'
+            Colour palette name (see plot_data() for options).
+        black : bool, default False
+            If True, renders all lines in black.
+        font : str, default 'Times New Roman'
+            Font family for all plot text.
+        title_font_size : int, default 15
+            Title font size in points.
+        axis_font_size : int, default 12
+            Axis label font size in points.
+        labelsize : int, default 12
+            Tick label font size in points.
+        filename : str or None, default None
+            If provided, saves the plot to this path.
+        file_format : str, default 'png'
+            Output file format.
+        dpi : int, default 300
+            Output resolution in dots per inch.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+            The rendered TCC plot.
+        """
 
         if isinstance(items, str):
             if items == 'all':
@@ -1556,9 +2602,56 @@ class SLM(Rasch):
                   file_format='png',
                   dpi=300):
 
-        '''
-        Plots Test Information Curve for SLM.
-        '''
+        """
+        Plot the Test Information Curve.
+
+        Displays the sum of item Fisher information values across all (or a
+        subset of) items as a function of person ability. Higher information
+        indicates greater measurement precision at that ability level.
+
+        Parameters
+        ----------
+        items : str, list, or None, default None
+            Item subset to include. None or 'all' uses all items.
+        point_info_lines : list or None, default None
+            List of ability values at which to draw vertical and horizontal
+            reference lines showing the total information at those abilities.
+        point_info_labels : bool, default False
+            If True, annotates point information line intersections.
+        xmin : float, default -5
+            Left limit of the displayed ability axis.
+        xmax : float, default 5
+            Right limit of the displayed ability axis.
+        ymax : float or None, default None
+            Upper limit of the y-axis. If None, auto-scaled to 110% of peak.
+        title : str or None, default None
+            Plot title. If None, no title is shown.
+        plot_style : str, default 'white'
+            Plot background style: 'white' or 'dark'.
+        palette : str, default 'dark blue'
+            Colour palette name.
+        black : bool, default False
+            If True, renders all lines in black.
+        font : str, default 'Times New Roman'
+            Font family for all plot text.
+        title_font_size : int, default 15
+            Title font size in points.
+        axis_font_size : int, default 12
+            Axis label font size in points.
+        labelsize : int, default 12
+            Tick label font size in points.
+        filename : str or None, default None
+            If provided, saves the plot to this path.
+        file_format : str, default 'png'
+            Output file format.
+        dpi : int, default 300
+            Output resolution in dots per inch.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+            The rendered test information curve plot.
+        """
 
         if isinstance(items, str):
             if items == 'all':
@@ -1623,9 +2716,57 @@ class SLM(Rasch):
                   file_format='png',
                   dpi=300):
 
-        '''
-        Plots Test Conditional Standard Error of Measurement Curve for SLM.
-        '''
+        """
+        Plot the Test Conditional Standard Error of Measurement (CSEM) Curve.
+
+        Displays 1 / sqrt(I(theta)) — the conditional standard error of
+        measurement as a function of person ability — where I(theta) is the
+        total test information. Lower CSEM indicates greater measurement
+        precision. Optionally draws reference lines at specified ability values.
+
+        Parameters
+        ----------
+        items : str, list, or None, default None
+            Item subset to include. None or 'all' uses all items.
+        point_csem_lines : list or None, default None
+            List of ability values at which to draw vertical and horizontal
+            reference lines showing the CSEM at those abilities.
+        point_csem_labels : bool, default False
+            If True, annotates CSEM line intersections with numeric values.
+        xmin : float, default -5
+            Left limit of the displayed ability axis.
+        xmax : float, default 5
+            Right limit of the displayed ability axis.
+        ymax : float, default 5
+            Upper limit of the y-axis.
+        title : str or None, default None
+            Plot title. If None, no title is shown.
+        plot_style : str, default 'white'
+            Plot background style: 'white' or 'dark'.
+        palette : str, default 'dark blue'
+            Colour palette name.
+        black : bool, default False
+            If True, renders all lines in black.
+        font : str, default 'Times New Roman'
+            Font family for all plot text.
+        title_font_size : int, default 15
+            Title font size in points.
+        axis_font_size : int, default 12
+            Axis label font size in points.
+        labelsize : int, default 12
+            Tick label font size in points.
+        filename : str or None, default None
+            If provided, saves the plot to this path.
+        file_format : str, default 'png'
+            Output file format.
+        dpi : int, default 300
+            Output resolution in dots per inch.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+            The rendered CSEM curve plot.
+        """
 
         if isinstance(items, str):
             if items == 'all':
@@ -1685,9 +2826,56 @@ class SLM(Rasch):
                            file_format='png',
                            plot_density=300):
 
-        '''
-        Plots histogram of standardised residuals for SLM, with optional overplotting of Standard Normal Distribution.
-        '''
+        """
+        Plot a histogram of standardised residuals.
+
+        Displays the distribution of standardised residuals across all
+        person-item combinations (or a subset of items). Under a well-fitting
+        Rasch model these should approximate a standard normal distribution.
+        Optionally overlays a standard normal density curve for comparison.
+
+        Requires fit_statistics() to have been run first (self.std_residual_df
+        must exist).
+
+        Parameters
+        ----------
+        items : str, list, or None, default None
+            Item subset to include. None or 'all' uses all items.
+            Pass a single item name string or list of names to restrict.
+        bin_width : float, default 0.5
+            Width of histogram bins in standardised residual units.
+        x_min : float, default -5
+            Left limit of the displayed x-axis.
+        x_max : float, default 5
+            Right limit of the displayed x-axis.
+        normal : bool, default False
+            If True, overlays a standard normal density curve on the histogram.
+        title : str or None, default None
+            Plot title. If None, no title is shown.
+        plot_style : str, default 'white'
+            Plot background style: 'white' or 'dark'.
+        black : bool, default False
+            If True, renders the histogram in black.
+        font : str, default 'Times New Roman'
+            Font family for all plot text.
+        title_font_size : int, default 15
+            Title font size in points.
+        axis_font_size : int, default 12
+            Axis label font size in points.
+        labelsize : int, default 12
+            Tick label font size in points.
+        filename : str or None, default None
+            If provided, saves the plot to this path.
+        file_format : str, default 'png'
+            Output file format.
+        plot_density : int, default 300
+            Output resolution in dots per inch.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+            The rendered standardised residuals histogram.
+        """
 
         if isinstance(items, str):
             if items == 'all':

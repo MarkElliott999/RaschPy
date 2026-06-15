@@ -60,10 +60,31 @@ class PCM(Rasch):
     # ------------------------------------------------------------------
 
     def cat_prob_centred(self, ability, difficulty, category, thresholds):
-        '''
-        Probability of scoring in a given category given ability, item difficulty
-        and Rasch-Andrich thresholds.
-        '''
+        """
+        Compute the probability of a response category using centred parameterisation.
+
+        Uses the PCM formulation with a central item difficulty and
+        Rasch-Andrich threshold offsets. Vectorised using numpy cumsum for
+        performance. P(X=k) = exp(k*(b-d) - cumsum(tau)_k) / sum over all categories,
+        where b is ability, d is difficulty, tau are thresholds (tau[0]=0 by convention).
+
+        Parameters
+        ----------
+        ability : float
+            Person ability estimate on the logit scale.
+        difficulty : float
+            Central item difficulty on the logit scale.
+        category : int
+            Response category (0 to max_score).
+        thresholds : array-like
+            Rasch-Andrich threshold offsets, length max_score + 1,
+            with thresholds[0] = 0 by convention.
+
+        Returns
+        -------
+        float
+            Probability of the specified category, in [0, 1].
+        """
         max_score = len(thresholds) - 1
         cats = np.arange(max_score + 1)
         cumsum = np.concatenate(([0.0], np.cumsum(thresholds[1:])))
@@ -73,9 +94,27 @@ class PCM(Rasch):
         return nums[category] / nums.sum()
 
     def cat_prob_uncentred(self, ability, category, thresholds):
-        '''
-        Probability of scoring in a given category given ability and uncentred thresholds.
-        '''
+        """
+        Compute the probability of a response category using uncentred parameterisation.
+
+        Uses the PCM formulation with uncentred (absolute) item-category thresholds.
+        Numerically stabilised via log-sum-exp. P(X=k) = exp(k*b - cumsum(tau)_k) /
+        sum over all categories, where b is ability and tau are uncentred thresholds.
+
+        Parameters
+        ----------
+        ability : float
+            Person ability estimate on the logit scale.
+        category : int
+            Response category (0 to max_score).
+        thresholds : array-like
+            Uncentred threshold parameters, length equals max_score.
+
+        Returns
+        -------
+        float
+            Probability of the specified category, in [0, 1].
+        """
         thresh = np.asarray(thresholds)
         m = len(thresh)
         cats = np.arange(m + 1, dtype=float)
@@ -86,9 +125,24 @@ class PCM(Rasch):
         return nums[category] / nums.sum()
 
     def exp_score_uncentred(self, ability, thresholds):
-        '''
-        Expected score on an item given ability and uncentred thresholds.
-        '''
+        """
+        Compute the expected score using uncentred threshold parameterisation.
+
+        Calculates E[X | ability, thresholds] = sum(k * P(X=k)) over all
+        categories, using uncentred threshold parameters.
+
+        Parameters
+        ----------
+        ability : float
+            Person ability estimate on the logit scale.
+        thresholds : array-like
+            Uncentred threshold parameters, length equals max_score.
+
+        Returns
+        -------
+        float
+            Expected score in [0, max_score].
+        """
         thresh = np.asarray(thresholds)
         m = len(thresh)
         cats = np.arange(m + 1, dtype=float)
@@ -99,10 +153,27 @@ class PCM(Rasch):
         return (cats * nums).sum() / nums.sum()
 
     def exp_score_centred(self, ability, difficulty, thresholds):
-        '''
-        Expected score on an item given ability, item difficulty and
-        Rasch-Andrich thresholds.
-        '''
+        """
+        Compute the expected score using centred parameterisation.
+
+        Calculates E[X | ability, difficulty, thresholds] using the centred
+        PCM formulation with a central item difficulty and Rasch-Andrich offsets.
+        Numerically stabilised via log-sum-exp.
+
+        Parameters
+        ----------
+        ability : float
+            Person ability estimate on the logit scale.
+        difficulty : float
+            Central item difficulty on the logit scale.
+        thresholds : array-like
+            Rasch-Andrich threshold offsets, length max_score + 1.
+
+        Returns
+        -------
+        float
+            Expected score in [0, max_score].
+        """
         thresh = np.asarray(thresholds)
         max_score = len(thresh) - 1
         cats = np.arange(max_score + 1, dtype=float)
@@ -113,9 +184,25 @@ class PCM(Rasch):
         return (cats * nums).sum() / nums.sum()
 
     def variance_uncentred(self, ability, thresholds):
-        '''
-        Item Fisher information (= score variance) given ability and uncentred thresholds.
-        '''
+        """
+        Compute item variance (Fisher information) using uncentred parameterisation.
+
+        Calculates Var[X | ability, thresholds] = sum((k - E[X])^2 * P(X=k)),
+        equal to the Fisher information for the item at the given ability.
+        Numerically stabilised via log-sum-exp.
+
+        Parameters
+        ----------
+        ability : float
+            Person ability estimate on the logit scale.
+        thresholds : array-like
+            Uncentred threshold parameters, length equals max_score.
+
+        Returns
+        -------
+        float
+            Item variance / Fisher information. Always non-negative.
+        """
         thresh = np.asarray(thresholds)
         m = len(thresh)
         cats = np.arange(m + 1, dtype=float)
@@ -128,9 +215,26 @@ class PCM(Rasch):
         return ((cats - expected) ** 2 * probs).sum()
 
     def variance_centred(self, ability, difficulty, thresholds):
-        '''
-        Item Fisher information given ability, item difficulty and Rasch-Andrich thresholds.
-        '''
+        """
+        Compute item variance (Fisher information) using centred parameterisation.
+
+        Calculates Var[X | ability, difficulty, thresholds] = sum((k - E[X])^2 * P(X=k)).
+        Numerically stabilised via log-sum-exp.
+
+        Parameters
+        ----------
+        ability : float
+            Person ability estimate on the logit scale.
+        difficulty : float
+            Central item difficulty on the logit scale.
+        thresholds : array-like
+            Rasch-Andrich threshold offsets, length max_score + 1.
+
+        Returns
+        -------
+        float
+            Item variance / Fisher information.
+        """
         thresh = np.asarray(thresholds)
         max_score = len(thresh) - 1
         cats = np.arange(max_score + 1, dtype=float)
@@ -143,9 +247,25 @@ class PCM(Rasch):
         return ((cats - expected) ** 2 * probs).sum()
 
     def kurtosis_uncentred(self, ability, thresholds):
-        '''
-        Item kurtosis given ability and uncentred thresholds.
-        '''
+        """
+        Compute the fourth central moment of the response distribution (uncentred).
+
+        Calculates sum((k - E[X])^4 * P(X=k)) using uncentred threshold
+        parameterisation. Used in the Wilson-Hilferty approximation for
+        standardised fit statistics (Infit Z, Outfit Z).
+
+        Parameters
+        ----------
+        ability : float
+            Person ability estimate on the logit scale.
+        thresholds : array-like
+            Uncentred threshold parameters, length equals max_score.
+
+        Returns
+        -------
+        float
+            Fourth central moment of the response distribution.
+        """
         thresh = np.asarray(thresholds)
         m = len(thresh)
         cats = np.arange(m + 1, dtype=float)
@@ -158,9 +278,25 @@ class PCM(Rasch):
         return ((cats - expected) ** 4 * probs).sum()
 
     def kurtosis_centred(self, ability, difficulty, thresholds):
-        '''
-        Item kurtosis given ability, item difficulty and Rasch-Andrich thresholds.
-        '''
+        """
+        Compute the fourth central moment of the response distribution (centred).
+
+        Calculates sum((k - E[X])^4 * P(X=k)) using centred PCM parameterisation.
+
+        Parameters
+        ----------
+        ability : float
+            Person ability estimate on the logit scale.
+        difficulty : float
+            Central item difficulty on the logit scale.
+        thresholds : array-like
+            Rasch-Andrich threshold offsets, length max_score + 1.
+
+        Returns
+        -------
+        float
+            Fourth central moment of the response distribution.
+        """
         thresh = np.asarray(thresholds)
         max_score = len(thresh) - 1
         cats = np.arange(max_score + 1, dtype=float)
@@ -229,9 +365,46 @@ class PCM(Rasch):
                   method='cos',
                   matrix_power=3,
                   log_lik_tol=0.000001):
-        '''
-        PAIR item difficulty estimation via vectorised contingency matrix construction.
-        '''
+        """
+        Estimate item thresholds using the PAIR (Pairwise) algorithm.
+
+        Constructs a joint score-category frequency matrix across all item
+        pairs and threshold combinations using vectorised operations, then
+        raises it to successive powers to resolve structural zeroes (Choppin's
+        matrix power property). A priority vector is extracted from the resolved
+        matrix to obtain uncentred threshold estimates. Central item difficulties
+        are derived as the mean of each item's uncentred thresholds, and centred
+        thresholds are computed as deviations from this mean.
+
+        Issues a UserWarning if only one item is present, or if constant=0
+        and any item has all-maximum scores.
+
+        Parameters
+        ----------
+        constant : float, default 0.1
+            Additive smoothing constant applied to the frequency matrix.
+            Use 0 to disable smoothing; estimation may fail if any item
+            has all-maximum or all-minimum scores.
+        method : str, default 'cos'
+            Priority vector extraction method. See base.priority_vector().
+        matrix_power : int, default 3
+            Initial matrix power before checking for structural zeroes.
+        log_lik_tol : float, default 0.000001
+            Log-likelihood convergence tolerance for priority vector extraction.
+
+        Attributes set
+        --------------
+        thresholds_uncentred : dict
+            {item: numpy.ndarray} of uncentred threshold estimates per item.
+        central_diffs : pandas.Series
+            Central item difficulty (mean of uncentred thresholds) per item.
+        thresholds_centred : dict
+            {item: numpy.ndarray} of centred threshold offsets per item.
+        threshold_list : numpy.ndarray
+            Flat array of all uncentred thresholds concatenated.
+        null_persons : pandas.Index
+            Persons dropped prior to calibration due to entirely missing data.
+        """
 
         if len(self.dataframe.columns) == 1:
             warnings.warn("Only one item detected. This model with a single item reduces to RSM "
@@ -439,9 +612,44 @@ class PCM(Rasch):
                    matrix_power=3,
                    log_lik_tol=0.000001,
                    no_of_samples=100):
-        '''
-        Bootstrapped standard error estimates for item difficulties.
-        '''
+        """
+        Estimate bootstrap standard errors for item threshold estimates.
+
+        Draws no_of_samples bootstrap resamples of person-level response data,
+        calibrates each resample, and computes the standard deviation of
+        threshold and central difficulty estimates across samples. Also
+        computes category width SEs (SE of spacing between adjacent thresholds).
+
+        Parameters
+        ----------
+        interval : float or None, default None
+            Confidence interval width (e.g. 0.95). If None, only SEs computed.
+        constant : float, default 0.1
+            Additive smoothing constant for bootstrap calibrations.
+        method : str, default 'cos'
+            Priority vector extraction method.
+        matrix_power : int, default 3
+            Matrix power for bootstrap calibrations.
+        log_lik_tol : float, default 0.000001
+            Convergence tolerance for bootstrap calibrations.
+        no_of_samples : int, default 100
+            Number of bootstrap resamples.
+
+        Attributes set
+        --------------
+        threshold_se : dict
+            {item: numpy.ndarray} bootstrap SEs for each item's uncentred thresholds.
+        item_se : pandas.Series
+            Bootstrap SE for each item's central difficulty.
+        cat_width_se : dict
+            {item: numpy.ndarray} bootstrap SEs for category widths.
+        threshold_low / threshold_high : dict or None
+            Bootstrap CI bounds for thresholds, or None.
+        central_bootstrap : pandas.DataFrame
+            Bootstrap central difficulty estimates, shape (no_of_samples, items).
+        threshold_bootstrap : dict
+            {item: DataFrame} of bootstrap threshold estimates.
+        """
         samples = [PCM(self.dataframe.sample(frac=1, replace=True),
                        self.max_score_vector)
                    for _ in range(no_of_samples)]
@@ -532,10 +740,34 @@ class PCM(Rasch):
              tolerance=0.00001,
              max_iters=100,
              ext_score_adjustment=0.5):
-        '''
-        Newton-Raphson ML ability estimation with optional Warm (1989) bias correction.
-        Uses vectorised category probability computation.
-        '''
+        """
+        Estimate person abilities using Newton-Raphson maximum likelihood.
+
+        For each person, iteratively solves the likelihood equation using
+        uncentred threshold parameterisation and vectorised category probability
+        computation. Extreme scores are adjusted. Optionally applies Warm (1989)
+        bias correction.
+
+        Parameters
+        ----------
+        persons : str or list
+            Person identifier(s). Pass 'all' for all persons.
+        items : str, list, or None, default None
+            Item subset. None uses all items.
+        warm_corr : bool, default True
+            If True, applies Warm's (1989) bias correction.
+        tolerance : float, default 0.00001
+            Newton-Raphson convergence criterion.
+        max_iters : int, default 100
+            Maximum Newton-Raphson iterations.
+        ext_score_adjustment : float, default 0.5
+            Adjustment applied to extreme scores.
+
+        Returns
+        -------
+        pandas.Series
+            Ability estimates in logits. Returns numpy.nan on failure.
+        """
         if isinstance(persons, str):
             persons = self.persons if persons == 'all' else [persons]
 
@@ -633,9 +865,30 @@ class PCM(Rasch):
                      tolerance=0.00001,
                      max_iters=100,
                      ext_score_adjustment=0.5):
-        '''
-        Estimates abilities for all persons and stores as self.person_abilities.
-        '''
+        """
+        Estimate abilities for all persons and store as an attribute.
+
+        Wrapper around abil() that estimates abilities for all persons
+        and stores the result as self.person_abilities.
+
+        Parameters
+        ----------
+        items : str, list, or None, default None
+            Item subset. None uses all items.
+        warm_corr : bool, default True
+            Warm bias correction.
+        tolerance : float, default 0.00001
+            Newton-Raphson convergence tolerance.
+        max_iters : int, default 100
+            Maximum iterations.
+        ext_score_adjustment : float, default 0.5
+            Extreme score adjustment.
+
+        Attributes set
+        --------------
+        person_abilities : pandas.Series
+            Ability estimates for all persons, in logits.
+        """
         self.person_abilities = self.abil(
             self.persons, items=items, warm_corr=warm_corr, tolerance=tolerance,
             max_iters=max_iters, ext_score_adjustment=ext_score_adjustment
@@ -648,9 +901,31 @@ class PCM(Rasch):
                    tolerance=0.00001,
                    max_iters=100,
                    ext_score_adjustment=0.5):
-        '''
-        Single-score ability estimate (used for score lines on plots).
-        '''
+        """
+        Convert a raw total score to an ability estimate via Newton-Raphson ML.
+
+        Used internally to draw score lines on TCC plots.
+
+        Parameters
+        ----------
+        score : int or float
+            Raw total score. Extreme scores adjusted by ext_score_adjustment.
+        items : list or None, default None
+            Item subset. None uses all items.
+        warm_corr : bool, default True
+            Warm bias correction.
+        tolerance : float, default 0.00001
+            Convergence tolerance.
+        max_iters : int, default 100
+            Maximum iterations.
+        ext_score_adjustment : float, default 0.5
+            Adjustment for extreme scores.
+
+        Returns
+        -------
+        float
+            Ability estimate in logits.
+        """
         # BUG FIX: original had a string-iteration bug when items was a single string item name.
         if items is None or (isinstance(items, str) and items in ('all', 'none')):
             items = list(self.items)
@@ -750,10 +1025,26 @@ class PCM(Rasch):
         self.abil_table = estimates
 
     def warm(self, abilities, items, person_filter):
-        '''
-        Warm (1989) bias correction for ML ability estimates.
-        Vectorised using _cat_probs_matrix.
-        '''
+        """
+        Apply Warm's (1989) weighted maximum likelihood bias correction.
+
+        Uses the vectorised _cat_probs_matrix engine. Computes
+        (J1 - J2 + J3) / (2 * I^2) simultaneously for all persons.
+
+        Parameters
+        ----------
+        abilities : pandas.Series
+            Current ability estimates.
+        items : list or pandas.Index
+            Item subset.
+        person_filter : pandas.DataFrame
+            Binary mask (1 = responded, NaN = missing).
+
+        Returns
+        -------
+        pandas.Series
+            Warm bias correction terms to add to ML estimates.
+        """
         if isinstance(items, str):
             items = [items]
         items = list(items)
@@ -800,9 +1091,25 @@ class PCM(Rasch):
              persons=None,
              abilities=None,
              items=None):
-        '''
-        Conditional standard error of measurement for a set of abilities.
-        '''
+        """
+        Compute the conditional standard error of measurement.
+
+        CSEM = 1 / sqrt(I) where I is total Fisher information.
+
+        Parameters
+        ----------
+        persons : list, str, or None, default None
+            Person identifiers. Overrides abilities if provided.
+        abilities : pandas.Series, float, list, or None, default None
+            Ability estimates. If None, uses self.person_abilities.
+        items : str, list, or None, default None
+            Item subset. None uses all items.
+
+        Returns
+        -------
+        pandas.Series
+            CSEM values in logits.
+        """
         if abilities is None:
             abilities = self.person_abilities
         if isinstance(abilities, (int, float)):
@@ -1260,10 +1567,46 @@ class PCM(Rasch):
                           log_lik_tol=0.000001,
                           no_of_samples=100,
                           interval=None):
-        '''
-        PCA of standardised residual correlations for local independence /
-        unidimensionality assessment.
-        '''
+        """
+        Analyse standardised residual correlations for local item dependence.
+
+        Computes inter-item standardised residual correlations and performs
+        PCA to detect violations of local independence and unidimensionality.
+        A first eigenvalue > 2.0 conventionally suggests a second dimension.
+        Auto-triggers fit_statistics() if not yet run.
+
+        Parameters
+        ----------
+        warm_corr : bool, default True
+            Warm bias correction.
+        tolerance : float, default 0.00001
+            Newton-Raphson convergence tolerance.
+        max_iters : int, default 100
+            Maximum iterations.
+        ext_score_adjustment : float, default 0.5
+            Extreme score adjustment.
+        constant : float, default 0.1
+            Additive smoothing constant.
+        method : str, default 'cos'
+            Priority vector extraction method.
+        matrix_power : int, default 3
+            Matrix power for calibration.
+        log_lik_tol : float, default 0.000001
+            Convergence tolerance for calibration.
+        no_of_samples : int, default 100
+            Bootstrap samples.
+        interval : float or None, default None
+            CI width.
+
+        Attributes set
+        --------------
+        residual_correlations : pandas.DataFrame
+            Item-by-item correlation matrix of standardised residuals.
+        eigenvectors, eigenvalues, variance_explained, loadings : DataFrame or None
+            PCA results. None if PCA fails.
+        pca_fail : bool
+            True only if PCA raises an exception.
+        """
         if not hasattr(self, 'std_residual_df'):
             self.fit_statistics(warm_corr=warm_corr, tolerance=tolerance,
                                 max_iters=max_iters,
@@ -1443,9 +1786,41 @@ class PCM(Rasch):
                         ext_score_adjustment=0.5,
                         method='cos',
                         constant=0.1):
-        '''
-        Person statistics dataframe: ability, CSEM, scores, fit.
-        '''
+        """
+        Build and store the person statistics summary table.
+
+        Auto-triggers fit_statistics() if not yet run. One row per person
+        with ability estimate, CSEM, raw score, max score, proportion correct,
+        and Infit/Outfit MS and Z statistics.
+
+        Parameters
+        ----------
+        full : bool, default False
+            If True, sets rsem=True.
+        rsem : bool, default False
+            If True, includes Residual SEM (RSEM) column.
+        dp : int, default 3
+            Decimal places.
+        warm_corr : bool, default True
+            Warm bias correction.
+        tolerance : float, default 0.00001
+            Newton-Raphson convergence tolerance.
+        max_iters : int, default 100
+            Maximum Newton-Raphson iterations.
+        ext_score_adjustment : float, default 0.5
+            Extreme score adjustment.
+        method : str, default 'cos'
+            Priority vector extraction method.
+        constant : float, default 0.1
+            Additive smoothing constant.
+
+        Attributes set
+        --------------
+        person_stats : pandas.DataFrame
+            Person statistics with persons as rows. Contains 'Estimate',
+            'CSEM', 'Score', 'Max score', 'p', 'Infit MS', 'Infit Z',
+            'Outfit MS', 'Outfit Z'. Optional: 'RSEM'.
+        """
         if not hasattr(self, 'person_infit_ms'):
             self.fit_statistics(warm_corr=warm_corr, tolerance=tolerance,
                                 max_iters=max_iters,
@@ -1728,11 +2103,87 @@ class PCM(Rasch):
                   plot_density=300,
                   filename=None,
                   file_format='png'):
-        '''
-        Core plotting function for ability-function curves.
-        BUG FIX: removed the spurious plt.rcParams LaTeX join() no-op (see base.py).
-        Font set via rc_context to avoid per-text-object findfont() cost.
-        '''
+        """
+        Core plotting engine for all PCM item and test characteristic curves.
+
+        Renders one or more curves against an ability x-axis with optional
+        observed-data overlays, threshold lines, central difference lines,
+        score lines, information lines, and CSEM lines. Called internally
+        by icc(), crcs(), threshold_ccs(), iic(), tcc(), test_info(), and
+        test_csem(). Not normally called directly by users.
+
+        Parameters
+        ----------
+        x_data : array-like
+            X-axis values (typically ability grid from -20 to 20).
+        y_data : numpy.ndarray
+            2-D array shape (len(x_data), n_curves).
+        x_min : float, default -5
+            Left x-axis limit.
+        x_max : float, default 5
+            Right x-axis limit.
+        y_max : float, default 0
+            Upper y-axis limit. If <= 0, auto-scaled to 110% of peak.
+        items : str, list, or None
+            Item(s) being plotted, for threshold/score line lookups.
+        obs : bool, list, or None
+            Controls observed data overlay.
+        x_obs_data, y_obs_data : array-like
+            Observed data point coordinates.
+        thresh_lines : bool, default False
+            Draw vertical lines at each uncentred threshold.
+        central_diff : bool, default False
+            Draw a vertical line at the item's central difficulty.
+        score_lines_item : list, default [None, None]
+            [item_name, list_of_scores] for item-level score lines.
+        score_lines_test : list or None
+            Raw total scores for test-level score reference lines.
+        point_info_lines_item : list, default [None, None]
+            [item_name, list_of_abilities] for item-level information lines.
+        point_info_lines_test : list or None
+            Abilities for test-level information reference lines.
+        point_csem_lines : list or None
+            Abilities for CSEM reference lines.
+        score_labels : bool, default False
+            Annotate score/CSEM line intersections with values.
+        warm : bool, default True
+            Unused; passed for API consistency.
+        cat_highlight : int or None
+            Category index to shade blue on the plot.
+        graph_title : str, default ''
+            Plot title.
+        y_label : str, default ''
+            Y-axis label.
+        plot_style : str, default 'white'
+            'white' or 'dark'.
+        palette : str, default 'dark blue'
+            Colour palette name.
+        black : bool, default False
+            If True, all curves are black.
+        figsize : tuple, default (8, 6)
+            Figure size in inches.
+        font : str, default 'Times New Roman'
+            Font family.
+        title_font_size : int, default 15
+            Title font size.
+        axis_font_size : int, default 12
+            Axis label font size.
+        labelsize : int, default 12
+            Tick label font size.
+        tex : bool, default True
+            Attempt LaTeX rendering.
+        plot_density : int, default 300
+            Output DPI when saving.
+        filename : str or None
+            If provided, saves the plot.
+        file_format : str, default 'png'
+            File format for saved plots.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+            The rendered Figure object.
+        """
         if plot_style == 'dark':
             sns.set_style('darkgrid')
         else:
@@ -1916,7 +2367,55 @@ class PCM(Rasch):
             plot_style='white', palette='dark blue', black=False,
             font='Times New Roman', title_font_size=15, axis_font_size=12,
             labelsize=12, filename=None, file_format='png', dpi=300):
-        '''Item Characteristic Curve for PCM.'''
+        """
+        Plot the Item Characteristic Curve (ICC) for a single item.
+
+        Displays modelled expected score as a function of person ability.
+        Optionally overlays observed class-interval mean scores.
+
+        Parameters
+        ----------
+        item : str
+            Item identifier.
+        obs : bool, default False
+            If True, overlays observed class-interval mean scores.
+        no_of_classes : int, default 5
+            Number of class intervals for the observed overlay.
+        title : str or None, default None
+            Plot title.
+        thresh_lines : bool, default False
+            Draw vertical lines at each threshold.
+        central_diff : bool, default False
+            Draw a line at the central item difficulty.
+        score_lines : list or None, default None
+            Raw scores at which to draw reference lines.
+        score_labels : bool, default False
+            Annotate score line intersections.
+        cat_highlight : int or None, default None
+            Category to shade.
+        xmin, xmax : float
+            Ability axis limits.
+        plot_style : str, default 'white'
+            Background style.
+        palette : str, default 'dark blue'
+            Colour palette.
+        black : bool, default False
+            If True, renders in black.
+        font : str, default 'Times New Roman'
+            Font family.
+        title_font_size, axis_font_size, labelsize : int
+            Font sizes.
+        filename : str or None, default None
+            If provided, saves the plot.
+        file_format : str, default 'png'
+            Output format.
+        dpi : int, default 300
+            Output resolution.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+        """
         # BUG FIX: 'person_abiliites' -> 'person_abilities' (typo in original)
         if obs and not hasattr(self, 'person_abilities'):
             self.person_abils(warm_corr=False)
@@ -1950,7 +2449,46 @@ class PCM(Rasch):
              xmin=-5, xmax=5, plot_style='white', palette='dark blue', black=False,
              font='Times New Roman', title_font_size=15, axis_font_size=12,
              labelsize=12, filename=None, file_format='png', dpi=300):
-        '''Category Response Curves for PCM.'''
+        """
+        Plot Category Response Curves (CRCs) for a single item.
+
+        Displays the probability of each response category as a function of
+        ability using uncentred PCM parameterisation. Optionally overlays
+        observed class-interval category proportions.
+
+        Parameters
+        ----------
+        item : str
+            Item identifier.
+        obs : list, 'all', or None, default None
+            Observed overlay: 'all' for all categories, list of indices,
+            or None for no overlay.
+        no_of_classes : int, default 5
+            Number of class intervals.
+        title : str or None, default None
+            Plot title.
+        thresh_lines : bool, default False
+            Draw vertical lines at each threshold.
+        central_diff : bool, default False
+            Draw a line at the central difficulty.
+        cat_highlight : int or None, default None
+            Category to shade.
+        xmin, xmax : float
+            Ability axis limits.
+        plot_style, palette, black, font : see plot_data().
+        title_font_size, axis_font_size, labelsize : int
+            Font sizes.
+        filename : str or None, default None
+            If provided, saves the plot.
+        file_format : str, default 'png'
+            Output format.
+        dpi : int, default 300
+            Output resolution.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+        """
         # BUG FIX: typo 'person_abiliites' -> 'person_abilities'
         if obs is not None and not hasattr(self, 'person_abilities'):
             self.person_abils(warm_corr=False)
@@ -1991,7 +2529,45 @@ class PCM(Rasch):
                       black=False, font='Times New Roman', title_font_size=15,
                       axis_font_size=12, labelsize=12, filename=None,
                       file_format='png', dpi=300):
-        '''Threshold Characteristic Curves for PCM.'''
+        """
+        Plot Threshold Characteristic Curves (TCCs) for a single item.
+
+        Displays the probability of scoring in the higher of two adjacent
+        categories at each threshold, as a function of person ability.
+
+        Parameters
+        ----------
+        item : str
+            Item identifier.
+        obs : list, 'all', or None, default None
+            Observed overlay: 'all' for all thresholds, list of 1-based
+            threshold indices, or None.
+        no_of_classes : int, default 5
+            Number of class intervals.
+        title : str or None, default None
+            Plot title.
+        thresh_lines : bool, default False
+            Draw vertical lines at threshold locations.
+        central_diff : bool, default False
+            Draw a line at the central difficulty.
+        cat_highlight : int or None, default None
+            Threshold category to shade.
+        xmin, xmax : float
+            Ability axis limits.
+        plot_style, palette, black, font : see plot_data().
+        title_font_size, axis_font_size, labelsize : int
+            Font sizes.
+        filename : str or None, default None
+            If provided, saves the plot.
+        file_format : str, default 'png'
+            Output format.
+        dpi : int, default 300
+            Output resolution.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+        """
         if obs is not None and not hasattr(self, 'person_abilities'):
             self.person_abils(warm_corr=False)
 
@@ -2030,7 +2606,46 @@ class PCM(Rasch):
             title=None, xmin=-5, xmax=5, plot_style='white', palette='dark blue',
             black=False, font='Times New Roman', title_font_size=15, axis_font_size=12,
             labelsize=12, filename=None, file_format='png', dpi=300):
-        '''Item Information Curve.'''
+        """
+        Plot the Item Information Curve (IIC) for a single item.
+
+        Displays Fisher information (item variance) as a function of ability
+        using uncentred threshold parameterisation.
+
+        Parameters
+        ----------
+        item : str
+            Item identifier.
+        ymax : float or None, default None
+            Upper y-axis limit. Auto-scaled if None.
+        thresh_lines : bool, default False
+            Draw vertical lines at each threshold.
+        central_diff : bool, default False
+            Draw a line at the central difficulty.
+        point_info_lines : list or None, default None
+            Ability values at which to draw information reference lines.
+        point_info_labels : bool, default False
+            Annotate information line intersections.
+        cat_highlight : int or None, default None
+            Category to shade.
+        title : str or None, default None
+            Plot title.
+        xmin, xmax : float
+            Ability axis limits.
+        plot_style, palette, black, font : see plot_data().
+        title_font_size, axis_font_size, labelsize : int
+            Font sizes.
+        filename : str or None, default None
+            If provided, saves the plot.
+        file_format : str, default 'png'
+            Output format.
+        dpi : int, default 300
+            Output resolution.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+        """
         abilities = np.arange(-20, 20, 0.1)
         y = np.array([self.variance_uncentred(a, self.thresholds_uncentred[item])
                       for a in abilities]).reshape(-1, 1)
@@ -2054,7 +2669,44 @@ class PCM(Rasch):
             plot_style='white', palette='dark blue', black=False,
             font='Times New Roman', title_font_size=15, axis_font_size=12,
             labelsize=12, filename=None, file_format='png', dpi=300):
-        '''Test Characteristic Curve for PCM.'''
+        """
+        Plot the Test Characteristic Curve (TCC).
+
+        Displays expected total score as a function of ability. Optionally
+        overlays observed class-interval mean total scores.
+
+        Parameters
+        ----------
+        items : str, list, or None, default None
+            Item subset. None uses all items.
+        obs : bool, default False
+            If True, overlays observed mean total scores.
+        xmin, xmax : float
+            Ability axis limits.
+        no_of_classes : int, default 5
+            Number of class intervals for observed overlay.
+        title : str or None, default None
+            Plot title.
+        score_lines : list or None, default None
+            Raw total scores at which to draw reference lines.
+        score_labels : bool, default False
+            Annotate score line intersections.
+        warm : bool, default True
+            Passed for API consistency.
+        plot_style, palette, black, font : see plot_data().
+        title_font_size, axis_font_size, labelsize : int
+            Font sizes.
+        filename : str or None, default None
+            If provided, saves the plot.
+        file_format : str, default 'png'
+            Output format.
+        dpi : int, default 300
+            Output resolution.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+        """
         if isinstance(items, str) and items in ('all', 'none'):
             items = None
         elif isinstance(items, str):
@@ -2095,7 +2747,39 @@ class PCM(Rasch):
                   palette='dark blue', black=False, font='Times New Roman',
                   title_font_size=15, axis_font_size=12, labelsize=12,
                   filename=None, file_format='png', dpi=300):
-        '''Test Information Curve for PCM.'''
+        """
+        Plot the Test Information Curve.
+
+        Displays sum of item Fisher information values as a function of ability.
+
+        Parameters
+        ----------
+        items : str, list, or None, default None
+            Item subset. None uses all items.
+        point_info_lines : list or None, default None
+            Ability values at which to draw reference lines.
+        point_info_labels : bool, default False
+            Annotate information line intersections.
+        xmin, xmax : float
+            Ability axis limits.
+        ymax : float or None, default None
+            Upper y-axis limit. Auto-scaled if None.
+        title : str or None, default None
+            Plot title.
+        plot_style, palette, black, font : see plot_data().
+        title_font_size, axis_font_size, labelsize : int
+            Font sizes.
+        filename : str or None, default None
+            If provided, saves the plot.
+        file_format : str, default 'png'
+            Output format.
+        dpi : int, default 300
+            Output resolution.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+        """
         if isinstance(items, str) and items in ('all', 'none'):
             items = None
         elif isinstance(items, str):
@@ -2123,7 +2807,40 @@ class PCM(Rasch):
                   palette='dark blue', black=False, font='Times New Roman',
                   title_font_size=15, axis_font_size=12, labelsize=12,
                   filename=None, file_format='png', dpi=300):
-        '''Test Conditional Standard Error of Measurement Curve for PCM.'''
+        """
+        Plot the Test Conditional Standard Error of Measurement (CSEM) Curve.
+
+        Displays 1 / sqrt(I(theta)) as a function of ability, where I(theta)
+        is total test information.
+
+        Parameters
+        ----------
+        items : str, list, or None, default None
+            Item subset. None uses all items.
+        point_csem_lines : list or None, default None
+            Ability values at which to draw CSEM reference lines.
+        point_csem_labels : bool, default False
+            Annotate CSEM line intersections.
+        xmin, xmax : float
+            Ability axis limits.
+        ymax : float, default 5
+            Upper y-axis limit.
+        title : str or None, default None
+            Plot title.
+        plot_style, palette, black, font : see plot_data().
+        title_font_size, axis_font_size, labelsize : int
+            Font sizes.
+        filename : str or None, default None
+            If provided, saves the plot.
+        file_format : str, default 'png'
+            Output format.
+        dpi : int, default 300
+            Output resolution.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+        """
         if isinstance(items, str) and items in ('all', 'none'):
             items = None
         elif isinstance(items, str):
@@ -2160,9 +2877,47 @@ class PCM(Rasch):
                            filename=None,
                            file_format='png',
                            plot_density=300):
-        '''
-        Histogram of standardised residuals with optional Normal overlay.
-        '''
+        """
+        Plot a histogram of standardised residuals.
+
+        Displays the distribution of standardised residuals across all
+        person-item combinations (or a subset of items). Under a well-fitting
+        Rasch model these should approximate a standard normal distribution.
+        Optionally overlays a standard normal density curve.
+
+        Requires fit_statistics() to have been run first.
+
+        Parameters
+        ----------
+        items : str, list, or None, default None
+            Item subset. None uses all items.
+        bin_width : float, default 0.5
+            Width of histogram bins.
+        x_min : float, default -6
+            Left x-axis limit.
+        x_max : float, default 6
+            Right x-axis limit.
+        normal : bool, default False
+            If True, overlays a standard normal density curve.
+        title : str or None, default None
+            Plot title.
+        plot_style : str, default 'white'
+            Background style.
+        font : str, default 'Times New Roman'
+            Font family.
+        title_font_size, axis_font_size, labelsize : int
+            Font sizes.
+        filename : str or None, default None
+            If provided, saves the plot.
+        file_format : str, default 'png'
+            Output format.
+        plot_density : int, default 300
+            Output resolution.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+        """
         if isinstance(items, str) and items in ('all', 'none'):
             items = None
         elif isinstance(items, str):
