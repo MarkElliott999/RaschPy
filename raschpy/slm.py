@@ -1623,9 +1623,10 @@ class SLM(Rasch):
             Additive smoothing constant.
         """
 
-        if hasattr(self, 'eigenvectors') == False:
-            self.fit_statistics(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
-                                ext_score_adjustment=ext_score_adjustment, method=method, constant=constant)
+        if not hasattr(self, 'eigenvectors'):
+            # BUG FIX: must call res_corr_analysis (not just fit_statistics) to set eigenvectors
+            self.res_corr_analysis(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
+                                   ext_score_adjustment=ext_score_adjustment, method=method, constant=constant)
 
         if single:
             if format == 'xlsx':

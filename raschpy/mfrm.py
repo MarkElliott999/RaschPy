@@ -3297,7 +3297,7 @@ class MFRM(Rasch):
         if format == 'xlsx':
             if not filename.endswith('.xlsx'):
                 filename += '.xlsx'
-            with pd.ExcelWriter(filename, engine='xlsxwriter') as writer:
+            with pd.ExcelWriter(filename, engine='openpyxl') as writer:
                 getattr(self, f'item_stats_{model}').to_excel(
                     writer, sheet_name='Item statistics')
                 getattr(self, f'threshold_stats_{model}').to_excel(
@@ -3367,7 +3367,7 @@ class MFRM(Rasch):
         if format == 'xlsx':
             if not filename.endswith('.xlsx'):
                 filename += '.xlsx'
-            with pd.ExcelWriter(filename, engine='xlsxwriter') as writer:
+            with pd.ExcelWriter(filename, engine='openpyxl') as writer:
                 if single:
                     row = 0
                     for frame in frames:

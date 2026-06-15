@@ -1931,7 +1931,7 @@ class PCM(Rasch):
         if format == 'xlsx':
             if not filename.endswith('.xlsx'):
                 filename += '.xlsx'
-            with pd.ExcelWriter(filename, engine='xlsxwriter') as writer:  # BUG FIX: writer.save() deprecated
+            with pd.ExcelWriter(filename, engine='openpyxl') as writer:  # BUG FIX: writer.save() deprecated
                 self.item_stats.to_excel(writer, sheet_name='Item statistics')
                 self.threshold_stats_uncentred.to_excel(writer, sheet_name='Threshold statistics uncentred')
                 self.threshold_stats_centred.to_excel(writer, sheet_name='Threshold statistics centred')
@@ -1959,10 +1959,11 @@ class PCM(Rasch):
                        constant=0.1):
 
         if not hasattr(self, 'eigenvectors'):
-            self.fit_statistics(warm_corr=warm_corr, tolerance=tolerance,
-                                max_iters=max_iters,
-                                ext_score_adjustment=ext_score_adjustment,
-                                method=method, constant=constant)
+            # BUG FIX: must call res_corr_analysis (not just fit_statistics) to set eigenvectors
+            self.res_corr_analysis(warm_corr=warm_corr, tolerance=tolerance,
+                                   max_iters=max_iters,
+                                   ext_score_adjustment=ext_score_adjustment,
+                                   method=method, constant=constant)
 
         frames = [self.eigenvectors, self.eigenvalues,
                   self.variance_explained, self.loadings]
@@ -1975,7 +1976,7 @@ class PCM(Rasch):
         if format == 'xlsx':
             if not filename.endswith('.xlsx'):
                 filename += '.xlsx'
-            with pd.ExcelWriter(filename, engine='xlsxwriter') as writer:  # BUG FIX: writer.save()
+            with pd.ExcelWriter(filename, engine='openpyxl') as writer:  # BUG FIX: writer.save()
                 if single:
                     row = 0
                     for frame in frames:
