@@ -1,14 +1,10 @@
-import itertools
 import warnings
-from math import exp, log, sqrt, floor
-import statistics
 
 import numpy as np
 import pandas as pd
-from scipy.stats import truncnorm, norm
+from scipy.stats import truncnorm
 
 from raschpy.simulation.base_sim import Rasch_Sim
-from raschpy.mfrm import MFRM
 
 
 class MFRM_Sim(Rasch_Sim):
@@ -16,10 +12,10 @@ class MFRM_Sim(Rasch_Sim):
     Simulate polytomous response data for the Many-Facet Rasch Model (MFRM).
 
     Generates item difficulties, shared Rasch-Andrich thresholds, person
-    abilities, and rater severity parameters under one of four parameterisations,
+    abilities, and facet_element severity parameters under one of four parameterisations,
     then computes category probabilities and samples scores for every
-    rater-person-item combination. Simulation runs automatically on instantiation;
-    access results via self.scores.
+    facet_element-person-item combination. Simulation runs automatically on instantiation;
+    access results via self.responses.
 
     Parameters
     ----------
@@ -28,19 +24,19 @@ class MFRM_Sim(Rasch_Sim):
     no_of_persons : int
         Number of persons to simulate.
     no_of_raters : int
-        Number of raters to simulate.
+        Number of facet_elements to simulate.
     max_score : int
         Maximum possible score per item (number of categories minus 1).
     model : str, default 'global'
         Rater severity parameterisation. One of:
-        'global'     — single scalar severity per rater;
-        'items'      — separate severity per (rater, item);
-        'thresholds' — separate severity per (rater, threshold);
-        'matrix'     — full severity per (rater, item, threshold).
+        'global'     — single scalar severity per facet_element;
+        'items'      — separate severity per (facet_element, item);
+        'thresholds' — separate severity per (facet_element, threshold);
+        'matrix'     — full severity per (facet_element, item, threshold).
     item_range : float, default 2
         Total spread of item difficulties in logits.
-    rater_range : float, default 2
-        Total spread of rater severities in logits.
+    facet_range : float, default 2
+        Total spread of facet_element severities in logits.
     category_base : float, default 1
         Base width of each rating category. Larger values produce wider,
         more ordered categories.
@@ -53,8 +49,8 @@ class MFRM_Sim(Rasch_Sim):
     missing : float, default 0
         Proportion of responses to set as missing at random, in [0, 1).
     shared_missing : bool, default True
-        If True, the same persons are missing across all raters (correlated
-        missingness). If False, missingness is independent across raters.
+        If True, the same persons are missing across all facet_elements (correlated
+        missingness). If False, missingness is independent across facet_elements.
     manual_abilities : array-like or None, default None
         Custom person abilities. Length must equal no_of_persons.
     manual_diffs : array-like or None, default None
@@ -62,166 +58,196 @@ class MFRM_Sim(Rasch_Sim):
     manual_thresholds : array-like or None, default None
         Custom threshold vector, length max_score + 1. Must satisfy
         thresholds[0] == 0 and sum(thresholds) == 0.
-    manual_severities : dict or array-like or None, default None
-        Custom rater severity parameters. Structure must match the chosen model:
+    manual_raters : dict or array-like or None, default None
+        Custom facet_element severity parameters. Structure must match the chosen model:
         global — array-like of length no_of_raters;
-        items  — {rater: {item: float}};
-        thresholds — {rater: array of length max_score};
-        matrix — {rater: {item: array of length max_score}}.
+        items  — {facet_element: {item: float}};
+        thresholds — {facet_element: array of length max_score};
+        matrix — {facet_element: {item: array of length max_score}}.
     manual_person_names : list of str or None, default None
         Custom person labels. If None, labels are 'Person_1', 'Person_2', etc.
     manual_item_names : list of str or None, default None
         Custom item labels. If None, labels are 'Item_1', 'Item_2', etc.
-    manual_rater_names : list of str or None, default None
-        Custom rater labels. If None, labels are 'Rater_1', 'Rater_2', etc.
+    manual_facet_names : list of str or None, default None
+        Custom facet_element labels. If None, labels are '{Facet}_1', '{Facet}_2', etc. where Facet is the capitalised facet name.
 
     Attributes set
     --------------
-    scores : pandas.DataFrame
+    responses : pandas.DataFrame
         Simulated response matrix with (Rater, Person) MultiIndex and items
         as columns. Values are integers in [0, max_score] or NaN (missing).
-        This is the primary output — pass directly to MFRM(scores).
-    abilities : pandas.Series
+        This is the primary output — pass directly to MFRM(responses).
+    persons : pandas.Series
         True person ability parameters, indexed by person.
-    diffs : pandas.Series
+    items : pandas.Series
         True item difficulty parameters, indexed by item.
     thresholds : numpy.ndarray
         True Rasch-Andrich threshold vector, length max_score + 1,
         with thresholds[0] = 0.
     severities : pandas.Series or dict
-        True rater severity parameters. Structure depends on model.
+        True facet_element severity parameters. Structure depends on model.
     cat_probs : dict
         {cat: DataFrame} of category probabilities used for simulation.
-    persons : list of str
+    person_names : list of str
         Person labels.
-    items : list of str
+    item_names : list of str
         Item labels.
-    raters : list of str
+    rater_names : list of str
         Rater labels.
     model : str
         Rater parameterisation used for simulation.
     """
 
-    def __init__(self,
-                 no_of_items,
-                 no_of_persons,
-                 no_of_raters,
-                 max_score,
-                 model='global',
-                 item_range=2,
-                 rater_range=2,
-                 category_base=1,
-                 person_sd=1.5,
-                 max_disorder=0,
-                 offset=0,
-                 missing=0,
-                 shared_missing=True,
-                 manual_abilities=None,
-                 manual_diffs=None,
-                 manual_thresholds=None,
-                 manual_severities=None,
-                 manual_person_names=None,
-                 manual_item_names=None,
-                 manual_rater_names=None):
+    def __init__(
+        self,
+        no_of_items,
+        no_of_persons,
+        no_of_facet_elements,
+        max_score,
+        no_of_raters=None,
+        model="global",
+        item_range=2,
+        facet_range=2,
+        category_base=1,
+        person_sd=1.5,
+        max_disorder=0,
+        offset=0,
+        missing=0,
+        shared_missing=True,
+        manual_abilities=None,
+        manual_diffs=None,
+        manual_thresholds=None,
+        manual_facet_effects=None,
+        manual_person_names=None,
+        manual_item_names=None,
+        manual_facet_names=None,
+        facet="rater",
+        facet_plural=None,
+    ):
+        """
+        Instantiate and run an MFRM simulation.
 
-        if model not in ('global', 'items', 'thresholds', 'matrix'):
-            raise ValueError(f"model must be one of 'global', 'items', 'thresholds', 'matrix'")
+        See class docstring for full parameter and attribute documentation.
+        All simulation output is generated on instantiation and stored as
+        instance attributes; see self.responses for the primary output.
+        """
 
-        self.model          = model
-        self.no_of_items    = int(no_of_items)
-        self.no_of_persons  = int(no_of_persons)
-        self.no_of_raters   = int(no_of_raters)
-        self.max_score      = max_score
-        self.item_range     = item_range
-        self.rater_range    = rater_range
-        self.category_base  = category_base
-        self.person_sd      = person_sd
-        self.max_disorder   = max_disorder
-        self.offset         = offset
-        self.missing        = missing
+        if model not in ("global", "items", "thresholds", "matrix"):
+            raise ValueError(
+                "model must be one of 'global', 'items', 'thresholds', 'matrix'. "
+                "For bivector simulation use MFRM_Sim_Bivector directly."
+            )
+
+        self.model = model
+        self.no_of_items = int(no_of_items)
+        self.no_of_persons = int(no_of_persons)
+        # Resolve no_of_facet_elements / no_of_raters alias
+        if no_of_raters is not None and no_of_facet_elements is None:
+            no_of_facet_elements = no_of_raters
+        elif no_of_raters is not None and no_of_facet_elements is not None:
+            raise ValueError("Pass no_of_facet_elements or no_of_raters, not both.")
+        self.no_of_facet_elements = int(no_of_facet_elements)
+        self.no_of_raters = self.no_of_facet_elements  # alias
+        self.facet = facet
+        self.facets = facet_plural if facet_plural is not None else facet + "s"
+        setattr(self, f"no_of_{self.facets}", self.no_of_facet_elements)
+        self.max_score = max_score
+        self.item_range = item_range
+        self.facet_range = facet_range
+        self.category_base = category_base
+        self.person_sd = person_sd
+        self.max_disorder = max_disorder
+        self.offset = offset
+        self.missing = missing
         self.shared_missing = shared_missing
 
         # ------------------------------------------------------------------
         # Persons
         # ------------------------------------------------------------------
         if manual_person_names is not None:
-            assert len(manual_person_names) == self.no_of_persons, \
-                'Length of person names must match number of persons.'
-            self.persons = manual_person_names
+            assert (
+                len(manual_person_names) == self.no_of_persons
+            ), "Length of person names must match number of persons."
+            self.person_names = manual_person_names
         else:
-            self.persons = [f'Person_{p + 1}' for p in range(self.no_of_persons)]
+            self.person_names = [f"Person_{p + 1}" for p in range(self.no_of_persons)]
 
         if manual_abilities is not None:
-            assert len(manual_abilities) == self.no_of_persons, \
-                'Length of manual abilities must match number of persons.'
+            assert (
+                len(manual_abilities) == self.no_of_persons
+            ), "Length of manual abilities must match number of persons."
             abilities = np.array(manual_abilities)
         else:
             abilities = np.random.normal(0, self.person_sd, self.no_of_persons)
             abilities -= abilities.mean()
             abilities += self.offset
 
-        self.abilities = pd.Series(
-            {person: ab for person, ab in zip(self.persons, abilities)}
+        self.persons = pd.Series(
+            {person: ab for person, ab in zip(self.person_names, abilities)}
         )
 
         # ------------------------------------------------------------------
         # Items
         # ------------------------------------------------------------------
         if manual_item_names is not None:
-            assert len(manual_item_names) == self.no_of_items, \
-                'Length of item names must match number of items.'
-            self.items = manual_item_names
+            assert (
+                len(manual_item_names) == self.no_of_items
+            ), "Length of item names must match number of items."
+            self.item_names = manual_item_names
         else:
-            self.items = [f'Item_{i + 1}' for i in range(self.no_of_items)]
+            self.item_names = [f"Item_{i + 1}" for i in range(self.no_of_items)]
 
         if manual_diffs is not None:
-            assert len(manual_diffs) == self.no_of_items, \
-                'Length of manual difficulties must match number of items.'
+            assert (
+                len(manual_diffs) == self.no_of_items
+            ), "Length of manual difficulties must match number of items."
             diffs = np.array(manual_diffs)
         else:
             diffs = np.random.uniform(0, 1, self.no_of_items)
             diffs *= self.item_range / (diffs.max() - diffs.min())
             diffs -= diffs.mean()
 
-        self.diffs = pd.Series(
-            {item: d for item, d in zip(self.items, diffs)}
-        )
+        self.items = pd.Series({item: d for item, d in zip(self.item_names, diffs)})
 
         # ------------------------------------------------------------------
         # Thresholds (shared RSM structure across all four models)
         # ------------------------------------------------------------------
         if manual_thresholds is not None:
-            assert len(manual_thresholds) == self.max_score + 1, \
-                'Number of manual thresholds must be max score plus 1.'
-            assert manual_thresholds[0] == 0, \
-                'First threshold must be zero.'
-            assert sum(manual_thresholds) == 0, \
-                'Manual thresholds must sum to zero.'
-            self.thresholds = np.array(manual_thresholds)
+            assert (
+                len(manual_thresholds) == self.max_score + 1
+            ), "Number of manual thresholds must be max score plus 1."
+            assert sum(manual_thresholds) == 0, "Manual thresholds must sum to zero."
+            self.thresholds = pd.Series(np.array(manual_thresholds))
         else:
             cat_widths = np.random.uniform(
                 self.max_disorder,
                 2 * self.category_base - self.max_disorder,
-                self.max_score
+                self.max_score,
             )
             thresholds = np.array([cat_widths[:k].sum() for k in range(self.max_score)])
             thresholds -= thresholds.mean()
-            self.thresholds = np.insert(thresholds, 0, 0.0)
+            self.thresholds = pd.Series(thresholds)
 
         # ------------------------------------------------------------------
         # Raters
         # ------------------------------------------------------------------
-        if manual_rater_names is not None:
-            assert len(manual_rater_names) == self.no_of_raters, \
-                'Length of rater names must match number of raters.'
-            self.raters = manual_rater_names
+        if manual_facet_names is not None:
+            assert (
+                len(manual_facet_names) == self.no_of_facet_elements
+            ), "Length of facet_element names must match number of facet_elements."
+            self.facet_names = manual_facet_names
         else:
-            self.raters = [f'Rater_{r + 1}' for r in range(self.no_of_raters)]
+            self.facet_names = [
+                f"{self.facet.capitalize()}_{r + 1}"
+                for r in range(self.no_of_facet_elements)
+            ]
+        self.rater_names = self.facet_names  # alias for default facet
 
         # ------------------------------------------------------------------
         # Severities (model-specific)
         # ------------------------------------------------------------------
-        self.severities = self._generate_severities(manual_severities)
+        self.facet_effects = self._generate_severities(manual_facet_effects)
+        setattr(self, f"{self.facets}_effects", self.facet_effects)
 
         # ------------------------------------------------------------------
         # Category probabilities
@@ -232,191 +258,208 @@ class MFRM_Sim(Rasch_Sim):
         # Scores + missing data
         # ------------------------------------------------------------------
         scoring_randoms = {
-            rater: pd.DataFrame(
-                self.randoms(), columns=self.items, index=self.persons
+            facet_element: pd.DataFrame(
+                self.randoms(), columns=self.item_names, index=self.person_names
             )
-            for rater in self.raters
+            for facet_element in self.facet_names
         }
         scoring_randoms = pd.concat(
             scoring_randoms.values(), keys=scoring_randoms.keys()
         )
 
-        self.scores = sum(
-            scoring_randoms < sum(
-                self.cat_probs[cat] for cat in range(c, self.max_score + 1)
-            )
+        self.responses = sum(
+            scoring_randoms
+            < sum(self.cat_probs[cat] for cat in range(c, self.max_score + 1))
             for c in range(1, self.max_score + 1)
         )
 
         if shared_missing:
             missing_randoms = pd.DataFrame(
-                self.randoms(), columns=self.items, index=self.persons
+                self.randoms(), columns=self.item_names, index=self.person_names
             )
             missing_randoms = pd.concat(
-                {rater: missing_randoms for rater in self.raters},
-                keys=self.raters
+                {facet_element: missing_randoms for facet_element in self.facet_names},
+                keys=self.facet_names,
             )
         else:
             missing_randoms = pd.concat(
-                {rater: pd.DataFrame(
-                    self.randoms(), columns=self.items, index=self.persons
-                ) for rater in self.raters},
-                keys=self.raters
+                {
+                    facet_element: pd.DataFrame(
+                        self.randoms(), columns=self.item_names, index=self.person_names
+                    )
+                    for facet_element in self.facet_names
+                },
+                keys=self.facet_names,
             )
 
-        self.scores[missing_randoms < self.missing] = np.nan
+        self.responses[missing_randoms < self.missing] = np.nan
 
     # ------------------------------------------------------------------
     # Severity generation
     # ------------------------------------------------------------------
 
-    def _generate_severities(self, manual_severities):
-        '''Generate or validate rater severity parameters for the given model.'''
+    def _generate_severities(self, manual_facet_effects):
+        """Generate or validate facet_element severity parameters for the given model."""
 
-        if self.model == 'global':
-            if manual_severities is not None:
-                assert len(manual_severities) == self.no_of_raters, \
-                    'Length of manual severities must match number of raters.'
-                sev = np.array(manual_severities)
+        if self.model == "global":
+            if manual_facet_effects is not None:
+                assert (
+                    len(manual_facet_effects) == self.no_of_facet_elements
+                ), "Length of manual severities must match number of facet_elements."
+                sev = np.array(manual_facet_effects)
             else:
-                sev = truncnorm.rvs(-1.96, 1.96, size=self.no_of_raters)
-                sev *= self.rater_range / (sev.max() - sev.min())
+                sev = truncnorm.rvs(-1.96, 1.96, size=self.no_of_facet_elements)
+                sev *= self.facet_range / (sev.max() - sev.min())
                 sev -= sev.mean()
             return pd.Series(
-                {rater: s for rater, s in zip(self.raters, sev)}
+                {facet_element: s for facet_element, s in zip(self.facet_names, sev)}
             )
 
-        elif self.model == 'items':
-            if manual_severities is not None:
-                assert len(manual_severities) == self.no_of_raters, \
-                    'Length of manual severities must match number of raters.'
-                return manual_severities
+        elif self.model == "items":
+            if manual_facet_effects is not None:
+                assert (
+                    len(manual_facet_effects) == self.no_of_facet_elements
+                ), "Length of manual severities must match number of facet_elements."
+                return manual_facet_effects
             else:
-                sev = np.array([
-                    truncnorm.rvs(-1.96, 1.96, size=self.no_of_items)
-                    for _ in range(self.no_of_raters)
-                ])  # (R, I)
-                sev *= self.rater_range / (sev.max() - sev.min())
+                sev = np.array(
+                    [
+                        truncnorm.rvs(-1.96, 1.96, size=self.no_of_items)
+                        for _ in range(self.no_of_facet_elements)
+                    ]
+                )  # (R, I)
+                sev *= self.facet_range / (sev.max() - sev.min())
                 # Centre per item (column)
                 for i in range(self.no_of_items):
                     sev[:, i] -= sev[:, i].mean()
-                return {
-                    rater: {item: sev[r, i]
-                            for i, item in enumerate(self.items)}
-                    for r, rater in enumerate(self.raters)
-                }
+                return pd.DataFrame(
+                    sev, index=self.facet_names, columns=self.item_names
+                )
 
-        elif self.model == 'thresholds':
-            if manual_severities is not None:
-                assert len(manual_severities) == self.no_of_raters, \
-                    'Length of manual severities must match number of raters.'
-                return manual_severities
+        elif self.model == "thresholds":
+            if manual_facet_effects is not None:
+                assert (
+                    len(manual_facet_effects) == self.no_of_facet_elements
+                ), "Length of manual severities must match number of facet_elements."
+                return manual_facet_effects
             else:
-                sev = np.array([
-                    truncnorm.rvs(-1.96, 1.96, size=self.max_score)
-                    for _ in range(self.no_of_raters)
-                ])  # (R, K)
-                sev *= self.rater_range / (sev.max() - sev.min())
+                sev = np.array(
+                    [
+                        truncnorm.rvs(-1.96, 1.96, size=self.max_score)
+                        for _ in range(self.no_of_facet_elements)
+                    ]
+                )  # (R, K)
+                sev *= self.facet_range / (sev.max() - sev.min())
                 sev -= sev.mean()
-                sev = np.insert(sev, 0, 0.0, axis=1)  # prepend zero slot
-                return {
-                    rater: sev[r, :]
-                    for r, rater in enumerate(self.raters)
-                }
+                return pd.DataFrame(sev, index=self.facet_names)
 
-        elif self.model == 'matrix':
-            if manual_severities is not None:
-                assert len(manual_severities) == self.no_of_raters, \
-                    'Length of manual severities must match number of raters.'
-                return manual_severities
+        elif self.model == "matrix":
+            if manual_facet_effects is not None:
+                assert (
+                    len(manual_facet_effects.index.get_level_values(0).unique())
+                    == self.no_of_facet_elements
+                ), "Length of manual severities must match number of facet_elements."
+                return manual_facet_effects
             else:
-                sev = np.array([
-                    [truncnorm.rvs(-1.96, 1.96, size=self.max_score)
-                     for _ in range(self.no_of_items)]
-                    for _ in range(self.no_of_raters)
-                ])  # (R, I, K)
-                sev *= self.rater_range / (sev.max() - sev.min())
-                # Centre per (rater, item) cell
-                for r in range(self.no_of_raters):
+                sev = np.array(
+                    [
+                        [
+                            truncnorm.rvs(-1.96, 1.96, size=self.max_score)
+                            for _ in range(self.no_of_items)
+                        ]
+                        for _ in range(self.no_of_facet_elements)
+                    ]
+                )  # (R, I, K)
+                sev *= self.facet_range / (sev.max() - sev.min())
+                # Centre per (facet_element, item) cell
+                for r in range(self.no_of_facet_elements):
                     for i in range(self.no_of_items):
                         sev[r, i, :] -= sev[r, i, :].mean()
-                sev = np.insert(sev, 0, 0.0, axis=2)  # prepend zero slot
-                return {
-                    rater: {item: sev[r, i, :]
-                            for i, item in enumerate(self.items)}
-                    for r, rater in enumerate(self.raters)
-                }
+                mi = pd.MultiIndex.from_product(
+                    [self.facet_names, self.item_names], names=["facet_element", "item"]
+                )
+                return pd.DataFrame(sev.reshape(-1, self.max_score), index=mi)
 
     # ------------------------------------------------------------------
     # Category probability computation
     # ------------------------------------------------------------------
 
     def _compute_cat_probs(self):
-        '''Compute category probability DataFrames for all raters and categories.'''
+        """Compute category probability DataFrames for all facet_elements and categories."""
 
-        if self.model == 'global':
+        if self.model == "global":
             c_p_df = pd.DataFrame(
-                {item: self.abilities - self.diffs[item] for item in self.items}
+                {item: self.persons - self.items[item] for item in self.item_names}
             )
             cat_probs = {
                 cat: {
-                    rater: (cat * (c_p_df - self.severities[rater])
-                            - self.thresholds[:cat + 1].sum())
-                    for rater in self.raters
+                    facet_element: (
+                        cat * (c_p_df - self.facet_effects.loc[facet_element])
+                        - self.thresholds.iloc[:cat].sum()
+                    )
+                    for facet_element in self.facet_names
                 }
                 for cat in range(self.max_score + 1)
             }
 
-        elif self.model == 'items':
+        elif self.model == "items":
             c_p_df = {
-                rater: pd.DataFrame({
-                    item: self.abilities - self.diffs[item] - self.severities[rater][item]
-                    for item in self.items
-                })
-                for rater in self.raters
+                facet_element: pd.DataFrame(
+                    {
+                        item: self.persons
+                        - self.items[item]
+                        - self.facet_effects.loc[facet_element, item]
+                        for item in self.item_names
+                    }
+                )
+                for facet_element in self.facet_names
             }
             cat_probs = {
                 cat: {
-                    rater: (cat * c_p_df[rater] - self.thresholds[:cat + 1].sum())
-                    for rater in self.raters
+                    facet_element: (
+                        cat * c_p_df[facet_element] - self.thresholds.iloc[:cat].sum()
+                    )
+                    for facet_element in self.facet_names
                 }
                 for cat in range(self.max_score + 1)
             }
 
-        elif self.model == 'thresholds':
+        elif self.model == "thresholds":
             c_p_df = pd.DataFrame(
-                {item: self.abilities - self.diffs[item] for item in self.items}
+                {item: self.persons - self.items[item] for item in self.item_names}
             )
             cat_probs = {
                 cat: {
-                    rater: (cat * c_p_df
-                            - self.thresholds[:cat + 1].sum()
-                            - self.severities[rater][:cat + 1].sum())
-                    for rater in self.raters
+                    facet_element: (
+                        cat * c_p_df
+                        - self.thresholds.iloc[:cat].sum()
+                        - self.facet_effects.loc[facet_element].iloc[:cat].sum()
+                    )
+                    for facet_element in self.facet_names
                 }
                 for cat in range(self.max_score + 1)
             }
 
-        elif self.model == 'matrix':
+        elif self.model == "matrix":
             c_p_df = pd.DataFrame(
-                {item: self.abilities - self.diffs[item] for item in self.items}
+                {item: self.persons - self.items[item] for item in self.item_names}
             )
             cat_probs = {
                 cat: {
-                    rater: (cat * c_p_df - self.thresholds[:cat + 1].sum())
-                    for rater in self.raters
+                    facet_element: (cat * c_p_df - self.thresholds.iloc[:cat].sum())
+                    for facet_element in self.facet_names
                 }
                 for cat in range(self.max_score + 1)
             }
-            # Apply per-(rater, item, threshold) severity
+            # Apply per-(facet_element, item, threshold) severity
             for cat in range(self.max_score + 1):
-                for rater in self.raters:
-                    for item in self.items:
-                        cat_probs[cat][rater][item] -= (
-                            self.severities[rater][item][:cat + 1].sum()
+                for facet_element in self.facet_names:
+                    for item in self.item_names:
+                        cat_probs[cat][facet_element][item] -= (
+                            self.facet_effects.loc[facet_element, item].iloc[:cat].sum()
                         )
 
-        # Concatenate across raters, exponentiate, normalise
+        # Concatenate across facet_elements, exponentiate, normalise
         for cat in range(self.max_score + 1):
             cat_probs[cat] = pd.concat(
                 cat_probs[cat].values(), keys=cat_probs[cat].keys()
@@ -435,61 +478,77 @@ class MFRM_Sim(Rasch_Sim):
 
     def rename_rater(self, old, new):
         """
-        Rename a single rater in the simulated scores DataFrame.
+        Rename a single facet_element in the simulated responses DataFrame.
 
         Parameters
         ----------
         old : str
-            Current rater name.
+            Current facet_element name.
         new : str
-            Desired new rater name.
+            Desired new facet_element name.
         """
 
         if old == new:
-            warnings.warn('New rater name is the same as the old rater name.',
-                          UserWarning, stacklevel=2)
-        elif new in self.raters:
-            warnings.warn('New rater name is a duplicate of an existing rater name.',
-                          UserWarning, stacklevel=2)
-        if old not in self.raters:
-            warnings.warn(f'Old rater name {old!r} not found in data.',
-                          UserWarning, stacklevel=2)
+            warnings.warn(
+                "New facet_element name is the same as the old facet_element name.",
+                UserWarning,
+                stacklevel=2,
+            )
+        elif new in self.facet_names:
+            warnings.warn(
+                "New facet_element name is a duplicate of an existing facet_element name.",
+                UserWarning,
+                stacklevel=2,
+            )
+        if old not in self.facet_names:
+            warnings.warn(
+                f"Old facet_element name {old!r} not found in data.",
+                UserWarning,
+                stacklevel=2,
+            )
         elif not isinstance(new, str):
-            warnings.warn('Rater names must be strings.',
-                          UserWarning, stacklevel=2)
+            warnings.warn("Rater names must be strings.", UserWarning, stacklevel=2)
         else:
-            new_names = [new if r == old else r for r in self.raters]
+            new_names = [new if r == old else r for r in self.facet_names]
             self.rename_raters_all(new_names)
 
     def rename_raters_all(self, new_names):
         """
-        Rename all raters at once.
+        Rename all facet_elements at once.
 
         Parameters
         ----------
         new_names : list of str
-            New rater names in the same order as self.raters.
+            New facet_element names in the same order as self.facet_names.
         """
 
         if len(new_names) != len(set(new_names)):
-            warnings.warn('List of new rater names contains duplicates.',
-                          UserWarning, stacklevel=2)
-        elif len(new_names) != self.no_of_raters:
-            warnings.warn(f'Incorrect number of rater names: {len(new_names)} provided, '
-                          f'{self.no_of_raters} raters in data.',
-                          UserWarning, stacklevel=2)
+            warnings.warn(
+                "List of new facet_element names contains duplicates.",
+                UserWarning,
+                stacklevel=2,
+            )
+        elif len(new_names) != self.no_of_facet_elements:
+            warnings.warn(
+                f"Incorrect number of facet_element names: {len(new_names)} provided, "
+                f"{self.no_of_facet_elements} facet_elements in data.",
+                UserWarning,
+                stacklevel=2,
+            )
         elif not all(isinstance(n, str) for n in new_names):
-            warnings.warn('Rater names must be strings.',
-                          UserWarning, stacklevel=2)
+            warnings.warn("Rater names must be strings.", UserWarning, stacklevel=2)
         else:
-            df_dict = {new: self.scores.xs(old)
-                       for old, new in zip(self.raters, new_names)}
-            self.scores = pd.concat(df_dict.values(), keys=df_dict.keys())
-        self.raters = self.scores.index.get_level_values(0).unique().tolist()
+            df_dict = {
+                new: self.responses.xs(old)
+                for old, new in zip(self.facet_names, new_names)
+            }
+            self.responses = pd.concat(df_dict.values(), keys=df_dict.keys())
+        self.facet_names = self.responses.index.get_level_values(0).unique().tolist()
+        self.rater_names = self.facet_names  # alias for default facet
 
     def rename_person(self, old, new):
         """
-        Rename a single person in the simulated scores DataFrame.
+        Rename a single person in the simulated responses DataFrame.
 
         Parameters
         ----------
@@ -500,20 +559,26 @@ class MFRM_Sim(Rasch_Sim):
         """
 
         if old == new:
-            warnings.warn('New person name is the same as the old person name.',
-                          UserWarning, stacklevel=2)
-        elif new in self.scores.index.get_level_values(1):
-            warnings.warn('New person name is a duplicate of an existing person name.',
-                          UserWarning, stacklevel=2)
-        if old not in self.scores.index.get_level_values(1):
-            warnings.warn(f'Old person name {old!r} not found in data.',
-                          UserWarning, stacklevel=2)
+            warnings.warn(
+                "New person name is the same as the old person name.",
+                UserWarning,
+                stacklevel=2,
+            )
+        elif new in self.responses.index.get_level_values(1):
+            warnings.warn(
+                "New person name is a duplicate of an existing person name.",
+                UserWarning,
+                stacklevel=2,
+            )
+        if old not in self.responses.index.get_level_values(1):
+            warnings.warn(
+                f"Old person name {old!r} not found in data.", UserWarning, stacklevel=2
+            )
         elif not isinstance(new, str):
-            warnings.warn('Person names must be strings.',
-                          UserWarning, stacklevel=2)
+            warnings.warn("Person names must be strings.", UserWarning, stacklevel=2)
         else:
-            self.scores.rename(index={old: new}, inplace=True)
-        self.persons = self.scores.index.get_level_values(1).unique().tolist()
+            self.responses.rename(index={old: new}, inplace=True)
+        self.person_names = self.responses.index.get_level_values(1).unique().tolist()
 
     def rename_persons_all(self, new_names):
         """
@@ -522,79 +587,408 @@ class MFRM_Sim(Rasch_Sim):
         Parameters
         ----------
         new_names : list of str
-            New person names in the same order as self.persons.
+            New person names in the same order as self.person_names.
         """
 
-        old_names = self.scores.index.get_level_values(1)
+        old_names = self.responses.index.get_level_values(1)
         if len(new_names) != len(set(new_names)):
-            warnings.warn('List of new person names contains duplicates.',
-                          UserWarning, stacklevel=2)
-        elif len(new_names) != self.no_of_persons:
-            warnings.warn(f'Incorrect number of person names: {len(new_names)} provided, '
-                          f'{self.no_of_persons} persons in data.',
-                          UserWarning, stacklevel=2)
-        elif not all(isinstance(n, str) for n in new_names):
-            warnings.warn('Person names must be strings.',
-                          UserWarning, stacklevel=2)
-        else:
-            self.scores.rename(
-                index={old: new for old, new in zip(old_names, new_names)},
-                inplace=True
+            warnings.warn(
+                "List of new person names contains duplicates.",
+                UserWarning,
+                stacklevel=2,
             )
-        self.persons = self.scores.index.get_level_values(1).unique().tolist()
+        elif len(new_names) != self.no_of_persons:
+            warnings.warn(
+                f"Incorrect number of person names: {len(new_names)} provided, "
+                f"{self.no_of_persons} persons in data.",
+                UserWarning,
+                stacklevel=2,
+            )
+        elif not all(isinstance(n, str) for n in new_names):
+            warnings.warn("Person names must be strings.", UserWarning, stacklevel=2)
+        else:
+            self.responses.rename(
+                index={old: new for old, new in zip(old_names, new_names)}, inplace=True
+            )
+        self.person_names = self.responses.index.get_level_values(1).unique().tolist()
 
 
 # ------------------------------------------------------------------
 # Backwards-compatible subclass aliases
 # ------------------------------------------------------------------
 
+
 class MFRM_Sim_Global(MFRM_Sim):
     """
-    MFRM simulation — global (scalar) rater severity parameterisation.
+    MFRM simulation — global (scalar) facet_element severity parameterisation.
 
     Convenience subclass of MFRM_Sim with model='global' fixed.
-    Each rater has a single scalar severity estimate applied equally
+    Each facet_element has a single scalar severity estimate applied equally
     across all items and thresholds. See MFRM_Sim for full parameter docs.
     """
-    def __init__(self, no_of_items, no_of_persons, no_of_raters, max_score, **kw):
-        super().__init__(no_of_items, no_of_persons, no_of_raters, max_score,
-                         model='global', **kw)
+
+    def __init__(
+        self,
+        no_of_items,
+        no_of_persons,
+        no_of_facet_elements=None,
+        max_score=None,
+        no_of_raters=None,
+        **kw,
+    ):
+        """Convenience wrapper: MFRM_Sim with model='global' fixed. See MFRM_Sim for full documentation."""
+        super().__init__(
+            no_of_items,
+            no_of_persons,
+            no_of_facet_elements=no_of_facet_elements,
+            max_score=max_score,
+            no_of_raters=no_of_raters,
+            model="global",
+            **kw,
+        )
 
 
 class MFRM_Sim_Items(MFRM_Sim):
     """
-    MFRM simulation — items (per rater×item) severity parameterisation.
+    MFRM simulation — items (per facet_element×item) severity parameterisation.
 
     Convenience subclass of MFRM_Sim with model='items' fixed.
-    Each rater has a separate severity for each item, constant across
+    Each facet_element has a separate severity for each item, constant across
     thresholds. See MFRM_Sim for full parameter docs.
     """
-    def __init__(self, no_of_items, no_of_persons, no_of_raters, max_score, **kw):
-        super().__init__(no_of_items, no_of_persons, no_of_raters, max_score,
-                         model='items', **kw)
+
+    def __init__(
+        self,
+        no_of_items,
+        no_of_persons,
+        no_of_facet_elements=None,
+        max_score=None,
+        no_of_raters=None,
+        **kw,
+    ):
+        """Convenience wrapper: MFRM_Sim with model='items' fixed. See MFRM_Sim for full documentation."""
+        super().__init__(
+            no_of_items,
+            no_of_persons,
+            no_of_facet_elements=no_of_facet_elements,
+            max_score=max_score,
+            no_of_raters=no_of_raters,
+            model="items",
+            **kw,
+        )
 
 
 class MFRM_Sim_Thresholds(MFRM_Sim):
     """
-    MFRM simulation — thresholds (per rater×threshold) severity parameterisation.
+    MFRM simulation — thresholds (per facet_element×threshold) severity parameterisation.
 
     Convenience subclass of MFRM_Sim with model='thresholds' fixed.
-    Each rater has a separate severity for each threshold, constant across
+    Each facet_element has a separate severity for each threshold, constant across
     items. See MFRM_Sim for full parameter docs.
     """
-    def __init__(self, no_of_items, no_of_persons, no_of_raters, max_score, **kw):
-        super().__init__(no_of_items, no_of_persons, no_of_raters, max_score,
-                         model='thresholds', **kw)
+
+    def __init__(
+        self,
+        no_of_items,
+        no_of_persons,
+        no_of_facet_elements=None,
+        max_score=None,
+        no_of_raters=None,
+        **kw,
+    ):
+        """Convenience wrapper: MFRM_Sim with model='thresholds' fixed. See MFRM_Sim for full documentation."""
+        super().__init__(
+            no_of_items,
+            no_of_persons,
+            no_of_facet_elements=no_of_facet_elements,
+            max_score=max_score,
+            no_of_raters=no_of_raters,
+            model="thresholds",
+            **kw,
+        )
 
 
 class MFRM_Sim_Matrix(MFRM_Sim):
     """
-    MFRM simulation — matrix (full rater×item×threshold tensor) parameterisation.
+    MFRM simulation — matrix (full facet_element×item×threshold tensor) parameterisation.
 
     Convenience subclass of MFRM_Sim with model='matrix' fixed.
-    Each rater has a separate severity for every (item, threshold) combination.
+    Each facet_element has a separate severity for every (item, threshold) combination.
     See MFRM_Sim for full parameter docs.
     """
-    def __init__(self, no_of_items, no_of_persons, no_of_raters, max_score, **kw):
-        super().__init__(no_of_items, no_of_persons, no_of_raters, max_score,
-                         model='matrix', **kw)
+
+    def __init__(
+        self,
+        no_of_items,
+        no_of_persons,
+        no_of_facet_elements=None,
+        max_score=None,
+        no_of_raters=None,
+        **kw,
+    ):
+        """Convenience wrapper: MFRM_Sim with model='matrix' fixed. See MFRM_Sim for full documentation."""
+        super().__init__(
+            no_of_items,
+            no_of_persons,
+            no_of_facet_elements=no_of_facet_elements,
+            max_score=max_score,
+            no_of_raters=no_of_raters,
+            model="matrix",
+            **kw,
+        )
+
+
+class MFRM_Sim_Bivector:
+    """
+    Simulate polytomous response data for the Many-Facet Rasch Model (MFRM)
+    under the bivector facet_element parameterisation.
+
+    The bivector model treats facet_element severity as the sum of two additive
+    components: a per-(facet_element, item) item effect and a per-(facet_element, threshold)
+    threshold effect. This is analogous to treating the facet_element as an RSM
+    (rather than a PCM as in the matrix model) — each facet_element has a location
+    profile across items and a shape profile across thresholds, but the two
+    are independent and additive.
+
+    True severity for facet_element r, item i, threshold k is:
+
+        severity[r, i, k] = item_effect[r, i] + threshold_effect[r, k]
+
+    Identification constraints:
+    - item_effect: free mean per facet_element (overall facet_element severity lives here).
+    - threshold_effect: zero-sum per facet_element across thresholds (shape only,
+      no net location contribution).
+
+    Score sampling, missing data, category probabilities, and all rename
+    utilities are delegated to MFRM_Sim_Matrix via the reconstructed full
+    severity matrix. All attributes of MFRM_Sim_Matrix are available on
+    this object, plus item_effects and threshold_effects.
+
+    Parameters
+    ----------
+    no_of_items : int
+        Number of items to simulate.
+    no_of_persons : int
+        Number of persons to simulate.
+    no_of_raters : int
+        Number of facet_elements to simulate.
+    max_score : int
+        Maximum possible score per item (number of categories minus 1).
+    item_range : float, default 2
+        Total spread of item difficulties in logits.
+    item_facet_range : float, default 2
+        Total spread of per-(facet_element, item) severity effects across the full
+        facet_element x item matrix in logits.
+    threshold_facet_range : float, default 1
+        Total spread of per-(facet_element, threshold) severity effects across the
+        full facet_element x threshold matrix in logits.
+    category_base : float, default 1
+        Base width of each rating category. Larger values produce wider,
+        more ordered categories.
+    person_sd : float, default 1.5
+        Standard deviation of the person ability distribution (normal).
+    max_disorder : float, default 0
+        Maximum threshold disorder. 0 produces perfectly ordered thresholds.
+    offset : float, default 0
+        Mean shift applied to person abilities after centring.
+    missing : float, default 0
+        Proportion of responses to set as missing at random, in [0, 1).
+    shared_missing : bool, default True
+        If True, the same persons are missing across all facet_elements (correlated
+        missingness). If False, missingness is independent across facet_elements.
+    manual_abilities : array-like or None, default None
+        Custom person abilities. Length must equal no_of_persons.
+    manual_diffs : array-like or None, default None
+        Custom item difficulties. Length must equal no_of_items.
+    manual_thresholds : array-like or None, default None
+        Custom threshold vector, length max_score + 1. Must satisfy
+        thresholds[0] == 0 and sum(thresholds) == 0.
+    manual_item_effects : dict or None, default None
+        Custom per-(facet_element, item) severity effects.
+        Structure: {facet_element: {item: float}}.
+    manual_threshold_effects : dict or None, default None
+        Custom per-(facet_element, threshold) severity effects.
+        Structure: {facet_element: array of length max_score + 1}, with
+        threshold_effects[facet_element][0] == 0 and
+        sum(threshold_effects[facet_element]) == 0 for each facet_element.
+    manual_person_names : list of str or None, default None
+        Custom person labels.
+    manual_item_names : list of str or None, default None
+        Custom item labels.
+    manual_facet_names : list of str or None, default None
+        Custom facet_element labels.
+
+    Attributes set
+    --------------
+    All attributes of MFRM_Sim_Matrix, plus:
+
+    item_effects : dict
+        True per-(facet_element, item) severity effects.
+        Structure: {facet_element: {item: float}}.
+    threshold_effects : dict
+        True per-(facet_element, threshold) severity effects (zero-sum per facet_element).
+        Structure: {facet_element: numpy.ndarray of length max_score + 1},
+        with threshold_effects[facet_element][0] = 0 and
+        sum(threshold_effects[facet_element]) = 0 for each facet_element.
+    model : str
+        Always 'bivector'.
+
+    Note: self.facet_effects contains the reconstructed full severity matrix
+    in {facet_element: {item: array}} format (item_effect + threshold_effect per
+    cell), which is the format used internally by MFRM's probability
+    machinery.
+    """
+
+    def __init__(
+        self,
+        no_of_items,
+        no_of_persons,
+        no_of_facet_elements=None,
+        max_score=None,
+        no_of_raters=None,
+        item_range=2,
+        item_facet_range=2,
+        threshold_facet_range=1,
+        category_base=1,
+        person_sd=1.5,
+        max_disorder=0,
+        offset=0,
+        missing=0,
+        shared_missing=True,
+        manual_abilities=None,
+        manual_diffs=None,
+        manual_thresholds=None,
+        manual_item_effects=None,
+        manual_threshold_effects=None,
+        manual_person_names=None,
+        manual_item_names=None,
+        manual_facet_names=None,
+        facet="rater",
+        facet_plural=None,
+    ):
+        """
+        Instantiate and run an MFRM bivector simulation.
+
+        See class docstring for full parameter and attribute documentation.
+        All simulation output is generated on instantiation and stored as
+        instance attributes; see self.responses for the primary output.
+        """
+
+        # ------------------------------------------------------------------
+        # Resolve no_of_facet_elements / no_of_raters alias
+        # ------------------------------------------------------------------
+        if no_of_raters is not None and no_of_facet_elements is None:
+            no_of_facet_elements = no_of_raters
+        elif no_of_raters is not None and no_of_facet_elements is not None:
+            raise ValueError("Pass no_of_facet_elements or no_of_raters, not both.")
+        # ------------------------------------------------------------------
+        # Resolve names early so severity generation can use them
+        # ------------------------------------------------------------------
+        facet_elements = (
+            manual_facet_names
+            if manual_facet_names is not None
+            else [f"{facet.capitalize()}_{r + 1}" for r in range(no_of_facet_elements)]
+        )
+        items = (
+            manual_item_names
+            if manual_item_names is not None
+            else [f"Item_{i + 1}" for i in range(no_of_items)]
+        )
+
+        # ------------------------------------------------------------------
+        # Item effects — (R, I) DataFrame
+        # Free mean per facet_element; centred per item across facet_elements.
+        # ------------------------------------------------------------------
+        if manual_item_effects is not None:
+            assert (
+                len(manual_item_effects) == no_of_facet_elements
+            ), "Length of manual item effects must match number of facet_elements."
+            item_effects = manual_item_effects
+        else:
+            raw = np.array(
+                [
+                    truncnorm.rvs(-1.96, 1.96, size=no_of_items)
+                    for _ in range(no_of_facet_elements)
+                ]
+            )  # (R, I)
+            raw *= item_facet_range / (raw.max() - raw.min())
+            raw -= raw.mean(axis=0, keepdims=True)
+            item_effects = pd.DataFrame(raw, index=facet_elements, columns=items)
+
+        # ------------------------------------------------------------------
+        # Threshold effects — (R, K+1) DataFrame, zero-sum per facet_element
+        # ------------------------------------------------------------------
+        if manual_threshold_effects is not None:
+            assert (
+                len(manual_threshold_effects) == no_of_facet_elements
+            ), "Length of manual threshold effects must match number of facet_elements."
+            threshold_effects = manual_threshold_effects
+        else:
+            raw = np.array(
+                [
+                    truncnorm.rvs(-1.96, 1.96, size=max_score)
+                    for _ in range(no_of_facet_elements)
+                ]
+            )  # (R, K)
+            raw *= threshold_facet_range / (raw.max() - raw.min())
+            raw -= raw.mean(axis=1, keepdims=True)
+            threshold_effects = pd.DataFrame(raw, index=facet_elements)
+
+        # ------------------------------------------------------------------
+        # Reconstruct full severity matrix as MultiIndex DataFrame
+        # ------------------------------------------------------------------
+        mi = pd.MultiIndex.from_product(
+            [facet_elements, items], names=["facet_element", "item"]
+        )
+        rows = []
+        for facet_element in facet_elements:
+            for item in items:
+                ie = (
+                    item_effects.loc[facet_element, item]
+                    if isinstance(item_effects, pd.DataFrame)
+                    else item_effects[facet_element][item]
+                )
+                te = (
+                    threshold_effects.loc[facet_element].values
+                    if isinstance(threshold_effects, pd.DataFrame)
+                    else threshold_effects[facet_element]
+                )
+                row = np.array([ie + te[k] for k in range(max_score)])
+                rows.append(row)
+        manual_facet_effects = pd.DataFrame(rows, index=mi)
+
+        # ------------------------------------------------------------------
+        # Delegate all score sampling to MFRM_Sim_Matrix
+        # ------------------------------------------------------------------
+        sim = MFRM_Sim_Matrix(
+            no_of_items=no_of_items,
+            no_of_persons=no_of_persons,
+            no_of_facet_elements=no_of_facet_elements,
+            max_score=max_score,
+            item_range=item_range,
+            category_base=category_base,
+            person_sd=person_sd,
+            max_disorder=max_disorder,
+            offset=offset,
+            missing=missing,
+            shared_missing=shared_missing,
+            manual_abilities=manual_abilities,
+            manual_diffs=manual_diffs,
+            manual_thresholds=manual_thresholds,
+            manual_facet_effects=manual_facet_effects,
+            manual_person_names=manual_person_names,
+            manual_item_names=manual_item_names,
+            # Use the resolved facet_elements as facet names so they match
+            # the keys in manual_facet_effects
+            manual_facet_names=manual_facet_names or facet_elements,
+            facet=facet,
+            facet_plural=facet_plural,
+        )
+
+        # Copy all MFRM_Sim_Matrix attributes onto self
+        self.__dict__.update(sim.__dict__)
+
+        # Add bivector-specific attributes and correct the model label
+        self.item_effects = item_effects
+        self.threshold_effects = threshold_effects
+        self.model = "bivector"

@@ -1,13 +1,11 @@
 import itertools
-from math import exp, log, sqrt, floor
 import statistics
 
 import numpy as np
 import pandas as pd
-from scipy.stats import truncnorm, norm
 
 from raschpy.simulation.base_sim import Rasch_Sim
-from raschpy.pcm import PCM
+
 
 class PCM_Sim(Rasch_Sim):
     """
@@ -16,7 +14,7 @@ class PCM_Sim(Rasch_Sim):
     Generates item difficulties, per-item Rasch-Andrich thresholds, and person
     abilities, then computes category probabilities and samples scores. Unlike
     the RSM, each item has its own independent threshold structure. Simulation
-    runs automatically on instantiation; access results via self.scores.
+    runs automatically on instantiation; access results via self.responses.
 
     Parameters
     ----------
@@ -56,14 +54,14 @@ class PCM_Sim(Rasch_Sim):
 
     Attributes set
     --------------
-    scores : pandas.DataFrame
+    responses : pandas.DataFrame
         Simulated response matrix, shape (no_of_persons, no_of_items).
         Values are integers in [0, max_score_vector[i]] or NaN (missing).
-    abilities : pandas.Series
+    persons : pandas.Series
         True person ability parameters, indexed by person.
-    diffs : pandas.Series
+    items : pandas.Series
         True item difficulty parameters (central difficulties), indexed by item.
-    thresholds_centred : dict
+    thresholds : dict
         {item: numpy.ndarray} of centred Rasch-Andrich threshold offsets per item,
         length max_score_vector[i] + 1, with index 0 = 0.
     thresholds_uncentred : dict
@@ -71,9 +69,9 @@ class PCM_Sim(Rasch_Sim):
         length max_score_vector[i].
     cat_probs : dict
         {cat: DataFrame} of category probabilities used for simulation.
-    persons : list of str
+    person_names : list of str
         Person labels.
-    items : list of str
+    item_names : list of str
         Item labels.
     no_of_items : int
         Number of items.
@@ -83,21 +81,30 @@ class PCM_Sim(Rasch_Sim):
         Maximum score per item.
     """
 
-    def __init__(self,
-                 no_of_items,
-                 no_of_persons,
-                 max_score_vector,
-                 item_range=3,
-                 category_base=1,
-                 person_sd=1.5,
-                 max_disorder=0,
-                 offset=0,
-                 missing=0,
-                 manual_abilities=None,
-                 manual_diffs=None,
-                 manual_thresholds=None,
-                 manual_person_names=None,
-                 manual_item_names=None):
+    def __init__(
+        self,
+        no_of_items,
+        no_of_persons,
+        max_score_vector,
+        item_range=3,
+        category_base=1,
+        person_sd=1.5,
+        max_disorder=0,
+        offset=0,
+        missing=0,
+        manual_abilities=None,
+        manual_diffs=None,
+        manual_thresholds=None,
+        manual_person_names=None,
+        manual_item_names=None,
+    ):
+        """
+        Instantiate and run a PCM simulation.
+
+        See class docstring for full parameter and attribute documentation.
+        All simulation output is generated on instantiation and stored as
+        instance attributes; see self.responses for the primary output.
+        """
 
         self.no_of_items = int(no_of_items)
         self.no_of_persons = int(no_of_persons)
@@ -108,130 +115,186 @@ class PCM_Sim(Rasch_Sim):
         self.max_disorder = max_disorder
         self.offset = offset
         self.missing = missing
-        self.abilities = manual_abilities
-        self.diffs = manual_diffs
-        self.persons = manual_person_names
-        self.items = manual_item_names
-        self.dataframe = pd.DataFrame([1])
-        self.pcm = PCM(self.dataframe, self.max_score_vector)
-        
+        self.persons = manual_abilities
+        self.items = manual_diffs
+        self.person_names = manual_person_names
+        self.item_names = manual_item_names
+        self._dummy_df = pd.DataFrame([1])
+
         # Generate person, item, and threshold parameters
 
-        assert len(self.max_score_vector) == self.no_of_items, 'Length of max score vector must match number of items.'
+        assert (
+            len(self.max_score_vector) == self.no_of_items
+        ), "Length of max score vector must match number of items."
 
-        if self.persons is not None:
-            assert len(self.persons) == self.no_of_persons, 'Length of person names must match number of persons.'
+        if self.person_names is not None:
+            assert (
+                len(self.person_names) == self.no_of_persons
+            ), "Length of person names must match number of persons."
 
-        if self.items is not None:
-            assert len(self.items) == self.no_of_items, 'Length of item names must match number of items.'
+        if self.item_names is not None:
+            assert (
+                len(self.item_names) == self.no_of_items
+            ), "Length of item names must match number of items."
 
         if manual_person_names is not None:
-            self.persons = manual_person_names
+            self.person_names = manual_person_names
 
         else:
-            self.persons = [f'Person_{person + 1}' for person in range(self.no_of_persons)]
+            self.person_names = [
+                f"Person_{person + 1}" for person in range(self.no_of_persons)
+            ]
 
-        if self.abilities is None:
-            self.abilities = np.random.normal(0, self.person_sd, self.no_of_persons)
-            self.abilities -= np.mean(self.abilities)
-            self.abilities += self.offset
+        if self.persons is None:
+            self.persons = np.random.normal(0, self.person_sd, self.no_of_persons)
+            self.persons -= np.mean(self.persons)
+            self.persons += self.offset
 
         else:
-            assert len(self.abilities) == self.no_of_persons, 'Length of manual abilities must match number of persons.'
-            self.abilities = np.array(self.abilities)
+            assert (
+                len(self.persons) == self.no_of_persons
+            ), "Length of manual abilities must match number of persons."
+            self.persons = np.array(self.persons)
 
-        self.abilities = {person: ability for person, ability in zip(self.persons, self.abilities)}
-        self.abilities = pd.Series(self.abilities)
+        self.persons = {
+            person: ability for person, ability in zip(self.person_names, self.persons)
+        }
+        self.persons = pd.Series(self.persons)
 
         if manual_item_names is not None:
-            self.items = manual_item_names
+            self.item_names = manual_item_names
 
         else:
-            self.items = [f'Item_{item + 1}' for item in range(self.no_of_items)]
+            self.item_names = [f"Item_{item + 1}" for item in range(self.no_of_items)]
 
-        if self.diffs is None:
-            self.diffs = np.random.uniform(0, 1, self.no_of_items)
-            self.diffs *= (self.item_range / (np.max(self.diffs) - np.min(self.diffs)))
-            self.diffs -= np.mean(self.diffs)
+        if self.items is None:
+            self.items = np.random.uniform(0, 1, self.no_of_items)
+            self.items *= self.item_range / (np.max(self.items) - np.min(self.items))
+            self.items -= np.mean(self.items)
 
         else:
-            assert len(self.diffs) == self.no_of_items, 'Length of manual difficulties must match number of items.'
-            self.diffs = np.array(self.diffs)
+            assert (
+                len(self.items) == self.no_of_items
+            ), "Length of manual difficulties must match number of items."
+            self.items = np.array(self.items)
 
-        self.diffs = {item: diff for item, diff in zip(self.items, self.diffs)}
-        self.diffs = pd.Series(self.diffs)
+        self.items = {item: diff for item, diff in zip(self.item_names, self.items)}
+        self.items = pd.Series(self.items)
+        self.max_score_vector = pd.Series(
+            {item: int(ms) for item, ms in zip(self.item_names, self.max_score_vector)}
+        )
 
         if manual_thresholds is None:
-            
-            category_widths = {item:
-                               np.random.uniform(self.max_disorder,
-                                                 2 * self.category_base - self.max_disorder,
-                                                 max_score - 1)
-                               for item, max_score in zip(self.items, self.max_score_vector)}
-            
-            self.thresholds_centred = {item:
-                                       np.array([np.sum(category_widths[item][:category])
-                                                 for category in range(max_score)])
-                                       for item, max_score in zip(self.items, self.max_score_vector)}
-    
-            for item in self.items:
-    
-                self.thresholds_centred[item] -= np.mean(self.thresholds_centred[item])
-                self.thresholds_centred[item] = np.insert(self.thresholds_centred[item], 0, 0)
+
+            category_widths = {
+                item: np.random.uniform(
+                    self.max_disorder,
+                    2 * self.category_base - self.max_disorder,
+                    max_score - 1,
+                )
+                for item, max_score in zip(self.item_names, self.max_score_vector)
+            }
+
+            thr_dict = {
+                item: np.array(
+                    [
+                        np.sum(category_widths[item][:category])
+                        for category in range(max_score)
+                    ]
+                )
+                for item, max_score in zip(self.item_names, self.max_score_vector)
+            }
+
+            for item in self.item_names:
+                thr_dict[item] -= np.mean(thr_dict[item])
 
         else:
-            assert len(manual_thresholds) == self.no_of_items, 'No of sets of manual thresholds must match number of items.'
+            assert (
+                len(manual_thresholds) == self.no_of_items
+            ), "No of sets of manual thresholds must match number of items."
             for item in range(no_of_items):
-                assert len(manual_thresholds[item]) == self.max_score_vector[item] + 1, ('All sets of item thresholds ' +
-                    'in manual thresholds must be max score vector plus one for the corresponding item, beginning zero.')
+                assert len(manual_thresholds[item]) == self.max_score_vector[item], (
+                    "All sets of item thresholds "
+                    + "in manual thresholds must be max score vector for the corresponding item."
+                )
             for item in range(no_of_items):
-                assert manual_thresholds[item][0] == 0 , ('All sets of item thresholds in manual thresholds must ' +
-                    'be max score vector plus one for the corresponding item, beginning zero.')
-            for item in range(no_of_items):
-                assert sum(manual_thresholds[item]) == 0 , ('All sets of item thresholds in manual thresholds must ' +
-                    'sum to zero.')
+                assert sum(manual_thresholds[item]) == 0, (
+                    "All sets of item thresholds in manual thresholds must "
+                    + "sum to zero."
+                )
 
-            self.thresholds_centred = {item: np.array(thresholds)
-                                       for item, thresholds in zip(self.items, manual_thresholds)}
+            thr_dict = {
+                item: np.array(thresholds)
+                for item, thresholds in zip(self.item_names, manual_thresholds)
+            }
 
-        self.thresholds_uncentred = {item:
-                                     self.thresholds_centred[item][1:] + self.diffs[item]
-                                     for item in self.items}
+        # thresholds as NaN-padded DataFrame (items × threshold indices)
+        max_len = max(len(thr_dict[item]) for item in self.item_names)
+        thr_rows = {}
+        for item in self.item_names:
+            arr = thr_dict[item]
+            row = np.full(max_len, np.nan)
+            row[: len(arr)] = arr
+            thr_rows[item] = row
+        self.thresholds = pd.DataFrame(thr_rows).T
 
-        threshold_list = itertools.chain.from_iterable(self.thresholds_uncentred.values())
+        unc_dict = {item: thr_dict[item] + self.items[item] for item in self.item_names}
+
+        threshold_list = itertools.chain.from_iterable(unc_dict.values())
         threshold_mean = statistics.mean(threshold_list)
-        
-        for item in self.items:
-            self.diffs[item] -= threshold_mean
-            self.thresholds_uncentred[item] -= threshold_mean
-            
+
+        for item in self.item_names:
+            self.items[item] -= threshold_mean
+            unc_dict[item] -= threshold_mean
+
+        # thresholds_uncentred as DataFrame (items × threshold indices)
+        self.thresholds_uncentred = pd.DataFrame(
+            {item: pd.Series(unc_dict[item]) for item in self.item_names}
+        ).T
+
         # Calculate category probabilities for each person-item combination
 
         max_max_score = max(self.max_score_vector)
 
-        self.cat_probs = {cat: pd.DataFrame(0, index=self.persons, columns=self.items)
-                          for cat in range(max_max_score + 1)}
+        self.cat_probs = {
+            cat: pd.DataFrame(0, index=self.person_names, columns=self.item_names)
+            for cat in range(max_max_score + 1)
+        }
 
-        for i, item in enumerate(self.items):
-            for cat in range(self.max_score_vector[i] + 1):
-                self.cat_probs[cat][item] = (self.abilities * cat) - sum(self.thresholds_uncentred[item][:cat])
+        for i, item in enumerate(self.item_names):
+            for cat in range(self.max_score_vector[item] + 1):
+                self.cat_probs[cat][item] = (self.persons * cat) - sum(
+                    self.thresholds_uncentred.loc[item].dropna().iloc[:cat]
+                )
                 self.cat_probs[cat][item] = np.exp(self.cat_probs[cat][item])
 
             den_vector = sum(self.cat_probs.values())[item]
 
-            for cat in range(self.max_score_vector[i] + 1):
+            for cat in range(self.max_score_vector[item] + 1):
                 self.cat_probs[cat][item] /= den_vector
-        
+
         # Calculate scores and apply missing data
 
-        scoring_randoms = pd.DataFrame(self.randoms(), columns=self.items, index=self.persons)
+        scoring_randoms = pd.DataFrame(
+            self.randoms(), columns=self.item_names, index=self.person_names
+        )
 
-        cum_probs = {cat + 1: sum(self.cat_probs[category] for category in range(cat + 1, max_max_score + 1))
-                     for cat in range(max_max_score)}
+        cum_probs = {
+            cat
+            + 1: sum(
+                self.cat_probs[category]
+                for category in range(cat + 1, max_max_score + 1)
+            )
+            for cat in range(max_max_score)
+        }
 
-        self.scores = {cat + 1: scoring_randoms < cum_probs[cat + 1]
-                       for cat in range(max_max_score)}
-        self.scores = sum(self.scores.values())
+        self.responses = {
+            cat + 1: scoring_randoms < cum_probs[cat + 1]
+            for cat in range(max_max_score)
+        }
+        self.responses = sum(self.responses.values())
 
-        missing_randoms = pd.DataFrame(self.randoms(), columns=self.items, index=self.persons)
-        self.scores[missing_randoms < self.missing] = np.nan
+        missing_randoms = pd.DataFrame(
+            self.randoms(), columns=self.item_names, index=self.person_names
+        )
+        self.responses[missing_randoms < self.missing] = np.nan

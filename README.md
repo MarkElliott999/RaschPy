@@ -1,12 +1,12 @@
 # RaschPy
-_RaschPy_ is a Python package for Rasch analysis which can estimate parameters for a variety of Rasch models, generate a range of model fit statistics and output tables and graphical plots. _RaschPy_ also contains simulation functionality (used for the simulations in this work). _RaschPy_ is open source and free to download. Specifications are subject to change as the software is developed; the details listed here are correct at the time of writing (January 2024). The following is not intended to be a user manual, or even fully comprehensive at the time of writing, but rather to highlight the main functionality of _RaschPy_. A full navigable manual is available in the GitHub repository. A basic Excel spreadsheet demonstrating the PAIR algorithm for dichotomous data is also available, following the example of the Moulton JMLE dichotomous demo available via https://www.rasch.org/moulton.htm  (and using the same set of responses - the final results are compared to the Moulton JMLE output).
+_RaschPy_ is a Python package for Rasch analysis which can estimate parameters for a variety of Rasch models, generate a range of model fit statistics, and output tables and graphical plots. _RaschPy_ also contains simulation functionality. _RaschPy_ is open source and free to download. The following is intended to highlight the main functionality of _RaschPy_ rather than serve as a comprehensive user manual; a full navigable manual is available in the GitHub repository. A basic Excel spreadsheet demonstrating the PAIR algorithm for dichotomous data is also available, following the example of the Moulton JMLE dichotomous demo available via https://www.rasch.org/moulton.htm (and using the same set of responses — the final results are compared to the Moulton JMLE output).
 
 ## Models
 _RaschPy_ has a parent class `Rasch` for analysis, with the following child classes for different Rasch models:
 - `SLM` for the simple logistic model (dichotomous Rasch model) (Rasch 1960)
 - `PCM` for the partial credit model (Masters 1982)
 - `RSM` for the rating scale model (Andrich 1978)
-- `MFRM` for the many-facet Rasch model (rating scale model formulation) (Linacre 1994), including extended rater representations (Elliott and Buttery 2022a)
+- `MFRM` for the many-facet Rasch model (rating scale model formulation) (Linacre 1994), including extended rater representations (Elliott and Buttery 2022a), with four rater parameterisations (global, items, thresholds, matrix) and a bivector formulation
 
 ## Analysis
 To analyse data, create an object in the appropriate class, passing a pandas DataFrame of response data as an argument along with other arguments relevant to the chosen Rasch model, such as the maximum score for `RSM` or `MFRM`, or a vector of maximum scores for `PCM`. At the time of writing, the `RSM` and `MFRM` classes only support a single response group (i.e. all items must have the same threshold structure), and the `MFRM` class only supports one additional facet for rater severity. Parameter estimation uses variants of PAIR (Choppin 1968, 1985), the eigenvector method (Garner & Engelhard 2002, 2009) and CPAT (Elliott & Buttery 2022a, 2022b).
@@ -53,7 +53,13 @@ Dichotomous data (0/1). Each row is a person, each column an item.
 
 ```python
 from raschpy import SLM
+from raschpy.simulation import SLM_Sim
 
+# Pass a simulation object directly — generating parameters are attached to m.generating
+sim = SLM_Sim(no_of_items=10, no_of_persons=300)
+m = SLM(sim)
+
+# Or pass a DataFrame as usual
 m = SLM(responses)
 m.calibrate()          # PAIR item difficulty estimation
 m.fit_statistics()     # item, person, and test-level fit
@@ -75,6 +81,18 @@ m.std_residuals_plot(normal=True)  # Standardised residuals histogram
 m.save_stats('slm_results', format='xlsx')
 ```
 
+**Score lookup and person estimation**
+
+```python
+# Convert raw scores to ability estimates
+m.score_lookup_table()
+print(m.score_lookup)   # pandas Series indexed by raw score
+
+# By default, extreme scores (0 and perfect) are excluded from person estimates.
+# To include them, treated as incorrect rather than missing:
+m.person_estimates(missing_as_incorrect=False)
+```
+
 ---
 
 ### Partial Credit Model (PCM)
@@ -83,7 +101,13 @@ Polytomous data where items may have different maximum scores.
 
 ```python
 from raschpy import PCM
+from raschpy.simulation import PCM_Sim
 
+# Pass a simulation object directly — generating parameters are attached to m.generating
+sim = PCM_Sim(no_of_items=5, no_of_persons=300, max_score_vector=[3, 3, 4, 4, 3])
+m = PCM(sim)
+
+# Or pass a DataFrame as usual
 m = PCM(responses, max_score_vector=[3, 3, 4, 4, 3])
 m.calibrate()
 m.fit_statistics()
@@ -100,6 +124,9 @@ m.crcs(item='Item_1', obs='all')           # Category Response Curves
 m.threshold_ccs(item='Item_1', obs='all')  # Threshold Characteristic Curves
 m.tcc(obs=True)
 
+m.score_lookup_table()
+print(m.score_lookup)   # pandas Series indexed by raw score
+
 m.save_stats('pcm_results', format='xlsx')
 ```
 
@@ -111,7 +138,13 @@ Polytomous data where all items share the same rating scale structure.
 
 ```python
 from raschpy import RSM
+from raschpy.simulation import RSM_Sim
 
+# Pass a simulation object directly — generating parameters are attached to m.generating
+sim = RSM_Sim(no_of_items=8, no_of_persons=300, max_score=4)
+m = RSM(sim)
+
+# Or pass a DataFrame as usual
 m = RSM(responses, max_score=4)
 m.calibrate()
 m.fit_statistics()
@@ -126,6 +159,9 @@ m.icc(item='Item_1', obs=True)
 m.crcs(obs='all')         # Pooled across all items
 m.threshold_ccs(obs='all')
 m.tcc(obs=True)
+
+m.score_lookup_table()
+print(m.score_lookup)   # pandas Series indexed by raw score
 
 m.save_stats('rsm_results', format='xlsx')
 ```
@@ -178,27 +214,64 @@ m.rater_stats_df(model='items', full=True)
 print(m.rater_stats_items)  # Per-item severity table
 ```
 
+**Extreme and invalid persons**
+
+Persons with entirely missing data are always removed at instantiation and stored in `m.invalid_responses`. Persons with extreme scores (all-zero or perfect) are removed only when `extreme_persons=False` is passed to the constructor, and are stored in `m.extreme_persons`.
+
+---
+
+### Many-Facet Rasch Model — Bivector formulation
+
+The bivector formulation represents rater severity as an additive combination of per-item leniency effects and per-threshold consistency effects, allowing rater behaviour to vary systematically across the latent continuum. It is available as a fifth parameterisation:
+
+```python
+m.calibrate(model='bivector')
+m.fit_statistics(model='bivector')
+
+m.rater_stats_df(model='bivector', full=True)
+# rater_stats_bivector has MultiIndex columns:
+# per-item marginal severities, then per-threshold marginal severities,
+# plus overall fit statistics
+print(m.rater_stats_bivector)
+
+m.icc(item='Item_1', model='bivector', obs=True)
+m.tcc(model='bivector', obs=True)
+
+m.save_stats(model='bivector', filename='mfrm_bivector_results', format='xlsx')
+```
+
 ---
 
 ### Simulation
 
-_RaschPy_ includes simulation classes for generating synthetic data under each model, useful for testing and methodological work:
+_RaschPy_ includes simulation classes for generating synthetic data under each model. Simulation runs automatically on instantiation; generating parameters are stored as attributes on the simulation object (`sim.items`, `sim.persons`, `sim.thresholds`, and for MFRM models `sim.facet_effects`). When a simulation object is passed directly to a model constructor, the generating parameters are also attached to the model object under a `generating` namespace, making recovery comparisons straightforward:
 
 ```python
 from raschpy.simulation import SLM_Sim, RSM_Sim, PCM_Sim
 from raschpy.simulation import MFRM_Sim_Global, MFRM_Sim_Items, MFRM_Sim_Thresholds, MFRM_Sim_Matrix
 
 sim = SLM_Sim(no_of_items=10, no_of_persons=300, item_range=3, person_sd=1.5)
-data = sim.scores   # pandas DataFrame, ready to pass to SLM()
+data = sim.responses   # pandas DataFrame, ready to pass to SLM()
 
 sim = RSM_Sim(no_of_items=8, no_of_persons=300, max_score=4)
-data = sim.scores
+data = sim.responses
 
 sim = PCM_Sim(no_of_items=6, no_of_persons=300, max_score_vector=[3, 3, 3, 4, 4, 4])
-data = sim.scores
+data = sim.responses
 
 sim = MFRM_Sim_Global(no_of_items=6, no_of_persons=200, no_of_raters=4, max_score=3)
-data = sim.scores   # (Rater, Person) MultiIndex DataFrame, ready to pass to MFRM()
+data = sim.responses   # (Rater, Person) MultiIndex DataFrame, ready to pass to MFRM()
+
+# Pass the sim object directly to the model constructor to attach generating parameters
+from raschpy import MFRM
+m = MFRM(sim)
+m.calibrate(model='global')
+
+# Compare generating and estimated parameters
+print(sim.items)              # Generating item difficulties
+print(m.generating.items)    # Same, accessible on the model object
+print(sim.facet_effects)     # Generating rater severities
+print(m.generating.facet_effects)
 ```
 
 ---
@@ -227,7 +300,7 @@ m.calibrate_anchor(anchors)
 ## Usage and citation
 _RaschPy_ is provided as freeware under an Apache 2.0 Licence (see LICENSE file in this repository for details). Users are free to use or modify the code for their own purposes, but should cite using the following format:
 
-Elliott, M. (2025) _RaschPy_. Downloaded from: https://github.com/MarkElliott999/RaschPy
+Elliott, M. (2026) _RaschPy_. Downloaded from: https://github.com/MarkElliott999/RaschPy
 
 ## References
 Andrich, D. (1978). A rating formulation for ordered response categories. _Psychometrika_, _43_(4), 561–573.

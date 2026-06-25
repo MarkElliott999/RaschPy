@@ -21,14 +21,15 @@ Loaders
 
 Simulation
 ----------
-    SLM_Sim            — simulate SLM data
-    PCM_Sim            — simulate PCM data
-    RSM_Sim            — simulate RSM data
-    MFRM_Sim           — simulate MFRM data (any parameterisation)
-    MFRM_Sim_Global    — MFRM simulation, global rater severity
-    MFRM_Sim_Items     — MFRM simulation, per-item rater severity
-    MFRM_Sim_Thresholds — MFRM simulation, per-threshold rater severity
-    MFRM_Sim_Matrix    — MFRM simulation, full rater × item × threshold severity
+    SLM_Sim              — simulate SLM data
+    PCM_Sim              — simulate PCM data
+    RSM_Sim              — simulate RSM data
+    MFRM_Sim             — simulate MFRM data (any parameterisation)
+    MFRM_Sim_Global      — MFRM simulation, global rater severity
+    MFRM_Sim_Items       — MFRM simulation, per-item rater severity
+    MFRM_Sim_Thresholds  — MFRM simulation, per-threshold rater severity
+    MFRM_Sim_Bivector    — MFRM simulation, additive (item + threshold) rater severity
+    MFRM_Sim_Matrix      — MFRM simulation, full rater × item × threshold severity
 """
 
 from raschpy.slm import SLM
@@ -53,6 +54,7 @@ from raschpy.simulation.mfrm_sim import (
     MFRM_Sim_Global,
     MFRM_Sim_Items,
     MFRM_Sim_Thresholds,
+    MFRM_Sim_Bivector,
     MFRM_Sim_Matrix,
 )
 
@@ -80,5 +82,6 @@ __all__ = [
     "MFRM_Sim_Global",
     "MFRM_Sim_Items",
     "MFRM_Sim_Thresholds",
+    "MFRM_Sim_Bivector",
     "MFRM_Sim_Matrix",
 ]

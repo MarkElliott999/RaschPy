@@ -1,11 +1,8 @@
-import itertools
 import warnings
-from math import exp, log, sqrt, floor
-import statistics
 
 import numpy as np
 import pandas as pd
-from scipy.stats import truncnorm, norm
+
 
 class Rasch_Sim:
     """
@@ -17,16 +14,26 @@ class Rasch_Sim:
     """
 
     def __init__(self):
-
+        """Initialise the abstract base simulation object. Not intended for direct use."""
         pass
 
     def randoms(self):
+        """
+        Generate a (no_of_persons, no_of_items) array of uniform random numbers.
 
+        Used internally by all simulation subclasses to sample response scores
+        and apply missing data patterns.
+
+        Returns
+        -------
+        numpy.ndarray
+            Shape (no_of_persons, no_of_items), values in [0, 1).
+        """
         return np.random.rand(self.no_of_persons, self.no_of_items)
 
     def rename_item(self, old, new):
         """
-        Rename a single item in the simulated scores DataFrame.
+        Rename a single item in the simulated responses DataFrame.
 
         Parameters
         ----------
@@ -34,25 +41,35 @@ class Rasch_Sim:
             Current item name.
         new : str
             Desired new item name.
+
+        Returns
+        -------
+        None
         """
 
         if old == new:
-            warnings.warn('New item name is the same as the old item name.',
-                          UserWarning, stacklevel=2)
-        elif new in self.scores.columns:
-            warnings.warn('New item name is a duplicate of an existing item name.',
-                          UserWarning, stacklevel=2)
-        if old not in self.scores.columns:
-            warnings.warn(f'Old item name {old!r} not found in data.',
-                          UserWarning, stacklevel=2)
+            warnings.warn(
+                "New item name is the same as the old item name.",
+                UserWarning,
+                stacklevel=2,
+            )
+        elif new in self.responses.columns:
+            warnings.warn(
+                "New item name is a duplicate of an existing item name.",
+                UserWarning,
+                stacklevel=2,
+            )
+        if old not in self.responses.columns:
+            warnings.warn(
+                f"Old item name {old!r} not found in data.", UserWarning, stacklevel=2
+            )
         if not isinstance(new, str):
-            warnings.warn('Item names must be strings.',
-                          UserWarning, stacklevel=2)
+            warnings.warn("Item names must be strings.", UserWarning, stacklevel=2)
 
         else:
-            self.scores.rename(columns={old: new}, inplace=True)
+            self.responses.rename(columns={old: new}, inplace=True)
 
-        self.items = self.scores.columns.tolist()
+        self.item_names = self.responses.columns.tolist()
 
     def rename_items_all(self, new_names):
         """
@@ -62,29 +79,41 @@ class Rasch_Sim:
         ----------
         new_names : list of str
             New item names in the same order as self.items.
+
+        Returns
+        -------
+        None
         """
 
         list_length = len(new_names)
 
         if len(new_names) != len(set(new_names)):
-            warnings.warn('List of new item names contains duplicates.',
-                          UserWarning, stacklevel=2)
+            warnings.warn(
+                "List of new item names contains duplicates.", UserWarning, stacklevel=2
+            )
         elif list_length != self.no_of_items:
-            warnings.warn(f'Incorrect number of item names: {list_length} provided, '
-                          f'{self.no_of_items} items in data.',
-                          UserWarning, stacklevel=2)
+            warnings.warn(
+                f"Incorrect number of item names: {list_length} provided, "
+                f"{self.no_of_items} items in data.",
+                UserWarning,
+                stacklevel=2,
+            )
         if not all(isinstance(name, str) for name in new_names):
-            warnings.warn('Item names must be strings.',
-                          UserWarning, stacklevel=2)
+            warnings.warn("Item names must be strings.", UserWarning, stacklevel=2)
 
         else:
-            self.scores.rename(columns={old: new for old, new in zip(self.scores.columns, new_names)}, inplace=True)
+            self.responses.rename(
+                columns={
+                    old: new for old, new in zip(self.responses.columns, new_names)
+                },
+                inplace=True,
+            )
 
-        self.items = self.scores.columns.tolist()
+        self.item_names = self.responses.columns.tolist()
 
     def rename_person(self, old, new):
         """
-        Rename a single person in the simulated scores DataFrame.
+        Rename a single person in the simulated responses DataFrame.
 
         Parameters
         ----------
@@ -92,25 +121,35 @@ class Rasch_Sim:
             Current person name.
         new : str
             Desired new person name.
+
+        Returns
+        -------
+        None
         """
 
         if old == new:
-            warnings.warn('New person name is the same as the old person name.',
-                          UserWarning, stacklevel=2)
-        elif new in self.scores.index:
-            warnings.warn('New person name is a duplicate of an existing person name.',
-                          UserWarning, stacklevel=2)
-        if old not in self.scores.index:
-            warnings.warn(f'Old person name {old!r} not found in data.',
-                          UserWarning, stacklevel=2)
+            warnings.warn(
+                "New person name is the same as the old person name.",
+                UserWarning,
+                stacklevel=2,
+            )
+        elif new in self.responses.index:
+            warnings.warn(
+                "New person name is a duplicate of an existing person name.",
+                UserWarning,
+                stacklevel=2,
+            )
+        if old not in self.responses.index:
+            warnings.warn(
+                f"Old person name {old!r} not found in data.", UserWarning, stacklevel=2
+            )
         if not isinstance(new, str):
-            warnings.warn('Person names must be strings.',
-                          UserWarning, stacklevel=2)
+            warnings.warn("Person names must be strings.", UserWarning, stacklevel=2)
 
         else:
-            self.scores.rename(index={old: new}, inplace=True)
+            self.responses.rename(index={old: new}, inplace=True)
 
-        self.persons = self.scores.index.tolist()
+        self.person_names = self.responses.index.tolist()
 
     def rename_persons_all(self, new_names):
         """
@@ -120,32 +159,39 @@ class Rasch_Sim:
         ----------
         new_names : list of str
             New person names in the same order as self.persons.
+
+        Returns
+        -------
+        None
         """
 
         list_length = len(new_names)
 
         if len(new_names) != len(set(new_names)):
-            warnings.warn('List of new person names contains duplicates.',
-                          UserWarning, stacklevel=2)
+            warnings.warn(
+                "List of new person names contains duplicates.",
+                UserWarning,
+                stacklevel=2,
+            )
         elif list_length != self.no_of_persons:
-            warnings.warn(f'Incorrect number of person names: {list_length} provided, '
-                          f'{self.no_of_persons} persons in data.',
-                          UserWarning, stacklevel=2)
+            warnings.warn(
+                f"Incorrect number of person names: {list_length} provided, "
+                f"{self.no_of_persons} persons in data.",
+                UserWarning,
+                stacklevel=2,
+            )
         if not all(isinstance(name, str) for name in new_names):
-            warnings.warn('Person names must be strings.',
-                          UserWarning, stacklevel=2)
+            warnings.warn("Person names must be strings.", UserWarning, stacklevel=2)
 
         else:
-            self.scores.rename(index={old: new for old, new in zip(self.scores.index, new_names)}, inplace=True)
+            self.responses.rename(
+                index={old: new for old, new in zip(self.responses.index, new_names)},
+                inplace=True,
+            )
 
-        self.persons = self.scores.index.tolist()
+        self.person_names = self.responses.index.tolist()
 
-    def produce_df(self,
-                   rows,
-                   columns,
-                   row_names=None,
-                   column_names=None):
-
+    def produce_df(self, rows, columns, row_names=None, column_names=None):
         """
         Build an empty MultiIndex DataFrame with the given row/column structure.
 

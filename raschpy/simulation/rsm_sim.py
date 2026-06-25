@@ -1,13 +1,8 @@
-import itertools
-from math import exp, log, sqrt, floor
-import statistics
-
 import numpy as np
 import pandas as pd
-from scipy.stats import truncnorm, norm
 
 from raschpy.simulation.base_sim import Rasch_Sim
-from raschpy.rsm import RSM
+
 
 class RSM_Sim(Rasch_Sim):
     """
@@ -16,7 +11,7 @@ class RSM_Sim(Rasch_Sim):
     Generates item difficulties, shared Rasch-Andrich thresholds, and person
     abilities, then computes category probabilities and samples scores. All items
     share the same threshold structure. Simulation runs automatically on
-    instantiation; access results via self.scores.
+    instantiation; access results via self.responses.
 
     Parameters
     ----------
@@ -54,21 +49,21 @@ class RSM_Sim(Rasch_Sim):
 
     Attributes set
     --------------
-    scores : pandas.DataFrame
+    responses : pandas.DataFrame
         Simulated response matrix, shape (no_of_persons, no_of_items).
         Values are integers in [0, max_score] or NaN (missing).
-    abilities : pandas.Series
+    persons : pandas.Series
         True person ability parameters, indexed by person.
-    diffs : pandas.Series
+    items : pandas.Series
         True item difficulty parameters, indexed by item.
     thresholds : numpy.ndarray
         True Rasch-Andrich threshold vector, length max_score + 1,
         with thresholds[0] = 0.
     cat_probs : dict
         {cat: DataFrame} of category probabilities used for simulation.
-    persons : list of str
+    person_names : list of str
         Person labels.
-    items : list of str
+    item_names : list of str
         Item labels.
     no_of_items : int
         Number of items.
@@ -78,21 +73,30 @@ class RSM_Sim(Rasch_Sim):
         Maximum score per item.
     """
 
-    def __init__(self,
-                 no_of_items,
-                 no_of_persons,
-                 max_score,
-                 item_range=3,
-                 category_base=1,
-                 person_sd=1.5,
-                 max_disorder=0,
-                 offset=0,
-                 missing=0 ,
-                 manual_abilities=None,
-                 manual_diffs=None,
-                 manual_thresholds=None,
-                 manual_person_names=None,
-                 manual_item_names=None):
+    def __init__(
+        self,
+        no_of_items,
+        no_of_persons,
+        max_score,
+        item_range=3,
+        category_base=1,
+        person_sd=1.5,
+        max_disorder=0,
+        offset=0,
+        missing=0,
+        manual_abilities=None,
+        manual_diffs=None,
+        manual_thresholds=None,
+        manual_person_names=None,
+        manual_item_names=None,
+    ):
+        """
+        Instantiate and run an RSM simulation.
+
+        See class docstring for full parameter and attribute documentation.
+        All simulation output is generated on instantiation and stored as
+        instance attributes; see self.responses for the primary output.
+        """
 
         self.no_of_items = int(no_of_items)
         self.no_of_persons = int(no_of_persons)
@@ -103,82 +107,98 @@ class RSM_Sim(Rasch_Sim):
         self.max_disorder = max_disorder
         self.offset = offset
         self.missing = missing
-        self.abilities = manual_abilities
-        self.diffs = manual_diffs
+        self.persons = manual_abilities
+        self.items = manual_diffs
         self.thresholds = manual_thresholds
-        self.persons = manual_person_names
-        self.items = manual_item_names
-        self.dataframe = pd.DataFrame([self.max_score])
-        self.rsm = RSM(self.dataframe, self.max_score)
+        self.person_names = manual_person_names
+        self.item_names = manual_item_names
+        self._dummy_df = pd.DataFrame([self.max_score])
 
         # Generate person, item, and threshold parameters
 
-        if self.persons is not None:
-            assert len(self.persons) == self.no_of_persons, 'Length of person names must match number of persons.'
+        if self.person_names is not None:
+            assert (
+                len(self.person_names) == self.no_of_persons
+            ), "Length of person names must match number of persons."
 
-        if self.items is not None:
-            assert len(self.items) == self.no_of_items, 'Length of item names must match number of items.'
+        if self.item_names is not None:
+            assert (
+                len(self.item_names) == self.no_of_items
+            ), "Length of item names must match number of items."
 
         if manual_person_names is not None:
-            self.persons = manual_person_names
+            self.person_names = manual_person_names
 
         else:
-            self.persons = [f'Person_{person + 1}' for person in range(self.no_of_persons)]
+            self.person_names = [
+                f"Person_{person + 1}" for person in range(self.no_of_persons)
+            ]
 
-        if self.abilities is None:
-            self.abilities = np.random.normal(0, self.person_sd, self.no_of_persons)
-            self.abilities -= np.mean(self.abilities)
-            self.abilities += self.offset
+        if self.persons is None:
+            self.persons = np.random.normal(0, self.person_sd, self.no_of_persons)
+            self.persons -= np.mean(self.persons)
+            self.persons += self.offset
 
         else:
-            assert len(self.abilities) == self.no_of_persons, 'Length of manual abilities must match number of persons.'
-            self.abilities = np.array(self.abilities)
+            assert (
+                len(self.persons) == self.no_of_persons
+            ), "Length of manual abilities must match number of persons."
+            self.persons = np.array(self.persons)
 
-        self.abilities = {person: ability for person, ability in zip(self.persons, self.abilities)}
-        self.abilities = pd.Series(self.abilities)
+        self.persons = {
+            person: ability for person, ability in zip(self.person_names, self.persons)
+        }
+        self.persons = pd.Series(self.persons)
 
         if manual_item_names is not None:
-            self.items = manual_item_names
+            self.item_names = manual_item_names
 
         else:
-            self.items = [f'Item_{item + 1}' for item in range(self.no_of_items)]
+            self.item_names = [f"Item_{item + 1}" for item in range(self.no_of_items)]
 
-        if self.diffs is None:
-            self.diffs = np.random.uniform(0, 1, self.no_of_items)
-            self.diffs *= (self.item_range / (np.max(self.diffs) - np.min(self.diffs)))
-            self.diffs -= np.mean(self.diffs)
+        if self.items is None:
+            self.items = np.random.uniform(0, 1, self.no_of_items)
+            self.items *= self.item_range / (np.max(self.items) - np.min(self.items))
+            self.items -= np.mean(self.items)
 
         else:
-            assert len(self.diffs) == self.no_of_items, 'Length of manual difficulties must match number of items.'
-            self.diffs = np.array(self.diffs)
+            assert (
+                len(self.items) == self.no_of_items
+            ), "Length of manual difficulties must match number of items."
+            self.items = np.array(self.items)
 
-        self.diffs = {item: diff for item, diff in zip(self.items, self.diffs)}
-        self.diffs = pd.Series(self.diffs)
+        self.items = {item: diff for item, diff in zip(self.item_names, self.items)}
+        self.items = pd.Series(self.items)
 
         if self.thresholds is None:
-            category_widths = np.random.uniform(self.max_disorder,
-                                                2 * self.category_base - self.max_disorder,
-                                                self.max_score)       
-            self.thresholds = [np.sum(category_widths[:category])
-                               for category in range(self.max_score)]
+            category_widths = np.random.uniform(
+                self.max_disorder,
+                2 * self.category_base - self.max_disorder,
+                self.max_score,
+            )
+            self.thresholds = [
+                np.sum(category_widths[:category]) for category in range(self.max_score)
+            ]
             self.thresholds = np.array(self.thresholds)
             self.thresholds -= np.mean(self.thresholds)
-            self.thresholds = np.insert(self.thresholds, 0, 0)
+            self.thresholds = pd.Series(self.thresholds)
 
         else:
-            assert len(self.thresholds) == self.max_score + 1, 'Number of manual thresholds must be max score plus 1.'
-            assert self.thresholds[0] == 0, 'First threshold in manual thresholds must have value zero.'
-            assert sum(manual_thresholds) == 0 , ('Manual thresholds must sum to zero.')
-            self.thresholds = np.array(self.thresholds)
+            assert (
+                len(self.thresholds) == self.max_score
+            ), "Number of manual thresholds must be max score."
+            assert sum(manual_thresholds) == 0, "Manual thresholds must sum to zero."
+            self.thresholds = pd.Series(np.array(self.thresholds))
 
         # Calculate category probabilities for each person-item combination
 
-        c_p_df = {item: self.abilities - self.diffs[item]
-                  for item in self.items}
+        c_p_df = {item: self.persons - self.items[item] for item in self.item_names}
         c_p_df = pd.DataFrame(c_p_df)
 
-        self.cat_probs = {cat: (cat * c_p_df) - sum(self.thresholds[:cat + 1])
-                          for cat in range(self.max_score + 1)}
+        self.cat_probs = {
+            cat: (cat * c_p_df) - sum(self.thresholds.iloc[:cat])
+            for cat in range(self.max_score + 1)
+        }
         for cat in range(self.max_score + 1):
             self.cat_probs[cat] = np.exp(self.cat_probs[cat])
 
@@ -189,11 +209,19 @@ class RSM_Sim(Rasch_Sim):
 
         # Calculate scores and apply missing data
 
-        scoring_randoms = pd.DataFrame(self.randoms(), columns=self.items, index=self.persons)
+        scoring_randoms = pd.DataFrame(
+            self.randoms(), columns=self.item_names, index=self.person_names
+        )
 
-        self.scores = sum(scoring_randoms < sum(self.cat_probs[category]
-                                                for category in range(cat, self.max_score + 1))
-                          for cat in range(1, self.max_score + 1))
+        self.responses = sum(
+            scoring_randoms
+            < sum(
+                self.cat_probs[category] for category in range(cat, self.max_score + 1)
+            )
+            for cat in range(1, self.max_score + 1)
+        )
 
-        missing_randoms = pd.DataFrame(self.randoms(), columns=self.items, index=self.persons)
-        self.scores[missing_randoms < self.missing] = np.nan
+        missing_randoms = pd.DataFrame(
+            self.randoms(), columns=self.item_names, index=self.person_names
+        )
+        self.responses[missing_randoms < self.missing] = np.nan

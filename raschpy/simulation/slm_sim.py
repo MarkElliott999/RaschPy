@@ -1,13 +1,8 @@
-import itertools
-from math import exp, log, sqrt, floor
-import statistics
-
 import numpy as np
 import pandas as pd
-from scipy.stats import truncnorm, norm
 
 from raschpy.simulation.base_sim import Rasch_Sim
-from raschpy.slm import SLM
+
 
 class SLM_Sim(Rasch_Sim):
     """
@@ -16,7 +11,7 @@ class SLM_Sim(Rasch_Sim):
     Generates item difficulties from a uniform distribution scaled to item_range,
     person abilities from a normal distribution, and response scores by comparing
     uniform random draws against the SLM response probability. Simulation runs
-    automatically on instantiation; access results via self.scores.
+    automatically on instantiation; access results via self.responses.
 
     Parameters
     ----------
@@ -46,105 +41,130 @@ class SLM_Sim(Rasch_Sim):
 
     Attributes set
     --------------
-    scores : pandas.DataFrame
+    responses : pandas.DataFrame
         Simulated response matrix, shape (no_of_persons, no_of_items).
         Values are 0, 1, or NaN (missing). This is the primary output.
-    abilities : pandas.Series
+    persons : pandas.Series
         True person ability parameters used for simulation, indexed by person.
-    diffs : pandas.Series
+    items : pandas.Series
         True item difficulty parameters used for simulation, indexed by item.
     probs : pandas.DataFrame
         Probability of a correct response for each person-item combination.
-    persons : list of str
+    person_names : list of str
         Person labels.
-    items : list of str
+    item_names : list of str
         Item labels.
     no_of_items : int
         Number of items.
     no_of_persons : int
         Number of persons.
     """
-    
-    def __init__(self,
-                 no_of_items,
-                 no_of_persons,
-                 item_range=3,
-                 person_sd=1.5,
-                 offset=0,
-                 missing=0,
-                 manual_abilities=None,
-                 manual_diffs=None,
-                 manual_person_names=None,
-                 manual_item_names=None):
-        
+
+    def __init__(
+        self,
+        no_of_items,
+        no_of_persons,
+        item_range=3,
+        person_sd=1.5,
+        offset=0,
+        missing=0,
+        manual_abilities=None,
+        manual_diffs=None,
+        manual_person_names=None,
+        manual_item_names=None,
+    ):
+        """
+        Instantiate and run an SLM simulation.
+
+        See class docstring for full parameter and attribute documentation.
+        All simulation output is generated on instantiation and stored as
+        instance attributes; see self.responses for the primary output.
+        """
+
         self.no_of_items = int(no_of_items)
         self.no_of_persons = int(no_of_persons)
         self.item_range = item_range
         self.person_sd = person_sd
         self.offset = offset
         self.missing = missing
-        self.abilities = manual_abilities
-        self.diffs = manual_diffs
-        self.persons = manual_person_names
-        self.items = manual_item_names
-        self.dataframe = pd.DataFrame([1])
-        self.slm = SLM(self.dataframe)
-        
+        self.persons = manual_abilities
+        self.items = manual_diffs
+        self.person_names = manual_person_names
+        self.item_names = manual_item_names
+        self._dummy_df = pd.DataFrame([1])
+
         # Generate person and item parameters
 
-        if self.persons is not None:
-            assert len(self.persons) == self.no_of_persons, 'Length of person names must match number of persons.'
+        if self.person_names is not None:
+            assert (
+                len(self.person_names) == self.no_of_persons
+            ), "Length of person names must match number of persons."
 
-        if self.items is not None:
-            assert len(self.items) == self.no_of_items, 'Length of item names must match number of items.'
+        if self.item_names is not None:
+            assert (
+                len(self.item_names) == self.no_of_items
+            ), "Length of item names must match number of items."
 
         if manual_person_names is not None:
-            self.persons = manual_person_names
+            self.person_names = manual_person_names
 
         else:
-            self.persons = [f'Person_{person + 1}' for person in range(self.no_of_persons)]
+            self.person_names = [
+                f"Person_{person + 1}" for person in range(self.no_of_persons)
+            ]
 
-        if self.abilities is None:
-            self.abilities = np.random.normal(0, self.person_sd, self.no_of_persons)
-            self.abilities -= np.mean(self.abilities)
-            self.abilities += self.offset
+        if self.persons is None:
+            self.persons = np.random.normal(0, self.person_sd, self.no_of_persons)
+            self.persons -= np.mean(self.persons)
+            self.persons += self.offset
 
         else:
-            assert len(self.abilities) == self.no_of_persons, 'Length of manual abilities must match number of persons.'
-            self.abilities = np.array(self.abilities)
+            assert (
+                len(self.persons) == self.no_of_persons
+            ), "Length of manual abilities must match number of persons."
+            self.persons = np.array(self.persons)
 
-        self.abilities = {person: ability for person, ability in zip(self.persons, self.abilities)}
-        self.abilities = pd.Series(self.abilities)
+        self.persons = {
+            person: ability for person, ability in zip(self.person_names, self.persons)
+        }
+        self.persons = pd.Series(self.persons)
 
         if manual_item_names is not None:
-            self.items = manual_item_names
+            self.item_names = manual_item_names
 
         else:
-            self.items = [f'Item_{item + 1}' for item in range(self.no_of_items)]
-        
-        if self.diffs is None:
-            self.diffs = np.random.uniform(0, 1, self.no_of_items)
-            self.diffs *= (self.item_range / (np.max(self.diffs) - np.min(self.diffs)))
-            self.diffs -= np.mean(self.diffs)
+            self.item_names = [f"Item_{item + 1}" for item in range(self.no_of_items)]
+
+        if self.items is None:
+            self.items = np.random.uniform(0, 1, self.no_of_items)
+            self.items *= self.item_range / (np.max(self.items) - np.min(self.items))
+            self.items -= np.mean(self.items)
 
         else:
-            assert len(self.diffs) == self.no_of_items, 'Length of manual difficulties must match number of items.'
-            self.diffs = np.array(self.diffs)
-            
-        self.diffs = {item: diff for item, diff in zip(self.items, self.diffs)}
-        self.diffs = pd.Series(self.diffs)
+            assert (
+                len(self.items) == self.no_of_items
+            ), "Length of manual difficulties must match number of items."
+            self.items = np.array(self.items)
+
+        self.items = {item: diff for item, diff in zip(self.item_names, self.items)}
+        self.items = pd.Series(self.items)
 
         # Calculate probability of a correct response for each person on each item
 
-        self.probs = {item: self.diffs[item] - self.abilities
-                      for item in self.items}
-        self.probs = pd.DataFrame(self.probs, columns=self.items, index=self.persons)
+        self.probs = {item: self.items[item] - self.persons for item in self.item_names}
+        self.probs = pd.DataFrame(
+            self.probs, columns=self.item_names, index=self.person_names
+        )
         self.probs = 1 / (1 + np.exp(self.probs))
-        
+
         # Calculate scores and apply missing data
 
-        scoring_randoms = pd.DataFrame(self.randoms(), columns=self.items, index=self.persons)
-        self.scores = (scoring_randoms <= self.probs).astype(int)
+        scoring_randoms = pd.DataFrame(
+            self.randoms(), columns=self.item_names, index=self.person_names
+        )
+        self.responses = (scoring_randoms <= self.probs).astype(int)
 
-        missing_randoms = pd.DataFrame(self.randoms(), columns=self.items, index=self.persons)
-        self.scores[missing_randoms < self.missing] = np.nan
+        missing_randoms = pd.DataFrame(
+            self.randoms(), columns=self.item_names, index=self.person_names
+        )
+        self.responses[missing_randoms < self.missing] = np.nan

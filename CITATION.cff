@@ -6,10 +6,11 @@ abstract: "A Python package for Rasch measurement, implementing the Simple Logis
 authors:
   - family-names: Elliott
     given-names: Mark
+    email: mwe24@cam.ac.uk
 repository-code: "https://github.com/MarkElliott999/RaschPy"
 license: Apache-2.0
 version: "0.1.0"
-date-released: "2025-01-01"
+date-released: "2026-06-16"
 
 preferred-citation:
   type: article
@@ -51,3 +52,30 @@ references:
     start: 870
     end: 872
     year: 1968
+ - type: article
+    authors:
+      - family-names: Garner
+        given-names: Mary
+      - family-names: Engelhard
+        given-names: George
+    title: "An eigenvector method for estimating item parameters of the dichotomous and polytomous Rasch models"
+    journal: "Journal of Applied Measurement"
+    volume: 3
+    issue: 2
+    start: 107
+    end: 128
+    year: 2002
+
+  - type: article
+    authors:
+      - family-names: Garner
+        given-names: Mary
+      - family-names: Engelhard
+        given-names: George
+    title: "Using paired comparison matrices to estimate parameters of the partial credit Rasch measurement model for rater-mediated assessments"
+    journal: "Journal of Applied Measurement"
+    volume: 10
+    issue: 1
+    start: 30
+    end: 41
+    year: 2009

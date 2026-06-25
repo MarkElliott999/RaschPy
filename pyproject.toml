@@ -4,16 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "raschpy"
-version = "0.1.0"
+version = "1.0.0"
 description = "Rasch measurement in Python: SLM, PCM, RSM, and Many-Facet Rasch models"
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [
-    { name = "Mark Elliott" }
+    { name = "Mark Elliott", email = "mwe24@cam.ac.uk" }
 ]
 keywords = ["rasch", "psychometrics", "item response theory", "measurement"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Science/Research",
     "Intended Audience :: Education",
     "License :: OSI Approved :: Apache Software License",
@@ -21,13 +21,14 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering",
     "Topic :: Scientific/Engineering :: Mathematics",
 ]
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.24",
-    "pandas>=1.5",
+    "pandas>=2.0",
     "scipy>=1.9",
     "scikit-learn>=1.1",
     "matplotlib>=3.6",

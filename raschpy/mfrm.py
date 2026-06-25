@@ -1,9 +1,8 @@
-from math import exp, log, sqrt, floor
+from math import log
 import warnings
 
 import numpy as np
 import pandas as pd
-from scipy.stats import hmean, norm
 from sklearn.decomposition import PCA
 from matplotlib import pyplot as plt
 from matplotlib import colors as colors
@@ -14,87 +13,98 @@ from raschpy.base import Rasch
 
 
 class MFRM(Rasch):
-    '''
-    Many-Facet Rasch Model (Linacre 1994) with RSM (Andrich 1978) formulation.
+    """
+    Many-Facet Rasch Model (Linacre 1994) with RSM (Andrich 1978) formulation,
+        including extended facet_element representations (Elliott & Buttery 2022a).
 
-    Supports four rater severity parameterisations:
-      'global'     — scalar severity σ_r per rater
-      'items'      — vector σ_{r,i} per (rater, item)
-      'thresholds' — vector σ_{r,k} per (rater, threshold)
-      'matrix'     — full σ_{r,i,k} per (rater, item, threshold)
+        Supports five facet_element severity parameterisations:
+          'global'     — scalar severity λ_r per facet_element
+          'items'      — vector λ_{r,i} per (facet_element, item)
+          'thresholds' — vector λ_{r,k} per (facet_element, threshold)
+          'bivector'   — additive λ_{r,i} + λ_{r,k} per (facet_element, item, threshold)
+                         (facet_element as RSM; zero-sum threshold vector per facet_element)
+          'matrix'     — full λ_{r,i,k} per (facet_element, item, threshold)
+                         (facet_element as PCM)
 
-    The log-numerator for person n, rater r, item i, category k is:
-      global:     k*(θ_n − δ_i − σ_r) − Σ τ_k
-      items:      k*(θ_n − δ_i − σ_{r,i}) − Σ τ_k
-      thresholds: k*(θ_n − δ_i) − Σ(τ_k + σ_{r,k})
-      matrix:     k*(θ_n − δ_i) − Σ(τ_k + σ_{r,i,k})
+    The log-numerator for person n, facet_element r, item i, category k is:
+      global:     k*(θ_n − δ_i − λ_r) − Σ τ_k
+          items:      k*(θ_n − δ_i − λ_{r,i}) − Σ τ_k
+          thresholds: k*(θ_n − δ_i) − Σ(τ_k + λ_{r,k})
+          bivector:   k*(θ_n − δ_i) − Σ(τ_k + λ_{r,i} + λ_{r,k})
+                  where Σ_k λ_{r,k} = 0 for each r
+          matrix:     k*(θ_n − δ_i) − Σ(τ_k + λ_{r,i,k})
 
     Data format: (Rater, Person) MultiIndex × Items DataFrame.
-    '''
+    """
 
     # ------------------------------------------------------------------
     # Model registry — maps model name to severity attribute names
     # ------------------------------------------------------------------
-    _MODELS = ('global', 'items', 'thresholds', 'matrix')
+    _MODELS = ("global", "items", "thresholds", "bivector", "matrix")
 
     def _attr(self, model, name, anchor=False):
-        '''Return the attribute name for a given model and statistic.'''
-        prefix = 'anchor_' if anchor else ''
-        suffix = f'_{model}'
-        return f'{prefix}{name}{suffix}'
+        """Return the attribute name for a given model and statistic."""
+        prefix = "anchor_" if anchor else ""
+        suffix = f"_{model}"
+        return f"{prefix}{name}{suffix}"
 
     def _get_params(self, model, anchor=False):
-        '''
+        """
         Return (difficulties, thresholds, severities) for the requested model.
         Auto-triggers calibration if not yet run.
-        '''
+        """
         if anchor:
-            diff_attr  = f'anchor_diffs_{model}'
-            thr_attr   = f'anchor_thresholds_{model}'
-            sev_attr   = f'anchor_severities_{model}'
+            diff_attr = f"anchor_items_{model}"
+            thr_attr = f"anchor_thresholds_{model}"
+            sev_attr = f"anchor_facet_effects_{model}"
             if not hasattr(self, diff_attr):
                 raise AttributeError(
-                    f'Anchor calibration required. '
-                    f'Run self.calibrate_{model}_anchor().'
+                    f"Anchor calibration required. "
+                    f"Run self.calibrate_{model}_anchor()."
                 )
         else:
-            diff_attr = 'diffs'
-            thr_attr  = 'thresholds'
-            sev_attr  = f'severities_{model}'
+            diff_attr = "items"
+            thr_attr = "thresholds"
+            sev_attr = f"facet_effects_{model}"
             if not hasattr(self, sev_attr):
                 self.calibrate(model=model)
-        return (getattr(self, diff_attr),
-                getattr(self, thr_attr),
-                getattr(self, sev_attr))
+        return (
+            getattr(self, diff_attr),
+            getattr(self, thr_attr),
+            getattr(self, sev_attr),
+        )
 
     def _get_abils(self, model, anchor=False):
-        '''Return ability estimates for the requested model. Auto-triggers if needed.'''
-        attr = f'anchor_abils_{model}' if anchor else f'abils_{model}'
+        """Return ability estimates for the requested model. Auto-triggers if needed."""
+        attr = f"anchor_persons_{model}" if anchor else f"persons_{model}"
         if not hasattr(self, attr):
-            self.person_abils(model=model, anchor=anchor)
+            self.person_estimates(model=model, anchor=anchor)
         return getattr(self, attr)
 
-    
     # ------------------------------------------------------------------
     # Initialisation
     # ------------------------------------------------------------------
 
-    def __init__(self,
-                 dataframe,
-                 max_score=0,
-                 extreme_persons=True,
-                 no_of_classes=5):
+    def __init__(
+        self,
+        responses,
+        max_score=0,
+        extreme_persons=True,
+        no_of_classes=5,
+        facet="rater",
+        facet_plural=None,
+    ):
         """
         Initialise a Many-Facet Rasch Model (MFRM) object.
 
-        The MFRM extends the RSM/PCM to include rater facets. Four rater
+        The MFRM extends the RSM/PCM to include facet_element facets. Four facet_element
         parameterisations are supported, selected at calibrate() time:
-        'global' (single severity per rater), 'items' (per-item severities),
+        'global' (single severity per facet_element), 'items' (per-item severities),
         'thresholds' (per-threshold severities), 'matrix' (per-item-threshold).
 
         Parameters
         ----------
-        dataframe : pandas.DataFrame
+        responses : pandas.DataFrame
             Response data with a (Rater, Person) MultiIndex and items as
             columns. Cell values should be non-negative integers from 0 to
             max_score; NaN for missing responses.
@@ -104,14 +114,14 @@ class MFRM(Rasch):
             maximum is never observed.
         extreme_persons : bool, default True
             If True, removes only persons with entirely missing data across
-            all raters. If False, additionally removes persons with all-zero
+            all facet_elements. If False, additionally removes persons with all-zero
             or perfect total scores.
         no_of_classes : int, default 5
             Number of class intervals for observed-data overlays on plots.
 
         Attributes set
         --------------
-        dataframe : pandas.DataFrame
+        responses : pandas.DataFrame
             Filtered response data with (Rater, Person) MultiIndex.
         invalid_responses : pandas.DataFrame
             Rows removed based on the extreme_persons rule.
@@ -122,117 +132,251 @@ class MFRM(Rasch):
         no_of_items : int
             Number of items (columns).
         no_of_raters : int
-            Number of unique raters.
+            Number of unique facet_elements.
         no_of_classes : int
             Number of class intervals for plots.
         items : pandas.Index
             Item identifiers (column names).
-        raters : pandas.Index
+        facet_elements : pandas.Index
             Rater identifiers.
         persons : pandas.Index
             Person identifiers.
-        anchor_raters_{model} : list
+        anchor_rater_names_{model} : list
             Empty list per model (global/items/thresholds/matrix) for
-            anchor rater tracking.
+            anchor facet_element tracking.
         """
-        self.max_score = int(np.nanmax(dataframe)) if max_score == 0 else max_score
 
-        unstacked_df = dataframe.unstack(level=0)
+        # Sim-aware instantiation: store sim attributes in self.generating namespace
+        from raschpy.simulation.mfrm_sim import MFRM_Sim, MFRM_Sim_Bivector
+        from raschpy.base import _SimParams
+
+        if isinstance(responses, (MFRM_Sim, MFRM_Sim_Bivector)):
+            sim = responses
+            self.generating = _SimParams()
+            for attr, value in vars(sim).items():
+                setattr(self.generating, attr, value)
+            if max_score != 0 and max_score != sim.max_score:
+                warnings.warn(
+                    f"max_score={max_score} does not match sim.max_score={sim.max_score}. "
+                    f"Using max_score={max_score}."
+                )
+                self.max_score = int(max_score)
+            else:
+                self.max_score = int(sim.max_score)
+            responses = sim.responses
+        else:
+            self.max_score = (
+                int(np.nanmax(responses)) if max_score == 0 else int(max_score)
+            )
+
+        # Validate max_score against observed data
+        observed_max = int(np.nanmax(responses))
+        if self.max_score < observed_max:
+            raise ValueError(
+                f"max_score={self.max_score} is less than the maximum observed score "
+                f"({observed_max}) in the data."
+            )
+        if self.max_score > observed_max:
+            warnings.warn(
+                f"max_score={self.max_score} exceeds the maximum observed score "
+                f"({observed_max}) in the data. Some score categories may be unobserved."
+            )
+
+        unstacked_df = responses.unstack(level=0)
+
+        # Always remove all-NaN persons (truly invalid — no usable data across any rater)
+        all_nan_mask = unstacked_df.isna().all(axis=1)
+        invalid_idx = unstacked_df[all_nan_mask].index
+        self.invalid_responses = responses[
+            responses.index.get_level_values(1).isin(invalid_idx)
+        ]
+        valid_unstacked = unstacked_df[~all_nan_mask]
 
         if extreme_persons:
-            to_drop = unstacked_df[unstacked_df.isna().all(axis=1)].index
+            extreme_idx = valid_unstacked.iloc[
+                0:0
+            ].index  # empty; no persons removed as extreme
         else:
-            scores     = unstacked_df.sum(axis=1)
-            max_scores = unstacked_df.notna().sum(axis=1) * self.max_score
-            to_drop    = unstacked_df[(scores == 0) | (scores == max_scores)].index
+            scores = valid_unstacked.sum(axis=1)
+            max_scores = valid_unstacked.notna().sum(axis=1) * self.max_score
+            extreme_mask = (scores == 0) | (scores == max_scores)
+            extreme_idx = valid_unstacked[extreme_mask].index
 
-        self.invalid_responses = dataframe[
-            dataframe.index.get_level_values(1).isin(to_drop)
+        self.extreme_persons = responses[
+            responses.index.get_level_values(1).isin(extreme_idx)
         ]
-        self.dataframe = dataframe[
-            ~dataframe.index.get_level_values(1).isin(to_drop)
+        self.responses = responses[
+            ~responses.index.get_level_values(1).isin(invalid_idx.union(extreme_idx))
         ]
 
-        self.no_of_persons = len(self.dataframe.index.levels[1])
-        self.no_of_items   = self.dataframe.shape[1]
-        self.no_of_raters  = len(self.dataframe.index.levels[0])
+        self.no_of_persons = len(self.responses.index.get_level_values(1).unique())
+        self.no_of_items = self.responses.shape[1]
+        self.facet = facet
+        self.facets = facet_plural if facet_plural is not None else facet + "s"
+        self.no_of_facet_elements = len(self.responses.index.get_level_values(0).unique())
+        self.no_of_raters = self.no_of_facet_elements  # alias; see facet naming
+        setattr(self, f"no_of_{self.facets}", self.no_of_facet_elements)
         self.no_of_classes = no_of_classes
-        self.items   = self.dataframe.columns
-        self.raters  = self.dataframe.index.get_level_values(0).unique()
-        self.persons = self.dataframe.index.get_level_values(1).unique()
+        self.item_names = self.responses.columns
+        self.facet_names = self.responses.index.get_level_values(0).unique()
+        self.rater_names = self.facet_names  # alias for default facet
+        self.person_names = self.responses.index.get_level_values(1).unique()
 
-        # Anchor rater tracking per model
+        # Facet name aliases (e.g. self.judge_names, self.judges)
+        setattr(self, f"{self.facet}_names", self.facet_names)
+        setattr(self, self.facets, self.facet_names)
+
+        # Anchor facet_element tracking per model
         for model in self._MODELS:
-            setattr(self, f'anchor_raters_{model}', [])
+            setattr(self, f"anchor_rater_names_{model}", [])
+
+        # Dynamic method aliases for facet-named stats and res_corr (Phase 4)
+        for model in self._MODELS:
+            setattr(
+                self,
+                f"{self.facet}_stats_df_{model}",
+                lambda m=model, **kw: self.rater_stats_df(model=m, **kw),
+            )
+            setattr(
+                self,
+                f"{self.facet}_res_corr_analysis_{model}",
+                lambda m=model, **kw: self._run_facet_res_corr(m, **kw),
+            )
 
     # ------------------------------------------------------------------
     # Rename utilities
     # ------------------------------------------------------------------
 
-    def rename_rater(self, old, new):
+    def _set_facet_aliases(self, model, anchor=False):
+        """Set dynamic facet-named aliases for public severity/SE attributes."""
+        prefix = "anchor_" if anchor else ""
+        # Severity estimates
+        for attr in [
+            f"facet_effects_{model}",
+            "facet_effects_bivector_items",
+            "facet_effects_bivector_thresholds",
+            "marginal_facet_effects_items",
+            "marginal_facet_effects_thresholds",
+        ]:
+            if hasattr(self, f"{prefix}{attr}"):
+                # Dynamic alias using actual facet name (e.g. judges_global)
+                facet_alias = attr.replace("facet_effects", self.facets)
+                setattr(
+                    self, f"{prefix}{facet_alias}", getattr(self, f"{prefix}{attr}")
+                )
+                # rater_ alias for default-facet backward compatibility
+                rater_alias = attr.replace("facet_effects", "raters")
+                setattr(
+                    self, f"{prefix}{rater_alias}", getattr(self, f"{prefix}{attr}")
+                )
+        # SE / CI attributes
+        for suffix in [
+            f"se_{model}",
+            f"low_{model}",
+            f"high_{model}",
+            f"infit_ms_{model}",
+            f"outfit_ms_{model}",
+            f"infit_zstd_{model}",
+            f"outfit_zstd_{model}",
+            f"residual_correlations_{model}",
+            f"loadings_{model}",
+            "se_marginal_items",
+            "se_marginal_thresholds",
+        ]:
+            canonical = f"{prefix}rater_{suffix}"
+            if hasattr(self, canonical):
+                setattr(
+                    self, f"{prefix}{self.facet}_{suffix}", getattr(self, canonical)
+                )
+        # Stats table
+        stats_attr = f"{prefix}rater_stats_{model}"
+        if hasattr(self, stats_attr):
+            setattr(
+                self, f"{prefix}{self.facet}_stats_{model}", getattr(self, stats_attr)
+            )
+
+    def rename_facet_element(self, old, new):
         """
-        Rename a single rater in the dataframe.
+        Rename a single facet_element in the responses.
 
         Validates the rename (no duplicates, no self-rename, must be a string)
-        and updates self.raters. Prints a message rather than raising if
+        and updates self.facet_names. Prints a message rather than raising if
         validation fails.
 
         Parameters
         ----------
         old : str
-            Current rater name.
+            Current facet_element name.
         new : str
-            Desired new rater name.
+            Desired new facet_element name.
         """
 
         if old == new:
-            warnings.warn('New rater name is the same as the old rater name.',
-                          UserWarning, stacklevel=2)
-        elif new in self.raters:
-            warnings.warn('New rater name is a duplicate of an existing rater name.',
-                          UserWarning, stacklevel=2)
-        if old not in self.raters:
-            warnings.warn(f'Old rater name {old!r} not found in data.',
-                          UserWarning, stacklevel=2)
+            warnings.warn(
+                "New facet_element name is the same as the old facet_element name.",
+                UserWarning,
+                stacklevel=2,
+            )
+        elif new in self.facet_names:
+            warnings.warn(
+                "New facet_element name is a duplicate of an existing facet_element name.",
+                UserWarning,
+                stacklevel=2,
+            )
+        if old not in self.facet_names:
+            warnings.warn(
+                f"Old facet_element name {old!r} not found in data.",
+                UserWarning,
+                stacklevel=2,
+            )
         elif not isinstance(new, str):
-            warnings.warn('Rater names must be strings.',
-                          UserWarning, stacklevel=2)
+            warnings.warn("Rater names must be strings.", UserWarning, stacklevel=2)
         else:
-            new_names = [new if r == old else r for r in self.raters]
-            self.rename_raters_all(new_names)
+            new_names = [new if r == old else r for r in self.facet_names]
+            self.rename_facet_elements_all(new_names)
 
-    def rename_raters_all(self, new_names):
+    def rename_facet_elements_all(self, new_names):
         """
-        Rename all raters at once.
+        Rename all facet_elements at once.
 
         Validates the new name list (correct length, no duplicates, all strings)
-        and rebuilds the dataframe with the new rater index labels.
+        and rebuilds the responses with the new facet_element index labels.
 
         Parameters
         ----------
         new_names : list of str
-            New rater names in the same order as self.raters.
+            New facet_element names in the same order as self.facet_names.
         """
 
         if len(new_names) != len(set(new_names)):
-            warnings.warn('List of new rater names contains duplicates.',
-                          UserWarning, stacklevel=2)
-        elif len(new_names) != self.no_of_raters:
-            warnings.warn(f'Incorrect number of rater names: {len(new_names)} provided, '
-                          f'{self.no_of_raters} raters in data.',
-                          UserWarning, stacklevel=2)
+            warnings.warn(
+                "List of new facet_element names contains duplicates.",
+                UserWarning,
+                stacklevel=2,
+            )
+        elif len(new_names) != self.no_of_facet_elements:
+            warnings.warn(
+                f"Incorrect number of facet_element names: {len(new_names)} provided, "
+                f"{self.no_of_facet_elements} facet_elements in data.",
+                UserWarning,
+                stacklevel=2,
+            )
         elif not all(isinstance(n, str) for n in new_names):
-            warnings.warn('Rater names must be strings.',
-                          UserWarning, stacklevel=2)
+            warnings.warn("Rater names must be strings.", UserWarning, stacklevel=2)
         else:
-            df_dict = {new: self.dataframe.xs(old)
-                       for old, new in zip(self.raters, new_names)}
-            self.dataframe = pd.concat(df_dict.values(), keys=df_dict.keys())
-            self.raters = self.dataframe.index.get_level_values(0).unique()
+            df_dict = {
+                new: self.responses.xs(old)
+                for old, new in zip(self.facet_names, new_names)
+            }
+            self.responses = pd.concat(df_dict.values(), keys=df_dict.keys())
+            self.facet_names = self.responses.index.get_level_values(0).unique()
+            self.rater_names = self.facet_names  # keep alias in sync
+            setattr(self, f"{self.facet}_names", self.facet_names)
+            setattr(self, self.facets, self.facet_names)
 
     def rename_person(self, old, new):
         """
-        Rename a single person in the dataframe.
+        Rename a single person in the responses.
 
         Validates the rename and updates the level-1 (Person) index.
         Prints a message rather than raising if validation fails.
@@ -246,22 +390,26 @@ class MFRM(Rasch):
         """
 
         if old == new:
-            warnings.warn('New person name is the same as the old person name.',
-                          UserWarning, stacklevel=2)
-        elif new in self.persons:
-            warnings.warn('New person name is a duplicate of an existing person name.',
-                          UserWarning, stacklevel=2)
-        if old not in self.persons:
-            warnings.warn(f'Old person name {old!r} not found in data.',
-                          UserWarning, stacklevel=2)
-        elif not isinstance(new, str):
-            warnings.warn('Person names must be strings.',
-                          UserWarning, stacklevel=2)
-        else:
-            self.dataframe = self.dataframe.rename(
-                index={old: new}, level=1
+            warnings.warn(
+                "New person name is the same as the old person name.",
+                UserWarning,
+                stacklevel=2,
             )
-            self.persons = self.dataframe.index.get_level_values(1).unique()
+        elif new in self.person_names:
+            warnings.warn(
+                "New person name is a duplicate of an existing person name.",
+                UserWarning,
+                stacklevel=2,
+            )
+        if old not in self.person_names:
+            warnings.warn(
+                f"Old person name {old!r} not found in data.", UserWarning, stacklevel=2
+            )
+        elif not isinstance(new, str):
+            warnings.warn("Person names must be strings.", UserWarning, stacklevel=2)
+        else:
+            self.responses = self.responses.rename(index={old: new}, level=1)
+            self.person_names = self.responses.index.get_level_values(1).unique()
 
     def rename_persons_all(self, new_names):
         """
@@ -272,30 +420,44 @@ class MFRM(Rasch):
         Parameters
         ----------
         new_names : list of str
-            New person names in the same order as self.persons.
+            New person names in the same order as self.person_names.
         """
 
         if len(new_names) != len(set(new_names)):
-            warnings.warn('List of new person names contains duplicates.',
-                          UserWarning, stacklevel=2)
+            warnings.warn(
+                "List of new person names contains duplicates.",
+                UserWarning,
+                stacklevel=2,
+            )
         elif len(new_names) != self.no_of_persons:
-            warnings.warn(f'Incorrect number of person names: {len(new_names)} provided, '
-                          f'{self.no_of_persons} persons in data.',
-                          UserWarning, stacklevel=2)
+            warnings.warn(
+                f"Incorrect number of person names: {len(new_names)} provided, "
+                f"{self.no_of_persons} persons in data.",
+                UserWarning,
+                stacklevel=2,
+            )
         elif not all(isinstance(n, str) for n in new_names):
-            warnings.warn('Person names must be strings.',
-                          UserWarning, stacklevel=2)
+            warnings.warn("Person names must be strings.", UserWarning, stacklevel=2)
         else:
-            rename_map = dict(zip(self.persons, new_names))
-            self.dataframe = self.dataframe.rename(index=rename_map, level=1)
-            self.persons = self.dataframe.index.get_level_values(1).unique()
+            rename_map = dict(zip(self.person_names, new_names))
+            self.responses = self.responses.rename(index=rename_map, level=1)
+            self.person_names = self.responses.index.get_level_values(1).unique()
 
     # ------------------------------------------------------------------
     # Scalar probability functions (used in plots)
     # ------------------------------------------------------------------
 
-    def cat_prob(self, ability, item, difficulties, rater, severities,
-                 category, thresholds, model='global'):
+    def cat_prob(
+        self,
+        ability,
+        item,
+        difficulties,
+        facet_element,
+        severities,
+        category,
+        thresholds,
+        model="global",
+    ):
         """
         Compute the probability of a response category for a single observation.
 
@@ -311,14 +473,14 @@ class MFRM(Rasch):
             Item identifier.
         difficulties : pandas.Series
             Item difficulty estimates indexed by item name.
-        rater : str
+        facet_element : str
             Rater identifier.
         severities : Series or dict
             Rater severity parameters. Structure depends on model:
-            global — Series indexed by rater;
-            items  — dict of Series {rater: Series(items)};
-            thresholds — dict of arrays {rater: array(thresholds)};
-            matrix — nested dict {rater: {item: array}}.
+            global — Series indexed by facet_element;
+            items  — dict of Series {facet_element: Series(items)};
+            thresholds — dict of arrays {facet_element: array(thresholds)};
+            matrix — nested dict {facet_element: {item: array}}.
         category : int
             Response category (0 to max_score).
         thresholds : array-like
@@ -331,29 +493,41 @@ class MFRM(Rasch):
         float
             Probability of the specified category, in [0, 1].
         """
-        cats   = np.arange(len(thresholds), dtype=float)
-        cumtau = np.cumsum(thresholds)
+        cats = np.arange(len(thresholds) + 1, dtype=float)
+        cumtau = np.concatenate([[0.0], np.cumsum(thresholds)])
         log_nums = cats * (ability - difficulties.loc[item]) - cumtau
-        # Apply rater severity
-        if model == 'global':
-            log_nums -= cats * severities.loc[rater]
-        elif model == 'items':
-            log_nums -= cats * severities[rater][item]
-        elif model == 'thresholds':
-            log_nums -= np.cumsum(severities[rater])
-        elif model == 'matrix':
-            log_nums -= np.cumsum(severities[rater][item])
+        # Apply facet_element severity
+        if model == "global":
+            log_nums -= cats * severities.loc[facet_element]
+        elif model == "items":
+            log_nums -= cats * severities.loc[facet_element, item]
+        elif model == "thresholds":
+            log_nums -= np.concatenate(
+                [[0.0], np.cumsum(severities.loc[facet_element].values)]
+            )
+        elif model in ("bivector", "matrix"):
+            log_nums -= np.concatenate(
+                [[0.0], np.cumsum(severities.loc[facet_element, item].values)]
+            )
         log_nums -= log_nums.max()
         nums = np.exp(log_nums)
         return nums[category] / nums.sum()
 
-    def exp_score(self, ability, item, difficulties, rater, severities,
-                  thresholds, model='global'):
+    def exp_score(
+        self,
+        ability,
+        item,
+        difficulties,
+        facet_element,
+        severities,
+        thresholds,
+        model="global",
+    ):
         """
-        Compute the expected score for a single person/rater/item combination.
+        Compute the expected score for a single person/facet_element/item combination.
 
-        Calculates E[X | ability, item, rater, model] = sum(k * P(X=k)).
-        Used in scalar Newton-Raphson estimation and score_abil().
+        Calculates E[X | ability, item, facet_element, model] = sum(k * P(X=k)).
+        Used in scalar Newton-Raphson estimation and score_lookup().
 
         Parameters
         ----------
@@ -363,7 +537,7 @@ class MFRM(Rasch):
             Item identifier.
         difficulties : pandas.Series
             Item difficulty estimates.
-        rater : str
+        facet_element : str
             Rater identifier.
         severities : Series or dict
             Rater severity parameters (structure depends on model).
@@ -377,19 +551,39 @@ class MFRM(Rasch):
         float
             Expected score in [0, max_score].
         """
-        cats = np.arange(len(thresholds), dtype=float)
-        probs = np.array([self.cat_prob(ability, item, difficulties, rater,
-                                        severities, cat, thresholds, model)
-                          for cat in range(len(thresholds))])
+        cats = np.arange(len(thresholds) + 1, dtype=float)
+        probs = np.array(
+            [
+                self.cat_prob(
+                    ability,
+                    item,
+                    difficulties,
+                    facet_element,
+                    severities,
+                    cat,
+                    thresholds,
+                    model,
+                )
+                for cat in range(len(thresholds) + 1)
+            ]
+        )
         return (cats * probs).sum()
 
-    def variance(self, ability, item, difficulties, rater, severities,
-                 thresholds, model='global'):
+    def variance(
+        self,
+        ability,
+        item,
+        difficulties,
+        facet_element,
+        severities,
+        thresholds,
+        model="global",
+    ):
         """
         Compute item variance (Fisher information) for a single observation.
 
-        Calculates Var[X | ability, item, rater, model] = sum((k - E[X])^2 * P(X=k)).
-        Used in scalar Newton-Raphson estimation and score_abil().
+        Calculates Var[X | ability, item, facet_element, model] = sum((k - E[X])^2 * P(X=k)).
+        Used in scalar Newton-Raphson estimation and score_lookup().
 
         Parameters
         ----------
@@ -399,7 +593,7 @@ class MFRM(Rasch):
             Item identifier.
         difficulties : pandas.Series
             Item difficulty estimates.
-        rater : str
+        facet_element : str
             Rater identifier.
         severities : Series or dict
             Rater severity parameters.
@@ -413,17 +607,37 @@ class MFRM(Rasch):
         float
             Item variance / Fisher information. Always non-negative.
         """
-        cats  = np.arange(len(thresholds), dtype=float)
-        probs = np.array([self.cat_prob(ability, item, difficulties, rater,
-                                        severities, cat, thresholds, model)
-                          for cat in range(len(thresholds))])
-        exp   = (cats * probs).sum()
+        cats = np.arange(len(thresholds) + 1, dtype=float)
+        probs = np.array(
+            [
+                self.cat_prob(
+                    ability,
+                    item,
+                    difficulties,
+                    facet_element,
+                    severities,
+                    cat,
+                    thresholds,
+                    model,
+                )
+                for cat in range(len(thresholds) + 1)
+            ]
+        )
+        exp = (cats * probs).sum()
         return ((cats - exp) ** 2 * probs).sum()
 
-    def kurtosis(self, ability, item, difficulties, rater, severities,
-                 thresholds, model='global'):
+    def kurtosis(
+        self,
+        ability,
+        item,
+        difficulties,
+        facet_element,
+        severities,
+        thresholds,
+        model="global",
+    ):
         """
-        Compute the fourth central moment for a single person/rater/item.
+        Compute the fourth central moment for a single person/facet_element/item.
 
         Calculates sum((k - E[X])^4 * P(X=k)). Used in Wilson-Hilferty
         approximation for standardised fit statistics.
@@ -436,7 +650,7 @@ class MFRM(Rasch):
             Item identifier.
         difficulties : pandas.Series
             Item difficulty estimates.
-        rater : str
+        facet_element : str
             Rater identifier.
         severities : Series or dict
             Rater severity parameters.
@@ -450,107 +664,151 @@ class MFRM(Rasch):
         float
             Fourth central moment of the response distribution.
         """
-        cats  = np.arange(len(thresholds), dtype=float)
-        probs = np.array([self.cat_prob(ability, item, difficulties, rater,
-                                        severities, cat, thresholds, model)
-                          for cat in range(len(thresholds))])
-        exp   = (cats * probs).sum()
+        cats = np.arange(len(thresholds) + 1, dtype=float)
+        probs = np.array(
+            [
+                self.cat_prob(
+                    ability,
+                    item,
+                    difficulties,
+                    facet_element,
+                    severities,
+                    cat,
+                    thresholds,
+                    model,
+                )
+                for cat in range(len(thresholds) + 1)
+            ]
+        )
+        exp = (cats * probs).sum()
         return ((cats - exp) ** 4 * probs).sum()
 
     # Backwards-compatible aliases for the four parameterisations
     def cat_prob_global(self, a, i, d, r, s, c, t):
-        return self.cat_prob(a, i, d, r, s, c, t, 'global')
+        """Alias for cat_prob(..., model='global'). See cat_prob for full documentation."""
+        return self.cat_prob(a, i, d, r, s, c, t, "global")
+
     def cat_prob_items(self, a, i, d, r, s, c, t):
-        return self.cat_prob(a, i, d, r, s, c, t, 'items')
+        """Alias for cat_prob(..., model='items'). See cat_prob for full documentation."""
+        return self.cat_prob(a, i, d, r, s, c, t, "items")
+
     def cat_prob_thresholds(self, a, i, d, r, s, c, t):
-        return self.cat_prob(a, i, d, r, s, c, t, 'thresholds')
+        """Alias for cat_prob(..., model='thresholds'). See cat_prob for full documentation."""
+        return self.cat_prob(a, i, d, r, s, c, t, "thresholds")
+
     def cat_prob_matrix(self, a, i, d, r, s, c, t):
-        return self.cat_prob(a, i, d, r, s, c, t, 'matrix')
+        """Alias for cat_prob(..., model='matrix'). See cat_prob for full documentation."""
+        return self.cat_prob(a, i, d, r, s, c, t, "matrix")
 
     def exp_score_global(self, a, i, d, r, s, t):
-        return self.exp_score(a, i, d, r, s, t, 'global')
+        """Alias for exp_score(..., model='global'). See exp_score for full documentation."""
+        return self.exp_score(a, i, d, r, s, t, "global")
+
     def exp_score_items(self, a, i, d, r, s, t):
-        return self.exp_score(a, i, d, r, s, t, 'items')
+        """Alias for exp_score(..., model='items'). See exp_score for full documentation."""
+        return self.exp_score(a, i, d, r, s, t, "items")
+
     def exp_score_thresholds(self, a, i, d, r, s, t):
-        return self.exp_score(a, i, d, r, s, t, 'thresholds')
+        """Alias for exp_score(..., model='thresholds'). See exp_score for full documentation."""
+        return self.exp_score(a, i, d, r, s, t, "thresholds")
+
     def exp_score_matrix(self, a, i, d, r, s, t):
-        return self.exp_score(a, i, d, r, s, t, 'matrix')
+        """Alias for exp_score(..., model='matrix'). See exp_score for full documentation."""
+        return self.exp_score(a, i, d, r, s, t, "matrix")
 
     def variance_global(self, a, i, d, r, s, t):
-        return self.variance(a, i, d, r, s, t, 'global')
+        """Alias for variance(..., model='global'). See variance for full documentation."""
+        return self.variance(a, i, d, r, s, t, "global")
+
     def variance_items(self, a, i, d, r, s, t):
-        return self.variance(a, i, d, r, s, t, 'items')
+        """Alias for variance(..., model='items'). See variance for full documentation."""
+        return self.variance(a, i, d, r, s, t, "items")
+
     def variance_thresholds(self, a, i, d, r, s, t):
-        return self.variance(a, i, d, r, s, t, 'thresholds')
+        """Alias for variance(..., model='thresholds'). See variance for full documentation."""
+        return self.variance(a, i, d, r, s, t, "thresholds")
+
     def variance_matrix(self, a, i, d, r, s, t):
-        return self.variance(a, i, d, r, s, t, 'matrix')
+        """Alias for variance(..., model='matrix'). See variance for full documentation."""
+        return self.variance(a, i, d, r, s, t, "matrix")
 
     def kurtosis_global(self, a, i, d, r, s, t):
-        return self.kurtosis(a, i, d, r, s, t, 'global')
+        """Alias for kurtosis(..., model='global'). See kurtosis for full documentation."""
+        return self.kurtosis(a, i, d, r, s, t, "global")
+
     def kurtosis_items(self, a, i, d, r, s, t):
-        return self.kurtosis(a, i, d, r, s, t, 'items')
+        """Alias for kurtosis(..., model='items'). See kurtosis for full documentation."""
+        return self.kurtosis(a, i, d, r, s, t, "items")
+
     def kurtosis_thresholds(self, a, i, d, r, s, t):
-        return self.kurtosis(a, i, d, r, s, t, 'thresholds')
+        """Alias for kurtosis(..., model='thresholds'). See kurtosis for full documentation."""
+        return self.kurtosis(a, i, d, r, s, t, "thresholds")
+
     def kurtosis_matrix(self, a, i, d, r, s, t):
-        return self.kurtosis(a, i, d, r, s, t, 'matrix')
+        """Alias for kurtosis(..., model='matrix'). See kurtosis for full documentation."""
+        return self.kurtosis(a, i, d, r, s, t, "matrix")
 
     # ------------------------------------------------------------------
     # Vectorised probability engine
     # ------------------------------------------------------------------
 
-    def _cat_probs_mfrm(self, abilities, items, raters, thresholds,
-                        model, severities):
-        '''
+    def _cat_probs_mfrm(
+        self, abilities, items, facet_elements, thresholds, model, severities
+    ):
+        """
         Vectorised MFRM category probability engine.
 
-        Returns dict {rater: ndarray (K+1, N, I)} and cats array (K+1,).
+        Returns dict {facet_element: ndarray (K+1, N, I)} and cats array (K+1,).
 
-        The log-numerator for person n, rater r, item i, category k:
-          global:     k*(θ_n − δ_i − σ_r) − Σ τ_k
-          items:      k*(θ_n − δ_i − σ_{r,i}) − Σ τ_k
-          thresholds: k*(θ_n − δ_i) − Σ(τ_k + σ_{r,k})
-          matrix:     k*(θ_n − δ_i) − Σ(τ_k + σ_{r,i,k})
-        '''
-        cats      = np.arange(len(thresholds), dtype=float)   # (K+1,)
-        cumtau    = np.cumsum(thresholds)                       # (K+1,)
-        ab        = np.asarray(abilities, dtype=float)          # (N,)
-        diff_arr  = self.diffs.loc[items].values                # (I,)
-        n_items   = len(items)
+        The log-numerator for person n, facet_element r, item i, category k:
+          global:     k*(θ_n − δ_i − λ_r) − Σ τ_k
+          items:      k*(θ_n − δ_i − λ_{r,i}) − Σ τ_k
+          thresholds: k*(θ_n − δ_i) − Σ(τ_k + λ_{r,k})
+          matrix:     k*(θ_n − δ_i) − Σ(τ_k + λ_{r,i,k})
+        """
+        cats = np.arange(len(thresholds) + 1, dtype=float)  # (K+1,)
+        cumtau = np.concatenate([[0.0], np.cumsum(thresholds)])  # (K+1,)
+        ab = np.asarray(abilities, dtype=float)  # (N,)
+        diff_arr = self.items.loc[items].values  # (I,)
+        n_items = len(items)
 
         result = {}
-        for rater in raters:
-            if model == 'global':
+        for facet_element in facet_elements:
+            if model == "global":
                 # item_offset: scalar, same for all (i)
-                item_offset = float(severities.loc[rater])
-                thresh_offset = np.zeros(len(thresholds))
-            elif model == 'items':
+                item_offset = float(severities.loc[facet_element])
+                thresh_offset = np.zeros(len(thresholds) + 1)
+            elif model == "items":
                 # item_offset: (I,) vector
-                item_offset = np.array(
-                    [severities[rater][item] for item in items], dtype=float
-                )
-                thresh_offset = np.zeros(len(thresholds))
-            elif model == 'thresholds':
+                item_offset = severities.loc[facet_element, items].values
+                thresh_offset = np.zeros(len(thresholds) + 1)
+            elif model == "thresholds":
                 item_offset = 0.0
-                thresh_offset = np.asarray(severities[rater], dtype=float)
-            elif model == 'matrix':
+                thresh_offset = np.concatenate(
+                    [[0.0], np.cumsum(severities.loc[facet_element].values)]
+                )
+            elif model == "bivector":
+                item_offset = 0.0
+                thresh_offset = None  # applied per-item below
+            elif model == "matrix":
                 item_offset = 0.0
                 thresh_offset = None  # applied per-item below
             else:
-                raise ValueError(f'Unknown model: {model}')
+                raise ValueError(f"Unknown model: {model}")
 
-            if model == 'matrix':
+            if model in ("bivector", "matrix"):
                 # Build (K+1, N, I) tensor item by item
-                log_num = np.zeros((len(thresholds), len(ab), n_items))
+                log_num = np.zeros((len(thresholds) + 1, len(ab), n_items))
                 for j, item in enumerate(items):
-                    sev_rik = np.asarray(severities[rater][item], dtype=float)
-                    cumtau_total = cumtau + np.cumsum(sev_rik)
+                    sev_rik = severities.loc[facet_element, item].values
+                    cumtau_total = cumtau + np.concatenate([[0.0], np.cumsum(sev_rik)])
                     log_num[:, :, j] = (
                         cats[:, None] * (ab[None, :] - diff_arr[j])
                         - cumtau_total[:, None]
                     )
             else:
                 if isinstance(item_offset, np.ndarray):
-                    io = item_offset[None, None, :]   # (1, 1, I)
+                    io = item_offset[None, None, :]  # (1, 1, I)
                 else:
                     io = float(item_offset)
                 cumtau_total = cumtau + thresh_offset  # (K+1,)
@@ -561,9 +819,9 @@ class MFRM(Rasch):
                 )  # (K+1, N, I)
 
             log_num -= log_num.max(axis=0, keepdims=True)
-            probs    = np.exp(log_num)
-            probs   /= probs.sum(axis=0, keepdims=True)
-            result[rater] = probs
+            probs = np.exp(log_num)
+            probs /= probs.sum(axis=0, keepdims=True)
+            result[facet_element] = probs
 
         return result, cats
 
@@ -572,29 +830,40 @@ class MFRM(Rasch):
     # ------------------------------------------------------------------
 
     def _remove_null_persons(self):
-        '''Vectorised null person removal.'''
-        _pd = self.dataframe.unstack(level=0)
+        """Vectorised null person removal."""
+        _pd = self.responses.unstack(level=0)
         _null = _pd.isnull().all(axis=1)
         self.null_persons = _pd.index[_null].tolist()
         if self.null_persons:
-            self.dataframe = self.dataframe.drop(self.null_persons, level=1)
-            self.persons   = self.dataframe.index.get_level_values(1).unique()
-        self.no_of_persons = len(self.persons)
+            self.responses = self.responses.drop(self.null_persons, level=1)
+            self.person_names = self.responses.index.get_level_values(1).unique()
+        self.no_of_persons = len(self.person_names)
 
-    def item_diffs(self, constant=0.1, method='cos', matrix_power=3,
-                   log_lik_tol=0.000001):
-        '''PAIR item difficulty estimation summing across raters.'''
-        data = (self.dataframe.values
-                .reshape(self.no_of_raters, self.no_of_persons, -1)
-                .swapaxes(1, 2)
-                .transpose((1, 0, 2)))  # (I, R, P)
+    def item_diffs(
+        self, constant=0.1, method="cos", matrix_power=3, log_lik_tol=0.000001
+    ):
+        """PAIR item difficulty estimation summing across facet_elements."""
+        data = (
+            self.responses.values.reshape(
+                self.no_of_facet_elements, self.no_of_persons, -1
+            )
+            .swapaxes(1, 2)
+            .transpose((1, 0, 2))
+        )  # (I, R, P)
 
-        matrix = np.array([
-            [sum(np.count_nonzero(data[i, r, :] == data[j, r, :] + 1)
-                 for r in range(self.no_of_raters))
-             for j in range(self.no_of_items)]
-            for i in range(self.no_of_items)
-        ], dtype=np.float64)
+        matrix = np.array(
+            [
+                [
+                    sum(
+                        np.count_nonzero(data[i, r, :] == data[j, r, :] + 1)
+                        for r in range(self.no_of_facet_elements)
+                    )
+                    for j in range(self.no_of_items)
+                ]
+                for i in range(self.no_of_items)
+            ],
+            dtype=np.float64,
+        )
 
         constant_matrix = ((matrix + matrix.T) > 0).astype(np.float64) * constant
         matrix += constant_matrix
@@ -609,24 +878,26 @@ class MFRM(Rasch):
                 mat += constant
                 break
 
-        self.diffs = self.priority_vector(mat, method=method,
-                                          log_lik_tol=log_lik_tol)
+        self.items = self.priority_vector(mat, method=method, log_lik_tol=log_lik_tol)
 
     def _threshold_distance(self, threshold, difficulties, constant=0.1):
-        '''
-        CPAT threshold distance estimate for MFRM — sums counts across raters.
+        """
+        CPAT threshold distance estimate for MFRM — sums counts across facet_elements.
         Vectorised via indicator matrix multiplication.
-        '''
-        data = (self.dataframe.values
-                .reshape(self.no_of_raters, self.no_of_persons, -1)
-                .swapaxes(1, 2)
-                .transpose((1, 0, 2)))  # (I, R, P)
+        """
+        data = (
+            self.responses.values.reshape(
+                self.no_of_facet_elements, self.no_of_persons, -1
+            )
+            .swapaxes(1, 2)
+            .transpose((1, 0, 2))
+        )  # (I, R, P)
 
-        # Sum count matrices across raters
+        # Sum count matrices across facet_elements
         num_matrix = np.zeros((self.no_of_items, self.no_of_items))
         den_matrix = np.zeros((self.no_of_items, self.no_of_items))
-        for r in range(self.no_of_raters):
-            at_k   = (data[:, r, :] == threshold).astype(np.float64)
+        for r in range(self.no_of_facet_elements):
+            at_k = (data[:, r, :] == threshold).astype(np.float64)
             at_km1 = (data[:, r, :] == threshold - 1).astype(np.float64)
             at_kp1 = (data[:, r, :] == threshold + 1).astype(np.float64)
             num_matrix += at_k @ at_k.T
@@ -636,14 +907,13 @@ class MFRM(Rasch):
         num_s = np.where(valid, num_matrix + constant, 0.0)
         den_s = np.where(valid, den_matrix + constant, 0.0)
 
-        with np.errstate(divide='ignore', invalid='ignore'):
-            weight_matrix = np.where(valid,
-                                     2.0 * num_s * den_s / (num_s + den_s), 0.0)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            weight_matrix = np.where(valid, 2.0 * num_s * den_s / (num_s + den_s), 0.0)
 
         diffs = difficulties.values
         diff_matrix = diffs[:, None] - diffs[None, :]
 
-        with np.errstate(divide='ignore', invalid='ignore'):
+        with np.errstate(divide="ignore", invalid="ignore"):
             log_ratio = np.where(valid, np.log(num_s) - np.log(den_s), 0.0)
 
         total_weight = weight_matrix.sum()
@@ -652,31 +922,59 @@ class MFRM(Rasch):
         return (weight_matrix * (log_ratio + diff_matrix)).sum() / total_weight
 
     def ra_thresholds(self, difficulties, constant=0.1):
-        '''CPAT threshold set estimation.'''
-        distances = [self._threshold_distance(k, difficulties, constant)
-                     for k in range(1, self.max_score)]
+        """CPAT threshold set estimation."""
+        distances = [
+            self._threshold_distance(k, difficulties, constant)
+            for k in range(1, self.max_score)
+        ]
         thresholds = np.array([sum(distances[:t]) for t in range(self.max_score)])
         thresholds -= thresholds.mean()
-        return np.insert(thresholds, 0, 0.0)
+        return thresholds
 
     # ------------------------------------------------------------------
     # Rater severity estimation
     # ------------------------------------------------------------------
 
     def _pair_matrix(self, data_2d, constant):
-        '''Build a PAIR pairwise matrix from (R, P) data and apply smoothing.'''
+        """Build a PAIR pairwise matrix from (R, P) data and apply smoothing."""
         R = data_2d.shape[0]
-        matrix = np.array([
-            [np.count_nonzero(data_2d[r1, :] == data_2d[r2, :] + 1)
-             for r2 in range(R)]
-            for r1 in range(R)
-        ], dtype=np.float64)
+        matrix = np.array(
+            [
+                [
+                    np.count_nonzero(data_2d[r1, :] == data_2d[r2, :] + 1)
+                    for r2 in range(R)
+                ]
+                for r1 in range(R)
+            ],
+            dtype=np.float64,
+        )
         constant_matrix = ((matrix + matrix.T) > 0).astype(np.float64) * constant
         matrix += constant_matrix
         np.fill_diagonal(matrix, matrix.diagonal() + constant)
         return matrix
 
     def _raise_matrix_power(self, matrix, matrix_power, constant):
+        """
+        Raise a matrix to a given power, incrementing until no zeros remain.
+
+        Used internally during PAIR calibration to ensure full connectivity
+        in the facet comparison matrix. If zeros persist after matrix_power + 5
+        iterations, adds a smoothing constant and stops.
+
+        Parameters
+        ----------
+        matrix : numpy.ndarray
+            Square comparison count matrix.
+        matrix_power : int
+            Starting matrix power.
+        constant : float
+            Smoothing constant added if zeros persist.
+
+        Returns
+        -------
+        numpy.ndarray
+            Powered matrix with zeros resolved or smoothed.
+        """
         mat = np.linalg.matrix_power(matrix, matrix_power)
         mat_pow = matrix_power
         while 0 in mat:
@@ -687,66 +985,90 @@ class MFRM(Rasch):
                 break
         return mat
 
-    def raters_global(self, constant=0.1, method='cos', matrix_power=3,
-                      log_lik_tol=0.000001):
-        '''PAIR rater severity estimation — scalar per rater.'''
-        data = (self.dataframe.values
-                .reshape(self.no_of_raters, self.no_of_persons, -1)
-                .swapaxes(1, 2)
-                .transpose((1, 0, 2)))  # (I, R, P)
+    def _estimate_raters_global(
+        self, constant=0.1, method="cos", matrix_power=3, log_lik_tol=0.000001
+    ):
+        """PAIR facet_element severity estimation — scalar per facet_element."""
+        data = (
+            self.responses.values.reshape(
+                self.no_of_facet_elements, self.no_of_persons, -1
+            )
+            .swapaxes(1, 2)
+            .transpose((1, 0, 2))
+        )  # (I, R, P)
 
-        matrix = np.array([
-            [sum(np.count_nonzero(data[item, r1, :] == data[item, r2, :] + 1)
-                 for item in range(self.no_of_items))
-             for r2 in range(self.no_of_raters)]
-            for r1 in range(self.no_of_raters)
-        ], dtype=np.float64)
+        matrix = np.array(
+            [
+                [
+                    sum(
+                        np.count_nonzero(data[item, r1, :] == data[item, r2, :] + 1)
+                        for item in range(self.no_of_items)
+                    )
+                    for r2 in range(self.no_of_facet_elements)
+                ]
+                for r1 in range(self.no_of_facet_elements)
+            ],
+            dtype=np.float64,
+        )
         constant_matrix = ((matrix + matrix.T) > 0).astype(np.float64) * constant
         matrix += constant_matrix
         np.fill_diagonal(matrix, matrix.diagonal() + constant)
 
         mat = self._raise_matrix_power(matrix, matrix_power, constant)
-        self.severities_global = self.priority_vector(mat, method=method,
-                                                      log_lik_tol=log_lik_tol,
-                                                      raters=True)
+        self.facet_effects_global = self.priority_vector(
+            mat, method=method, log_lik_tol=log_lik_tol, raters=True
+        )
 
-    def _item_rater_element(self, item, constant=0.1, method='cos',
-                            matrix_power=3, log_lik_tol=0.000001):
-        '''PAIR rater severity for a single item (items parameterisation).'''
-        data = (self.dataframe.values
-                .reshape(self.no_of_raters, self.no_of_persons, -1)
-                .swapaxes(1, 2)
-                .transpose((1, 0, 2)))  # (I, R, P)
-        matrix = self._pair_matrix(data[item, :, :], constant)
-        mat    = self._raise_matrix_power(matrix, matrix_power, constant)
-        return self.priority_vector(mat, method=method, log_lik_tol=log_lik_tol,
-                                    raters=True)
-
-    def raters_items(self, constant=0.1, method='cos', matrix_power=3,
-                     log_lik_tol=0.000001):
-        '''PAIR rater severity estimation — vector per (rater, item).'''
-        raters = np.zeros((self.no_of_raters, self.no_of_items))
-        for i in range(self.no_of_items):
-            raters[:, i] = self._item_rater_element(
-                i, constant=constant, method=method,
-                matrix_power=matrix_power, log_lik_tol=log_lik_tol
+    def _item_rater_element(
+        self, item, constant=0.1, method="cos", matrix_power=3, log_lik_tol=0.000001
+    ):
+        """PAIR facet_element severity for a single item (items parameterisation)."""
+        data = (
+            self.responses.values.reshape(
+                self.no_of_facet_elements, self.no_of_persons, -1
             )
-        raters_df = pd.DataFrame(raters, index=self.raters,
-                                 columns=self.dataframe.columns)
-        self.severities_items = raters_df.T.to_dict()
+            .swapaxes(1, 2)
+            .transpose((1, 0, 2))
+        )  # (I, R, P)
+        matrix = self._pair_matrix(data[item, :, :], constant)
+        mat = self._raise_matrix_power(matrix, matrix_power, constant)
+        return self.priority_vector(
+            mat, method=method, log_lik_tol=log_lik_tol, raters=True
+        )
 
-    def _threshold_rater_element(self, category, constant=0.1, method='cos',
-                                 matrix_power=3, log_lik_tol=0.000001):
-        '''PAIR rater severity for a single threshold (thresholds parameterisation).'''
-        data = (self.dataframe.values
-                .reshape(self.no_of_raters, self.no_of_persons, -1)
-                .swapaxes(1, 2)
-                .transpose((1, 0, 2)))  # (I, R, P)
+    def _estimate_raters_items(
+        self, constant=0.1, method="cos", matrix_power=3, log_lik_tol=0.000001
+    ):
+        """PAIR facet_element severity estimation — vector per (facet_element, item)."""
+        facet_elements = np.zeros((self.no_of_facet_elements, self.no_of_items))
+        for i in range(self.no_of_items):
+            facet_elements[:, i] = self._item_rater_element(
+                i,
+                constant=constant,
+                method=method,
+                matrix_power=matrix_power,
+                log_lik_tol=log_lik_tol,
+            )
+        self.facet_effects_items = pd.DataFrame(
+            facet_elements, index=self.facet_names, columns=self.responses.columns
+        )
+
+    def _threshold_rater_element(
+        self, category, constant=0.1, method="cos", matrix_power=3, log_lik_tol=0.000001
+    ):
+        """PAIR facet_element severity for a single threshold (thresholds parameterisation)."""
+        data = (
+            self.responses.values.reshape(
+                self.no_of_facet_elements, self.no_of_persons, -1
+            )
+            .swapaxes(1, 2)
+            .transpose((1, 0, 2))
+        )  # (I, R, P)
 
         # Sum across items: count(X_{i,r1}==k+1 AND X_{i,r2}==k)
-        matrix = np.zeros((self.no_of_raters, self.no_of_raters))
+        matrix = np.zeros((self.no_of_facet_elements, self.no_of_facet_elements))
         for i in range(self.no_of_items):
-            at_k   = (data[i, :, :] == category + 1).astype(np.float64)  # (R, P)
+            at_k = (data[i, :, :] == category + 1).astype(np.float64)  # (R, P)
             at_km1 = (data[i, :, :] == category).astype(np.float64)
             matrix += at_k @ at_km1.T
 
@@ -756,32 +1078,46 @@ class MFRM(Rasch):
         np.fill_diagonal(matrix, matrix.diagonal() + constant)
 
         mat = self._raise_matrix_power(matrix, matrix_power, constant)
-        return self.priority_vector(mat, method=method, log_lik_tol=log_lik_tol,
-                                    raters=True)
+        return self.priority_vector(
+            mat, method=method, log_lik_tol=log_lik_tol, raters=True
+        )
 
-    def raters_thresholds(self, constant=0.1, method='cos', matrix_power=3,
-                          log_lik_tol=0.000001):
-        '''PAIR rater severity estimation — vector per (rater, threshold).'''
-        raters = np.zeros((self.no_of_raters, self.max_score))
+    def _estimate_raters_thresholds(
+        self, constant=0.1, method="cos", matrix_power=3, log_lik_tol=0.000001
+    ):
+        """PAIR facet_element severity estimation — vector per (facet_element, threshold)."""
+        facet_elements = np.zeros((self.no_of_facet_elements, self.max_score))
         for k in range(self.max_score):
-            raters[:, k] = self._threshold_rater_element(
-                k, constant=constant, method=method,
-                matrix_power=matrix_power, log_lik_tol=log_lik_tol
+            facet_elements[:, k] = self._threshold_rater_element(
+                k,
+                constant=constant,
+                method=method,
+                matrix_power=matrix_power,
+                log_lik_tol=log_lik_tol,
             )
-        raters = np.insert(raters, 0, 0.0, axis=1)
-        self.severities_thresholds = {
-            rater: sev for rater, sev in zip(self.raters, raters)
-        }
+        self.facet_effects_thresholds = pd.DataFrame(
+            facet_elements, index=self.facet_names
+        )
 
-    def _matrix_rater_element(self, item, category, constant=0.1, method='cos',
-                               matrix_power=3, log_lik_tol=0.000001):
-        '''PAIR rater severity for a single (item, category) cell (matrix param).'''
-        data = (self.dataframe.values
-                .reshape(self.no_of_raters, self.no_of_persons, -1)
-                .swapaxes(1, 2)
-                .transpose((1, 0, 2)))  # (I, R, P)
+    def _matrix_rater_element(
+        self,
+        item,
+        category,
+        constant=0.1,
+        method="cos",
+        matrix_power=3,
+        log_lik_tol=0.000001,
+    ):
+        """PAIR facet_element severity for a single (item, category) cell (matrix param)."""
+        data = (
+            self.responses.values.reshape(
+                self.no_of_facet_elements, self.no_of_persons, -1
+            )
+            .swapaxes(1, 2)
+            .transpose((1, 0, 2))
+        )  # (I, R, P)
 
-        at_k   = (data[item, :, :] == category + 1).astype(np.float64)  # (R, P)
+        at_k = (data[item, :, :] == category + 1).astype(np.float64)  # (R, P)
         at_km1 = (data[item, :, :] == category).astype(np.float64)
         matrix = at_k @ at_km1.T
 
@@ -791,286 +1127,489 @@ class MFRM(Rasch):
         np.fill_diagonal(matrix, matrix.diagonal() + constant)
 
         mat = self._raise_matrix_power(matrix, matrix_power, constant)
-        return self.priority_vector(mat, method=method, log_lik_tol=log_lik_tol,
-                                    raters=True)
+        return self.priority_vector(
+            mat, method=method, log_lik_tol=log_lik_tol, raters=True
+        )
 
-    def raters_matrix(self, constant=0.1, method='cos', matrix_power=3,
-                      log_lik_tol=0.000001):
-        '''PAIR rater severity estimation — full (rater, item, threshold) matrix.'''
-        raters = np.zeros((self.no_of_raters, self.no_of_items, self.max_score + 1))
+    def _estimate_raters_matrix(
+        self, constant=0.1, method="cos", matrix_power=3, log_lik_tol=0.000001
+    ):
+        """PAIR facet_element severity estimation — full (facet_element, item, threshold) matrix."""
+        facet_elements = np.zeros(
+            (self.no_of_facet_elements, self.no_of_items, self.max_score)
+        )
         for i in range(self.no_of_items):
             for k in range(self.max_score):
-                raters[:, i, k + 1] = self._matrix_rater_element(
-                    i, k, constant=constant, method=method,
-                    matrix_power=matrix_power, log_lik_tol=log_lik_tol
+                facet_elements[:, i, k] = self._matrix_rater_element(
+                    i,
+                    k,
+                    constant=constant,
+                    method=method,
+                    matrix_power=matrix_power,
+                    log_lik_tol=log_lik_tol,
                 )
 
-        rater_dict = {
-            rater: {
-                item: raters[r, j, :]
-                for j, item in enumerate(self.dataframe.columns)
-            }
-            for r, rater in enumerate(self.raters)
-        }
+        # MultiIndex DataFrame: (facet_element, item) × threshold
+        mi = pd.MultiIndex.from_product(
+            [self.facet_names, self.responses.columns], names=[self.facet, "item"]
+        )
+        self.facet_effects_matrix = pd.DataFrame(
+            facet_elements.reshape(-1, self.max_score), index=mi
+        )
 
-        # Marginal severities for use in plots and stats
-        sev_arr = raters[:, :, 1:]  # (R, I, K)
-        self.marginal_severities_items = {
-            rater: pd.Series({
-                item: sev_arr[r, j, :].mean()
-                for j, item in enumerate(self.dataframe.columns)
-            })
-            for r, rater in enumerate(self.raters)
-        }
-        self.marginal_severities_thresholds = {
-            rater: pd.Series(
-                np.concatenate([[0.0], sev_arr[r, :, :].mean(axis=0)])
-            )
-            for r, rater in enumerate(self.raters)
-        }
-        self.severities_matrix = rater_dict
+        # Marginal severities
+        sev_arr = facet_elements  # (R, I, K) — no sentinel to skip
+        self.marginal_facet_effects_items = pd.DataFrame(
+            sev_arr.mean(axis=2), index=self.facet_names, columns=self.responses.columns
+        )
+        self.marginal_facet_effects_thresholds = pd.DataFrame(
+            sev_arr.mean(axis=1), index=self.facet_names
+        )
+
+    def _estimate_raters_bivector(self, matrix_marginals=True, **kw):
+        """
+        Bivector facet_element severity estimation.
+
+        Uses the full matrix PAIR estimator as an intermediate step. Elliott &
+        Buttery (2022a) find evidence that marginal means derived from matrix
+        estimates produce more accurate bivector parameter recovery than direct
+        estimation of the two vectors in almost all conditions, because the
+        matrix estimator captures variability across both items and thresholds
+        simultaneously and aggregation of the cell estimates reduces stochastic
+        noise.
+
+        The estimated matrix is decomposed into two additive marginal vectors
+        per facet_element:
+
+            λ'_rik = λ_ri. + λ_r.k
+
+        where:
+          λ_ri. — mean over thresholds of σ_{r,i,k} (item vector, free mean;
+                  overall facet_element severity lives here)
+          λ_r.k — mean over items of σ_{r,i,k}, zero-summed per facet_element
+                  (threshold vector, shape only; Σ_k λ_r.k = 0)
+
+        The reconstructed full matrix λ'_rik is stored as facet_effects_bivector
+        in the same {facet_element: {item: array}} format as facet_effects_matrix, so all
+        downstream probability, fit, and plot machinery operates on it without
+        modification.
+
+        The intermediate matrix estimates are available as facet_effects_matrix
+        but should not be interpreted as a matrix model calibration.
+
+        Public attributes set
+        ---------------------
+        facet_effects_bivector_items : dict
+            {facet_element: pd.Series({item: float})} — per-(facet_element, item) marginal means.
+        facet_effects_bivector_thresholds : dict
+            {facet_element: pd.Series} of length max_score + 1 — per-(facet_element, threshold)
+            marginal means, zero-summed per facet_element. Index 0 is always 0.0.
+        facet_effects_bivector : dict
+            {facet_element: {item: array}} — reconstructed full severity matrix
+            (item_effect + threshold_effect per cell). Used by all downstream
+            machinery.
+        """
+        if matrix_marginals:
+            # Marginal-means estimator: full matrix PAIR → marginal means per vector
+            self._estimate_raters_matrix(**kw)
+            self.facet_effects_bivector_items = self.marginal_facet_effects_items
+            self.facet_effects_bivector_thresholds = self.marginal_facet_effects_thresholds
+        else:
+            # Direct pooled-PAIR estimator: each vector estimated from its own
+            # pooled comparison matrix (items PAIR summed over thresholds;
+            # thresholds PAIR summed over items, corrected for μ_r).
+            self._estimate_raters_items(**kw)
+            self._estimate_raters_thresholds(**kw)
+            mu_r = self.facet_effects_items.mean(axis=1)
+            thr = self.facet_effects_thresholds.subtract(mu_r, axis=0)
+            thr = thr.subtract(thr.mean(axis=1), axis=0)
+            self.facet_effects_bivector_items = self.facet_effects_items
+            self.facet_effects_bivector_thresholds = thr
+
+        # Reconstruct full matrix as sum of marginals (λ'_rik = λ_ri. + λ_r.k)
+        mi = pd.MultiIndex.from_product(
+            [self.facet_names, self.item_names], names=[self.facet, "item"]
+        )
+        rows = []
+        for facet_element in self.facet_names:
+            for item in self.item_names:
+                row = np.array(
+                    [
+                        self.facet_effects_bivector_items.loc[facet_element, item]
+                        + self.facet_effects_bivector_thresholds.loc[facet_element, k]
+                        for k in range(self.max_score)
+                    ]
+                )
+                rows.append(row)
+        self.facet_effects_bivector = pd.DataFrame(rows, index=mi)
 
     # ------------------------------------------------------------------
     # Calibration — top-level methods
     # ------------------------------------------------------------------
 
-    def calibrate(self,
-                  model='global',
-                  constant=0.1,
-                  method='cos',
-                  matrix_power=3,
-                  log_lik_tol=0.000001):
-        '''
-        Calibrate the MFRM for the specified rater parameterisation.
+    def calibrate(
+        self,
+        model="global",
+        constant=0.1,
+        method="cos",
+        matrix_power=3,
+        log_lik_tol=0.000001,
+        matrix_marginals=False,
+    ):
+        """
+        Calibrate the MFRM for the specified facet_element parameterisation.
 
         Three-stage sequential estimation:
           1. item_diffs()       — PAIR item difficulties (shared across models)
           2. ra_thresholds()    — CPAT shared thresholds (shared across models)
-          3. raters_{model}()   — PAIR rater severities (model-specific)
+          3. raters_{model}()   — PAIR facet_element severities (model-specific)
 
         Parameters
         ----------
-        model : one of 'global', 'items', 'thresholds', 'matrix'
-        '''
+        model : one of 'global', 'items', 'thresholds', 'matrix', 'bivector'
+        matrix_marginals : bool, default False
+            Bivector model only. If True (default), estimate item and threshold
+            vectors as marginal means of the full matrix PAIR estimates. If
+            False, estimate each vector directly using its own pooled PAIR
+            (items PAIR summed across thresholds; thresholds PAIR summed across
+            items, corrected for per-facet_element mean item effect).
+        """
         if model not in self._MODELS:
-            raise ValueError(f'model must be one of {self._MODELS}')
+            raise ValueError(f"model must be one of {self._MODELS}")
 
         if constant == 0:
-            all_max_items = [item for item in self.items
-                             if (self.dataframe.xs(item, level=-1, axis=1).dropna(how='all').eq(self.max_score).all(axis=None))]
+            all_max_items = [
+                item
+                for item in self.item_names
+                if (
+                    self.responses.xs(item, level=-1, axis=1)
+                    .dropna(how="all")
+                    .eq(self.max_score)
+                    .all(axis=None)
+                )
+            ]
             if all_max_items:
-                warnings.warn(f"Items with all-maximum scores detected with constant=0: "
-                              f"{all_max_items}. Item estimation will fail. "
-                              f"Either drop these items or use a non-zero constant.",
-                              UserWarning, stacklevel=2)
+                warnings.warn(
+                    f"Items with all-maximum scores detected with constant=0: "
+                    f"{all_max_items}. Item estimation will fail. "
+                    f"Either drop these items or use a non-zero constant.",
+                    UserWarning,
+                    stacklevel=2,
+                )
 
-        if len(self.raters) == 1:
-            warnings.warn("Only one rater detected. MFRM with a single rater reduces to RSM. "
-                          "Consider using RSM instead.",
-                          UserWarning, stacklevel=2)
+        if len(self.facet_names) == 1:
+            warnings.warn(
+                "Only one facet_element detected. MFRM with a single facet_element reduces to RSM. "
+                "Consider using RSM instead.",
+                UserWarning,
+                stacklevel=2,
+            )
 
-        if len(self.items) == 1:
-            warnings.warn("Only one item detected. MFRM with a single item reduces to RSM "
-                          "with raters as items. Consider reconfiguring and using RSM instead.",
-                          UserWarning, stacklevel=2)
+        if len(self.item_names) == 1:
+            warnings.warn(
+                "Only one item detected. MFRM with a single item reduces to RSM "
+                "with facet_elements as items. Consider reconfiguring and using RSM instead.",
+                UserWarning,
+                stacklevel=2,
+            )
 
         self._remove_null_persons()
-        self.item_diffs(constant=constant, method=method,
-                        matrix_power=matrix_power, log_lik_tol=log_lik_tol)
-        self.thresholds = self.ra_thresholds(self.diffs, constant=constant)
-        getattr(self, f'raters_{model}')(
-            constant=constant, method=method,
-            matrix_power=matrix_power, log_lik_tol=log_lik_tol
+        self.item_diffs(
+            constant=constant,
+            method=method,
+            matrix_power=matrix_power,
+            log_lik_tol=log_lik_tol,
         )
+        self.thresholds = pd.Series(self.ra_thresholds(self.items, constant=constant))
+        kw = dict(constant=constant, method=method,
+                  matrix_power=matrix_power, log_lik_tol=log_lik_tol)
+        if model == "bivector":
+            kw["matrix_marginals"] = matrix_marginals
+        getattr(self, f"_estimate_raters_{model}")(**kw)
+        self._set_facet_aliases(model)
 
     # Backwards-compatible aliases
     def calibrate_global(self, **kw):
-        self.calibrate(model='global', **kw)
+        """Alias for calibrate(model='global'). See calibrate for full documentation."""
+        self.calibrate(model="global", **kw)
+
     def calibrate_items(self, **kw):
-        self.calibrate(model='items', **kw)
+        """Alias for calibrate(model='items'). See calibrate for full documentation."""
+        self.calibrate(model="items", **kw)
+
     def calibrate_thresholds(self, **kw):
-        self.calibrate(model='thresholds', **kw)
+        """Alias for calibrate(model='thresholds'). See calibrate for full documentation."""
+        self.calibrate(model="thresholds", **kw)
+
     def calibrate_matrix(self, **kw):
-        self.calibrate(model='matrix', **kw)
+        """Alias for calibrate(model='matrix'). See calibrate for full documentation."""
+        self.calibrate(model="matrix", **kw)
+
+    def calibrate_bivector(self, **kw):
+        """Alias for calibrate(model='bivector'). See calibrate for full documentation."""
+        self.calibrate(model="bivector", **kw)
 
     # ------------------------------------------------------------------
     # Anchor calibration
     # ------------------------------------------------------------------
 
-    def calibrate_anchor(self, model, anchor_raters, calibrate=False,
-                         constant=0.1, method='cos', matrix_power=3,
-                         log_lik_tol=0.000001):
-        '''
-        Anchor calibration: set mean severity of anchor_raters to zero
+    def calibrate_anchor(
+        self,
+        model,
+        anchors,
+        calibrate=False,
+        constant=0.1,
+        method="cos",
+        matrix_power=3,
+        log_lik_tol=0.000001,
+        adj=None,
+    ):
+        """
+        Anchor calibration: set mean severity of anchors to zero
         and adjust item difficulties and thresholds accordingly.
-        '''
+
+        adj : pre-computed anchor adjustment from _extract_anchor_adj().
+            If provided, used as a fixed constant instead of re-estimating
+            from self. Pass this in bootstrap loops to avoid inflating SEs
+            with anchor rater sampling variance.
+        """
         if calibrate:
-            self.calibrate(model=model, constant=constant, method=method,
-                           matrix_power=matrix_power, log_lik_tol=log_lik_tol)
+            self.calibrate(
+                model=model,
+                constant=constant,
+                method=method,
+                matrix_power=matrix_power,
+                log_lik_tol=log_lik_tol,
+            )
 
-        if model == 'global':
-            self._calibrate_anchor_global(anchor_raters)
-        elif model == 'items':
-            self._calibrate_anchor_items(anchor_raters)
-        elif model == 'thresholds':
-            self._calibrate_anchor_thresholds(anchor_raters)
-        elif model == 'matrix':
-            self._calibrate_anchor_matrix(anchor_raters)
+        if model == "global":
+            self._calibrate_anchor_global(anchors, adj=adj)
+        elif model == "items":
+            self._calibrate_anchor_items(anchors, adj=adj)
+        elif model == "thresholds":
+            self._calibrate_anchor_thresholds(anchors, adj=adj)
+        elif model == "bivector":
+            self._calibrate_anchor_bivector(anchors, adj=adj)
+        elif model == "matrix":
+            self._calibrate_anchor_matrix(anchors, adj=adj)
 
-        setattr(self, f'anchor_raters_{model}', anchor_raters)
+        setattr(self, f"anchor_rater_names_{model}", anchors)
+        self._set_facet_aliases(model, anchor=True)
 
-    def _calibrate_anchor_global(self, anchor_raters):
-        self.anchor_diffs_global      = self.diffs.copy()
+    def _extract_anchor_adj(self, model, anchors):
+        """Extract the anchor adjustment from the current (full-data) calibration."""
+        if model == "global":
+            return float(self.facet_effects_global.loc[anchors].mean())
+        elif model == "items":
+            return self.facet_effects_items.loc[anchors].mean(axis=0)
+        elif model == "thresholds":
+            return self.facet_effects_thresholds.loc[anchors].mean(axis=0)
+        elif model == "matrix":
+            sev_array = self.facet_effects_matrix.values.reshape(
+                self.no_of_facet_elements, self.no_of_items, self.max_score
+            )
+            anchor_idx = [list(self.facet_names).index(a) for a in anchors]
+            return sev_array[anchor_idx].mean(axis=0)  # (I, K)
+        elif model == "bivector":
+            item_adj = self.facet_effects_bivector_items.loc[anchors].mean(axis=0)
+            thr_adj = self.facet_effects_bivector_thresholds.loc[anchors].mean(axis=0)
+            return (item_adj, thr_adj)
+
+    def _calibrate_anchor_global(self, anchors, adj=None):
+        """Anchor calibration for global parameterisation. Shifts all facet effects so anchor mean is zero."""
+        self.anchor_items_global = self.items.copy()
         self.anchor_thresholds_global = self.thresholds.copy()
-        self.anchor_severities_global = self.severities_global.copy()
+        self.anchor_facet_effects_global = self.facet_effects_global.copy()
 
-        adj = float(self.severities_global.loc[anchor_raters].mean())
-        self.anchor_severities_global -= adj
+        if adj is None:
+            adj = float(self.facet_effects_global.loc[anchors].mean())
+        self.anchor_facet_effects_global -= adj
 
-    def _calibrate_anchor_items(self, anchor_raters):
-        self.anchor_diffs_items      = self.diffs.copy()
+    def _calibrate_anchor_items(self, anchors, adj=None):
+        """Anchor calibration for items parameterisation. Adjusts per-item facet effects and absorbs mean into item difficulties."""
+        self.anchor_items_items = self.items.copy()
         self.anchor_thresholds_items = self.thresholds.copy()
 
-        sev_df = pd.DataFrame(self.severities_items).T  # (R, I)
-        adj    = sev_df.loc[anchor_raters].mean(axis=0)
+        sev_df = self.facet_effects_items.copy()  # already (R, I) DataFrame
+        if adj is None:
+            adj = sev_df.loc[anchors].mean(axis=0)
 
-        self.anchor_diffs_items += adj
+        self.anchor_items_items += adj
         sev_df -= adj
-        self.anchor_severities_items = {
-            rater: {item: sev_df.loc[rater, item]
-                    for item in self.dataframe.columns}
-            for rater in self.raters
-        }
-        self.anchor_diffs_items -= self.anchor_diffs_items.mean()
+        self.anchor_facet_effects_items = sev_df
+        self.anchor_items_items -= self.anchor_items_items.mean()
 
-    def _calibrate_anchor_thresholds(self, anchor_raters):
-        self.anchor_diffs_thresholds      = self.diffs.copy()
+    def _calibrate_anchor_thresholds(self, anchors, adj=None):
+        """Anchor calibration for thresholds parameterisation. Adjusts per-threshold facet effects and absorbs mean into thresholds."""
+        self.anchor_items_thresholds = self.items.copy()
         self.anchor_thresholds_thresholds = self.thresholds.copy()
 
-        sev_df = pd.DataFrame(self.severities_thresholds).T  # (R, K+1)
-        adj    = sev_df.loc[anchor_raters, 1:].mean(axis=0)
+        sev_df = self.facet_effects_thresholds.copy()  # already (R, K+1) DataFrame
+        if adj is None:
+            adj = sev_df.loc[anchors].mean(axis=0)
 
-        self.anchor_thresholds_thresholds[1:] += adj.values
-        sev_df.loc[:, 1:] -= adj
-        self.anchor_severities_thresholds = {
-            rater: sev_df.loc[rater].values for rater in self.raters
-        }
-        self.anchor_thresholds_thresholds[1:] -= (
-            self.anchor_thresholds_thresholds[1:].mean()
-        )
+        self.anchor_thresholds_thresholds += adj.values
+        sev_df -= adj
+        self.anchor_facet_effects_thresholds = sev_df
+        self.anchor_thresholds_thresholds -= self.anchor_thresholds_thresholds.mean()
 
-    def _calibrate_anchor_matrix(self, anchor_raters):
-        '''
+    def _calibrate_anchor_matrix(self, anchors, adj=None):
+        """
         Anchor calibration for matrix parameterisation.
-        Subtracts the mean anchor rater severity (per item, per threshold)
-        from all raters, and absorbs it into item difficulties and thresholds.
-        '''
-        self.anchor_diffs_matrix      = self.diffs.copy()
+        Subtracts the mean anchor facet_element severity (per item, per threshold)
+        from all facet_elements, and absorbs it into item difficulties and thresholds.
+        """
+        self.anchor_items_matrix = self.items.copy()
         self.anchor_thresholds_matrix = self.thresholds.copy()
 
-        # Build (R, I, K+1) severity array
-        sev_array = np.array([
-            [self.severities_matrix[rater][item]
-             for item in self.dataframe.columns]
-            for rater in self.raters
-        ])  # (R, I, K+1)
+        # (R, I, K+1) array from MultiIndex DataFrame
+        sev_array = self.facet_effects_matrix.values.reshape(
+            self.no_of_facet_elements, self.no_of_items, self.max_score
+        )
 
-        # Build (R_anchor, I, K+1) anchor severity array
-        anchor_sev_array = np.array([
-            [self.severities_matrix[rater][item]
-             for item in self.dataframe.columns]
-            for rater in anchor_raters
-        ])  # (R_anchor, I, K+1)
+        if adj is None:
+            anchor_idx = [list(self.facet_names).index(a) for a in anchors]
+            anchor_sev_array = sev_array[anchor_idx]  # (R_anchor, I, K)
+            severity_adjustments = anchor_sev_array.mean(axis=0)  # (I, K)
+        else:
+            severity_adjustments = adj  # (I, K) pre-computed from full data
+        diff_adjustments = severity_adjustments.mean(axis=1)  # (I,)
+        threshold_adjustments = severity_adjustments.mean(axis=0)  # (K,)
 
-        # Mean across anchor raters: (I, K+1)
-        severity_adjustments = anchor_sev_array.mean(axis=0)
+        for i, item in enumerate(self.responses.columns):
+            self.anchor_items_matrix[item] += diff_adjustments[i]
+        self.anchor_thresholds_matrix += threshold_adjustments
 
-        # Per-item adjustment: mean across thresholds (K slots, skip slot 0)
-        diff_adjustments = severity_adjustments[:, 1:].mean(axis=1)  # (I,)
-
-        # Per-threshold adjustment: mean across items
-        threshold_adjustments = severity_adjustments[:, 1:].mean(axis=0)  # (K,)
-
-        # Absorb into difficulties and thresholds
-        for i, item in enumerate(self.dataframe.columns):
-            self.anchor_diffs_matrix[item] += diff_adjustments[i]
-        self.anchor_thresholds_matrix[1:] += threshold_adjustments
-
-        # Subtract full adjustment from all raters
         sev_adj = sev_array.copy()
-        for r in range(len(self.raters)):
+        for r in range(self.no_of_facet_elements):
             sev_adj[r, :, :] -= severity_adjustments
 
-        # Re-centre diffs and thresholds (do NOT push back into severities)
-        self.anchor_diffs_matrix      -= self.anchor_diffs_matrix.mean()
-        self.anchor_thresholds_matrix[1:] -= self.anchor_thresholds_matrix[1:].mean()
+        self.anchor_items_matrix -= self.anchor_items_matrix.mean()
+        self.anchor_thresholds_matrix -= self.anchor_thresholds_matrix.mean()
 
-        self.anchor_severities_matrix = {
-            rater: {
-                item: sev_adj[r, j, :]
-                for j, item in enumerate(self.dataframe.columns)
-            }
-            for r, rater in enumerate(self.raters)
-        }
+        mi = pd.MultiIndex.from_product(
+            [self.facet_names, self.responses.columns], names=[self.facet, "item"]
+        )
+        self.anchor_facet_effects_matrix = pd.DataFrame(
+            sev_adj.reshape(-1, self.max_score), index=mi
+        )
 
-        # Marginal severities
-        sev_dict = {
-            rater: pd.DataFrame(self.anchor_severities_matrix[rater]).iloc[1:]
-            for rater in self.raters
-        }
-        sev_df = pd.concat(sev_dict.values(), keys=sev_dict.keys())
+        # Marginal severities (no sentinel to skip)
+        self.anchor_marginal_facet_effects_items = pd.DataFrame(
+            sev_adj.mean(axis=2), index=self.facet_names, columns=self.responses.columns
+        )
+        self.anchor_marginal_facet_effects_thresholds = pd.DataFrame(
+            sev_adj.mean(axis=1), index=self.facet_names
+        )
+        # Zero-sum per facet_element
+        adj_thr = self.anchor_marginal_facet_effects_thresholds.mean(axis=1)
+        self.anchor_marginal_facet_effects_thresholds = (
+            self.anchor_marginal_facet_effects_thresholds.subtract(adj_thr, axis=0)
+        )
 
-        self.anchor_marginal_severities_items = {
-            rater: sev_df.xs(rater).mean(axis=0)
-            for rater in self.raters
-        }
-        self.anchor_marginal_severities_thresholds = {
-            rater: pd.concat([pd.Series([0.0]),
-                              sev_df.xs(rater).mean(axis=1)])
-            for rater in self.raters
-        }
-        for rater in self.raters:
-            adj = self.anchor_marginal_severities_thresholds[rater].iloc[1:].mean()
-            self.anchor_marginal_severities_thresholds[rater].iloc[1:] -= adj
+    def _calibrate_anchor_bivector(self, anchors, adj=None):
+        """
+        Anchor calibration for the bivector parameterisation.
+
+        Bivector-native anchoring: operates directly on the two marginal
+        vectors rather than on the full matrix. Item vector adjustment is
+        absorbed into diffs (as in the items model); threshold vector
+        adjustment is absorbed into thresholds (as in the thresholds model).
+        The anchored full matrix is then reconstructed from the anchored
+        vectors.
+        """
+        self.anchor_items_bivector = self.items.copy()
+        self.anchor_thresholds_bivector = self.thresholds.copy()
+
+        # ---- Item vector adjustment --------------------------------------
+        item_sev_df = self.facet_effects_bivector_items.copy()  # (R, I) DataFrame
+        item_adj = item_sev_df.loc[anchors].mean(axis=0) if adj is None else adj[0]
+
+        self.anchor_items_bivector += item_adj
+        item_sev_df -= item_adj
+        self.anchor_facet_effects_bivector_items = item_sev_df
+        self.anchor_items_bivector -= self.anchor_items_bivector.mean()
+
+        # ---- Threshold vector adjustment ---------------------------------
+        thr_sev_df = self.facet_effects_bivector_thresholds.copy()  # (R, K+1) DataFrame
+        thr_adj = thr_sev_df.loc[anchors].mean(axis=0) if adj is None else adj[1]
+
+        self.anchor_thresholds_bivector += thr_adj.values
+        thr_sev_df -= thr_adj.values
+        self.anchor_facet_effects_bivector_thresholds = thr_sev_df
+        self.anchor_thresholds_bivector -= self.anchor_thresholds_bivector.mean()
+
+        # ---- Reconstruct anchored full matrix as MultiIndex DataFrame ----
+        mi = pd.MultiIndex.from_product(
+            [self.facet_names, self.item_names], names=[self.facet, "item"]
+        )
+        rows = []
+        for facet_element in self.facet_names:
+            for item in self.item_names:
+                row = np.array(
+                    [
+                        self.anchor_facet_effects_bivector_items.loc[
+                            facet_element, item
+                        ]
+                        + self.anchor_facet_effects_bivector_thresholds.loc[
+                            facet_element, k
+                        ]
+                        for k in range(self.max_score)
+                    ]
+                )
+                rows.append(row)
+        self.anchor_facet_effects_bivector = pd.DataFrame(rows, index=mi)
 
     # Backwards-compatible aliases
-    def calibrate_global_anchor(self, anchor_raters, **kw):
-        self.calibrate_anchor('global', anchor_raters, **kw)
-    def calibrate_items_anchor(self, anchor_raters, **kw):
-        self.calibrate_anchor('items', anchor_raters, **kw)
-    def calibrate_thresholds_anchor(self, anchor_raters, **kw):
-        self.calibrate_anchor('thresholds', anchor_raters, **kw)
-    def calibrate_matrix_anchor(self, anchor_raters, **kw):
-        self.calibrate_anchor('matrix', anchor_raters, **kw)
+    def calibrate_global_anchor(self, anchors, **kw):
+        """Alias for calibrate_anchor('global', anchors). See calibrate_anchor for full documentation."""
+        self.calibrate_anchor("global", anchors, **kw)
 
+    def calibrate_items_anchor(self, anchors, **kw):
+        """Alias for calibrate_anchor('items', anchors). See calibrate_anchor for full documentation."""
+        self.calibrate_anchor("items", anchors, **kw)
+
+    def calibrate_thresholds_anchor(self, anchors, **kw):
+        """Alias for calibrate_anchor('thresholds', anchors). See calibrate_anchor for full documentation."""
+        self.calibrate_anchor("thresholds", anchors, **kw)
+
+    def calibrate_matrix_anchor(self, anchors, **kw):
+        """Alias for calibrate_anchor('matrix', anchors). See calibrate_anchor for full documentation."""
+        self.calibrate_anchor("matrix", anchors, **kw)
+
+    def calibrate_bivector_anchor(self, anchors, **kw):
+        """Alias for calibrate_anchor('bivector', anchors). See calibrate_anchor for full documentation."""
+        self.calibrate_anchor("bivector", anchors, **kw)
 
     # ------------------------------------------------------------------
     # Standard errors (bootstrap)
     # ------------------------------------------------------------------
 
     def _bootstrap_samples(self, no_of_samples):
-        '''Generate bootstrap person samples preserving rater structure.'''
+        """Generate bootstrap person samples preserving facet_element structure."""
         picks = [
-            self.dataframe.index.get_level_values(1)[
+            self.responses.index.get_level_values(1)[
                 np.random.randint(0, self.no_of_persons, self.no_of_persons)
             ]
             for _ in range(no_of_samples)
         ]
-        data_dict = {rater: self.dataframe.xs(rater) for rater in self.raters}
+        data_dict = {
+            facet_element: self.responses.xs(facet_element)
+            for facet_element in self.facet_names
+        }
         samples = []
         for pick in picks:
             sample_dict = {
-                rater: pd.DataFrame(
-                    [data_dict[rater].loc[p] for p in pick]
+                facet_element: pd.DataFrame(
+                    [data_dict[facet_element].loc[p] for p in pick]
                 ).reset_index(drop=True)
-                for rater in self.raters
+                for facet_element in self.facet_names
             }
-            samples.append(pd.concat(sample_dict.values(),
-                                     keys=sample_dict.keys()))
+            samples.append(pd.concat(sample_dict.values(), keys=sample_dict.keys()))
         return [MFRM(s, self.max_score) for s in samples]
 
     def _se_from_bootstrap(self, ests_arr, labels, interval):
-        '''Compute SE and optional CI from a (B, N) bootstrap array.'''
+        """Compute SE and optional CI from a (B, N) bootstrap array."""
         se = np.nanstd(ests_arr, axis=0)
         if interval is not None:
             lo = np.percentile(ests_arr, 50 * (1 - interval), axis=0)
@@ -1079,324 +1618,723 @@ class MFRM(Rasch):
             lo = hi = None
         return se, lo, hi
 
-    def std_errors(self, model='global', anchor_raters=None, interval=None,
-                   no_of_samples=100, constant=0.1, method='cos',
-                   matrix_power=3, log_lik_tol=0.000001):
-        '''
+    def std_errors(
+        self,
+        model="global",
+        anchors=None,
+        interval=None,
+        no_of_samples=500,
+        constant=0.1,
+        method="cos",
+        matrix_power=3,
+        log_lik_tol=0.000001,
+        store_bootstrap=False,
+    ):
+        """
         Bootstrap standard errors for item difficulties, thresholds, and
-        rater severities for the specified model.
-        '''
+        facet_element severities for the specified model.
+
+        Parameters
+        ----------
+        store_bootstrap : bool, default False
+            If True, store the fitted bootstrap samples as
+            self._bootstrap_samples_{model} and set
+            self._bootstrap_stored_{model} = True. Allows
+            anchor_std_errors() to reuse the same samples without
+            rerunning the bootstrap. Memory cost: no_of_samples fitted
+            MFRM objects.
+        """
+        # Pre-compute anchor adjustment from full-data calibration so each
+        # bootstrap sample uses a fixed scale shift rather than re-estimating
+        # adj from the resample (which would inflate SEs with anchor rater
+        # sampling variance).
+        adj_fixed = self._extract_anchor_adj(model, anchors) if anchors is not None else None
+
         samples = self._bootstrap_samples(no_of_samples)
         for s in samples:
-            s.calibrate(model=model, constant=constant, method=method,
-                        matrix_power=matrix_power, log_lik_tol=log_lik_tol)
-            if anchor_raters is not None:
-                s.calibrate_anchor(model, anchor_raters, constant=constant,
-                                   method=method, matrix_power=matrix_power,
-                                   log_lik_tol=log_lik_tol)
+            s.calibrate(
+                model=model,
+                constant=constant,
+                method=method,
+                matrix_power=matrix_power,
+                log_lik_tol=log_lik_tol,
+            )
+            if anchors is not None:
+                s.calibrate_anchor(
+                    model,
+                    anchors,
+                    constant=constant,
+                    method=method,
+                    matrix_power=matrix_power,
+                    log_lik_tol=log_lik_tol,
+                    adj=adj_fixed,
+                )
 
-        anc = anchor_raters is not None
-        prefix = 'anchor_' if anc else ''
+        if store_bootstrap:
+            setattr(self, f"_bootstrap_samples_{model}", samples)
+            setattr(self, f"_bootstrap_stored_{model}", True)
+        else:
+            setattr(self, f"_bootstrap_stored_{model}", False)
+
+        setattr(self, f"_bootstrap_interval_{model}", interval)
+
+        anc = anchors is not None
+        prefix = "anchor_" if anc else ""
 
         # Item estimates
         if anc:
-            item_ests = np.array([
-                getattr(s, f'anchor_diffs_{model}').values for s in samples
-            ])
-            thresh_ests = np.array([
-                getattr(s, f'anchor_thresholds_{model}') for s in samples
-            ])
+            item_ests = np.array(
+                [getattr(s, f"anchor_items_{model}").values for s in samples]
+            )
+            thresh_ests = np.array(
+                [getattr(s, f"anchor_thresholds_{model}") for s in samples]
+            )
         else:
-            item_ests   = np.array([s.diffs.values for s in samples])
-            thresh_ests = np.array([s.thresholds for s in samples])
+            item_ests = np.array([s.items.values for s in samples])
+            thresh_ests = np.array([s.thresholds.values for s in samples])
 
         item_se, item_lo, item_hi = self._se_from_bootstrap(
-            item_ests, self.dataframe.columns, interval
+            item_ests, self.responses.columns, interval
         )
-        self.item_se = pd.Series(item_se, index=self.dataframe.columns)
-        self.item_low  = pd.Series(item_lo, index=self.dataframe.columns) if item_lo is not None else None
-        self.item_high = pd.Series(item_hi, index=self.dataframe.columns) if item_hi is not None else None
+        self.item_se = pd.Series(item_se, index=self.responses.columns)
+        if item_lo is not None:
+            self.item_low = pd.Series(item_lo, index=self.responses.columns)
+            self.item_high = pd.Series(item_hi, index=self.responses.columns)
 
         thr_se, thr_lo, thr_hi = self._se_from_bootstrap(thresh_ests, None, interval)
-        setattr(self, f'{prefix}threshold_se_{model}',   thr_se)
-        setattr(self, f'{prefix}threshold_low_{model}',  thr_lo)
-        setattr(self, f'{prefix}threshold_high_{model}', thr_hi)
+        setattr(self, f"{prefix}threshold_se_{model}", thr_se)
+        setattr(self, f"{prefix}threshold_low_{model}", thr_lo)
+        setattr(self, f"{prefix}threshold_high_{model}", thr_hi)
 
         # Category width SEs
         cat_widths = {
-            k + 1: thresh_ests[:, k + 2] - thresh_ests[:, k + 1]
+            k + 1: thresh_ests[:, k + 1] - thresh_ests[:, k]
             for k in range(self.max_score - 1)
         }
-        setattr(self, f'{prefix}cat_width_se_{model}',
-                {k: np.nanstd(v) for k, v in cat_widths.items()})
+        setattr(
+            self,
+            f"{prefix}cat_width_se_{model}",
+            {k: np.nanstd(v) for k, v in cat_widths.items()},
+        )
         if interval is not None:
-            setattr(self, f'{prefix}cat_width_low_{model}',
-                    {k: np.percentile(v, 50*(1-interval)) for k,v in cat_widths.items()})
-            setattr(self, f'{prefix}cat_width_high_{model}',
-                    {k: np.percentile(v, 50*(1+interval)) for k,v in cat_widths.items()})
+            setattr(
+                self,
+                f"{prefix}cat_width_low_{model}",
+                {
+                    k: np.percentile(v, 50 * (1 - interval))
+                    for k, v in cat_widths.items()
+                },
+            )
+            setattr(
+                self,
+                f"{prefix}cat_width_high_{model}",
+                {
+                    k: np.percentile(v, 50 * (1 + interval))
+                    for k, v in cat_widths.items()
+                },
+            )
 
         # Rater SE — structure differs by model
         self._store_rater_se(model, samples, anc, interval, prefix)
 
     def _store_rater_se(self, model, samples, anchor, interval, prefix):
-        '''Store rater SE attributes for the given model.'''
+        """Store facet_element SE attributes for the given model."""
         lo_p = 50 * (1 - interval) if interval is not None else None
         hi_p = 50 * (1 + interval) if interval is not None else None
 
-        if model == 'global':
-            sev_attr = f'anchor_severities_global' if anchor else 'severities_global'
+        if model == "global":
+            sev_attr = (
+                "anchor_facet_effects_global" if anchor else "facet_effects_global"
+            )
             rater_ests = np.array([
                 getattr(s, sev_attr).values for s in samples
+                if len(getattr(s, sev_attr)) == self.no_of_facet_elements
             ])
-            se = pd.Series(np.nanstd(rater_ests, axis=0), index=self.raters)
-            setattr(self, f'{prefix}rater_se_{model}', se)
+            se = pd.Series(np.nanstd(rater_ests, axis=0), index=self.facet_names)
+            setattr(self, f"{prefix}rater_se_{model}", se)
             if interval is not None:
-                setattr(self, f'{prefix}rater_low_{model}',
-                        pd.Series(np.percentile(rater_ests, lo_p, axis=0), index=self.raters))
-                setattr(self, f'{prefix}rater_high_{model}',
-                        pd.Series(np.percentile(rater_ests, hi_p, axis=0), index=self.raters))
-
-        elif model == 'items':
-            sev_attr = f'anchor_severities_items' if anchor else 'severities_items'
-            rater_ests = pd.concat(
-                {i: pd.DataFrame.from_dict(getattr(s, sev_attr), orient='index')
-                 for i, s in enumerate(samples)},
-                keys=range(len(samples))
-            ).swaplevel(0, 1)
-            se = {rater: rater_ests.xs(rater).std()
-                  for rater in self.raters}
-            setattr(self, f'{prefix}rater_se_{model}', se)
-            if interval is not None:
-                setattr(self, f'{prefix}rater_low_{model}',
-                        {r: rater_ests.xs(r).quantile(lo_p/100) for r in self.raters})
-                setattr(self, f'{prefix}rater_high_{model}',
-                        {r: rater_ests.xs(r).quantile(hi_p/100) for r in self.raters})
-
-        elif model == 'thresholds':
-            sev_attr = f'anchor_severities_thresholds' if anchor else 'severities_thresholds'
-            rater_ests = np.array([
-                list(getattr(s, sev_attr).values()) for s in samples
-            ])
-            se = {rater: rater_ests[:, r, :].std(axis=0)
-                  for r, rater in enumerate(self.raters)}
-            setattr(self, f'{prefix}rater_se_{model}', se)
-            if interval is not None:
-                setattr(self, f'{prefix}rater_low_{model}',
-                        {rater: np.percentile(rater_ests[:, r, :], lo_p, axis=0)
-                         for r, rater in enumerate(self.raters)})
-                setattr(self, f'{prefix}rater_high_{model}',
-                        {rater: np.percentile(rater_ests[:, r, :], hi_p, axis=0)
-                         for r, rater in enumerate(self.raters)})
-
-        elif model == 'matrix':
-            sev_attr = f'anchor_severities_matrix' if anchor else 'severities_matrix'
-            # Per-(rater, item) SE across bootstrap samples
-            by_rater = {
-                rater: {
-                    i: getattr(s, sev_attr)[rater]
-                    for i, s in enumerate(samples)
-                }
-                for rater in self.raters
-            }
-            se = {}
-            se_marginal_items_all = {}
-            se_marginal_thresholds_all = {}
-            for rater in self.raters:
-                df = pd.DataFrame(by_rater[rater]).T  # (B, I×K+1 dict)
-                # se is per item: std of per-item arrays across bootstrap
-                item_arrays = {
-                    item: np.array([
-                        getattr(s, sev_attr)[rater][item]
-                        for s in samples
-                    ])
-                    for item in self.dataframe.columns
-                }
-                se[rater] = {item: item_arrays[item].std(axis=0)
-                             for item in self.dataframe.columns}
-
-                # Marginal SEs computed from bootstrap samples directly
-                # Per-item marginal: mean of σ_{r,i,k} across k, std across bootstrap
-                se_marginal_items_rater = {
-                    item: np.array([
-                        getattr(s, sev_attr)[rater][item][1:].mean()
-                        for s in samples
-                    ]).std()
-                    for item in self.dataframe.columns
-                }
-                # Per-threshold marginal: mean of σ_{r,i,k} across i, std across bootstrap
-                thr_marginals = np.array([
-                    np.array([
-                        getattr(s, sev_attr)[rater][item][1:]
-                        for item in self.dataframe.columns
-                    ]).mean(axis=0)
-                    for s in samples
-                ])  # (B, K)
-                se_marginal_thresholds_rater = np.concatenate(
-                    [[0.0], thr_marginals.std(axis=0)]
+                setattr(
+                    self,
+                    f"{prefix}rater_low_{model}",
+                    pd.Series(
+                        np.percentile(rater_ests, lo_p, axis=0), index=self.facet_names
+                    ),
                 )
-                se_marginal_items_all[rater]      = se_marginal_items_rater
-                se_marginal_thresholds_all[rater] = se_marginal_thresholds_rater
+                setattr(
+                    self,
+                    f"{prefix}rater_high_{model}",
+                    pd.Series(
+                        np.percentile(rater_ests, hi_p, axis=0), index=self.facet_names
+                    ),
+                )
 
-            setattr(self, f'{prefix}rater_se_{model}', se)
-            setattr(self, f'{prefix}rater_se_marginal_items', se_marginal_items_all)
-            setattr(self, f'{prefix}rater_se_marginal_thresholds', se_marginal_thresholds_all)
+        elif model == "items":
+            sev_attr = "anchor_facet_effects_items" if anchor else "facet_effects_items"
+            # Each sample's facet_effects_items is now a (R, I) DataFrame
+            rater_ests = np.array(
+                [getattr(s, sev_attr).values for s in samples
+                 if getattr(s, sev_attr).shape[0] == self.no_of_facet_elements]
+            )  # (B, R, I)
+            se = pd.DataFrame(
+                np.nanstd(rater_ests, axis=0),
+                index=self.facet_names,
+                columns=self.responses.columns,
+            )
+            setattr(self, f"{prefix}rater_se_{model}", se)
+            if interval is not None:
+                setattr(
+                    self,
+                    f"{prefix}rater_low_{model}",
+                    pd.DataFrame(
+                        np.percentile(rater_ests, lo_p, axis=0),
+                        index=self.facet_names,
+                        columns=self.responses.columns,
+                    ),
+                )
+                setattr(
+                    self,
+                    f"{prefix}rater_high_{model}",
+                    pd.DataFrame(
+                        np.percentile(rater_ests, hi_p, axis=0),
+                        index=self.facet_names,
+                        columns=self.responses.columns,
+                    ),
+                )
+
+        elif model == "thresholds":
+            sev_attr = (
+                "anchor_facet_effects_thresholds"
+                if anchor
+                else "facet_effects_thresholds"
+            )
+            # Each sample's facet_effects_thresholds is now a (R, K+1) DataFrame
+            rater_ests = np.array(
+                [getattr(s, sev_attr).values for s in samples
+                 if getattr(s, sev_attr).shape[0] == self.no_of_facet_elements]
+            )  # (B, R, K+1)
+            se = pd.DataFrame(np.nanstd(rater_ests, axis=0), index=self.facet_names)
+            setattr(self, f"{prefix}rater_se_{model}", se)
+            if interval is not None:
+                setattr(
+                    self,
+                    f"{prefix}rater_low_{model}",
+                    pd.DataFrame(
+                        np.percentile(rater_ests, lo_p, axis=0), index=self.facet_names
+                    ),
+                )
+                setattr(
+                    self,
+                    f"{prefix}rater_high_{model}",
+                    pd.DataFrame(
+                        np.percentile(rater_ests, hi_p, axis=0), index=self.facet_names
+                    ),
+                )
+
+        elif model == "bivector":
+            sev_i_attr = (
+                "anchor_facet_effects_bivector_items"
+                if anchor
+                else "facet_effects_bivector_items"
+            )
+            sev_t_attr = (
+                "anchor_facet_effects_bivector_thresholds"
+                if anchor
+                else "facet_effects_bivector_thresholds"
+            )
+            # Both are (R, I) and (R, K+1) DataFrames
+            valid = [s for s in samples
+                     if getattr(s, sev_i_attr).shape[0] == self.no_of_facet_elements]
+            item_ests = np.array(
+                [getattr(s, sev_i_attr).values for s in valid]
+            )  # (B, R, I)
+            thr_ests = np.array(
+                [getattr(s, sev_t_attr).values for s in valid]
+            )  # (B, R, K+1)
+            se_items = pd.DataFrame(
+                np.nanstd(item_ests, axis=0),
+                index=self.facet_names,
+                columns=self.responses.columns,
+            )
+            se_thresholds = pd.DataFrame(
+                np.nanstd(thr_ests, axis=0), index=self.facet_names
+            )
+            setattr(self, f"{prefix}rater_se_marginal_items", se_items)
+            setattr(self, f"{prefix}rater_se_marginal_thresholds", se_thresholds)
+            setattr(self, f"{prefix}rater_se_{model}", se_items)
+
+        elif model == "matrix":
+            sev_attr = (
+                "anchor_facet_effects_matrix" if anchor else "facet_effects_matrix"
+            )
+            # Each sample's facet_effects_matrix is a MultiIndex DataFrame (R×I, K)
+            # Skip samples where a rater was dropped during bootstrap resampling
+            expected_rows = self.no_of_facet_elements * self.no_of_items
+            rater_ests = np.array(
+                [
+                    getattr(s, sev_attr).values
+                    for s in samples
+                    if getattr(s, sev_attr).shape[0] == expected_rows
+                ]
+            )  # (B, R*I, K)
+            mi = pd.MultiIndex.from_product(
+                [self.facet_names, self.responses.columns], names=[self.facet, "item"]
+            )
+            se = pd.DataFrame(np.nanstd(rater_ests, axis=0), index=mi)
+            setattr(self, f"{prefix}rater_se_{model}", se)
+
+            # Marginal SEs: item = mean over K, threshold = mean over I
+            sev_4d = rater_ests.reshape(
+                len(rater_ests),
+                self.no_of_facet_elements,
+                self.no_of_items,
+                self.max_score,
+            )
+            se_marginal_items = pd.DataFrame(
+                np.nanstd(sev_4d.mean(axis=3), axis=0),
+                index=self.facet_names,
+                columns=self.responses.columns,
+            )
+            thr_means = sev_4d.mean(axis=2)  # (B, R, K) — mean over I
+            thr_se_arr = np.concatenate(
+                [
+                    np.zeros((self.no_of_facet_elements, 1)),
+                    np.nanstd(thr_means, axis=0),
+                ],
+                axis=1,
+            )
+            se_marginal_thresholds = pd.DataFrame(thr_se_arr, index=self.facet_names)
+            setattr(self, f"{prefix}rater_se_marginal_items", se_marginal_items)
+            setattr(
+                self, f"{prefix}rater_se_marginal_thresholds", se_marginal_thresholds
+            )
+
+            if interval is not None:
+                setattr(
+                    self,
+                    f"{prefix}rater_low_{model}",
+                    pd.DataFrame(np.percentile(rater_ests, lo_p, axis=0), index=mi),
+                )
+                setattr(
+                    self,
+                    f"{prefix}rater_high_{model}",
+                    pd.DataFrame(np.percentile(rater_ests, hi_p, axis=0), index=mi),
+                )
+
+        self._set_facet_aliases(model, anchor=(prefix == "anchor_"))
 
     # Backwards-compatible aliases
-    def std_errors_global(self, anchor_raters=None, **kw):
-        self.std_errors(model='global', anchor_raters=anchor_raters, **kw)
-    def std_errors_items(self, anchor_raters=None, **kw):
-        self.std_errors(model='items', anchor_raters=anchor_raters, **kw)
-    def std_errors_thresholds(self, anchor_raters=None, **kw):
-        self.std_errors(model='thresholds', anchor_raters=anchor_raters, **kw)
-    def std_errors_matrix(self, anchor_raters=None, **kw):
-        self.std_errors(model='matrix', anchor_raters=anchor_raters, **kw)
-    def std_errors_global_anchor(self, anchor_raters, **kw):
-        self.std_errors(model='global', anchor_raters=anchor_raters, **kw)
+    def std_errors_global(self, anchors=None, **kw):
+        """Alias for std_errors(model=\'global\'). See std_errors for full documentation."""
+        self.std_errors(model="global", anchors=anchors, **kw)
+
+    def std_errors_items(self, anchors=None, **kw):
+        """Alias for std_errors(model=\'items\'). See std_errors for full documentation."""
+        self.std_errors(model="items", anchors=anchors, **kw)
+
+    def std_errors_thresholds(self, anchors=None, **kw):
+        """Alias for std_errors(model=\'thresholds\'). See std_errors for full documentation."""
+        self.std_errors(model="thresholds", anchors=anchors, **kw)
+
+    def std_errors_matrix(self, anchors=None, **kw):
+        """Alias for std_errors(model=\'matrix\'). See std_errors for full documentation."""
+        self.std_errors(model="matrix", anchors=anchors, **kw)
+
+    def std_errors_bivector(self, anchors=None, **kw):
+        """Alias for std_errors(model=\'bivector\'). See std_errors for full documentation."""
+        self.std_errors(model="bivector", anchors=anchors, **kw)
+
+    def std_errors_global_anchor(self, anchors, **kw):
+        """Alias for std_errors(model=\'global\', anchors=anchors). See std_errors for full documentation."""
+        self.std_errors(model="global", anchors=anchors, **kw)
+
+    def anchor_std_errors(
+        self,
+        model="global",
+        anchors=None,
+        interval=None,
+        no_of_samples=500,
+        constant=0.1,
+        method="cos",
+        matrix_power=3,
+        log_lik_tol=0.000001,
+    ):
+        """
+        Compute bootstrap standard errors for anchor-adjusted parameters.
+
+        If std_errors() was previously called with store_bootstrap=True for
+        this model, reuses the stored bootstrap samples — applying
+        calibrate_anchor() to each — without resampling. Otherwise reruns
+        the full bootstrap.
+
+        interval is inherited from std_errors() if not explicitly provided,
+        so anchor CIs are consistent with the unanchored CIs.
+
+        Stores anchor_item_se, anchor_item_low / anchor_item_high (if
+        interval is set), anchor_threshold_se_{model},
+        anchor_rater_se_{model}, and the corresponding low/high attributes,
+        mirroring the naming convention of std_errors().
+
+        Parameters
+        ----------
+        model : str
+            One of 'global', 'items', 'thresholds', 'matrix'.
+        anchors : list or None
+            Raters whose mean severity is anchored to zero. If None,
+            falls back to anchor_rater_names_{model} set by calibrate_anchor().
+        interval : float or None
+            If provided, store percentile CIs at this level (e.g. 0.95).
+            If None, inherits the interval used in std_errors() for this
+            model. Pass interval=0 to explicitly suppress CIs even if
+            std_errors() used one.
+        no_of_samples : int
+            Number of bootstrap samples. Only used when stored samples are
+            not available.
+        """
+        # Inherit interval from std_errors() if not explicitly provided
+        if interval is None:
+            interval = getattr(self, f"_bootstrap_interval_{model}", None)
+
+        stored_flag = getattr(self, f"_bootstrap_stored_{model}", False)
+
+        if stored_flag:
+            # Fast path: reuse stored calibrated samples
+            samples = getattr(self, f"_bootstrap_samples_{model}")
+            anchor_raters_used = getattr(self, f"anchor_rater_names_{model}", anchors)
+            if anchor_raters_used is None:
+                raise ValueError(
+                    f"anchors must be provided, or calibrate_anchor() "
+                    f'must have been run for model="{model}" so that '
+                    f"anchor_rater_names_{model} is available."
+                )
+            adj_fixed = self._extract_anchor_adj(model, anchor_raters_used)
+            for s in samples:
+                s.calibrate_anchor(
+                    model,
+                    anchor_raters_used,
+                    constant=constant,
+                    method=method,
+                    matrix_power=matrix_power,
+                    log_lik_tol=log_lik_tol,
+                    adj=adj_fixed,
+                )
+        else:
+            # Slow path: full bootstrap rerun
+            if anchors is None:
+                anchors = getattr(self, f"anchor_rater_names_{model}", None)
+            if anchors is None:
+                raise ValueError(
+                    f"anchors must be provided, or calibrate_anchor() "
+                    f'must have been run for model="{model}" so that '
+                    f"anchor_rater_names_{model} is available."
+                )
+            adj_fixed = self._extract_anchor_adj(model, anchors)
+            samples = self._bootstrap_samples(no_of_samples)
+            for s in samples:
+                s.calibrate(
+                    model=model,
+                    constant=constant,
+                    method=method,
+                    matrix_power=matrix_power,
+                    log_lik_tol=log_lik_tol,
+                )
+                s.calibrate_anchor(
+                    model,
+                    anchors,
+                    constant=constant,
+                    method=method,
+                    matrix_power=matrix_power,
+                    log_lik_tol=log_lik_tol,
+                    adj=adj_fixed,
+                )
+
+        # Item difficulty SEs — from anchor_items_{model}
+        item_ests = np.array(
+            [getattr(s, f"anchor_items_{model}").values for s in samples]
+        )
+        item_se, item_lo, item_hi = self._se_from_bootstrap(
+            item_ests, self.responses.columns, interval
+        )
+        self.anchor_item_se = pd.Series(item_se, index=self.responses.columns)
+        if item_lo is not None:
+            self.anchor_item_low = pd.Series(item_lo, index=self.responses.columns)
+            self.anchor_item_high = pd.Series(item_hi, index=self.responses.columns)
+
+        # Threshold SEs
+        thresh_ests = np.array(
+            [getattr(s, f"anchor_thresholds_{model}") for s in samples]
+        )
+        thr_se, thr_lo, thr_hi = self._se_from_bootstrap(thresh_ests, None, interval)
+        setattr(self, f"anchor_threshold_se_{model}", thr_se)
+        setattr(self, f"anchor_threshold_low_{model}", thr_lo)
+        setattr(self, f"anchor_threshold_high_{model}", thr_hi)
+
+        # Category width SEs
+        cat_widths = {
+            k + 1: thresh_ests[:, k + 1] - thresh_ests[:, k]
+            for k in range(self.max_score - 1)
+        }
+        setattr(
+            self,
+            f"anchor_cat_width_se_{model}",
+            {k: np.nanstd(v) for k, v in cat_widths.items()},
+        )
+        if interval is not None:
+            setattr(
+                self,
+                f"anchor_cat_width_low_{model}",
+                {
+                    k: np.percentile(v, 50 * (1 - interval))
+                    for k, v in cat_widths.items()
+                },
+            )
+            setattr(
+                self,
+                f"anchor_cat_width_high_{model}",
+                {
+                    k: np.percentile(v, 50 * (1 + interval))
+                    for k, v in cat_widths.items()
+                },
+            )
+
+        # Rater SEs
+        self._store_rater_se(
+            model, samples, anchor=True, interval=interval, prefix="anchor_"
+        )
+
+    def anchor_std_errors_global(self, anchors=None, **kw):
+        """Alias for anchor_std_errors(model=\'global\'). See anchor_std_errors for full documentation."""
+        self.anchor_std_errors(model="global", anchors=anchors, **kw)
+
+    def anchor_std_errors_items(self, anchors=None, **kw):
+        """Alias for anchor_std_errors(model=\'items\'). See anchor_std_errors for full documentation."""
+        self.anchor_std_errors(model="items", anchors=anchors, **kw)
+
+    def anchor_std_errors_thresholds(self, anchors=None, **kw):
+        """Alias for anchor_std_errors(model=\'thresholds\'). See anchor_std_errors for full documentation."""
+        self.anchor_std_errors(model="thresholds", anchors=anchors, **kw)
+
+    def anchor_std_errors_matrix(self, anchors=None, **kw):
+        """Alias for anchor_std_errors(model=\'matrix\'). See anchor_std_errors for full documentation."""
+        self.anchor_std_errors(model="matrix", anchors=anchors, **kw)
+
+    def anchor_std_errors_bivector(self, anchors=None, **kw):
+        """Alias for anchor_std_errors(model=\'bivector\'). See anchor_std_errors for full documentation."""
+        self.anchor_std_errors(model="bivector", anchors=anchors, **kw)
 
     # ------------------------------------------------------------------
     # Category probability dictionary
     # ------------------------------------------------------------------
 
-    def category_probability_dict(self, model='global', anchor=False,
-                                  warm_corr=True, ext_scores=True,
-                                  tolerance=0.00001, max_iters=100,
-                                  ext_score_adjustment=0.5, method='cos',
-                                  constant=0.1, matrix_power=3,
-                                  log_lik_tol=0.000001):
-        '''Build the (Rater, Person) × Items category probability DataFrames.'''
+    def category_probability_dict(
+        self,
+        model="global",
+        anchor=False,
+        warm_corr=True,
+        ext_scores=True,
+        tolerance=0.00001,
+        max_iters=100,
+        ext_score_adjustment=0.5,
+        method="cos",
+        constant=0.1,
+        matrix_power=3,
+        log_lik_tol=0.000001,
+    ):
+        """Build the (Rater, Person) × Items category probability DataFrames."""
         difficulties, thresholds, severities = self._get_params(model, anchor)
 
-        if not hasattr(self, f'abils_{model}'):
-            self.person_abils(model=model, anchor=anchor, warm_corr=warm_corr,
-                              tolerance=tolerance, max_iters=max_iters,
-                              ext_score_adjustment=ext_score_adjustment)
-        abilities = getattr(self, f'{"anchor_" if anchor else ""}abils_{model}')
+        if not hasattr(self, f'{"anchor_" if anchor else ""}persons_{model}'):
+            self.person_estimates(
+                model=model,
+                anchor=anchor,
+                warm_corr=warm_corr,
+                tolerance=tolerance,
+                max_iters=max_iters,
+                ext_score_adjustment=ext_score_adjustment,
+            )
+        abilities = getattr(self, f'{"anchor_" if anchor else ""}persons_{model}')
 
-        person_filter = self.dataframe.notna().astype(float).replace(0, np.nan)
+        person_filter = self.responses.notna().astype(float).replace(0, np.nan)
 
         if not ext_scores:
-            scores     = sum(person_filter.loc[r].sum(axis=1) * self.max_score
-                             for r in self.raters)
-            total_scores = sum(self.dataframe.loc[r].sum(axis=1)
-                               for r in self.raters)
+            scores = sum(
+                person_filter.loc[r].sum(axis=1) * self.max_score
+                for r in self.facet_names
+            )
+            total_scores = sum(
+                self.responses.loc[r].sum(axis=1) for r in self.facet_names
+            )
             abilities = abilities[(total_scores > 0) & (total_scores < scores)]
-            person_filter = self.dataframe.loc[
-                (slice(None), abilities.index), :
-            ].notna().astype(float).replace(0, np.nan)
+            person_filter = (
+                self.responses.loc[(slice(None), abilities.index), :]
+                .notna()
+                .astype(float)
+                .replace(0, np.nan)
+            )
 
         probs_dict, cats = self._cat_probs_mfrm(
-            abilities.values, list(self.items), list(self.raters),
-            thresholds, model, severities
+            abilities.values,
+            list(self.item_names),
+            list(self.facet_names),
+            thresholds,
+            model,
+            severities,
         )
         # Convert to per-category (Rater×Person, Items) DataFrames
         cat_prob_dict = {}
         for cat_idx in range(len(cats)):
             frames = {
-                rater: pd.DataFrame(
-                    probs_dict[rater][cat_idx, :, :],
+                facet_element: pd.DataFrame(
+                    probs_dict[facet_element][cat_idx, :, :],
                     index=abilities.index,
-                    columns=self.items
+                    columns=self.item_names,
                 )
-                for rater in self.raters
+                for facet_element in self.facet_names
             }
             df_cat = pd.concat(frames.values(), keys=frames.keys())
             df_cat *= person_filter
             cat_prob_dict[cat_idx] = df_cat
 
-        setattr(self, f'cat_prob_dict_{model}', cat_prob_dict)
+        setattr(self, f"cat_prob_dict_{model}", cat_prob_dict)
 
     # Backwards-compatible aliases
     def category_probability_dict_global(self, **kw):
-        self.category_probability_dict(model='global', **kw)
+        """Alias for category_probability_dict(model=\'global\'). See category_probability_dict for full documentation."""
+        self.category_probability_dict(model="global", **kw)
+
     def category_probability_dict_items(self, **kw):
-        self.category_probability_dict(model='items', **kw)
+        """Alias for category_probability_dict(model=\'items\'). See category_probability_dict for full documentation."""
+        self.category_probability_dict(model="items", **kw)
+
     def category_probability_dict_thresholds(self, **kw):
-        self.category_probability_dict(model='thresholds', **kw)
+        """Alias for category_probability_dict(model=\'thresholds\'). See category_probability_dict for full documentation."""
+        self.category_probability_dict(model="thresholds", **kw)
+
     def category_probability_dict_matrix(self, **kw):
-        self.category_probability_dict(model='matrix', **kw)
+        """Alias for category_probability_dict(model=\'matrix\'). See category_probability_dict for full documentation."""
+        self.category_probability_dict(model="matrix", **kw)
+
+    def category_probability_dict_bivector(self, **kw):
+        """Alias for category_probability_dict(model=\'bivector\'). See category_probability_dict for full documentation."""
+        self.category_probability_dict(model="bivector", **kw)
 
     # ------------------------------------------------------------------
     # Ability estimation
     # ------------------------------------------------------------------
 
-    def abil(self, persons, model='global', anchor=False, items=None,
-             raters=None, warm_corr=True, tolerance=0.00001,
-             max_iters=100, ext_score_adjustment=0.5):
-        '''
+    def person(
+        self,
+        persons,
+        model="global",
+        anchor=False,
+        items=None,
+        facet_elements=None,
+        warm_corr=True,
+        tolerance=0.00001,
+        max_iters=100,
+        ext_score_adjustment=0.5,
+        missing_as_incorrect=False,
+    ):
+        """
         Newton-Raphson ML ability estimation with optional Warm correction.
 
         The key difference between models is how the log-numerator is constructed
-        per rater — handled entirely by _cat_probs_mfrm() so the NR loop is
+        per facet_element — handled entirely by _cat_probs_mfrm() so the NR loop is
         identical across all four parameterisations.
-        '''
+        """
         if isinstance(persons, str):
-            persons = self.persons if persons == 'all' else [persons]
+            persons = self.person_names if persons == "all" else [persons]
         if persons is None:
-            persons = self.persons
+            persons = self.person_names
         if isinstance(items, str):
-            items = list(self.items) if items == 'all' else [items]
+            items = list(self.item_names) if items == "all" else [items]
         if items is None:
-            items = list(self.items)
-        if raters is None:
-            raters = list(self.raters)
-        elif isinstance(raters, str):
-            raters = list(self.raters) if raters == 'all' else [raters]
-        if isinstance(raters, pd.core.indexes.base.Index):
-            raters = raters.tolist()
+            items = list(self.item_names)
+        if facet_elements is None:
+            facet_elements = list(self.facet_names)
+        elif isinstance(facet_elements, str):
+            facet_elements = (
+                list(self.facet_names) if facet_elements == "all" else [facet_elements]
+            )
+        if isinstance(facet_elements, pd.core.indexes.base.Index):
+            facet_elements = facet_elements.tolist()
 
         difficulties, thresholds, severities = self._get_params(model, anchor)
         difficulties = difficulties.loc[items]
 
-        person_data   = self.dataframe.loc[pd.IndexSlice[raters, persons], items]
+        person_data = self.responses.loc[pd.IndexSlice[facet_elements, persons], items]
         person_filter = person_data.notna().astype(float).replace(0, np.nan)
 
-        scores = sum(
-            person_data.loc[r].sum(axis=1) for r in raters
-        ).astype(float)
-        ext_scores_vec = sum(
-            person_filter.loc[r].sum(axis=1) for r in raters
-        ) * self.max_score
+        if missing_as_incorrect:
+            # For scoring: NaN stays NaN (sum skipna=True gives 0 contribution — correct)
+            # For NR loop: treat all items as observed (full filter)
+            nr_filter = person_filter.fillna(1.0)
+            ext_scores_vec_val = len(facet_elements) * len(items) * self.max_score
+        else:
+            nr_filter = person_filter
+            ext_scores_vec_val = None  # computed per-person below
 
-        scores[scores == 0]                  = ext_score_adjustment
-        scores[scores == ext_scores_vec]    -= ext_score_adjustment
+        scores = sum(person_data.loc[r].sum(axis=1) for r in facet_elements).astype(
+            float
+        )
 
-        item_count = sum(person_filter.loc[r].sum(axis=1) for r in raters)
+        if missing_as_incorrect:
+            ext_scores_vec = pd.Series(
+                ext_scores_vec_val, index=scores.index, dtype=float
+            )
+        else:
+            ext_scores_vec = (
+                sum(person_filter.loc[r].sum(axis=1) for r in facet_elements)
+                * self.max_score
+            )
+
+        scores[scores == 0] = ext_score_adjustment
+        scores[scores == ext_scores_vec] -= ext_score_adjustment
+
+        item_count = sum(person_filter.loc[r].sum(axis=1) for r in facet_elements)
         mean_diffs = (
-            sum((person_filter.loc[r] * difficulties.values).sum(axis=1)
-                for r in raters) / item_count
+            sum(
+                (person_filter.loc[r] * difficulties.values).sum(axis=1)
+                for r in facet_elements
+            )
+            / item_count
         )
 
         try:
             estimates = pd.Series(
-                np.log(scores.values) - np.log((ext_scores_vec - scores).values)
+                np.log(scores.values)
+                - np.log((ext_scores_vec - scores).values)
                 + mean_diffs.values,
-                index=list(persons)
+                index=list(persons),
             )
 
             active = pd.Series(True, index=list(persons))
-            iters  = 0
+            iters = 0
 
             while active.any() and iters <= max_iters:
                 active_idx = estimates.index[active]
 
                 probs_dict, cats = self._cat_probs_mfrm(
                     estimates.loc[active_idx].values,
-                    items, raters, thresholds, model, severities
+                    items,
+                    facet_elements,
+                    thresholds,
+                    model,
+                    severities,
                 )
 
-                # Aggregate expected scores and info across raters
-                exp_sum  = pd.Series(0.0, index=active_idx)
+                # Aggregate expected scores and info across facet_elements
+                exp_sum = pd.Series(0.0, index=active_idx)
                 info_sum = pd.Series(0.0, index=active_idx)
 
-                for rater in raters:
-                    probs = probs_dict[rater]  # (K+1, N_active, I)
-                    pf    = person_filter.loc[rater].loc[active_idx].values  # (N, I)
+                for facet_element in facet_elements:
+                    probs = probs_dict[facet_element]  # (K+1, N_active, I)
+                    pf = nr_filter.loc[facet_element].loc[active_idx].values  # (N, I)
 
                     exp = (cats[:, None, None] * probs).sum(axis=0) * pf  # (N, I)
                     dev = cats[:, None, None] - exp[None, :, :]
-                    inf = (dev ** 2 * probs).sum(axis=0) * pf             # (N, I)
+                    inf = (dev**2 * probs).sum(axis=0) * pf  # (N, I)
 
-                    exp_sum  += np.nansum(exp, axis=1)
+                    exp_sum += np.nansum(exp, axis=1)
                     info_sum += np.nansum(inf, axis=1)
 
                 changes = ((exp_sum - scores.loc[active_idx]) / info_sum).clip(-1, 1)
@@ -1407,9 +2345,10 @@ class MFRM(Rasch):
             if iters >= max_iters and active.any():
                 n_nc = int(active.sum())
                 warnings.warn(
-                    f'{n_nc} person(s) did not converge in abil(model={model!r}) '
-                    f'and will be set to NaN. Consider increasing max_iters.',
-                    UserWarning, stacklevel=2
+                    f"{n_nc} person(s) did not converge in person(model={model!r}) "
+                    f"and will be set to NaN. Consider increasing max_iters.",
+                    UserWarning,
+                    stacklevel=2,
                 )
                 estimates[active] = np.nan
 
@@ -1417,62 +2356,197 @@ class MFRM(Rasch):
                 valid = estimates.notna()
                 if valid.any():
                     valid_idx = estimates.index[valid]
-                    valid_pf  = person_filter.loc[pd.IndexSlice[raters, valid_idx], :]
+                    valid_pf = nr_filter.loc[
+                        pd.IndexSlice[facet_elements, valid_idx], :
+                    ]
                     estimates[valid] += self.warm(
-                        estimates[valid], items, raters, severities,
-                        thresholds, valid_pf, model
+                        estimates[valid],
+                        items,
+                        facet_elements,
+                        severities,
+                        thresholds,
+                        valid_pf,
+                        model,
                     )
 
         except Exception as e:
-            warnings.warn(f'abil(model={model!r}) failed with exception: {e}. '
-                          'Returning NaN for all persons.',
-                          UserWarning, stacklevel=2)
+            warnings.warn(
+                f"person(model={model!r}) failed with exception: {e}. "
+                "Returning NaN for all persons.",
+                UserWarning,
+                stacklevel=2,
+            )
             estimates = pd.Series(np.nan, index=list(persons))
 
         return estimates
 
-    def person_abils(self, model='global', anchor=False, items=None,
-                     raters=None, warm_corr=True, tolerance=0.00001,
-                     max_iters=100, ext_score_adjustment=0.5):
-        '''Estimate abilities for all persons; store as self.abils_{model}.'''
-        estimates = self.abil(
-            self.persons, model=model, anchor=anchor, items=items,
-            raters=raters, warm_corr=warm_corr, tolerance=tolerance,
-            max_iters=max_iters, ext_score_adjustment=ext_score_adjustment
+    def person_estimates(
+        self,
+        model="global",
+        anchor=False,
+        items=None,
+        facet_elements=None,
+        warm_corr=True,
+        tolerance=0.00001,
+        max_iters=100,
+        ext_score_adjustment=0.5,
+        missing_as_incorrect=False,
+    ):
+        """Estimate abilities for all persons; store as self.persons_{model}."""
+        estimates = self.person(
+            self.person_names,
+            model=model,
+            anchor=anchor,
+            items=items,
+            facet_elements=facet_elements,
+            warm_corr=warm_corr,
+            tolerance=tolerance,
+            max_iters=max_iters,
+            ext_score_adjustment=ext_score_adjustment,
+            missing_as_incorrect=missing_as_incorrect,
         )
-        attr = f'{"anchor_" if anchor else ""}abils_{model}'
+        attr = f'{"anchor_" if anchor else ""}persons_{model}'
         setattr(self, attr, estimates)
 
     # Backwards-compatible aliases
-    def abil_global(self, persons, anchor=False, items=None, raters=None, **kw):
-        return self.abil(persons, model='global', anchor=anchor, items=items, raters=raters, **kw)
-    def abil_items(self, persons, anchor=False, items=None, raters=None, **kw):
-        return self.abil(persons, model='items', anchor=anchor, items=items, raters=raters, **kw)
-    def abil_thresholds(self, persons, anchor=False, items=None, raters=None, **kw):
-        return self.abil(persons, model='thresholds', anchor=anchor, items=items, raters=raters, **kw)
-    def abil_matrix(self, persons, anchor=False, items=None, raters=None, **kw):
-        return self.abil(persons, model='matrix', anchor=anchor, items=items, raters=raters, **kw)
+    def abil_global(self, persons, anchor=False, items=None, facet_elements=None, **kw):
+        """Alias for person(..., model='global'). See person for full documentation."""
+        return self.person(
+            persons,
+            model="global",
+            anchor=anchor,
+            items=items,
+            facet_elements=facet_elements,
+            **kw,
+        )
 
-    def person_abils_global(self, anchor=False, items=None, raters=None, **kw):
-        self.person_abils(model='global', anchor=anchor, items=items, raters=raters, **kw)
-    def person_abils_items(self, anchor=False, items=None, raters=None, **kw):
-        self.person_abils(model='items', anchor=anchor, items=items, raters=raters, **kw)
-    def person_abils_thresholds(self, anchor=False, items=None, raters=None, **kw):
-        self.person_abils(model='thresholds', anchor=anchor, items=items, raters=raters, **kw)
-    def person_abils_matrix(self, anchor=False, items=None, raters=None, **kw):
-        self.person_abils(model='matrix', anchor=anchor, items=items, raters=raters, **kw)
+    def abil_items(self, persons, anchor=False, items=None, facet_elements=None, **kw):
+        """Alias for person(..., model='items'). See person for full documentation."""
+        return self.person(
+            persons,
+            model="items",
+            anchor=anchor,
+            items=items,
+            facet_elements=facet_elements,
+            **kw,
+        )
+
+    def abil_thresholds(
+        self, persons, anchor=False, items=None, facet_elements=None, **kw
+    ):
+        """Alias for person(..., model='thresholds'). See person for full documentation."""
+        return self.person(
+            persons,
+            model="thresholds",
+            anchor=anchor,
+            items=items,
+            facet_elements=facet_elements,
+            **kw,
+        )
+
+    def abil_matrix(self, persons, anchor=False, items=None, facet_elements=None, **kw):
+        """Alias for person(..., model='matrix'). See person for full documentation."""
+        return self.person(
+            persons,
+            model="matrix",
+            anchor=anchor,
+            items=items,
+            facet_elements=facet_elements,
+            **kw,
+        )
+
+    def abil_bivector(
+        self, persons, anchor=False, items=None, facet_elements=None, **kw
+    ):
+        """Alias for person(..., model='bivector'). See person for full documentation."""
+        return self.person(
+            persons,
+            model="bivector",
+            anchor=anchor,
+            items=items,
+            facet_elements=facet_elements,
+            **kw,
+        )
+
+    def person_estimates_global(
+        self, anchor=False, items=None, facet_elements=None, **kw
+    ):
+        """Alias for person_estimates(model='global'). See person_estimates for full documentation."""
+        self.person_estimates(
+            model="global",
+            anchor=anchor,
+            items=items,
+            facet_elements=facet_elements,
+            **kw,
+        )
+
+    def person_estimates_items(
+        self, anchor=False, items=None, facet_elements=None, **kw
+    ):
+        """Alias for person_estimates(model='items'). See person_estimates for full documentation."""
+        self.person_estimates(
+            model="items",
+            anchor=anchor,
+            items=items,
+            facet_elements=facet_elements,
+            **kw,
+        )
+
+    def person_estimates_thresholds(
+        self, anchor=False, items=None, facet_elements=None, **kw
+    ):
+        """Alias for person_estimates(model='thresholds'). See person_estimates for full documentation."""
+        self.person_estimates(
+            model="thresholds",
+            anchor=anchor,
+            items=items,
+            facet_elements=facet_elements,
+            **kw,
+        )
+
+    def person_estimates_matrix(
+        self, anchor=False, items=None, facet_elements=None, **kw
+    ):
+        """Alias for person_estimates(model='matrix'). See person_estimates for full documentation."""
+        self.person_estimates(
+            model="matrix",
+            anchor=anchor,
+            items=items,
+            facet_elements=facet_elements,
+            **kw,
+        )
+
+    def person_estimates_bivector(
+        self, anchor=False, items=None, facet_elements=None, **kw
+    ):
+        """Alias for person_estimates(model='bivector'). See person_estimates for full documentation."""
+        self.person_estimates(
+            model="bivector",
+            anchor=anchor,
+            items=items,
+            facet_elements=facet_elements,
+            **kw,
+        )
 
     # ------------------------------------------------------------------
     # Warm correction
     # ------------------------------------------------------------------
 
-    def warm(self, abilities, items, raters, severities, thresholds,
-             person_filter, model='global'):
+    def warm(
+        self,
+        abilities,
+        items,
+        facet_elements,
+        severities,
+        thresholds,
+        person_filter,
+        model="global",
+    ):
         """
         Apply Warm's (1989) weighted maximum likelihood bias correction.
 
         Computes the MFRM generalisation of the Warm correction, summing over
-        all raters and items. The correction is (J1 - J2 + J3) / (2 * I^2)
+        all facet_elements and items. The correction is (J1 - J2 + J3) / (2 * I^2)
         where I is total Fisher information and J1, J2, J3 are cubic moment
         terms. Uses the vectorised _cat_probs_mfrm engine.
 
@@ -1482,7 +2556,7 @@ class MFRM(Rasch):
             Current ability estimates, indexed by person.
         items : list
             Item subset to use.
-        raters : list
+        facet_elements : list
             Rater subset to use.
         severities : Series or dict
             Rater severity parameters (structure depends on model).
@@ -1500,7 +2574,7 @@ class MFRM(Rasch):
             Warm bias correction terms indexed by person, to add to ML estimates.
         """
         probs_dict, cats = self._cat_probs_mfrm(
-            abilities.values, items, raters, thresholds, model, severities
+            abilities.values, items, facet_elements, thresholds, model, severities
         )
 
         part1 = pd.Series(0.0, index=abilities.index)
@@ -1508,49 +2582,85 @@ class MFRM(Rasch):
         part3 = pd.Series(0.0, index=abilities.index)
         info_sum = pd.Series(0.0, index=abilities.index)
 
-        for rater in raters:
-            probs = probs_dict[rater]  # (K+1, N, I)
+        for facet_element in facet_elements:
+            probs = probs_dict[facet_element]  # (K+1, N, I)
             if isinstance(person_filter.index, pd.MultiIndex):
-                pf = person_filter.loc[rater].values
+                pf = person_filter.loc[facet_element].values
             else:
                 pf = person_filter.values
 
-            exp   = (cats[:, None, None] * probs).sum(axis=0) * pf      # (N, I)
-            dev   = cats[:, None, None] - exp[None, :, :]
-            info  = (dev ** 2 * probs).sum(axis=0) * pf                  # (N, I)
+            exp = (cats[:, None, None] * probs).sum(axis=0) * pf  # (N, I)
+            dev = cats[:, None, None] - exp[None, :, :]
+            info = (dev**2 * probs).sum(axis=0) * pf  # (N, I)
             masked_probs = probs * np.where(np.isnan(pf), 0, pf)[None, :, :]
 
-            part1    += np.nansum((cats[:, None, None] ** 3 * masked_probs).sum(axis=0), axis=1)
-            part2    += 3 * np.nansum((info + exp ** 2) * exp, axis=1)
-            part3    += 2 * np.nansum(exp ** 3, axis=1)
+            part1 += np.nansum(
+                (cats[:, None, None] ** 3 * masked_probs).sum(axis=0), axis=1
+            )
+            part2 += 3 * np.nansum((info + exp**2) * exp, axis=1)
+            part3 += 2 * np.nansum(exp**3, axis=1)
             info_sum += np.nansum(info, axis=1)
 
-        den = 2 * info_sum ** 2
+        den = 2 * info_sum**2
         warm_corr = (part1 - part2 + part3) / den
         return pd.Series(warm_corr.values, index=abilities.index)
 
     # Backwards-compatible aliases
-    def warm_global(self, abilities, items, raters, severities, pf, **kw):
-        return self.warm(abilities, items, raters, severities, self.thresholds, pf, 'global')
-    def warm_items(self, abilities, items, raters, severities, pf, **kw):
-        return self.warm(abilities, items, raters, severities, self.thresholds, pf, 'items')
-    def warm_thresholds(self, abilities, items, raters, severities, pf, **kw):
-        thr = kw.get('thresholds', self.thresholds)
-        return self.warm(abilities, items, raters, severities, thr, pf, 'thresholds')
-    def warm_matrix(self, abilities, items, raters, severities, pf, **kw):
-        return self.warm(abilities, items, raters, severities, self.thresholds, pf, 'matrix')
+    def warm_global(self, abilities, items, facet_elements, severities, pf, **kw):
+        """Alias for warm(..., model='global'). See warm for full documentation."""
+        return self.warm(
+            abilities, items, facet_elements, severities, self.thresholds, pf, "global"
+        )
+
+    def warm_items(self, abilities, items, facet_elements, severities, pf, **kw):
+        """Alias for warm(..., model='items'). See warm for full documentation."""
+        return self.warm(
+            abilities, items, facet_elements, severities, self.thresholds, pf, "items"
+        )
+
+    def warm_thresholds(self, abilities, items, facet_elements, severities, pf, **kw):
+        """Alias for warm(..., model='thresholds'). See warm for full documentation."""
+        thr = kw.get("thresholds", self.thresholds)
+        return self.warm(
+            abilities, items, facet_elements, severities, thr, pf, "thresholds"
+        )
+
+    def warm_matrix(self, abilities, items, facet_elements, severities, pf, **kw):
+        """Alias for warm(..., model='matrix'). See warm for full documentation."""
+        return self.warm(
+            abilities, items, facet_elements, severities, self.thresholds, pf, "matrix"
+        )
+
+    def warm_bivector(self, abilities, items, facet_elements, severities, pf, **kw):
+        """Alias for warm(..., model='bivector'). See warm for full documentation."""
+        return self.warm(
+            abilities,
+            items,
+            facet_elements,
+            severities,
+            self.thresholds,
+            pf,
+            "bivector",
+        )
 
     # ------------------------------------------------------------------
     # CSEM
     # ------------------------------------------------------------------
 
-    def csem(self, model='global', anchor=False, persons=None, abilities=None,
-             items=None, raters=None):
+    def csem(
+        self,
+        model="global",
+        anchor=False,
+        persons=None,
+        abilities=None,
+        items=None,
+        facet_elements=None,
+    ):
         """
         Compute the conditional standard error of measurement.
 
         Calculates CSEM = 1 / sqrt(I) where I is total Fisher information
-        summed across all observed rater-item combinations for each person.
+        summed across all observed facet_element-item combinations for each person.
         Uses the vectorised _cat_probs_mfrm engine.
 
         Parameters
@@ -1562,11 +2672,11 @@ class MFRM(Rasch):
         persons : list or None, default None
             Subset of persons. None uses all persons.
         abilities : pandas.Series or None, default None
-            Ability estimates. If None, uses stored abils_{model}.
+            Ability estimates. If None, uses stored persons_{model}.
         items : list or None, default None
             Item subset. None uses all items.
-        raters : list or None, default None
-            Rater subset. None uses all raters.
+        facet_elements : list or None, default None
+            Rater subset. None uses all facet_elements.
 
         Returns
         -------
@@ -1580,46 +2690,70 @@ class MFRM(Rasch):
         if persons is not None:
             abilities = abilities.loc[persons]
         if items is None:
-            items = list(self.items)
-        if raters is None:
-            raters = list(self.raters)
+            items = list(self.item_names)
+        if facet_elements is None:
+            facet_elements = list(self.facet_names)
 
-        person_data   = self.dataframe.loc[(raters, abilities.index), items]
+        person_data = self.responses.loc[(facet_elements, abilities.index), items]
         person_filter = person_data.notna().astype(float).replace(0, np.nan)
 
         probs_dict, cats = self._cat_probs_mfrm(
-            abilities.values, items, raters, thresholds, model, severities
+            abilities.values, items, facet_elements, thresholds, model, severities
         )
 
         info_sum = pd.Series(0.0, index=abilities.index)
-        for rater in raters:
-            probs = probs_dict[rater]
-            pf    = person_filter.loc[rater].values
-            exp   = (cats[:, None, None] * probs).sum(axis=0) * pf
-            dev   = cats[:, None, None] - exp[None, :, :]
-            info  = (dev ** 2 * probs).sum(axis=0) * pf
+        for facet_element in facet_elements:
+            probs = probs_dict[facet_element]
+            pf = person_filter.loc[facet_element].values
+            exp = (cats[:, None, None] * probs).sum(axis=0) * pf
+            dev = cats[:, None, None] - exp[None, :, :]
+            info = (dev**2 * probs).sum(axis=0) * pf
             info_sum += np.nansum(info, axis=1)
 
-        return 1.0 / (info_sum ** 0.5)
+        return 1.0 / (info_sum**0.5)
 
     # Backwards-compatible aliases
-    def csem_global(self, **kw): return self.csem(model='global', **kw)
-    def csem_items(self, **kw):  return self.csem(model='items', **kw)
-    def csem_thresholds(self, **kw): return self.csem(model='thresholds', **kw)
-    def csem_matrix(self, **kw): return self.csem(model='matrix', **kw)
+    def csem_global(self, **kw):
+        """Alias for csem(model='global'). See csem for full documentation."""
+        return self.csem(model="global", **kw)
+
+    def csem_items(self, **kw):
+        """Alias for csem(model='items'). See csem for full documentation."""
+        return self.csem(model="items", **kw)
+
+    def csem_thresholds(self, **kw):
+        """Alias for csem(model='thresholds'). See csem for full documentation."""
+        return self.csem(model="thresholds", **kw)
+
+    def csem_matrix(self, **kw):
+        """Alias for csem(model='matrix'). See csem for full documentation."""
+        return self.csem(model="matrix", **kw)
+
+    def csem_bivector(self, **kw):
+        """Alias for csem(model='bivector'). See csem for full documentation."""
+        return self.csem(model="bivector", **kw)
 
     # ------------------------------------------------------------------
     # Score-to-ability lookup
     # ------------------------------------------------------------------
 
-    def score_abil(self, score, model='global', anchor=False, items=None,
-                   raters=None, warm_corr=True, tolerance=0.00001,
-                   max_iters=100, ext_score_adjustment=0.5):
+    def score_lookup(
+        self,
+        score,
+        model="global",
+        anchor=False,
+        items=None,
+        facet_elements=None,
+        warm_corr=True,
+        tolerance=0.00001,
+        max_iters=100,
+        ext_score_adjustment=0.5,
+    ):
         """
         Convert a raw total score to an ability estimate via Newton-Raphson ML.
 
         Used internally to draw score lines on TCC plots. Sums expected scores
-        and information across all specified rater-item combinations using
+        and information across all specified facet_element-item combinations using
         scalar exp_score() and variance() methods.
 
         Parameters
@@ -1633,8 +2767,8 @@ class MFRM(Rasch):
             If True, uses anchor-calibrated parameters.
         items : list or None, default None
             Item subset. None uses all items.
-        raters : list or None, default None
-            Rater subset. None uses all raters.
+        facet_elements : list or None, default None
+            Rater subset. None uses all facet_elements.
         warm_corr : bool, default True
             If True, applies Warm's (1989) bias correction.
         tolerance : float, default 0.00001
@@ -1652,84 +2786,144 @@ class MFRM(Rasch):
         difficulties, thresholds, severities = self._get_params(model, anchor)
 
         if items is None:
-            items = list(self.items)
+            items = list(self.item_names)
         elif isinstance(items, str):
-            items = list(self.items) if items == 'all' else [items]
+            items = list(self.item_names) if items == "all" else [items]
 
-        if raters is None:
-            raters = list(self.raters)
-        elif isinstance(raters, str):
-            raters = list(self.raters) if raters == 'all' else [raters]
+        if facet_elements is None:
+            facet_elements = list(self.facet_names)
+        elif isinstance(facet_elements, str):
+            facet_elements = (
+                list(self.facet_names) if facet_elements == "all" else [facet_elements]
+            )
 
         difficulties = difficulties.loc[items]
-        ext_score    = len(items) * len(raters) * self.max_score
-        used_score   = float(score)
+        ext_score = len(items) * len(facet_elements) * self.max_score
+        used_score = float(score)
         if used_score == 0:
             used_score = ext_score_adjustment
         elif used_score == ext_score:
             used_score -= ext_score_adjustment
 
-        estimate = log(used_score) - log(ext_score - used_score) + float(difficulties.mean())
+        estimate = (
+            log(used_score) - log(ext_score - used_score) + float(difficulties.mean())
+        )
         change, iters = 1.0, 0
 
         while abs(change) > tolerance and iters <= max_iters:
             result = sum(
-                self.exp_score(estimate, item, difficulties, rater,
-                               severities, thresholds, model)
-                for item in items for rater in raters
+                self.exp_score(
+                    estimate,
+                    item,
+                    difficulties,
+                    facet_element,
+                    severities,
+                    thresholds,
+                    model,
+                )
+                for item in items
+                for facet_element in facet_elements
             )
             info = sum(
-                self.variance(estimate, item, difficulties, rater,
-                              severities, thresholds, model)
-                for item in items for rater in raters
+                self.variance(
+                    estimate,
+                    item,
+                    difficulties,
+                    facet_element,
+                    severities,
+                    thresholds,
+                    model,
+                )
+                for item in items
+                for facet_element in facet_elements
             )
-            change   = max(-1.0, min(1.0, (result - used_score) / info))
+            change = max(-1.0, min(1.0, (result - used_score) / info))
             estimate -= change
-            iters    += 1
+            iters += 1
 
         if warm_corr:
             # Build a minimal single-person MultiIndex person_filter for warm()
             pf_mi = pd.DataFrame(
                 1.0,
                 index=pd.MultiIndex.from_product(
-                    [raters, ['_score_abil_person_']],
-                    names=self.dataframe.index.names
+                    [facet_elements, ["_score_lookup_person_"]],
+                    names=self.responses.index.names,
                 ),
-                columns=items
+                columns=items,
             )
-            estimate += float(self.warm(
-                pd.Series({'_score_abil_person_': estimate}),
-                items, raters, severities, thresholds, pf_mi, model
-            ).iloc[0])
+            estimate += float(
+                self.warm(
+                    pd.Series({"_score_lookup_person_": estimate}),
+                    items,
+                    facet_elements,
+                    severities,
+                    thresholds,
+                    pf_mi,
+                    model,
+                ).iloc[0]
+            )
 
         if iters >= max_iters:
             warnings.warn(
-                'Maximum iterations reached before convergence in score_abil(). '
-                'Returned estimate may be inaccurate.',
-                UserWarning, stacklevel=2
+                "Maximum iterations reached before convergence in score_lookup(). "
+                "Returned estimate may be inaccurate.",
+                UserWarning,
+                stacklevel=2,
             )
         return estimate
 
     # Backwards-compatible aliases
-    def score_abil_global(self, score, anchor=False, items=None, raters=None, **kw):
-        return self.score_abil(score, 'global', anchor, items, raters, **kw)
-    def score_abil_items(self, score, anchor=False, items=None, raters=None, **kw):
-        return self.score_abil(score, 'items', anchor, items, raters, **kw)
-    def score_abil_thresholds(self, score, anchor=False, items=None, raters=None, **kw):
-        return self.score_abil(score, 'thresholds', anchor, items, raters, **kw)
-    def score_abil_matrix(self, score, anchor=False, items=None, raters=None, **kw):
-        return self.score_abil(score, 'matrix', anchor, items, raters, **kw)
+    def score_lookup_global(
+        self, score, anchor=False, items=None, facet_elements=None, **kw
+    ):
+        """Alias for score_lookup(..., model='global'). See score_lookup for full documentation."""
+        return self.score_lookup(score, "global", anchor, items, facet_elements, **kw)
 
-    def abil_lookup_table(self, model='global', anchor=False, attribute=True,
-                          items=None, raters=None, ext_scores=True,
-                          warm_corr=True, tolerance=0.00001,
-                          max_iters=100, ext_score_adjustment=0.5):
+    def score_lookup_items(
+        self, score, anchor=False, items=None, facet_elements=None, **kw
+    ):
+        """Alias for score_lookup(..., model='items'). See score_lookup for full documentation."""
+        return self.score_lookup(score, "items", anchor, items, facet_elements, **kw)
+
+    def score_lookup_thresholds(
+        self, score, anchor=False, items=None, facet_elements=None, **kw
+    ):
+        """Alias for score_lookup(..., model='thresholds'). See score_lookup for full documentation."""
+        return self.score_lookup(
+            score, "thresholds", anchor, items, facet_elements, **kw
+        )
+
+    def score_lookup_matrix(
+        self, score, anchor=False, items=None, facet_elements=None, **kw
+    ):
+        """Alias for score_lookup(..., model='matrix'). See score_lookup for full documentation."""
+        return self.score_lookup(score, "matrix", anchor, items, facet_elements, **kw)
+
+    def score_lookup_bivector(
+        self, score, anchor=False, items=None, facet_elements=None, **kw
+    ):
+        """Alias for score_lookup(..., model='bivector'). See score_lookup for full documentation."""
+        return self.score_lookup(score, "bivector", anchor, items, facet_elements, **kw)
+
+    def score_lookup_table(
+        self,
+        model="global",
+        anchor=False,
+        attribute=True,
+        items=None,
+        facet_elements=None,
+        ext_scores=True,
+        warm_corr=True,
+        tolerance=0.00001,
+        max_iters=100,
+        ext_score_adjustment=0.5,
+    ):
         """
         Build a score-to-ability lookup table for all possible raw scores.
 
         Estimates the ability corresponding to every possible raw score across
-        the specified rater-item combination using Newton-Raphson, and stores
-        the result as self.abil_table.
+        the specified facet_element-item combination using Newton-Raphson, and stores
+        the result as self.score_table.
 
         Parameters
         ----------
@@ -1738,11 +2932,11 @@ class MFRM(Rasch):
         anchor : bool, default False
             If True, uses anchor-calibrated parameters.
         attribute : bool, default True
-            If True, stores result as self.abil_table.
+            If True, stores result as self.score_table.
         items : list or None, default None
             Item subset. None uses all items.
-        raters : list or None, default None
-            Rater subset. None uses all raters.
+        facet_elements : list or None, default None
+            Rater subset. None uses all facet_elements.
         ext_scores : bool, default True
             If True, includes extreme scores adjusted by ext_score_adjustment.
         warm_corr : bool, default True
@@ -1756,282 +2950,368 @@ class MFRM(Rasch):
 
         Attributes set (if attribute=True)
         -----------------------------------
-        abil_table : pandas.Series
+        score_table_{model} : pandas.Series
             Ability estimate for each possible raw score, indexed by score.
         """
         if items is None:
-            items = list(self.items)
-        if raters is None:
-            raters = list(self.raters)
+            items = list(self.item_names)
+        if facet_elements is None:
+            facet_elements = list(self.facet_names)
 
-        ext_score = len(items) * len(raters) * self.max_score
+        ext_score = len(items) * len(facet_elements) * self.max_score
         if ext_scores:
-            scores      = np.arange(ext_score + 1)
+            scores = np.arange(ext_score + 1)
             used_scores = scores.astype(float)
-            used_scores[0]  += ext_score_adjustment
+            used_scores[0] += ext_score_adjustment
             used_scores[-1] -= ext_score_adjustment
         else:
-            scores      = np.arange(1, ext_score)
+            scores = np.arange(1, ext_score)
             used_scores = scores.astype(float)
 
-        table = pd.Series({
-            score: self.score_abil(used_score, model=model, anchor=anchor,
-                                   items=items, raters=raters,
-                                   warm_corr=warm_corr, tolerance=tolerance,
-                                   max_iters=max_iters,
-                                   ext_score_adjustment=ext_score_adjustment)
-            for score, used_score in zip(scores, used_scores)
-        })
+        table = pd.Series(
+            {
+                score: self.score_lookup(
+                    used_score,
+                    model=model,
+                    anchor=anchor,
+                    items=items,
+                    facet_elements=facet_elements,
+                    warm_corr=warm_corr,
+                    tolerance=tolerance,
+                    max_iters=max_iters,
+                    ext_score_adjustment=ext_score_adjustment,
+                )
+                for score, used_score in zip(scores, used_scores)
+            }
+        )
         if attribute:
-            setattr(self, f'abil_table_{model}', table)
+            setattr(self, f"score_table_{model}", table)
         else:
             return table
 
     # Backwards-compatible aliases
-    def abil_lookup_table_global(self, **kw): self.abil_lookup_table(model='global', **kw)
-    def abil_lookup_table_items(self, **kw):  self.abil_lookup_table(model='items', **kw)
-    def abil_lookup_table_thresholds(self, **kw): self.abil_lookup_table(model='thresholds', **kw)
-    def abil_lookup_table_matrix(self, **kw): self.abil_lookup_table(model='matrix', **kw)
+    def score_lookup_table_global(self, **kw):
+        """Alias for score_lookup_table(model='global'). See score_lookup_table for full documentation."""
+        self.score_lookup_table(model="global", **kw)
 
+    def score_lookup_table_items(self, **kw):
+        """Alias for score_lookup_table(model='items'). See score_lookup_table for full documentation."""
+        self.score_lookup_table(model="items", **kw)
+
+    def score_lookup_table_thresholds(self, **kw):
+        """Alias for score_lookup_table(model='thresholds'). See score_lookup_table for full documentation."""
+        self.score_lookup_table(model="thresholds", **kw)
+
+    def score_lookup_table_matrix(self, **kw):
+        """Alias for score_lookup_table(model='matrix'). See score_lookup_table for full documentation."""
+        self.score_lookup_table(model="matrix", **kw)
+
+    def score_lookup_table_bivector(self, **kw):
+        """Alias for score_lookup_table(model='bivector'). See score_lookup_table for full documentation."""
+        self.score_lookup_table(model="bivector", **kw)
 
     # ------------------------------------------------------------------
     # Category counts
     # ------------------------------------------------------------------
 
-    def category_counts_item(self, item, rater=None):
+    def category_counts_item(self, item, facet_element=None):
         """
         Return response frequency counts for a single item.
 
         Parameters
         ----------
         item : str
-            Item identifier (must be a column in self.dataframe).
-        rater : str or None, default None
-            If provided, returns counts for that rater only.
-            If None, aggregates across all raters.
+            Item identifier (must be a column in self.responses).
+        facet_element : str or None, default None
+            If provided, returns counts for that facet_element only.
+            If None, aggregates across all facet_elements.
 
         Returns
         -------
         pandas.Series
             Count of each response category (0 to max_score), indexed by
             category value. Returns None and prints a message if item or
-            rater is invalid.
+            facet_element is invalid.
         """
 
-        if item not in self.dataframe.columns:
-            warnings.warn(f'Invalid item name: {item!r}. Returning None.',
-                          UserWarning, stacklevel=2)
+        if item not in self.responses.columns:
+            warnings.warn(
+                f"Invalid item name: {item!r}. Returning None.",
+                UserWarning,
+                stacklevel=2,
+            )
             return None
-        if rater is None:
-            return (self.dataframe[item]
-                    .value_counts()
-                    .reindex(range(self.max_score + 1), fill_value=0)
-                    .astype(int))
-        if rater not in self.raters:
-            warnings.warn(f'Invalid rater name: {rater!r}. Returning None.',
-                          UserWarning, stacklevel=2)
-            return None
-        return (self.dataframe.xs(rater)[item]
+        if facet_element is None:
+            return (
+                self.responses[item]
                 .value_counts()
                 .reindex(range(self.max_score + 1), fill_value=0)
-                .astype(int))
+                .astype(int)
+            )
+        if facet_element not in self.facet_names:
+            warnings.warn(
+                f"Invalid facet_element name: {facet_element!r}. Returning None.",
+                UserWarning,
+                stacklevel=2,
+            )
+            return None
+        return (
+            self.responses.xs(facet_element)[item]
+            .value_counts()
+            .reindex(range(self.max_score + 1), fill_value=0)
+            .astype(int)
+        )
 
     def category_counts_df(self):
         """
         Build and store response frequency tables across all items.
 
-        Computes two tables: an overall table aggregated across all raters,
-        and a per-rater breakdown. Both include category counts (0 through
+        Computes two tables: an overall table aggregated across all facet_elements,
+        and a per-facet_element breakdown. Both include category counts (0 through
         max_score), total valid responses, and missing responses per item.
 
         Attributes set
         --------------
         category_counts : pandas.DataFrame
-            Overall (all-rater) frequency table with items as rows and
+            Overall (all-facet_element) frequency table with items as rows and
             response categories plus Total and Missing as columns.
             A Total row is appended. All values are integers.
         category_counts_raters : pandas.DataFrame
-            Per-rater frequency table with a (Rater, Item) MultiIndex.
+            Per-facet_element frequency table with a (Rater, Item) MultiIndex.
             Same column structure as category_counts.
         """
 
-        # Overall category counts (across all raters)
+        # Overall category counts (across all facet_elements)
         cat_counts = {
             item: {
                 score: int(self.category_counts_item(item).get(score, 0))
                 for score in range(self.max_score + 1)
             }
-            for item in self.items
+            for item in self.item_names
         }
         df = pd.DataFrame(cat_counts).T.sort_index(axis=1)
-        df['Total']   = self.dataframe.count()
-        df['Missing'] = self.dataframe.shape[0] - df['Total']
-        df.loc['Total'] = df.sum()
+        df["Total"] = self.responses.count()
+        df["Missing"] = self.responses.shape[0] - df["Total"]
+        df.loc["Total"] = df.sum()
         self.category_counts = df.astype(int)
 
-        # Per-rater category counts
+        # Per-facet_element category counts
         rater_counts = {}
-        for rater in self.raters:
+        for facet_element in self.facet_names:
             rater_dict = {
                 item: {
-                    score: int(self.category_counts_item(item, rater).get(score, 0))
+                    score: int(
+                        self.category_counts_item(item, facet_element).get(score, 0)
+                    )
                     for score in range(self.max_score + 1)
                 }
-                for item in self.items
+                for item in self.item_names
             }
             rdf = pd.DataFrame(rater_dict).T.sort_index(axis=1)
-            rdf['Total']   = self.dataframe.xs(rater).count()
-            rdf['Missing'] = (len(self.dataframe.xs(rater).index) -
-                              rdf['Total'])
-            rdf.loc['Total'] = rdf.sum()
-            rater_counts[rater] = rdf
+            rdf["Total"] = self.responses.xs(facet_element).count()
+            rdf["Missing"] = len(self.responses.xs(facet_element).index) - rdf["Total"]
+            rdf.loc["Total"] = rdf.sum()
+            rater_counts[facet_element] = rdf
 
-        self.category_counts_raters = pd.concat(
+        self.category_counts_facet_elements = pd.concat(
             rater_counts.values(), keys=rater_counts.keys()
         ).astype(int)
+        setattr(
+            self, f"category_counts_{self.facets}", self.category_counts_facet_elements
+        )
 
     # ------------------------------------------------------------------
     # Fit matrices (shared engine)
     # ------------------------------------------------------------------
 
     def fit_matrices(self, cat_prob_dict):
-        '''
+        """
         Compute expected scores, info, kurtosis, residuals from cat_prob_dict.
         cat_prob_dict: {cat: (Rater×Person, Items) DataFrame}
-        '''
+        """
         exp_score_df = sum(cat * df for cat, df in cat_prob_dict.items())
-        info_df      = sum(df * (cat - exp_score_df) ** 2
-                           for cat, df in cat_prob_dict.items())
-        kurtosis_df  = sum(df * (cat - exp_score_df) ** 4
-                           for cat, df in cat_prob_dict.items())
-        residual_df  = self.dataframe.loc[exp_score_df.index] - exp_score_df
-        std_residual_df = residual_df / (info_df ** 0.5)
+        info_df = sum(
+            df * (cat - exp_score_df) ** 2 for cat, df in cat_prob_dict.items()
+        )
+        kurtosis_df = sum(
+            df * (cat - exp_score_df) ** 4 for cat, df in cat_prob_dict.items()
+        )
+        residual_df = self.responses.loc[exp_score_df.index] - exp_score_df
+        std_residual_df = residual_df / (info_df**0.5)
         return exp_score_df, info_df, kurtosis_df, residual_df, std_residual_df
 
     def _ensure_fit_matrices(self, model, **kw):
-        '''Ensure calibration, abilities, cat_prob_dict and fit matrices exist.'''
-        calib_kw = {k: v for k, v in kw.items()
-                    if k in ('constant', 'method', 'matrix_power', 'log_lik_tol')}
-        abil_kw  = {k: v for k, v in kw.items()
-                    if k in ('warm_corr', 'tolerance', 'max_iters', 'ext_score_adjustment')}
-        if not hasattr(self, f'severities_{model}'):
+        """Ensure calibration, abilities, cat_prob_dict and fit matrices exist."""
+        calib_kw = {
+            k: v
+            for k, v in kw.items()
+            if k in ("constant", "method", "matrix_power", "log_lik_tol")
+        }
+        abil_kw = {
+            k: v
+            for k, v in kw.items()
+            if k in ("warm_corr", "tolerance", "max_iters", "ext_score_adjustment")
+        }
+        if not hasattr(self, f"facet_effects_{model}"):
             self.calibrate(model=model, **calib_kw)
-        if not hasattr(self, f'abils_{model}'):
-            self.person_abils(model=model, **abil_kw)
-        cpd_attr = f'cat_prob_dict_{model}'
-        exp_attr = f'exp_score_df_{model}'
+        if not hasattr(self, f"persons_{model}"):
+            self.person_estimates(model=model, **abil_kw)
+        cpd_attr = f"cat_prob_dict_{model}"
+        exp_attr = f"exp_score_df_{model}"
         if not hasattr(self, cpd_attr):
             self.category_probability_dict(model=model, **kw)
         if not hasattr(self, exp_attr):
             cpd = getattr(self, cpd_attr)
             (exp, info, kur, res, std) = self.fit_matrices(cpd)
-            setattr(self, f'exp_score_df_{model}',    exp)
-            setattr(self, f'info_df_{model}',         info)
-            setattr(self, f'kurtosis_df_{model}',     kur)
-            setattr(self, f'residual_df_{model}',     res)
-            setattr(self, f'std_residual_df_{model}', std)
+            setattr(self, f"exp_score_df_{model}", exp)
+            setattr(self, f"info_df_{model}", info)
+            setattr(self, f"kurtosis_df_{model}", kur)
+            setattr(self, f"residual_df_{model}", res)
+            setattr(self, f"std_residual_df_{model}", std)
 
     def fit_matrices_global(self, **kw):
-        self._ensure_fit_matrices('global', **kw)
+        """Alias for fit_matrices(model='global'). See fit_matrices for full documentation."""
+        self._ensure_fit_matrices("global", **kw)
+
     def fit_matrices_items(self, **kw):
-        self._ensure_fit_matrices('items', **kw)
+        """Alias for fit_matrices(model='items'). See fit_matrices for full documentation."""
+        self._ensure_fit_matrices("items", **kw)
+
     def fit_matrices_thresholds(self, **kw):
-        self._ensure_fit_matrices('thresholds', **kw)
+        """Alias for fit_matrices(model='thresholds'). See fit_matrices for full documentation."""
+        self._ensure_fit_matrices("thresholds", **kw)
+
     def fit_matrices_matrix(self, **kw):
-        self._ensure_fit_matrices('matrix', **kw)
+        """Alias for fit_matrices(model='matrix'). See fit_matrices for full documentation."""
+        self._ensure_fit_matrices("matrix", **kw)
+
+    def fit_matrices_bivector(self, **kw):
+        """Alias for fit_matrices(model='bivector'). See fit_matrices for full documentation."""
+        self._ensure_fit_matrices("bivector", **kw)
 
     # ------------------------------------------------------------------
     # Item fit statistics
     # ------------------------------------------------------------------
 
-    def item_fit_statistics(self, exp_score_df, info_df, kurtosis_df,
-                             residual_df, std_residual_df, abilities):
-        '''Shared item fit statistics computation.'''
-        scores     = self.dataframe.sum(axis=1)
-        max_scores = self.dataframe.count(axis=1) * self.max_score
-        item_count = self.dataframe[(scores > 0) & (scores < max_scores)].count(axis=0)
-        self.response_counts = self.dataframe.count(axis=0)
-        self.item_facilities = self.dataframe.mean(axis=0) / self.max_score
+    def item_fit_statistics(
+        self,
+        exp_score_df,
+        info_df,
+        kurtosis_df,
+        residual_df,
+        std_residual_df,
+        abilities,
+    ):
+        """Shared item fit statistics computation."""
+        scores = self.responses.sum(axis=1)
+        max_scores = self.responses.count(axis=1) * self.max_score
+        item_count = self.responses[(scores > 0) & (scores < max_scores)].count(axis=0)
+        self.response_counts = self.responses.count(axis=0)
+        self.item_facilities = self.responses.mean(axis=0) / self.max_score
 
-        item_outfit_ms   = (std_residual_df ** 2).mean()
-        item_outfit_zstd = (((item_outfit_ms ** (1/3)) - 1
-                             + 2 / (9 * item_count))
-                            / (2 / (9 * item_count)) ** 0.5)
+        item_outfit_ms = (std_residual_df**2).mean()
+        item_outfit_zstd = ((item_outfit_ms ** (1 / 3)) - 1 + 2 / (9 * item_count)) / (
+            2 / (9 * item_count)
+        ) ** 0.5
 
-        item_infit_ms   = (residual_df ** 2).sum() / info_df.sum()
-        item_infit_zstd = (((item_infit_ms ** (1/3)) - 1
-                             + 2 / (9 * item_count))
-                            / (2 / (9 * item_count)) ** 0.5)
+        item_infit_ms = (residual_df**2).sum() / info_df.sum()
+        item_infit_zstd = ((item_infit_ms ** (1 / 3)) - 1 + 2 / (9 * item_count)) / (
+            2 / (9 * item_count)
+        ) ** 0.5
 
         # Expand abilities to (Rater×Person) MultiIndex
-        abils_by_rater = pd.concat(
-            {rater: abilities for rater in self.raters},
-            keys=self.raters
+        estimates_by_rater = pd.concat(
+            {facet_element: abilities for facet_element in self.facet_names},
+            keys=self.facet_names,
         )
-        abils_by_rater.index.names = self.dataframe.index.names
-        pm, exp_pm = self.pt_meas(abils_by_rater, exp_score_df, info_df)
+        estimates_by_rater.index.names = self.responses.index.names
+        pm, exp_pm = self.pt_meas(estimates_by_rater, exp_score_df, info_df)
 
-        return (item_outfit_ms, item_outfit_zstd, item_infit_ms, item_infit_zstd,
-                pm, exp_pm)
+        return (
+            item_outfit_ms,
+            item_outfit_zstd,
+            item_infit_ms,
+            item_infit_zstd,
+            pm,
+            exp_pm,
+        )
 
     def _run_item_fit(self, model, **kw):
+        """Internal dispatcher: ensure fit matrices then run item fit statistics for the given model."""
         self._ensure_fit_matrices(model, **kw)
-        abilities = getattr(self, f'abils_{model}')
+        abilities = getattr(self, f"persons_{model}")
         (outfit_ms, outfit_z, infit_ms, infit_z, pm, exp_pm) = self.item_fit_statistics(
-            getattr(self, f'exp_score_df_{model}'),
-            getattr(self, f'info_df_{model}'),
-            getattr(self, f'kurtosis_df_{model}'),
-            getattr(self, f'residual_df_{model}'),
-            getattr(self, f'std_residual_df_{model}'),
-            abilities
+            getattr(self, f"exp_score_df_{model}"),
+            getattr(self, f"info_df_{model}"),
+            getattr(self, f"kurtosis_df_{model}"),
+            getattr(self, f"residual_df_{model}"),
+            getattr(self, f"std_residual_df_{model}"),
+            abilities,
         )
-        setattr(self, f'item_outfit_ms_{model}',   outfit_ms)
-        setattr(self, f'item_outfit_zstd_{model}', outfit_z)
-        setattr(self, f'item_infit_ms_{model}',    infit_ms)
-        setattr(self, f'item_infit_zstd_{model}',  infit_z)
-        setattr(self, f'point_measure_{model}',     pm)
-        setattr(self, f'exp_point_measure_{model}', exp_pm)
+        setattr(self, f"item_outfit_ms_{model}", outfit_ms)
+        setattr(self, f"item_outfit_zstd_{model}", outfit_z)
+        setattr(self, f"item_infit_ms_{model}", infit_ms)
+        setattr(self, f"item_infit_zstd_{model}", infit_z)
+        setattr(self, f"point_measure_{model}", pm)
+        setattr(self, f"exp_point_measure_{model}", exp_pm)
 
-    def item_fit_statistics_global(self, **kw):   self._run_item_fit('global', **kw)
-    def item_fit_statistics_items(self, **kw):    self._run_item_fit('items', **kw)
-    def item_fit_statistics_thresholds(self, **kw): self._run_item_fit('thresholds', **kw)
-    def item_fit_statistics_matrix(self, **kw):  self._run_item_fit('matrix', **kw)
+    def item_fit_statistics_global(self, **kw):
+        """Alias for item_fit_statistics(model='global'). See item_fit_statistics for full documentation."""
+        self._run_item_fit("global", **kw)
+
+    def item_fit_statistics_items(self, **kw):
+        """Alias for item_fit_statistics(model='items'). See item_fit_statistics for full documentation."""
+        self._run_item_fit("items", **kw)
+
+    def item_fit_statistics_thresholds(self, **kw):
+        """Alias for item_fit_statistics(model='thresholds'). See item_fit_statistics for full documentation."""
+        self._run_item_fit("thresholds", **kw)
+
+    def item_fit_statistics_matrix(self, **kw):
+        """Alias for item_fit_statistics(model='matrix'). See item_fit_statistics for full documentation."""
+        self._run_item_fit("matrix", **kw)
+
+    def item_fit_statistics_bivector(self, **kw):
+        """Alias for item_fit_statistics(model='bivector'). See item_fit_statistics for full documentation."""
+        self._run_item_fit("bivector", **kw)
 
     # ------------------------------------------------------------------
     # Threshold fit statistics
     # ------------------------------------------------------------------
 
     def threshold_fit_statistics(self, abilities, diff_df_dict):
-        '''Shared threshold fit statistics (dichotomised ICC approach).
+        """Shared threshold fit statistics (dichotomised ICC approach).
         Mirrors RSM threshold_fit_statistics but with (Rater, Person) MultiIndex
         and nz filter for extreme total scores.
-        '''
+        """
         # Build (Rater×Person, Items) ability DataFrame
-        basic_abils_df = pd.DataFrame(
-            [[abilities[person] for _ in self.dataframe.columns]
-             for person in self.persons],
-            index=self.persons,
-            columns=self.dataframe.columns
+        basic_persons_df = pd.DataFrame(
+            [
+                [abilities[person] for _ in self.responses.columns]
+                for person in self.person_names
+            ],
+            index=self.person_names,
+            columns=self.responses.columns,
         )
         abil_df = pd.concat(
-            [basic_abils_df] * self.no_of_raters,
-            keys=list(self.raters)
+            [basic_persons_df] * self.no_of_facet_elements, keys=list(self.facet_names)
         )
-        abil_df.index.names = self.dataframe.index.names
+        abil_df.index.names = self.responses.index.names
 
-        scores     = self.dataframe.sum(axis=1)
-        max_scores = self.dataframe.count(axis=1) * self.max_score
-        nz         = (scores > 0) & (scores < max_scores)
+        scores = self.responses.sum(axis=1)
+        max_scores = self.responses.count(axis=1) * self.max_score
+        nz = (scores > 0) & (scores < max_scores)
 
         dich = {}
         for t in range(self.max_score):
-            d = self.dataframe.where(self.dataframe.isin([t, t + 1]), np.nan) - t
-            d.index.names = self.dataframe.index.names
+            d = self.responses.where(self.responses.isin([t, t + 1]), np.nan) - t
+            d.index.names = self.responses.index.names
             dich[t + 1] = d
 
         # Count non-missing in raw dich (before nz) — matches RSM
-        dich_cnt = {t + 1: dich[t + 1].notna().sum().sum()
-                    for t in range(self.max_score)}
+        dich_cnt = {
+            t + 1: dich[t + 1].notna().sum().sum() for t in range(self.max_score)
+        }
 
         dich_exp = {}
         dich_var = {}
@@ -2042,11 +3322,11 @@ class MFRM(Rasch):
         for t in range(self.max_score):
             mm = (dich[t + 1] + 1) / (dich[t + 1] + 1)
             mm = mm.loc[nz]
-            mm.index.names = self.dataframe.index.names
+            mm.index.names = self.responses.index.names
 
             p = 1.0 / (1.0 + np.exp(diff_df_dict[t + 1] - abil_df))
             p = p.loc[nz]
-            p.index.names = self.dataframe.index.names
+            p.index.names = self.responses.index.names
             p = p * mm
 
             v = p * (1 - p) * mm
@@ -2057,317 +3337,478 @@ class MFRM(Rasch):
             dich_kur[t + 1] = k
 
             d_t = dich[t + 1].loc[nz]
-            d_t.index.names = self.dataframe.index.names
+            d_t.index.names = self.responses.index.names
             dich_res[t + 1] = d_t - p
-            dich_std[t + 1] = dich_res[t + 1] / (v ** 0.5)
+            dich_std[t + 1] = dich_res[t + 1] / (v**0.5)
 
         def _series(fn):
+            """Build a Series indexed by threshold number (1..max_score) from a per-threshold function."""
             return pd.Series({t + 1: fn(t) for t in range(self.max_score)})
 
         # Outfit MS: sum(std_res²) / count of valid dich responses (matching RSM)
-        outfit_ms = _series(lambda t: (
-            (dich_std[t+1] ** 2).sum().sum() / dich[t+1].loc[nz].count().sum()
-        ))
-        infit_ms  = _series(lambda t: (
-            (dich_res[t+1] ** 2).sum().sum() / dich_var[t+1].sum().sum()
-            if dich_var[t+1].sum().sum() > 0 else np.nan
-        ))
+        outfit_ms = _series(
+            lambda t: (
+                (dich_std[t + 1] ** 2).sum().sum() / dich[t + 1].loc[nz].count().sum()
+            )
+        )
+        infit_ms = _series(
+            lambda t: (
+                (dich_res[t + 1] ** 2).sum().sum() / dich_var[t + 1].sum().sum()
+                if dich_var[t + 1].sum().sum() > 0
+                else np.nan
+            )
+        )
 
-        outfit_q  = (_series(lambda t: (
-            (dich_kur[t+1] / dich_var[t+1] ** 2).sum().sum() / dich_cnt[t+1] ** 2
-            - 1 / dich_cnt[t+1]
-        )) ** 0.5)
-        infit_q   = (_series(lambda t: (
-            (dich_kur[t+1] - dich_var[t+1] ** 2).sum().sum()
-            / dich_var[t+1].sum().sum() ** 2
-        )) ** 0.5)
+        outfit_q = (
+            _series(
+                lambda t: (
+                    (dich_kur[t + 1] / dich_var[t + 1] ** 2).sum().sum()
+                    / dich_cnt[t + 1] ** 2
+                    - 1 / dich_cnt[t + 1]
+                )
+            )
+            ** 0.5
+        )
+        infit_q = (
+            _series(
+                lambda t: (
+                    (dich_kur[t + 1] - dich_var[t + 1] ** 2).sum().sum()
+                    / dich_var[t + 1].sum().sum() ** 2
+                )
+            )
+            ** 0.5
+        )
 
-        outfit_z = ((outfit_ms ** (1/3) - 1) * (3 / outfit_q) + outfit_q / 3)
-        infit_z  = ((infit_ms  ** (1/3) - 1) * (3 / infit_q)  + infit_q  / 3)
+        outfit_z = (outfit_ms ** (1 / 3) - 1) * (3 / outfit_q) + outfit_q / 3
+        infit_z = (infit_ms ** (1 / 3) - 1) * (3 / infit_q) + infit_q / 3
 
         # Point-measure correlations
         abil_dev = pd.concat(
-            [abilities.loc[self.persons] - abilities.loc[self.persons].mean()] * self.no_of_raters,
-            keys=list(self.raters)
+            [abilities.loc[self.person_names] - abilities.loc[self.person_names].mean()]
+            * self.no_of_facet_elements,
+            keys=list(self.facet_names),
         ).loc[nz]
-        abil_dev.index.names = self.dataframe.index.names
+        abil_dev.index.names = self.responses.index.names
 
-        fac = {t+1: dich[t+1].loc[nz].mean() for t in range(self.max_score)}
+        fac = {t + 1: dich[t + 1].loc[nz].mean() for t in range(self.max_score)}
 
-        pm_num = _series(lambda t: (
-            (dich[t+1].loc[nz] - fac[t+1]).mul(abil_dev.values, axis=0).sum().sum()
-        ))
-        pm_den = _series(lambda t: (
-            ((dich[t+1].loc[nz] - fac[t+1]) ** 2).sum().sum()
-            * float((abil_dev ** 2).sum())
-        ) ** 0.5)
+        pm_num = _series(
+            lambda t: (
+                (dich[t + 1].loc[nz] - fac[t + 1])
+                .mul(abil_dev.values, axis=0)
+                .sum()
+                .sum()
+            )
+        )
+        pm_den = _series(
+            lambda t: (
+                ((dich[t + 1].loc[nz] - fac[t + 1]) ** 2).sum().sum()
+                * float((abil_dev**2).sum())
+            )
+            ** 0.5
+        )
         thresh_pm = pm_num / pm_den
 
-        exp_pm_c = {t+1: dich_exp[t+1] - dich_exp[t+1].mean()
-                    for t in range(self.max_score)}
-        exp_pm_num = _series(lambda t: exp_pm_c[t+1].mul(abil_dev.values, axis=0).sum().sum())
-        exp_pm_den = _series(lambda t: (
-            ((exp_pm_c[t+1] ** 2) + dich_var[t+1]).sum().sum()
-            * float((abil_dev ** 2).sum())
-        ) ** 0.5)
+        exp_pm_c = {
+            t + 1: dich_exp[t + 1] - dich_exp[t + 1].mean()
+            for t in range(self.max_score)
+        }
+        exp_pm_num = _series(
+            lambda t: exp_pm_c[t + 1].mul(abil_dev.values, axis=0).sum().sum()
+        )
+        exp_pm_den = _series(
+            lambda t: (
+                ((exp_pm_c[t + 1] ** 2) + dich_var[t + 1]).sum().sum()
+                * float((abil_dev**2).sum())
+            )
+            ** 0.5
+        )
         thresh_exp_pm = exp_pm_num / exp_pm_den
 
         # Discrimination
         diff_dev = {}
         for t in range(self.max_score):
-            dd = abil_df - diff_df_dict[t+1]
+            dd = abil_df - diff_df_dict[t + 1]
             dd = dd.loc[nz]
-            dd.index.names = self.dataframe.index.names
-            diff_dev[t+1] = dd
+            dd.index.names = self.responses.index.names
+            diff_dev[t + 1] = dd
 
-        disc_num = _series(lambda t: (diff_dev[t+1] * dich_res[t+1]).sum().sum())
-        disc_den = _series(lambda t: (dich_var[t+1] * diff_dev[t+1] ** 2).sum().sum())
+        disc_num = _series(lambda t: (diff_dev[t + 1] * dich_res[t + 1]).sum().sum())
+        disc_den = _series(
+            lambda t: (dich_var[t + 1] * diff_dev[t + 1] ** 2).sum().sum()
+        )
         discrimination = 1 + disc_num / disc_den
 
-        return (outfit_ms, outfit_z, infit_ms, infit_z,
-                thresh_pm, thresh_exp_pm, discrimination)
-
+        return (
+            outfit_ms,
+            outfit_z,
+            infit_ms,
+            infit_z,
+            thresh_pm,
+            thresh_exp_pm,
+            discrimination,
+        )
 
     def _diff_df_dict(self, model, difficulties, thresholds, severities):
-        '''Build the threshold location DataFrame dict for threshold fit stats.'''
+        """Build the threshold location DataFrame dict for threshold fit stats."""
         diff_df_dict = {}
         for t in range(self.max_score):
-            thr_loc = thresholds[t + 1]
+            thr_loc = thresholds[t]
             rows = {}
-            for rater in self.raters:
-                if model == 'global':
-                    row = difficulties + thr_loc + float(severities.loc[rater])
-                elif model == 'items':
-                    sev_series = pd.Series(severities[rater]).reindex(self.dataframe.columns)
-                    row = difficulties + thr_loc + sev_series
-                elif model == 'thresholds':
-                    row = difficulties + thr_loc + severities[rater][t + 1]
-                elif model == 'matrix':
-                    row = difficulties + thr_loc + pd.Series({
-                        item: severities[rater][item][t + 1]
-                        for item in self.dataframe.columns
-                    })
-                rows[rater] = pd.DataFrame(
+            for facet_element in self.facet_names:
+                if model == "global":
+                    row = difficulties + thr_loc + float(severities.loc[facet_element])
+                elif model == "items":
+                    row = difficulties + thr_loc + severities.loc[facet_element]
+                elif model == "thresholds":
+                    row = difficulties + thr_loc + severities.loc[facet_element, t]
+                elif model in ("bivector", "matrix"):
+                    row = (
+                        difficulties
+                        + thr_loc
+                        + pd.Series(
+                            severities.loc[facet_element].iloc[:, t].values,
+                            index=self.responses.columns,
+                        )
+                    )
+                rows[facet_element] = pd.DataFrame(
                     np.tile(row.values[None, :], (self.no_of_persons, 1)),
-                    index=self.persons, columns=self.dataframe.columns
+                    index=self.person_names,
+                    columns=self.responses.columns,
                 )
             df_t = pd.concat(list(rows.values()), keys=list(rows.keys()))
-            df_t.index.names = self.dataframe.index.names
+            df_t.index.names = self.responses.index.names
             diff_df_dict[t + 1] = df_t
         return diff_df_dict
 
-    def _run_threshold_fit(self, model, anchor_raters=None, **kw):
-        if not hasattr(self, f'abils_{model}'):
-            self.person_abils(model=model)
+    def _run_threshold_fit(self, model, anchors=None, **kw):
+        """Internal dispatcher: run threshold fit statistics for the given model."""
+        if not hasattr(self, f"persons_{model}"):
+            self.person_estimates(model=model)
         # Always use unanchored params for fit statistics — anchor is origin shift only
         difficulties, thresholds, severities = self._get_params(model, anchor=False)
-        abilities  = getattr(self, f'abils_{model}')
-        ddd        = self._diff_df_dict(model, difficulties, thresholds, severities)
-        results    = self.threshold_fit_statistics(abilities, ddd)
-        names      = ['threshold_outfit_ms', 'threshold_outfit_zstd',
-                      'threshold_infit_ms',  'threshold_infit_zstd',
-                      'threshold_point_measure', 'threshold_exp_point_measure',
-                      'threshold_discrimination']
+        abilities = getattr(self, f"persons_{model}")
+        ddd = self._diff_df_dict(model, difficulties, thresholds, severities)
+        results = self.threshold_fit_statistics(abilities, ddd)
+        names = [
+            "threshold_outfit_ms",
+            "threshold_outfit_zstd",
+            "threshold_infit_ms",
+            "threshold_infit_zstd",
+            "threshold_point_measure",
+            "threshold_exp_point_measure",
+            "threshold_discrimination",
+        ]
         for name, val in zip(names, results):
-            setattr(self, f'{name}_{model}', val)
+            setattr(self, f"{name}_{model}", val)
 
-    def threshold_fit_statistics_global(self, **kw):    self._run_threshold_fit('global', **kw)
-    def threshold_fit_statistics_items(self, **kw):     self._run_threshold_fit('items', **kw)
-    def threshold_fit_statistics_thresholds(self, **kw): self._run_threshold_fit('thresholds', **kw)
-    def threshold_fit_statistics_matrix(self, **kw):    self._run_threshold_fit('matrix', **kw)
+    def threshold_fit_statistics_global(self, **kw):
+        """Alias for threshold_fit_statistics(model='global'). See threshold_fit_statistics for full documentation."""
+        self._run_threshold_fit("global", **kw)
+
+    def threshold_fit_statistics_items(self, **kw):
+        """Alias for threshold_fit_statistics(model='items'). See threshold_fit_statistics for full documentation."""
+        self._run_threshold_fit("items", **kw)
+
+    def threshold_fit_statistics_thresholds(self, **kw):
+        """Alias for threshold_fit_statistics(model='thresholds'). See threshold_fit_statistics for full documentation."""
+        self._run_threshold_fit("thresholds", **kw)
+
+    def threshold_fit_statistics_matrix(self, **kw):
+        """Alias for threshold_fit_statistics(model='matrix'). See threshold_fit_statistics for full documentation."""
+        self._run_threshold_fit("matrix", **kw)
 
     # ------------------------------------------------------------------
     # Rater fit statistics
     # ------------------------------------------------------------------
 
-    def rater_pivot(self, df):
-        '''Pivot (Rater×Person, Items) DataFrame to (Person×Items, Raters).'''
-        return pd.DataFrame({
-            rater: df.xs(rater).T.stack()
-            for rater in self.raters
-        })
+    def facet_pivot(self, df):
+        """Pivot (Rater×Person, Items) DataFrame to (Person×Items, Raters)."""
+        return pd.DataFrame(
+            {
+                facet_element: df.xs(facet_element).T.stack()
+                for facet_element in self.facet_names
+            }
+        )
 
-    def rater_fit_statistics(self, info_df, kurtosis_df, residual_df,
-                              std_residual_df):
-        '''Shared rater fit statistics.'''
-        scores     = self.dataframe.sum(axis=1)
-        max_scores = self.dataframe.count(axis=1) * self.max_score
-        rater_count = pd.Series({
-            rater: self.dataframe[(scores > 0) & (scores < max_scores)
-                   ].xs(rater).count().sum()
-            for rater in self.raters
-        })
+    def facet_fit_statistics(self, info_df, kurtosis_df, residual_df, std_residual_df):
+        """Shared facet_element fit statistics."""
+        scores = self.responses.sum(axis=1)
+        max_scores = self.responses.count(axis=1) * self.max_score
+        rater_count = pd.Series(
+            {
+                facet_element: self.responses[(scores > 0) & (scores < max_scores)]
+                .xs(facet_element)
+                .count()
+                .sum()
+                for facet_element in self.facet_names
+            }
+        )
 
-        rater_outfit_ms = pd.Series({
-            rater: ((std_residual_df ** 2).xs(rater).sum().sum() /
-                    (std_residual_df ** 2).xs(rater).count().sum())
-            for rater in self.raters
-        })
-        rater_infit_ms = pd.Series({
-            rater: ((residual_df ** 2).xs(rater).sum().sum() /
-                    info_df.xs(rater).sum().sum())
-            for rater in self.raters
-        })
+        rater_outfit_ms = pd.Series(
+            {
+                facet_element: (
+                    (std_residual_df**2).xs(facet_element).sum().sum()
+                    / (std_residual_df**2).xs(facet_element).count().sum()
+                )
+                for facet_element in self.facet_names
+            }
+        )
+        rater_infit_ms = pd.Series(
+            {
+                facet_element: (
+                    (residual_df**2).xs(facet_element).sum().sum()
+                    / info_df.xs(facet_element).sum().sum()
+                )
+                for facet_element in self.facet_names
+            }
+        )
 
         rater_outfit_q = (
-            (self.rater_pivot(kurtosis_df) / (self.rater_pivot(info_df) ** 2))
-            / (rater_count ** 2)
+            (self.facet_pivot(kurtosis_df) / (self.facet_pivot(info_df) ** 2))
+            / (rater_count**2)
         ).sum() - 1 / rater_count
-        rater_outfit_q = rater_outfit_q ** 0.5
+        rater_outfit_q = rater_outfit_q**0.5
 
-        rater_outfit_zstd = (((rater_outfit_ms ** (1/3)) - 1) *
-                              (3 / rater_outfit_q) + rater_outfit_q / 3)
+        rater_outfit_zstd = ((rater_outfit_ms ** (1 / 3)) - 1) * (
+            3 / rater_outfit_q
+        ) + rater_outfit_q / 3
 
         rater_infit_q = (
-            (self.rater_pivot(kurtosis_df) - self.rater_pivot(info_df) ** 2).sum() /
-            (self.rater_pivot(info_df).sum() ** 2)
+            (self.facet_pivot(kurtosis_df) - self.facet_pivot(info_df) ** 2).sum()
+            / (self.facet_pivot(info_df).sum() ** 2)
         ) ** 0.5
-        rater_infit_zstd = (((rater_infit_ms ** (1/3)) - 1) *
-                             (3 / rater_infit_q) + rater_infit_q / 3)
+        rater_infit_zstd = ((rater_infit_ms ** (1 / 3)) - 1) * (
+            3 / rater_infit_q
+        ) + rater_infit_q / 3
 
         return rater_outfit_ms, rater_outfit_zstd, rater_infit_ms, rater_infit_zstd
 
-    def _run_rater_fit(self, model, **kw):
+    def _run_facet_fit(self, model, **kw):
+        """Internal dispatcher: run facet/rater fit statistics for the given model."""
         self._ensure_fit_matrices(model, **kw)
-        results = self.rater_fit_statistics(
-            getattr(self, f'info_df_{model}'),
-            getattr(self, f'kurtosis_df_{model}'),
-            getattr(self, f'residual_df_{model}'),
-            getattr(self, f'std_residual_df_{model}')
+        results = self.facet_fit_statistics(
+            getattr(self, f"info_df_{model}"),
+            getattr(self, f"kurtosis_df_{model}"),
+            getattr(self, f"residual_df_{model}"),
+            getattr(self, f"std_residual_df_{model}"),
         )
         for name, val in zip(
-            ['rater_outfit_ms', 'rater_outfit_zstd',
-             'rater_infit_ms',  'rater_infit_zstd'],
-            results
+            [
+                "rater_outfit_ms",
+                "rater_outfit_zstd",
+                "rater_infit_ms",
+                "rater_infit_zstd",
+            ],
+            results,
         ):
-            setattr(self, f'{name}_{model}', val)
+            setattr(self, f"{name}_{model}", val)
+        self._set_facet_aliases(model)
 
-    def rater_fit_statistics_global(self, **kw):     self._run_rater_fit('global', **kw)
-    def rater_fit_statistics_items(self, **kw):      self._run_rater_fit('items', **kw)
-    def rater_fit_statistics_thresholds(self, **kw): self._run_rater_fit('thresholds', **kw)
-    def rater_fit_statistics_matrix(self, **kw):     self._run_rater_fit('matrix', **kw)
+    def facet_fit_statistics_global(self, **kw):
+        """Alias for facet_fit_statistics(model='global'). See facet_fit_statistics for full documentation."""
+        self._run_facet_fit("global", **kw)
+
+    def facet_fit_statistics_items(self, **kw):
+        """Alias for facet_fit_statistics(model='items'). See facet_fit_statistics for full documentation."""
+        self._run_facet_fit("items", **kw)
+
+    def facet_fit_statistics_thresholds(self, **kw):
+        """Alias for facet_fit_statistics(model='thresholds'). See facet_fit_statistics for full documentation."""
+        self._run_facet_fit("thresholds", **kw)
+
+    def facet_fit_statistics_matrix(self, **kw):
+        """Alias for facet_fit_statistics(model='matrix'). See facet_fit_statistics for full documentation."""
+        self._run_facet_fit("matrix", **kw)
 
     # ------------------------------------------------------------------
     # Person fit statistics
     # ------------------------------------------------------------------
 
-    def person_fit_statistics(self, info_df, kurtosis_df, residual_df,
-                               std_residual_df, abilities, **kw):
-        '''Shared person fit statistics.'''
+    def person_fit_statistics(
+        self, info_df, kurtosis_df, residual_df, std_residual_df, abilities, **kw
+    ):
+        """Shared person fit statistics."""
         csems = 1.0 / (info_df.unstack(level=0).sum(axis=1) ** 0.5)
-        rsems = (((residual_df.unstack(level=0) ** 2).sum(axis=1)) ** 0.5
-                 / info_df.unstack(level=0).sum(axis=1))
+        rsems = (
+            (residual_df.unstack(level=0) ** 2).sum(axis=1)
+        ) ** 0.5 / info_df.unstack(level=0).sum(axis=1)
 
         person_outfit_ms = (std_residual_df.unstack(level=0) ** 2).mean(axis=1)
-        person_infit_ms  = ((residual_df.unstack(level=0) ** 2).sum(axis=1) /
-                             info_df.unstack(level=0).sum(axis=1))
+        person_infit_ms = (residual_df.unstack(level=0) ** 2).sum(
+            axis=1
+        ) / info_df.unstack(level=0).sum(axis=1)
 
-        scores     = self.dataframe.sum(axis=1)
-        max_scores = self.dataframe.count(axis=1) * self.max_score
+        scores = self.responses.sum(axis=1)
+        max_scores = self.responses.count(axis=1) * self.max_score
         person_count = (
-            self.dataframe[(scores > 0) & (scores < max_scores)]
-            .unstack(level=0).notna().sum(axis=1)
+            self.responses[(scores > 0) & (scores < max_scores)]
+            .unstack(level=0)
+            .notna()
+            .sum(axis=1)
         )
 
-        base_df = (kurtosis_df.unstack(level=0) /
-                   (info_df.unstack(level=0) ** 2))
+        base_df = kurtosis_df.unstack(level=0) / (info_df.unstack(level=0) ** 2)
         # Sum kurtosis/info² per person, divide by person_count²
         # Avoid the fragile transpose trick — align directly on person index
         base_df = base_df.loc[person_count.index]
-        outfit_q_sq = (base_df.sum(axis=1) / (person_count ** 2)) - (1 / person_count)
-        person_outfit_q = np.where(outfit_q_sq >= 0, outfit_q_sq ** 0.5, np.nan)
+        outfit_q_sq = (base_df.sum(axis=1) / (person_count**2)) - (1 / person_count)
+        person_outfit_q = np.where(outfit_q_sq >= 0, outfit_q_sq**0.5, np.nan)
         person_outfit_q = pd.Series(person_outfit_q, index=person_count.index)
-        person_outfit_zstd = (((person_outfit_ms ** (1/3)) - 1) *
-                               (3 / person_outfit_q) + person_outfit_q / 3)
-        person_outfit_zstd = person_outfit_zstd[:self.no_of_persons].astype(float)
+        person_outfit_zstd = ((person_outfit_ms ** (1 / 3)) - 1) * (
+            3 / person_outfit_q
+        ) + person_outfit_q / 3
+        person_outfit_zstd = person_outfit_zstd[: self.no_of_persons].astype(float)
 
-        infit_q_sq = ((kurtosis_df.unstack(level=0) -
-                       info_df.unstack(level=0) ** 2).sum(axis=1) /
-                      (info_df.unstack(level=0).sum(axis=1) ** 2))
-        person_infit_q = np.where(infit_q_sq >= 0, infit_q_sq ** 0.5, np.nan)
+        infit_q_sq = (kurtosis_df.unstack(level=0) - info_df.unstack(level=0) ** 2).sum(
+            axis=1
+        ) / (info_df.unstack(level=0).sum(axis=1) ** 2)
+        person_infit_q = np.where(infit_q_sq >= 0, infit_q_sq**0.5, np.nan)
         person_infit_q = pd.Series(person_infit_q, index=infit_q_sq.index)
-        person_infit_zstd = (((person_infit_ms ** (1/3)) - 1) *
-                              (3 / person_infit_q) + person_infit_q / 3).astype(float)
+        person_infit_zstd = (
+            ((person_infit_ms ** (1 / 3)) - 1) * (3 / person_infit_q)
+            + person_infit_q / 3
+        ).astype(float)
 
-        return (csems, rsems, person_outfit_ms, person_outfit_zstd,
-                person_infit_ms, person_infit_zstd)
+        return (
+            csems,
+            rsems,
+            person_outfit_ms,
+            person_outfit_zstd,
+            person_infit_ms,
+            person_infit_zstd,
+        )
 
     def _run_person_fit(self, model, **kw):
+        """Internal dispatcher: run person fit statistics for the given model."""
         self._ensure_fit_matrices(model, **kw)
-        abilities = getattr(self, f'abils_{model}')
-        results   = self.person_fit_statistics(
-            getattr(self, f'info_df_{model}'),
-            getattr(self, f'kurtosis_df_{model}'),
-            getattr(self, f'residual_df_{model}'),
-            getattr(self, f'std_residual_df_{model}'),
-            abilities
+        abilities = getattr(self, f"persons_{model}")
+        results = self.person_fit_statistics(
+            getattr(self, f"info_df_{model}"),
+            getattr(self, f"kurtosis_df_{model}"),
+            getattr(self, f"residual_df_{model}"),
+            getattr(self, f"std_residual_df_{model}"),
+            abilities,
         )
-        names = ['csem_vector', 'rsem_vector', 'person_outfit_ms',
-                 'person_outfit_zstd', 'person_infit_ms', 'person_infit_zstd']
+        names = [
+            "csem_vector",
+            "rsem_vector",
+            "person_outfit_ms",
+            "person_outfit_zstd",
+            "person_infit_ms",
+            "person_infit_zstd",
+        ]
         for name, val in zip(names, results):
             if isinstance(val, pd.Series):
-                val = pd.to_numeric(val, errors='coerce')
-            setattr(self, f'{name}_{model}', val)
+                val = pd.to_numeric(val, errors="coerce")
+            setattr(self, f"{name}_{model}", val)
 
-    def person_fit_statistics_global(self, **kw):     self._run_person_fit('global', **kw)
-    def person_fit_statistics_items(self, **kw):      self._run_person_fit('items', **kw)
-    def person_fit_statistics_thresholds(self, **kw): self._run_person_fit('thresholds', **kw)
-    def person_fit_statistics_matrix(self, **kw):     self._run_person_fit('matrix', **kw)
+    def person_fit_statistics_global(self, **kw):
+        """Alias for person_fit_statistics(model='global'). See person_fit_statistics for full documentation."""
+        self._run_person_fit("global", **kw)
+
+    def person_fit_statistics_items(self, **kw):
+        """Alias for person_fit_statistics(model='items'). See person_fit_statistics for full documentation."""
+        self._run_person_fit("items", **kw)
+
+    def person_fit_statistics_thresholds(self, **kw):
+        """Alias for person_fit_statistics(model='thresholds'). See person_fit_statistics for full documentation."""
+        self._run_person_fit("thresholds", **kw)
+
+    def person_fit_statistics_matrix(self, **kw):
+        """Alias for person_fit_statistics(model='matrix'). See person_fit_statistics for full documentation."""
+        self._run_person_fit("matrix", **kw)
 
     # ------------------------------------------------------------------
     # Test-level fit statistics
     # ------------------------------------------------------------------
 
     def test_fit_statistics(self, abilities, rsems):
-        '''Shared test-level separation and reliability statistics.'''
-        scores     = self.dataframe.unstack(level=0).sum(axis=1)
-        max_scores = self.dataframe.unstack(level=0).count(axis=1) * self.max_score
-        abilities  = abilities[(scores > 0) & (scores < max_scores)]
+        """Shared test-level separation and reliability statistics."""
+        scores = self.responses.unstack(level=0).sum(axis=1)
+        max_scores = self.responses.unstack(level=0).count(axis=1) * self.max_score
+        abilities = abilities[(scores > 0) & (scores < max_scores)]
 
-        isi              = (self.diffs.var() / (self.item_se ** 2).mean() - 1) ** 0.5
-        item_strata      = (4 * isi + 1) / 3
-        item_reliability = isi ** 2 / (1 + isi ** 2)
+        isi = (self.items.var() / (self.item_se**2).mean() - 1) ** 0.5
+        item_strata = (4 * isi + 1) / 3
+        item_reliability = isi**2 / (1 + isi**2)
 
-        mean_rsem2 = (rsems ** 2).mean()
-        psi              = ((np.var(abilities) - mean_rsem2) / mean_rsem2) ** 0.5
-        person_strata    = (4 * psi + 1) / 3
-        person_reliability = psi ** 2 / (1 + psi ** 2)
+        mean_rsem2 = (rsems**2).mean()
+        psi = ((np.var(abilities) - mean_rsem2) / mean_rsem2) ** 0.5
+        person_strata = (4 * psi + 1) / 3
+        person_reliability = psi**2 / (1 + psi**2)
 
-        return (isi, item_strata, item_reliability,
-                psi, person_strata, person_reliability)
+        return (
+            isi,
+            item_strata,
+            item_reliability,
+            psi,
+            person_strata,
+            person_reliability,
+        )
 
     def _run_test_fit(self, model, **kw):
-        if not hasattr(self, f'csem_vector_{model}'):
+        """Internal dispatcher: run test-level separation statistics for the given model."""
+        if not hasattr(self, f"csem_vector_{model}"):
             self._run_person_fit(model, **kw)
-        if not hasattr(self, 'item_se'):
+        if not hasattr(self, "item_se"):
             self.std_errors(model=model, **kw)
-        abilities = getattr(self, f'abils_{model}')
-        rsems     = getattr(self, f'rsem_vector_{model}')
-        results   = self.test_fit_statistics(abilities, rsems)
+        abilities = getattr(self, f"persons_{model}")
+        rsems = getattr(self, f"rsem_vector_{model}")
+        results = self.test_fit_statistics(abilities, rsems)
         for name, val in zip(
-            ['isi', 'item_strata', 'item_reliability',
-             'psi', 'person_strata', 'person_reliability'],
-            results
+            [
+                "isi",
+                "item_strata",
+                "item_reliability",
+                "psi",
+                "person_strata",
+                "person_reliability",
+            ],
+            results,
         ):
-            setattr(self, f'{name}_{model}', val)
+            setattr(self, f"{name}_{model}", val)
 
-    def test_fit_statistics_global(self, **kw):     self._run_test_fit('global', **kw)
-    def test_fit_statistics_items(self, **kw):      self._run_test_fit('items', **kw)
-    def test_fit_statistics_thresholds(self, **kw): self._run_test_fit('thresholds', **kw)
-    def test_fit_statistics_matrix(self, **kw):     self._run_test_fit('matrix', **kw)
+    def test_fit_statistics_global(self, **kw):
+        """Alias for test_fit_statistics(model='global'). See test_fit_statistics for full documentation."""
+        self._run_test_fit("global", **kw)
+
+    def test_fit_statistics_items(self, **kw):
+        """Alias for test_fit_statistics(model='items'). See test_fit_statistics for full documentation."""
+        self._run_test_fit("items", **kw)
+
+    def test_fit_statistics_thresholds(self, **kw):
+        """Alias for test_fit_statistics(model='thresholds'). See test_fit_statistics for full documentation."""
+        self._run_test_fit("thresholds", **kw)
+
+    def test_fit_statistics_matrix(self, **kw):
+        """Alias for test_fit_statistics(model='matrix'). See test_fit_statistics for full documentation."""
+        self._run_test_fit("matrix", **kw)
 
     # ------------------------------------------------------------------
     # Top-level fit_statistics
     # ------------------------------------------------------------------
 
-    def fit_statistics(self, model='global', anchor_raters=None,
-                       warm_corr=True, se=True, test_stats=True,
-                       ext_scores=True, tolerance=0.00001, max_iters=100,
-                       ext_score_adjustment=0.5, method='cos',
-                       constant=0.1, matrix_power=3, log_lik_tol=0.000001,
-                       no_of_samples=100, interval=None):
+    def fit_statistics(
+        self,
+        model="global",
+        anchors=None,
+        warm_corr=True,
+        se=True,
+        test_stats=True,
+        ext_scores=True,
+        tolerance=0.00001,
+        max_iters=100,
+        ext_score_adjustment=0.5,
+        method="cos",
+        constant=0.1,
+        matrix_power=3,
+        log_lik_tol=0.000001,
+        no_of_samples=500,
+        interval=None,
+    ):
         """
-        Compute all item, threshold, rater, person, and test-level fit statistics.
+        Compute all item, threshold, facet_element, person, and test-level fit statistics.
 
         Top-level orchestrator that auto-triggers calibrate(), std_errors(),
         person_abils(), and category_probability_dict() as needed, then runs
@@ -2378,7 +3819,7 @@ class MFRM(Rasch):
         ----------
         model : str, default 'global'
             Rater parameterisation: 'global', 'items', 'thresholds', or 'matrix'.
-        anchor_raters : list or None, default None
+        anchors : list or None, default None
             Rater identifiers to treat as anchors for SE computation.
         warm_corr : bool, default True
             Warm bias correction for ability estimates.
@@ -2402,7 +3843,7 @@ class MFRM(Rasch):
             Matrix power for calibration.
         log_lik_tol : float, default 0.000001
             Convergence tolerance for calibration.
-        no_of_samples : int, default 100
+        no_of_samples : int, default 500
             Bootstrap samples for SE estimation.
         interval : float or None, default None
             CI width for bootstrap estimates.
@@ -2430,43 +3871,76 @@ class MFRM(Rasch):
         psi_{model}, person_strata_{model}, person_reliability_{model} : float
             Person separation index, strata, and reliability (if test_stats).
         """
-        if not hasattr(self, f'severities_{model}'):
-            self.calibrate(model=model, constant=constant, method=method,
-                           matrix_power=matrix_power, log_lik_tol=log_lik_tol)
-        if se and not hasattr(self, f'threshold_se_{model}'):
-            self.std_errors(model=model, anchor_raters=anchor_raters,
-                            interval=interval, no_of_samples=no_of_samples,
-                            constant=constant, method=method,
-                            matrix_power=matrix_power, log_lik_tol=log_lik_tol)
-        if not hasattr(self, f'abils_{model}'):
-            self.person_abils(model=model, warm_corr=warm_corr,
-                              tolerance=tolerance, max_iters=max_iters,
-                              ext_score_adjustment=ext_score_adjustment)
+        if not hasattr(self, f"facet_effects_{model}"):
+            self.calibrate(
+                model=model,
+                constant=constant,
+                method=method,
+                matrix_power=matrix_power,
+                log_lik_tol=log_lik_tol,
+            )
+        if se and not hasattr(self, f"threshold_se_{model}"):
+            self.std_errors(
+                model=model,
+                anchors=anchors,
+                interval=interval,
+                no_of_samples=no_of_samples,
+                constant=constant,
+                method=method,
+                matrix_power=matrix_power,
+                log_lik_tol=log_lik_tol,
+            )
+        if not hasattr(self, f"persons_{model}"):
+            self.person_estimates(
+                model=model,
+                warm_corr=warm_corr,
+                tolerance=tolerance,
+                max_iters=max_iters,
+                ext_score_adjustment=ext_score_adjustment,
+            )
         if not se:
             test_stats = False
 
-        self.category_probability_dict(model=model, warm_corr=warm_corr,
-                                       ext_scores=ext_scores,
-                                       tolerance=tolerance,
-                                       max_iters=max_iters,
-                                       ext_score_adjustment=ext_score_adjustment,
-                                       method=method, constant=constant,
-                                       matrix_power=matrix_power,
-                                       log_lik_tol=log_lik_tol)
+        self.category_probability_dict(
+            model=model,
+            warm_corr=warm_corr,
+            ext_scores=ext_scores,
+            tolerance=tolerance,
+            max_iters=max_iters,
+            ext_score_adjustment=ext_score_adjustment,
+            method=method,
+            constant=constant,
+            matrix_power=matrix_power,
+            log_lik_tol=log_lik_tol,
+        )
         self._ensure_fit_matrices(model)
         self._run_item_fit(model)
-        self._run_threshold_fit(model, anchor_raters=anchor_raters)
-        self._run_rater_fit(model)
+        self._run_threshold_fit(model, anchors=anchors)
+        self._run_facet_fit(model)
         self._run_person_fit(model)
         if test_stats:
             self._run_test_fit(model)
 
     # Backwards-compatible aliases
-    def fit_statistics_global(self, **kw):     self.fit_statistics(model='global', **kw)
-    def fit_statistics_items(self, **kw):      self.fit_statistics(model='items', **kw)
-    def fit_statistics_thresholds(self, **kw): self.fit_statistics(model='thresholds', **kw)
-    def fit_statistics_matrix(self, **kw):     self.fit_statistics(model='matrix', **kw)
+    def fit_statistics_global(self, **kw):
+        """Alias for fit_statistics(model='global'). See fit_statistics for full documentation."""
+        self.fit_statistics(model="global", **kw)
 
+    def fit_statistics_items(self, **kw):
+        """Alias for fit_statistics(model='items'). See fit_statistics for full documentation."""
+        self.fit_statistics(model="items", **kw)
+
+    def fit_statistics_thresholds(self, **kw):
+        """Alias for fit_statistics(model='thresholds'). See fit_statistics for full documentation."""
+        self.fit_statistics(model="thresholds", **kw)
+
+    def fit_statistics_matrix(self, **kw):
+        """Alias for fit_statistics(model='matrix'). See fit_statistics for full documentation."""
+        self.fit_statistics(model="matrix", **kw)
+
+    def fit_statistics_bivector(self, **kw):
+        """Alias for fit_statistics(model='bivector'). See fit_statistics for full documentation."""
+        self.fit_statistics(model="bivector", **kw)
 
     # ------------------------------------------------------------------
     # Residual correlation analysis
@@ -2494,36 +3968,50 @@ class MFRM(Rasch):
         pca = PCA()
         try:
             pca.fit(item_residual_correlations)
-            n = self.no_of_items
-            pc_labels  = [f'PC {pc + 1}' for pc in range(n)]
-            eigvec_labels = [f'Eigenvector {pc + 1}' for pc in range(n)]
-            eigenvectors = pd.DataFrame(pca.components_, columns=eigvec_labels)
-            eigenvalues  = pd.DataFrame(
-                pca.explained_variance_, index=pc_labels, columns=['Eigenvalue']
+            n = (
+                self.no_of_items - 1
+            )  # rank of correlation matrix is n-1; drop zero eigenvalue
+            pc_labels = [f"PC {pc + 1}" for pc in range(n)]
+            eigvec_labels = [f"Eigenvector {pc + 1}" for pc in range(self.no_of_items)]
+            eigenvectors = pd.DataFrame(
+                pca.components_[:n, :], index=pc_labels, columns=eigvec_labels
+            )
+            eigenvalues = pd.DataFrame(
+                pca.explained_variance_[:n], index=pc_labels, columns=["Eigenvalue"]
             )
             variance_explained = pd.DataFrame(
-                pca.explained_variance_ratio_,
-                index=pc_labels, columns=['Variance explained']
+                pca.explained_variance_ratio_[:n],
+                index=pc_labels,
+                columns=["Variance explained"],
             )
             loadings = pd.DataFrame(
-                eigenvectors.values.T * (pca.explained_variance_ ** 0.5),
-                index=self.dataframe.columns, columns=pc_labels
+                eigenvectors.values.T * (pca.explained_variance_[:n] ** 0.5),
+                index=self.responses.columns,
+                columns=pc_labels,
             )
         except Exception:
-            warnings.warn('PCA of item standardised residuals failed. '
-                          'Eigenvectors and loadings set to None.',
-                          UserWarning, stacklevel=2)
+            warnings.warn(
+                "PCA of item standardised residuals failed. "
+                "Eigenvectors and loadings set to None.",
+                UserWarning,
+                stacklevel=2,
+            )
             eigenvectors = eigenvalues = variance_explained = loadings = None
-        return (item_residual_correlations, eigenvectors, eigenvalues,
-                variance_explained, loadings)
+        return (
+            item_residual_correlations,
+            eigenvectors,
+            eigenvalues,
+            variance_explained,
+            loadings,
+        )
 
-    def rater_res_corr_analysis(self, residual_df, std_residual_df):
+    def facet_res_corr_analysis(self, residual_df, std_residual_df):
         """
-        Analyse rater residual correlations.
+        Analyse facet_element residual correlations.
 
         Pivots the residual DataFrame to (Person×Items, Raters) shape,
-        computes the inter-rater correlation matrix, and performs PCA.
-        A large first eigenvalue suggests systematic rater bias.
+        computes the inter-facet_element correlation matrix, and performs PCA.
+        A large first eigenvalue suggests systematic facet_element bias.
 
         Parameters
         ----------
@@ -2537,113 +4025,235 @@ class MFRM(Rasch):
         tuple of (correlations, eigenvectors, eigenvalues, variance_explained, loadings)
             All are DataFrames (or None if PCA fails).
         """
-        rater_res     = self.rater_pivot(residual_df)
-        rater_std_res = self.rater_pivot(std_residual_df)
-        correlations  = rater_res.corr(numeric_only=False)
+        rater_res = self.facet_pivot(residual_df)
+        rater_std_res = self.facet_pivot(std_residual_df)
+        correlations = rater_res.corr(numeric_only=False)
         pca = PCA()
         try:
             pca.fit(rater_std_res.corr(numeric_only=False))
-            n = self.no_of_raters
-            pc_labels     = [f'PC {pc + 1}' for pc in range(n)]
-            eigvec_labels = [f'Eigenvector {pc + 1}' for pc in range(n)]
-            eigenvectors = pd.DataFrame(pca.components_, columns=eigvec_labels)
-            eigenvalues  = pd.DataFrame(
-                pca.explained_variance_, index=pc_labels, columns=['Eigenvalue']
+            n = (
+                self.no_of_facet_elements - 1
+            )  # rank of correlation matrix is n-1; drop zero eigenvalue
+            pc_labels = [f"PC {pc + 1}" for pc in range(n)]
+            eigvec_labels = [
+                f"Eigenvector {pc + 1}" for pc in range(self.no_of_facet_elements)
+            ]
+            eigenvectors = pd.DataFrame(
+                pca.components_[:n, :], index=pc_labels, columns=eigvec_labels
+            )
+            eigenvalues = pd.DataFrame(
+                pca.explained_variance_[:n], index=pc_labels, columns=["Eigenvalue"]
             )
             variance_explained = pd.DataFrame(
-                pca.explained_variance_ratio_,
-                index=pc_labels, columns=['Variance explained']
+                pca.explained_variance_ratio_[:n],
+                index=pc_labels,
+                columns=["Variance explained"],
             )
             loadings = pd.DataFrame(
-                eigenvectors.values.T * (pca.explained_variance_ ** 0.5),
-                index=self.raters, columns=pc_labels
+                eigenvectors.values.T * (pca.explained_variance_[:n] ** 0.5),
+                index=self.facet_names,
+                columns=pc_labels,
             )
         except Exception:
-            warnings.warn('PCA of rater standardised residuals failed. '
-                          'Eigenvectors and loadings set to None.',
-                          UserWarning, stacklevel=2)
+            warnings.warn(
+                "PCA of facet_element standardised residuals failed. "
+                "Eigenvectors and loadings set to None.",
+                UserWarning,
+                stacklevel=2,
+            )
             eigenvectors = eigenvalues = variance_explained = loadings = None
-        return (correlations, eigenvectors, eigenvalues,
-                variance_explained, loadings)
+        return (correlations, eigenvectors, eigenvalues, variance_explained, loadings)
 
     def _run_item_res_corr(self, model, **kw):
-        if not hasattr(self, f'std_residual_df_{model}'):
+        """Internal dispatcher: run item residual correlation analysis for the given model."""
+        if not hasattr(self, f"std_residual_df_{model}"):
             self.fit_statistics(model=model, **kw)
-        results = self.item_res_corr_analysis(
-            getattr(self, f'std_residual_df_{model}')
+        results = self.item_res_corr_analysis(getattr(self, f"std_residual_df_{model}"))
+        for name, val in zip(
+            [
+                "item_residual_correlations",
+                "item_eigenvectors",
+                "item_eigenvalues",
+                "item_variance_explained",
+                "item_loadings",
+            ],
+            results,
+        ):
+            setattr(self, f"{name}_{model}", val)
+
+    def _run_facet_res_corr(self, model, **kw):
+        """Internal dispatcher: run facet/rater residual correlation analysis for the given model."""
+        if not hasattr(self, f"std_residual_df_{model}"):
+            self.fit_statistics(model=model, **kw)
+        results = self.facet_res_corr_analysis(
+            getattr(self, f"residual_df_{model}"),
+            getattr(self, f"std_residual_df_{model}"),
         )
         for name, val in zip(
-            ['item_residual_correlations', 'item_eigenvectors',
-             'item_eigenvalues', 'item_variance_explained', 'item_loadings'],
-            results
+            [
+                "rater_residual_correlations",
+                "rater_eigenvectors",
+                "rater_eigenvalues",
+                "rater_variance_explained",
+                "rater_loadings",
+            ],
+            results,
         ):
-            setattr(self, f'{name}_{model}', val)
+            setattr(self, f"{name}_{model}", val)
+        self._set_facet_aliases(model)
 
-    def _run_rater_res_corr(self, model, **kw):
-        if not hasattr(self, f'std_residual_df_{model}'):
-            self.fit_statistics(model=model, **kw)
-        results = self.rater_res_corr_analysis(
-            getattr(self, f'residual_df_{model}'),
-            getattr(self, f'std_residual_df_{model}')
-        )
-        for name, val in zip(
-            ['rater_residual_correlations', 'rater_eigenvectors',
-             'rater_eigenvalues', 'rater_variance_explained', 'rater_loadings'],
-            results
-        ):
-            setattr(self, f'{name}_{model}', val)
+    def item_res_corr_analysis_global(self, **kw):
+        """Alias for item_res_corr_analysis(model='global'). See item_res_corr_analysis for full documentation."""
+        self._run_item_res_corr("global", **kw)
 
-    def item_res_corr_analysis_global(self, **kw):     self._run_item_res_corr('global', **kw)
-    def item_res_corr_analysis_items(self, **kw):      self._run_item_res_corr('items', **kw)
-    def item_res_corr_analysis_thresholds(self, **kw): self._run_item_res_corr('thresholds', **kw)
-    def item_res_corr_analysis_matrix(self, **kw):     self._run_item_res_corr('matrix', **kw)
+    def item_res_corr_analysis_items(self, **kw):
+        """Alias for item_res_corr_analysis(model='items'). See item_res_corr_analysis for full documentation."""
+        self._run_item_res_corr("items", **kw)
 
-    def rater_res_corr_analysis_global(self, **kw):     self._run_rater_res_corr('global', **kw)
-    def rater_res_corr_analysis_items(self, **kw):      self._run_rater_res_corr('items', **kw)
-    def rater_res_corr_analysis_thresholds(self, **kw): self._run_rater_res_corr('thresholds', **kw)
-    def rater_res_corr_analysis_matrix(self, **kw):     self._run_rater_res_corr('matrix', **kw)
+    def item_res_corr_analysis_thresholds(self, **kw):
+        """Alias for item_res_corr_analysis(model='thresholds'). See item_res_corr_analysis for full documentation."""
+        self._run_item_res_corr("thresholds", **kw)
+
+    def item_res_corr_analysis_matrix(self, **kw):
+        """Alias for item_res_corr_analysis(model='matrix'). See item_res_corr_analysis for full documentation."""
+        self._run_item_res_corr("matrix", **kw)
+
+    def item_res_corr_analysis_bivector(self, **kw):
+        """Alias for item_res_corr_analysis(model='bivector'). See item_res_corr_analysis for full documentation."""
+        self._run_item_res_corr("bivector", **kw)
+
+    def facet_res_corr_analysis_global(self, **kw):
+        """Alias for facet_res_corr_analysis(model='global'). See facet_res_corr_analysis for full documentation."""
+        self._run_facet_res_corr("global", **kw)
+
+    def facet_res_corr_analysis_items(self, **kw):
+        """Alias for facet_res_corr_analysis(model='items'). See facet_res_corr_analysis for full documentation."""
+        self._run_facet_res_corr("items", **kw)
+
+    def facet_res_corr_analysis_thresholds(self, **kw):
+        """Alias for facet_res_corr_analysis(model='thresholds'). See facet_res_corr_analysis for full documentation."""
+        self._run_facet_res_corr("thresholds", **kw)
+
+    def facet_res_corr_analysis_matrix(self, **kw):
+        """Alias for facet_res_corr_analysis(model='matrix'). See facet_res_corr_analysis for full documentation."""
+        self._run_facet_res_corr("matrix", **kw)
+
+    def facet_res_corr_analysis_bivector(self, **kw):
+        """Alias for facet_res_corr_analysis(model='bivector'). See facet_res_corr_analysis for full documentation."""
+        self._run_facet_res_corr("bivector", **kw)
+
+    # rater_ aliases for facet_res_corr_analysis methods (default facet)
+    def rater_res_corr_analysis_global(self, **kw):
+        """Alias for rater_res_corr_analysis(model='global'). See facet_res_corr_analysis for full documentation."""
+        self._run_facet_res_corr("global", **kw)
+
+    def rater_res_corr_analysis_items(self, **kw):
+        """Alias for rater_res_corr_analysis(model='items'). See facet_res_corr_analysis for full documentation."""
+        self._run_facet_res_corr("items", **kw)
+
+    def rater_res_corr_analysis_thresholds(self, **kw):
+        """Alias for rater_res_corr_analysis(model='thresholds'). See facet_res_corr_analysis for full documentation."""
+        self._run_facet_res_corr("thresholds", **kw)
+
+    def rater_res_corr_analysis_matrix(self, **kw):
+        """Alias for rater_res_corr_analysis(model='matrix'). See facet_res_corr_analysis for full documentation."""
+        self._run_facet_res_corr("matrix", **kw)
+
+    def rater_res_corr_analysis_bivector(self, **kw):
+        """Alias for rater_res_corr_analysis(model='bivector'). See facet_res_corr_analysis for full documentation."""
+        self._run_facet_res_corr("bivector", **kw)
 
     # ------------------------------------------------------------------
     # Output tables
     # ------------------------------------------------------------------
 
     def _ensure_calibrated(self, model, **kw):
-        '''Lazy-load the full chain: calibrate → abils → SE → fit matrices.'''
-        calib_kw = {k: v for k, v in kw.items()
-                    if k in ('constant', 'method', 'matrix_power', 'log_lik_tol')}
-        abil_kw  = {k: v for k, v in kw.items()
-                    if k in ('warm_corr', 'tolerance', 'max_iters', 'ext_score_adjustment')}
-        se_kw    = {k: v for k, v in kw.items()
-                    if k in ('constant', 'method', 'matrix_power', 'log_lik_tol',
-                             'no_of_samples', 'interval')}
-        anchor_raters = kw.get('anchor_raters', None)
+        """Lazy-load calibration and abilities. SE computation is handled
+        separately by _ensure_se to avoid redundant bootstrap runs."""
+        calib_kw = {
+            k: v
+            for k, v in kw.items()
+            if k in ("constant", "method", "matrix_power", "log_lik_tol")
+        }
+        abil_kw = {
+            k: v
+            for k, v in kw.items()
+            if k in ("warm_corr", "tolerance", "max_iters", "ext_score_adjustment")
+        }
+        anchors = kw.get("anchors", None)
 
-        if not hasattr(self, f'severities_{model}'):
+        if not hasattr(self, f"facet_effects_{model}"):
             self.calibrate(model=model, **calib_kw)
-        if anchor_raters is not None:
-            if not hasattr(self, f'anchor_severities_{model}'):
-                self.calibrate_anchor(model, anchor_raters, **calib_kw)
-        if not hasattr(self, f'abils_{model}'):
-            self.person_abils(model=model, **abil_kw)
-        if not hasattr(self, f'threshold_se_{model}'):
-            self.std_errors(model=model, anchor_raters=anchor_raters, **se_kw)
+        if anchors is not None:
+            stored = getattr(self, f"anchor_rater_names_{model}", None)
+            if not hasattr(self, f"anchor_rater_names_{model}") or set(stored) != set(anchors):
+                self.calibrate_anchor(model, anchors, **calib_kw)
+        if not hasattr(self, f"persons_{model}"):
+            self.person_estimates(model=model, **abil_kw)
 
-    def _ensure_se(self, model, anchor_raters, interval, no_of_samples,
-                   constant, method, matrix_power, log_lik_tol):
-        prefix = 'anchor_' if anchor_raters is not None else ''
-        trigger = f'{prefix}threshold_se_{model}'
-        if not hasattr(self, trigger):
-            self.std_errors(model=model, anchor_raters=anchor_raters,
-                            interval=interval, no_of_samples=no_of_samples,
-                            constant=constant, method=method,
-                            matrix_power=matrix_power, log_lik_tol=log_lik_tol)
+    def _ensure_se(
+        self,
+        model,
+        anchors,
+        interval,
+        no_of_samples,
+        constant,
+        method,
+        matrix_power,
+        log_lik_tol,
+    ):
+        """Internal helper: compute standard errors (and optionally anchor SEs) if not yet done."""
+        anc = anchors is not None
+        prefix = "anchor_" if anc else ""
+        trigger = f"{prefix}threshold_se_{model}"
+        # Re-run if SEs not computed, or if CIs requested but not yet stored.
+        ci_attr = "anchor_item_low" if anc else "item_low"
+        ci_missing = interval is not None and not hasattr(self, ci_attr)
+        if not hasattr(self, trigger) or ci_missing:
+            if anc:
+                # Ensure unanchored SEs exist first (anchor_std_errors depends on them)
+                if not hasattr(self, f"threshold_se_{model}"):
+                    self.std_errors(
+                        model=model,
+                        interval=interval,
+                        no_of_samples=no_of_samples,
+                        constant=constant,
+                        method=method,
+                        matrix_power=matrix_power,
+                        log_lik_tol=log_lik_tol,
+                    )
+                self.anchor_std_errors(model=model, anchors=anchors)
+            else:
+                self.std_errors(
+                    model=model,
+                    interval=interval,
+                    no_of_samples=no_of_samples,
+                    constant=constant,
+                    method=method,
+                    matrix_power=matrix_power,
+                    log_lik_tol=log_lik_tol,
+                )
 
-    def item_stats_df(self, model='global', anchor_raters=None, full=False,
-                      ext_scores=True, zstd=False, point_measure_corr=False,
-                      dp=3, warm_corr=True, tolerance=0.00001, max_iters=100,
-                      ext_score_adjustment=0.5, method='cos', constant=0.1,
-                      matrix_power=3, log_lik_tol=0.000001, no_of_samples=100,
-                      interval=None):
+    def item_stats_df(
+        self,
+        model="global",
+        anchors=None,
+        full=False,
+        ext_scores=True,
+        zstd=False,
+        point_measure_corr=False,
+        dp=3,
+        warm_corr=True,
+        tolerance=0.00001,
+        max_iters=100,
+        ext_score_adjustment=0.5,
+        method="cos",
+        constant=0.1,
+        matrix_power=3,
+        log_lik_tol=0.000001,
+        no_of_samples=500,
+        interval=None,
+    ):
         """
         Build and store the item statistics summary table.
 
@@ -2654,7 +4264,7 @@ class MFRM(Rasch):
         ----------
         model : str, default 'global'
             Rater parameterisation.
-        anchor_raters : list or None, default None
+        anchors : list or None, default None
             If provided, uses anchor-calibrated item difficulties.
         full : bool, default False
             If True, sets zstd=True, point_measure_corr=True, interval=0.95.
@@ -2682,7 +4292,7 @@ class MFRM(Rasch):
             Matrix power for calibration.
         log_lik_tol : float, default 0.000001
             Calibration convergence tolerance.
-        no_of_samples : int, default 100
+        no_of_samples : int, default 500
             Bootstrap samples for SE estimation.
         interval : float or None, default None
             CI width; if provided, percentile bound columns included.
@@ -2698,59 +4308,114 @@ class MFRM(Rasch):
             zstd = point_measure_corr = True
             interval = interval or 0.95
 
-        self._ensure_calibrated(model, anchor_raters=anchor_raters, interval=interval,
-                                no_of_samples=no_of_samples, constant=constant,
-                                method=method, matrix_power=matrix_power,
-                                log_lik_tol=log_lik_tol, warm_corr=warm_corr,
-                                tolerance=tolerance, max_iters=max_iters,
-                                ext_score_adjustment=ext_score_adjustment)
-        self._ensure_se(model, anchor_raters, interval, no_of_samples,
-                        constant, method, matrix_power, log_lik_tol)
-        if not hasattr(self, f'item_outfit_ms_{model}'):
+        self._ensure_calibrated(
+            model,
+            anchors=anchors,
+            interval=interval,
+            no_of_samples=no_of_samples,
+            constant=constant,
+            method=method,
+            matrix_power=matrix_power,
+            log_lik_tol=log_lik_tol,
+            warm_corr=warm_corr,
+            tolerance=tolerance,
+            max_iters=max_iters,
+            ext_score_adjustment=ext_score_adjustment,
+        )
+        self._ensure_se(
+            model,
+            anchors,
+            interval,
+            no_of_samples,
+            constant,
+            method,
+            matrix_power,
+            log_lik_tol,
+        )
+        if not hasattr(self, f"item_outfit_ms_{model}"):
             self._run_item_fit(model)
 
-        anc = anchor_raters is not None
-        difficulties = (getattr(self, f'anchor_diffs_{model}') if anc
-                        else self.diffs)
-        se   = self.item_se
-        low  = self.item_low
-        high = self.item_high
+        anc = anchors is not None
+        difficulties = getattr(self, f"anchor_items_{model}") if anc else self.items
+        se = (
+            self.anchor_item_se
+            if (anc and hasattr(self, "anchor_item_se"))
+            else self.item_se
+        )
+        low = (
+            self.anchor_item_low
+            if (anc and hasattr(self, "anchor_item_low"))
+            else self.item_low if hasattr(self, "item_low") else None
+        )
+        high = (
+            self.anchor_item_high
+            if (anc and hasattr(self, "anchor_item_high"))
+            else self.item_high if hasattr(self, "item_high") else None
+        )
 
-        stats = pd.DataFrame(index=self.dataframe.columns)
-        stats['Estimate'] = difficulties.round(dp)
-        stats['SE']       = se.round(dp)
+        stats = pd.DataFrame(index=self.responses.columns)
+        stats["Estimate"] = difficulties.round(dp)
+        stats["SE"] = se.round(dp)
         if interval is not None and low is not None:
-            lo_lbl = f'{round((1 - interval) * 50, 1)}%'
-            hi_lbl = f'{round((1 + interval) * 50, 1)}%'
+            lo_lbl = f"{round((1 - interval) * 50, 1)}%"
+            hi_lbl = f"{round((1 + interval) * 50, 1)}%"
             stats[lo_lbl] = low.round(dp)
             stats[hi_lbl] = high.round(dp)
-        stats['Count']    = self.response_counts.astype(int)
-        stats['Facility'] = self.item_facilities.round(dp)
-        stats['Infit MS'] = getattr(self, f'item_infit_ms_{model}').round(dp)
+        stats["Count"] = self.response_counts.astype(int)
+        stats["Facility"] = self.item_facilities.round(dp)
+        stats["Infit MS"] = getattr(self, f"item_infit_ms_{model}").round(dp)
         if zstd:
-            stats['Infit Z'] = getattr(self, f'item_infit_zstd_{model}').round(dp)
-        stats['Outfit MS'] = getattr(self, f'item_outfit_ms_{model}').round(dp)
+            stats["Infit Z"] = getattr(self, f"item_infit_zstd_{model}").round(dp)
+        stats["Outfit MS"] = getattr(self, f"item_outfit_ms_{model}").round(dp)
         if zstd:
-            stats['Outfit Z'] = getattr(self, f'item_outfit_zstd_{model}').round(dp)
+            stats["Outfit Z"] = getattr(self, f"item_outfit_zstd_{model}").round(dp)
         if point_measure_corr:
-            stats['PM corr']     = getattr(self, f'point_measure_{model}').round(dp)
-            stats['Exp PM corr'] = getattr(self, f'exp_point_measure_{model}').round(dp)
+            stats["PM corr"] = getattr(self, f"point_measure_{model}").round(dp)
+            stats["Exp PM corr"] = getattr(self, f"exp_point_measure_{model}").round(dp)
 
-        setattr(self, f'item_stats_{model}', stats)
+        setattr(self, f"item_stats_{model}", stats)
 
     # Backwards-compatible aliases
-    def item_stats_df_global(self, **kw):     self.item_stats_df(model='global', **kw)
-    def item_stats_df_items(self, **kw):      self.item_stats_df(model='items', **kw)
-    def item_stats_df_thresholds(self, **kw): self.item_stats_df(model='thresholds', **kw)
-    def item_stats_df_matrix(self, **kw):     self.item_stats_df(model='matrix', **kw)
+    def item_stats_df_global(self, **kw):
+        """Alias for item_stats_df(model='global'). See item_stats_df for full documentation."""
+        self.item_stats_df(model="global", **kw)
 
-    def threshold_stats_df(self, model='global', anchor_raters=None,
-                           full=False, zstd=False, disc=False,
-                           point_measure_corr=False, dp=3, warm_corr=True,
-                           tolerance=0.00001, max_iters=100,
-                           ext_score_adjustment=0.5, method='cos',
-                           constant=0.1, matrix_power=3, log_lik_tol=0.000001,
-                           no_of_samples=100, interval=None):
+    def item_stats_df_items(self, **kw):
+        """Alias for item_stats_df(model='items'). See item_stats_df for full documentation."""
+        self.item_stats_df(model="items", **kw)
+
+    def item_stats_df_thresholds(self, **kw):
+        """Alias for item_stats_df(model='thresholds'). See item_stats_df for full documentation."""
+        self.item_stats_df(model="thresholds", **kw)
+
+    def item_stats_df_matrix(self, **kw):
+        """Alias for item_stats_df(model='matrix'). See item_stats_df for full documentation."""
+        self.item_stats_df(model="matrix", **kw)
+
+    def item_stats_df_bivector(self, **kw):
+        """Alias for item_stats_df(model='bivector'). See item_stats_df for full documentation."""
+        self.item_stats_df(model="bivector", **kw)
+
+    def threshold_stats_df(
+        self,
+        model="global",
+        anchors=None,
+        full=False,
+        zstd=False,
+        disc=False,
+        point_measure_corr=False,
+        dp=3,
+        warm_corr=True,
+        tolerance=0.00001,
+        max_iters=100,
+        ext_score_adjustment=0.5,
+        method="cos",
+        constant=0.1,
+        matrix_power=3,
+        log_lik_tol=0.000001,
+        no_of_samples=500,
+        interval=None,
+    ):
         """
         Build and store the threshold statistics summary table.
 
@@ -2761,8 +4426,8 @@ class MFRM(Rasch):
         ----------
         model : str, default 'global'
             Rater parameterisation.
-        anchor_raters : list or None, default None
-            Anchor raters for SE computation.
+        anchors : list or None, default None
+            Anchor facet_elements for SE computation.
         full : bool, default False
             If True, sets zstd=True, disc=True, point_measure_corr=True, interval=0.95.
         zstd : bool, default False
@@ -2789,7 +4454,7 @@ class MFRM(Rasch):
             Matrix power.
         log_lik_tol : float, default 0.000001
             Calibration convergence tolerance.
-        no_of_samples : int, default 100
+        no_of_samples : int, default 500
             Bootstrap samples.
         interval : float or None, default None
             CI width.
@@ -2804,60 +4469,127 @@ class MFRM(Rasch):
             zstd = disc = point_measure_corr = True
             interval = interval or 0.95
 
-        self._ensure_calibrated(model, anchor_raters=anchor_raters, interval=interval,
-                                no_of_samples=no_of_samples, constant=constant,
-                                method=method, matrix_power=matrix_power,
-                                log_lik_tol=log_lik_tol, warm_corr=warm_corr,
-                                tolerance=tolerance, max_iters=max_iters,
-                                ext_score_adjustment=ext_score_adjustment)
-        self._ensure_se(model, anchor_raters, interval, no_of_samples,
-                        constant, method, matrix_power, log_lik_tol)
-        if not hasattr(self, f'threshold_outfit_ms_{model}'):
-            self._run_threshold_fit(model, anchor_raters=anchor_raters)
+        self._ensure_calibrated(
+            model,
+            anchors=anchors,
+            interval=interval,
+            no_of_samples=no_of_samples,
+            constant=constant,
+            method=method,
+            matrix_power=matrix_power,
+            log_lik_tol=log_lik_tol,
+            warm_corr=warm_corr,
+            tolerance=tolerance,
+            max_iters=max_iters,
+            ext_score_adjustment=ext_score_adjustment,
+        )
+        self._ensure_se(
+            model,
+            anchors,
+            interval,
+            no_of_samples,
+            constant,
+            method,
+            matrix_power,
+            log_lik_tol,
+        )
+        if not hasattr(self, f"threshold_outfit_ms_{model}"):
+            self._run_threshold_fit(model, anchors=anchors)
 
-        anc        = anchor_raters is not None
-        thresholds = (getattr(self, f'anchor_thresholds_{model}') if anc
-                      else self.thresholds)
-        thr_se_attr = f'anchor_threshold_se_{model}' if anc else f'threshold_se_{model}'
-        thr_se  = getattr(self, thr_se_attr, None)
-        thr_lo  = getattr(self, f'anchor_threshold_low_{model}'  if anc else f'threshold_low_{model}',  None)
-        thr_hi  = getattr(self, f'anchor_threshold_high_{model}' if anc else f'threshold_high_{model}', None)
+        anc = anchors is not None
+        thresholds = (
+            getattr(self, f"anchor_thresholds_{model}") if anc else self.thresholds
+        )
+        thr_se_attr = f"anchor_threshold_se_{model}" if anc else f"threshold_se_{model}"
+        thr_se = getattr(self, thr_se_attr, None)
+        thr_lo = getattr(
+            self,
+            f"anchor_threshold_low_{model}" if anc else f"threshold_low_{model}",
+            None,
+        )
+        thr_hi = getattr(
+            self,
+            f"anchor_threshold_high_{model}" if anc else f"threshold_high_{model}",
+            None,
+        )
 
-        idx    = [f'Threshold {t + 1}' for t in range(self.max_score)]
-        stats  = pd.DataFrame(index=idx)
-        stats['Estimate'] = thresholds[1:].round(dp)
+        idx = [f"Threshold {t + 1}" for t in range(self.max_score)]
+        stats = pd.DataFrame(index=idx)
+        stats["Estimate"] = thresholds.values.round(dp)
         if thr_se is not None:
-            stats['SE'] = thr_se[1:].round(dp)
+            stats["SE"] = thr_se.round(dp)
         if interval is not None and thr_lo is not None:
-            lo_lbl = f'{round((1 - interval) * 50, 1)}%'
-            hi_lbl = f'{round((1 + interval) * 50, 1)}%'
-            stats[lo_lbl] = thr_lo[1:].round(dp)
-            stats[hi_lbl] = thr_hi[1:].round(dp)
-        stats['Infit MS']  = getattr(self, f'threshold_infit_ms_{model}').values.round(dp)
+            lo_lbl = f"{round((1 - interval) * 50, 1)}%"
+            hi_lbl = f"{round((1 + interval) * 50, 1)}%"
+            stats[lo_lbl] = thr_lo.round(dp)
+            stats[hi_lbl] = thr_hi.round(dp)
+        stats["Infit MS"] = getattr(self, f"threshold_infit_ms_{model}").values.round(
+            dp
+        )
         if zstd:
-            stats['Infit Z']  = getattr(self, f'threshold_infit_zstd_{model}').values.round(dp)
-        stats['Outfit MS'] = getattr(self, f'threshold_outfit_ms_{model}').values.round(dp)
+            stats["Infit Z"] = getattr(
+                self, f"threshold_infit_zstd_{model}"
+            ).values.round(dp)
+        stats["Outfit MS"] = getattr(self, f"threshold_outfit_ms_{model}").values.round(
+            dp
+        )
         if zstd:
-            stats['Outfit Z'] = getattr(self, f'threshold_outfit_zstd_{model}').values.round(dp)
+            stats["Outfit Z"] = getattr(
+                self, f"threshold_outfit_zstd_{model}"
+            ).values.round(dp)
         if disc:
-            stats['Discrim'] = getattr(self, f'threshold_discrimination_{model}').values.round(dp)
+            stats["Discrim"] = getattr(
+                self, f"threshold_discrimination_{model}"
+            ).values.round(dp)
         if point_measure_corr:
-            stats['PM corr']     = getattr(self, f'threshold_point_measure_{model}').values.round(dp)
-            stats['Exp PM corr'] = getattr(self, f'threshold_exp_point_measure_{model}').values.round(dp)
+            stats["PM corr"] = getattr(
+                self, f"threshold_point_measure_{model}"
+            ).values.round(dp)
+            stats["Exp PM corr"] = getattr(
+                self, f"threshold_exp_point_measure_{model}"
+            ).values.round(dp)
 
-        setattr(self, f'threshold_stats_{model}', stats)
+        setattr(self, f"threshold_stats_{model}", stats)
 
-    def threshold_stats_df_global(self, **kw):     self.threshold_stats_df(model='global', **kw)
-    def threshold_stats_df_items(self, **kw):      self.threshold_stats_df(model='items', **kw)
-    def threshold_stats_df_thresholds(self, **kw): self.threshold_stats_df(model='thresholds', **kw)
-    def threshold_stats_df_matrix(self, **kw):     self.threshold_stats_df(model='matrix', **kw)
+    def threshold_stats_df_global(self, **kw):
+        """Alias for threshold_stats_df(model='global'). See threshold_stats_df for full documentation."""
+        self.threshold_stats_df(model="global", **kw)
 
-    def person_stats_df(self, model='global', anchor_raters=None,
-                        full=False, rsem=False, zstd=False, dp=3,
-                        warm_corr=True, tolerance=0.00001, max_iters=100,
-                        ext_score_adjustment=0.5, method='cos',
-                        constant=0.1, matrix_power=3, log_lik_tol=0.000001,
-                        interval=None, no_of_samples=100):
+    def threshold_stats_df_items(self, **kw):
+        """Alias for threshold_stats_df(model='items'). See threshold_stats_df for full documentation."""
+        self.threshold_stats_df(model="items", **kw)
+
+    def threshold_stats_df_thresholds(self, **kw):
+        """Alias for threshold_stats_df(model='thresholds'). See threshold_stats_df for full documentation."""
+        self.threshold_stats_df(model="thresholds", **kw)
+
+    def threshold_stats_df_matrix(self, **kw):
+        """Alias for threshold_stats_df(model='matrix'). See threshold_stats_df for full documentation."""
+        self.threshold_stats_df(model="matrix", **kw)
+
+    def threshold_stats_df_bivector(self, **kw):
+        """Alias for threshold_stats_df(model='bivector'). See threshold_stats_df for full documentation."""
+        self.threshold_stats_df(model="bivector", **kw)
+
+    def person_stats_df(
+        self,
+        model="global",
+        anchors=None,
+        full=False,
+        rsem=False,
+        zstd=False,
+        dp=3,
+        warm_corr=True,
+        tolerance=0.00001,
+        max_iters=100,
+        ext_score_adjustment=0.5,
+        method="cos",
+        constant=0.1,
+        matrix_power=3,
+        log_lik_tol=0.000001,
+        interval=None,
+        no_of_samples=500,
+    ):
         """
         Build and store the person statistics summary table.
 
@@ -2868,7 +4600,7 @@ class MFRM(Rasch):
         ----------
         model : str, default 'global'
             Rater parameterisation.
-        anchor_raters : list or None, default None
+        anchors : list or None, default None
             If provided, uses anchor-calibrated abilities.
         full : bool, default False
             If True, sets rsem=True, zstd=True.
@@ -2896,7 +4628,7 @@ class MFRM(Rasch):
             Calibration convergence tolerance.
         interval : float or None, default None
             CI width (unused directly; passed to _ensure_calibrated).
-        no_of_samples : int, default 100
+        no_of_samples : int, default 500
             Bootstrap samples.
 
         Attributes set
@@ -2907,56 +4639,86 @@ class MFRM(Rasch):
             Outfit Z.
         """
 
-        self._ensure_calibrated(model, warm_corr=warm_corr, tolerance=tolerance,
-                                max_iters=max_iters, ext_score_adjustment=ext_score_adjustment,
-                                constant=constant, method=method, matrix_power=matrix_power,
-                                log_lik_tol=log_lik_tol)
-        if not hasattr(self, f'person_outfit_ms_{model}'):
+        self._ensure_calibrated(
+            model,
+            warm_corr=warm_corr,
+            tolerance=tolerance,
+            max_iters=max_iters,
+            ext_score_adjustment=ext_score_adjustment,
+            constant=constant,
+            method=method,
+            matrix_power=matrix_power,
+            log_lik_tol=log_lik_tol,
+        )
+        if not hasattr(self, f"person_outfit_ms_{model}"):
             self._run_person_fit(model)
         if full:
             rsem = zstd = True
 
-        anc  = anchor_raters is not None
-        abils = (getattr(self, f'anchor_abils_{model}') if anc
-                 else getattr(self, f'abils_{model}'))
+        anc = anchors is not None
+        estimates = self._get_abils(model, anchor=anc)
 
-        stats = pd.DataFrame(index=self.persons)
-        stats['Estimate'] = abils.round(dp)
-        stats['CSEM']     = getattr(self, f'csem_vector_{model}').round(dp)
+        stats = pd.DataFrame(index=self.person_names)
+        stats["Estimate"] = estimates.round(dp)
+        stats["CSEM"] = getattr(self, f"csem_vector_{model}").round(dp)
         if rsem:
-            stats['RSEM'] = getattr(self, f'rsem_vector_{model}').round(dp)
+            stats["RSEM"] = getattr(self, f"rsem_vector_{model}").round(dp)
 
-        unstacked         = self.dataframe.unstack(level=0)
-        stats['Score']    = unstacked.sum(axis=1).astype(int)
-        stats['Max score']= (unstacked.count(axis=1) * self.max_score).astype(int)
-        stats['p']        = (unstacked.mean(axis=1) / self.max_score).round(dp)
+        unstacked = self.responses.unstack(level=0)
+        stats["Score"] = unstacked.sum(axis=1).astype(int)
+        stats["Max score"] = (unstacked.count(axis=1) * self.max_score).astype(int)
+        stats["p"] = (unstacked.mean(axis=1) / self.max_score).round(dp)
 
         for col, src in [
-            ('Infit MS',  getattr(self, f'person_infit_ms_{model}')),
-            ('Outfit MS', getattr(self, f'person_outfit_ms_{model}')),
+            ("Infit MS", getattr(self, f"person_infit_ms_{model}")),
+            ("Outfit MS", getattr(self, f"person_outfit_ms_{model}")),
         ]:
             stats[col] = np.nan
             stats.loc[src.index, col] = src.round(dp).values
         if zstd:
             for col, src in [
-                ('Infit Z',  getattr(self, f'person_infit_zstd_{model}')),
-                ('Outfit Z', getattr(self, f'person_outfit_zstd_{model}')),
+                ("Infit Z", getattr(self, f"person_infit_zstd_{model}")),
+                ("Outfit Z", getattr(self, f"person_outfit_zstd_{model}")),
             ]:
                 stats[col] = np.nan
                 stats.loc[src.index, col] = src.round(dp).values
 
-        setattr(self, f'person_stats_{model}', stats)
+        setattr(self, f"person_stats_{model}", stats)
 
-    def person_stats_df_global(self, **kw):     self.person_stats_df(model='global', **kw)
-    def person_stats_df_items(self, **kw):      self.person_stats_df(model='items', **kw)
-    def person_stats_df_thresholds(self, **kw): self.person_stats_df(model='thresholds', **kw)
-    def person_stats_df_matrix(self, **kw):     self.person_stats_df(model='matrix', **kw)
+    def person_stats_df_global(self, **kw):
+        """Alias for person_stats_df(model='global'). See person_stats_df for full documentation."""
+        self.person_stats_df(model="global", **kw)
 
-    def test_stats_df(self, model='global', dp=3, warm_corr=True,
-                      tolerance=0.00001, max_iters=100,
-                      ext_score_adjustment=0.5, method='cos',
-                      constant=0.1, matrix_power=3, log_lik_tol=0.000001,
-                      no_of_samples=100):
+    def person_stats_df_items(self, **kw):
+        """Alias for person_stats_df(model='items'). See person_stats_df for full documentation."""
+        self.person_stats_df(model="items", **kw)
+
+    def person_stats_df_thresholds(self, **kw):
+        """Alias for person_stats_df(model='thresholds'). See person_stats_df for full documentation."""
+        self.person_stats_df(model="thresholds", **kw)
+
+    def person_stats_df_matrix(self, **kw):
+        """Alias for person_stats_df(model='matrix'). See person_stats_df for full documentation."""
+        self.person_stats_df(model="matrix", **kw)
+
+    def person_stats_df_bivector(self, **kw):
+        """Alias for person_stats_df(model='bivector'). See person_stats_df for full documentation."""
+        self.person_stats_df(model="bivector", **kw)
+
+    def test_stats_df(
+        self,
+        model="global",
+        dp=3,
+        warm_corr=True,
+        tolerance=0.00001,
+        max_iters=100,
+        ext_score_adjustment=0.5,
+        method="cos",
+        constant=0.1,
+        matrix_power=3,
+        log_lik_tol=0.000001,
+        no_of_samples=500,
+    ):
         """
         Build and store the test-level summary statistics table.
 
@@ -2985,7 +4747,7 @@ class MFRM(Rasch):
             Matrix power.
         log_lik_tol : float, default 0.000001
             Calibration convergence tolerance.
-        no_of_samples : int, default 100
+        no_of_samples : int, default 500
             Bootstrap samples.
 
         Attributes set
@@ -2995,46 +4757,87 @@ class MFRM(Rasch):
             Mean, SD, Separation ratio, Strata, Reliability.
         """
 
-        self._ensure_calibrated(model, constant=constant, method=method,
-                                matrix_power=matrix_power, log_lik_tol=log_lik_tol)
-        if not hasattr(self, f'psi_{model}'):
+        self._ensure_calibrated(
+            model,
+            constant=constant,
+            method=method,
+            matrix_power=matrix_power,
+            log_lik_tol=log_lik_tol,
+        )
+        if not hasattr(self, f"psi_{model}"):
             self._run_test_fit(model)
 
-        stats = pd.DataFrame({
-            'Items':   [self.diffs.mean(), self.diffs.std(),
-                        getattr(self, f'isi_{model}'),
-                        getattr(self, f'item_strata_{model}'),
-                        getattr(self, f'item_reliability_{model}')],
-            'Persons': [getattr(self, f'abils_{model}').mean(),
-                        getattr(self, f'abils_{model}').std(),
-                        getattr(self, f'psi_{model}'),
-                        getattr(self, f'person_strata_{model}'),
-                        getattr(self, f'person_reliability_{model}')],
-        }, index=['Mean', 'SD', 'Separation ratio', 'Strata', 'Reliability'])
-        setattr(self, f'test_stats_{model}', stats.round(dp))
+        stats = pd.DataFrame(
+            {
+                "Items": [
+                    self.items.mean(),
+                    self.items.std(),
+                    getattr(self, f"isi_{model}"),
+                    getattr(self, f"item_strata_{model}"),
+                    getattr(self, f"item_reliability_{model}"),
+                ],
+                "Persons": [
+                    getattr(self, f"persons_{model}").mean(),
+                    getattr(self, f"persons_{model}").std(),
+                    getattr(self, f"psi_{model}"),
+                    getattr(self, f"person_strata_{model}"),
+                    getattr(self, f"person_reliability_{model}"),
+                ],
+            },
+            index=["Mean", "SD", "Separation ratio", "Strata", "Reliability"],
+        )
+        setattr(self, f"test_stats_{model}", stats.round(dp))
 
-    def test_stats_df_global(self, **kw):     self.test_stats_df(model='global', **kw)
-    def test_stats_df_items(self, **kw):      self.test_stats_df(model='items', **kw)
-    def test_stats_df_thresholds(self, **kw): self.test_stats_df(model='thresholds', **kw)
-    def test_stats_df_matrix(self, **kw):     self.test_stats_df(model='matrix', **kw)
+    def test_stats_df_global(self, **kw):
+        """Alias for test_stats_df(model='global'). See test_stats_df for full documentation."""
+        self.test_stats_df(model="global", **kw)
+
+    def test_stats_df_items(self, **kw):
+        """Alias for test_stats_df(model='items'). See test_stats_df for full documentation."""
+        self.test_stats_df(model="items", **kw)
+
+    def test_stats_df_thresholds(self, **kw):
+        """Alias for test_stats_df(model='thresholds'). See test_stats_df for full documentation."""
+        self.test_stats_df(model="thresholds", **kw)
+
+    def test_stats_df_matrix(self, **kw):
+        """Alias for test_stats_df(model='matrix'). See test_stats_df for full documentation."""
+        self.test_stats_df(model="matrix", **kw)
+
+    def test_stats_df_bivector(self, **kw):
+        """Alias for test_stats_df(model='bivector'). See test_stats_df for full documentation."""
+        self.test_stats_df(model="bivector", **kw)
 
     # ------------------------------------------------------------------
     # Rater stats table (most complex -- varies substantially by model)
     # ------------------------------------------------------------------
 
-    def rater_stats_df(self, model='global', anchor_raters=None,
-                       full=False, zstd=False, marginal=True, dp=3,
-                       warm_corr=True, tolerance=0.00001, max_iters=100,
-                       ext_score_adjustment=0.5, method='cos', constant=0.1,
-                       matrix_power=3, log_lik_tol=0.000001,
-                       no_of_samples=100, interval=None):
+    def rater_stats_df(
+        self,
+        model="global",
+        anchors=None,
+        full=False,
+        zstd=False,
+        marginal=True,
+        dp=3,
+        warm_corr=True,
+        tolerance=0.00001,
+        max_iters=100,
+        ext_score_adjustment=0.5,
+        method="cos",
+        constant=0.1,
+        matrix_power=3,
+        log_lik_tol=0.000001,
+        no_of_samples=500,
+        interval=None,
+    ):
         """
-        Build and store the rater statistics summary table.
+        Build and store the facet_element statistics summary table.
 
         Output structure varies substantially by model:
-          global     — one row per rater with scalar severity estimate and fit stats.
-          items      — MultiIndex columns (item, statistic), one row per rater.
-          thresholds — MultiIndex columns (threshold, statistic), one row per rater.
+          global     — one row per facet_element with scalar severity estimate and fit stats.
+          items      — MultiIndex columns (item, statistic), one row per facet_element.
+          thresholds — MultiIndex columns (threshold, statistic), one row per facet_element.
           matrix     — marginal=True: twin-vector (per-item + per-threshold marginals
                        recentred to zero); marginal=False: full (item, threshold)
                        cell table.
@@ -3046,8 +4849,8 @@ class MFRM(Rasch):
         ----------
         model : str, default 'global'
             Rater parameterisation.
-        anchor_raters : list or None, default None
-            Anchor raters for SE computation.
+        anchors : list or None, default None
+            Anchor facet_elements for SE computation.
         full : bool, default False
             If True, sets zstd=True, interval=0.95.
         zstd : bool, default False
@@ -3073,7 +4876,7 @@ class MFRM(Rasch):
             Matrix power.
         log_lik_tol : float, default 0.000001
             Calibration convergence tolerance.
-        no_of_samples : int, default 100
+        no_of_samples : int, default 500
             Bootstrap samples.
         interval : float or None, default None
             CI width.
@@ -3088,160 +4891,303 @@ class MFRM(Rasch):
             zstd = True
             interval = interval or 0.95
 
-        self._ensure_calibrated(model, anchor_raters=anchor_raters, interval=interval,
-                                no_of_samples=no_of_samples, constant=constant,
-                                method=method, matrix_power=matrix_power,
-                                log_lik_tol=log_lik_tol, warm_corr=warm_corr,
-                                tolerance=tolerance, max_iters=max_iters,
-                                ext_score_adjustment=ext_score_adjustment)
-        self._ensure_se(model, anchor_raters, interval, no_of_samples,
-                        constant, method, matrix_power, log_lik_tol)
-        if not hasattr(self, f'rater_outfit_ms_{model}'):
-            self._run_rater_fit(model)
+        self._ensure_calibrated(
+            model,
+            anchors=anchors,
+            interval=interval,
+            no_of_samples=no_of_samples,
+            constant=constant,
+            method=method,
+            matrix_power=matrix_power,
+            log_lik_tol=log_lik_tol,
+            warm_corr=warm_corr,
+            tolerance=tolerance,
+            max_iters=max_iters,
+            ext_score_adjustment=ext_score_adjustment,
+        )
+        self._ensure_se(
+            model,
+            anchors,
+            interval,
+            no_of_samples,
+            constant,
+            method,
+            matrix_power,
+            log_lik_tol,
+        )
+        if not hasattr(self, f"rater_outfit_ms_{model}"):
+            self._run_facet_fit(model)
 
-        anc = anchor_raters is not None
-        rse = getattr(self, f'rater_se_{model}', {})
-        rlo = getattr(self, f'rater_low_{model}', None)
-        rhi = getattr(self, f'rater_high_{model}', None)
+        anc = anchors is not None
+        rse = getattr(self, f"rater_se_{model}", {})
+        rlo = getattr(self, f"rater_low_{model}", None)
+        rhi = getattr(self, f"rater_high_{model}", None)
 
-        if model == 'global':
-            sev_attr = f'anchor_severities_{model}' if anc else f'severities_{model}'
+        if model == "global":
+            sev_attr = (
+                f"anchor_facet_effects_{model}" if anc else f"facet_effects_{model}"
+            )
             severities = getattr(self, sev_attr)
-            stats = pd.DataFrame({'Estimate': severities.round(dp)})
+            rse = getattr(
+                self, f"anchor_rater_se_{model}" if anc else f"rater_se_{model}", {}
+            )
+            rlo = getattr(
+                self, f"anchor_rater_low_{model}" if anc else f"rater_low_{model}", None
+            )
+            rhi = getattr(
+                self,
+                f"anchor_rater_high_{model}" if anc else f"rater_high_{model}",
+                None,
+            )
+            stats = pd.DataFrame({"Estimate": severities.round(dp)})
             if rse is not None:
-                stats['SE'] = pd.Series(rse).round(dp)
+                stats["SE"] = pd.Series(rse).round(dp)
             if interval is not None and rlo is not None:
-                stats[f'{round((1-interval)*50,1)}%'] = pd.Series(rlo).round(dp)
-                stats[f'{round((1+interval)*50,1)}%'] = pd.Series(rhi).round(dp)
-            stats['Count']    = pd.Series({r: self.dataframe.xs(r).count().sum()
-                                           for r in self.raters})
-            stats['Infit MS'] = getattr(self, f'rater_infit_ms_{model}').round(dp)
+                stats[f"{round((1-interval)*50, 1)}%"] = pd.Series(rlo).round(dp)
+                stats[f"{round((1+interval)*50, 1)}%"] = pd.Series(rhi).round(dp)
+            stats["Count"] = pd.Series(
+                {r: self.responses.xs(r).count().sum() for r in self.facet_names}
+            )
+            stats["Infit MS"] = getattr(self, f"rater_infit_ms_{model}").round(dp)
             if zstd:
-                stats['Infit Z'] = getattr(self, f'rater_infit_zstd_{model}').round(dp)
-            stats['Outfit MS'] = getattr(self, f'rater_outfit_ms_{model}').round(dp)
+                stats["Infit Z"] = getattr(self, f"rater_infit_zstd_{model}").round(dp)
+            stats["Outfit MS"] = getattr(self, f"rater_outfit_ms_{model}").round(dp)
             if zstd:
-                stats['Outfit Z'] = getattr(self, f'rater_outfit_zstd_{model}').round(dp)
-            stats.index = self.raters
-            setattr(self, f'rater_stats_{model}', stats)
+                stats["Outfit Z"] = getattr(self, f"rater_outfit_zstd_{model}").round(
+                    dp
+                )
+            stats.index = self.facet_names
+            setattr(self, f"rater_stats_{model}", stats)
 
         else:
-            sev_attr = f'anchor_severities_{model}' if anc else f'severities_{model}'
+            sev_attr = (
+                f"anchor_facet_effects_{model}" if anc else f"facet_effects_{model}"
+            )
             severities = getattr(self, sev_attr)
-            se_attr  = f'anchor_rater_se_{model}'  if anc else f'rater_se_{model}'
+            se_attr = f"anchor_rater_se_{model}" if anc else f"rater_se_{model}"
             rse = getattr(self, se_attr, {})
-            lo_attr = f'anchor_rater_low_{model}'  if anc else f'rater_low_{model}'
-            hi_attr = f'anchor_rater_high_{model}' if anc else f'rater_high_{model}'
+            lo_attr = f"anchor_rater_low_{model}" if anc else f"rater_low_{model}"
+            hi_attr = f"anchor_rater_high_{model}" if anc else f"rater_high_{model}"
             rlo = getattr(self, lo_attr, None)
             rhi = getattr(self, hi_attr, None)
 
             def _ov_stats():
-                cols = (['Count', 'Infit MS', 'Infit Z', 'Outfit MS', 'Outfit Z']
-                        if zstd else ['Count', 'Infit MS', 'Outfit MS'])
-                ov = pd.DataFrame(index=self.raters, columns=cols)
-                ov['Count'] = pd.Series({r: self.dataframe.xs(r).count().sum()
-                                         for r in self.raters}).astype(int)
-                ov['Infit MS']  = getattr(self, f'rater_infit_ms_{model}').round(dp)
-                ov['Outfit MS'] = getattr(self, f'rater_outfit_ms_{model}').round(dp)
+                """Build the overall rater fit statistics sub-table for the current model."""
+                cols = (
+                    ["Count", "Infit MS", "Infit Z", "Outfit MS", "Outfit Z"]
+                    if zstd
+                    else ["Count", "Infit MS", "Outfit MS"]
+                )
+                ov = pd.DataFrame(index=self.facet_names, columns=cols)
+                ov["Count"] = pd.Series(
+                    {r: self.responses.xs(r).count().sum() for r in self.facet_names}
+                ).astype(int)
+                ov["Infit MS"] = getattr(self, f"rater_infit_ms_{model}").round(dp)
+                ov["Outfit MS"] = getattr(self, f"rater_outfit_ms_{model}").round(dp)
                 if zstd:
-                    ov['Infit Z']  = getattr(self, f'rater_infit_zstd_{model}').round(dp)
-                    ov['Outfit Z'] = getattr(self, f'rater_outfit_zstd_{model}').round(dp)
+                    ov["Infit Z"] = getattr(self, f"rater_infit_zstd_{model}").round(dp)
+                    ov["Outfit Z"] = getattr(self, f"rater_outfit_zstd_{model}").round(
+                        dp
+                    )
                 return ov.T
 
             result = {}
 
-            if model == 'items':
-                for item in self.items:
-                    sub = pd.DataFrame(index=self.raters)
-                    sub['Estimate'] = np.array([severities[rater][item]
-                                                for rater in self.raters]).round(dp)
-                    sub['SE'] = np.array([rse.get(rater, {}).get(item, np.nan)
-                                          for rater in self.raters]).round(dp)
+            if model == "items":
+                for item in self.item_names:
+                    sub = pd.DataFrame(index=self.facet_names)
+                    sub["Estimate"] = severities[item].values.round(dp)
+                    if rse is not None and not isinstance(rse, dict) and not rse.empty:
+                        sub["SE"] = rse[item].values.round(dp)
                     if interval is not None and rlo is not None:
-                        sub[f'{round((1-interval)*50,1)}%'] = np.array(
-                            [rlo[rater][item] for rater in self.raters]).round(dp)
-                        sub[f'{round((1+interval)*50,1)}%'] = np.array(
-                            [rhi[rater][item] for rater in self.raters]).round(dp)
+                        sub[f"{round((1-interval)*50, 1)}%"] = rlo[item].values.round(dp)
+                        sub[f"{round((1+interval)*50, 1)}%"] = rhi[item].values.round(dp)
                     result[item] = sub.T
 
-            elif model == 'thresholds':
+            elif model == "thresholds":
                 for t in range(self.max_score):
-                    key = f'Threshold {t+1}'
-                    sub = pd.DataFrame(index=self.raters)
-                    sub['Estimate'] = np.array([severities[rater][t+1]
-                                                for rater in self.raters]).round(dp)
-                    sub['SE'] = np.array([rse.get(rater, np.zeros(self.max_score+1))[t+1]
-                                          for rater in self.raters]).round(dp)
+                    key = f"Threshold {t+1}"
+                    sub = pd.DataFrame(index=self.facet_names)
+                    sub["Estimate"] = severities.iloc[:, t].values.round(dp)
+                    if rse is not None and not isinstance(rse, dict) and not rse.empty:
+                        sub["SE"] = rse.iloc[:, t].values.round(dp)
                     if interval is not None and rlo is not None:
-                        sub[f'{round((1-interval)*50,1)}%'] = np.array(
-                            [rlo[rater][t+1] for rater in self.raters]).round(dp)
-                        sub[f'{round((1+interval)*50,1)}%'] = np.array(
-                            [rhi[rater][t+1] for rater in self.raters]).round(dp)
+                        sub[f"{round((1-interval)*50, 1)}%"] = rlo.iloc[
+                            :, t
+                        ].values.round(dp)
+                        sub[f"{round((1+interval)*50, 1)}%"] = rhi.iloc[
+                            :, t
+                        ].values.round(dp)
                     result[key] = sub.T
 
-            elif model == 'matrix':
-                if marginal:
-                    mg_i_attr = f'anchor_marginal_severities_items' if anc else 'marginal_severities_items'
-                    mg_t_attr = f'anchor_marginal_severities_thresholds' if anc else 'marginal_severities_thresholds'
-                    mg_items = getattr(self, mg_i_attr)
-                    mg_thrs  = getattr(self, mg_t_attr)
-                    mg_se_i  = getattr(self, 'rater_se_marginal_items', {})
-                    mg_se_t  = getattr(self, 'rater_se_marginal_thresholds', {})
+            elif model == "bivector":
+                mg_i_attr = (
+                    "anchor_facet_effects_bivector_items"
+                    if anc
+                    else "facet_effects_bivector_items"
+                )
+                mg_t_attr = (
+                    "anchor_facet_effects_bivector_thresholds"
+                    if anc
+                    else "facet_effects_bivector_thresholds"
+                )
+                mg_items = getattr(self, mg_i_attr)  # (R, I) DataFrame
+                mg_thrs = getattr(self, mg_t_attr)  # (R, K+1) DataFrame
+                mg_se_i = getattr(
+                    self,
+                    (
+                        "anchor_rater_se_marginal_items"
+                        if anc
+                        else "rater_se_marginal_items"
+                    ),
+                    None,
+                )
+                mg_se_t = getattr(
+                    self,
+                    (
+                        "anchor_rater_se_marginal_thresholds"
+                        if anc
+                        else "rater_se_marginal_thresholds"
+                    ),
+                    None,
+                )
 
-                    for item in self.items:
-                        sub = pd.DataFrame(index=self.raters)
-                        sub['Estimate'] = np.array([mg_items[rater][item]
-                                                    for rater in self.raters]).round(dp)
-                        sub['SE'] = np.array([mg_se_i.get(rater, {}).get(item, np.nan)
-                                              for rater in self.raters]).round(dp)
+                for item in self.item_names:
+                    sub = pd.DataFrame(index=self.facet_names)
+                    sub["Estimate"] = mg_items[item].values.round(dp)
+                    if mg_se_i is not None:
+                        sub["SE"] = mg_se_i[item].values.round(dp)
+                    result[item] = sub.T
+
+                for t in range(self.max_score):
+                    key = f"Threshold {t+1}"
+                    sub = pd.DataFrame(index=self.facet_names)
+                    sub["Estimate"] = mg_thrs.iloc[:, t].values.round(dp)
+                    if mg_se_t is not None:
+                        sub["SE"] = mg_se_t.iloc[:, t].values.round(dp)
+                    result[key] = sub.T
+
+            elif model == "matrix":
+                if marginal:
+                    mg_i_attr = (
+                        "anchor_marginal_facet_effects_items"
+                        if anc
+                        else "marginal_facet_effects_items"
+                    )
+                    mg_t_attr = (
+                        "anchor_marginal_facet_effects_thresholds"
+                        if anc
+                        else "marginal_facet_effects_thresholds"
+                    )
+                    mg_items = getattr(self, mg_i_attr)  # (R, I) DataFrame
+                    mg_thrs = getattr(self, mg_t_attr)  # (R, K+1) DataFrame
+                    mg_se_i = getattr(
+                        self,
+                        (
+                            "anchor_rater_se_marginal_items"
+                            if anc
+                            else "rater_se_marginal_items"
+                        ),
+                        None,
+                    )
+                    mg_se_t = getattr(
+                        self,
+                        (
+                            "anchor_rater_se_marginal_thresholds"
+                            if anc
+                            else "rater_se_marginal_thresholds"
+                        ),
+                        None,
+                    )
+
+                    for item in self.item_names:
+                        sub = pd.DataFrame(index=self.facet_names)
+                        sub["Estimate"] = mg_items[item].values.round(dp)
+                        if mg_se_i is not None:
+                            sub["SE"] = mg_se_i[item].values.round(dp)
                         result[item] = sub.T
 
                     for t in range(self.max_score):
-                        key = f'Threshold {t+1}'
-                        sub = pd.DataFrame(index=self.raters)
-                        sub['Estimate'] = np.array([mg_thrs[rater][t+1]
-                                                    for rater in self.raters]).round(dp)
-                        sub['SE'] = np.array([
-                            mg_se_t.get(rater, np.zeros(self.max_score+1))[t+1]
-                            for rater in self.raters]).round(dp)
+                        key = f"Threshold {t+1}"
+                        sub = pd.DataFrame(index=self.facet_names)
+                        sub["Estimate"] = mg_thrs.iloc[:, t].values.round(dp)
+                        if mg_se_t is not None:
+                            sub["SE"] = mg_se_t.iloc[:, t].values.round(dp)
                         result[key] = sub.T
 
                 else:
-                    for item in self.items:
+                    for item in self.item_names:
                         for t in range(self.max_score):
-                            key = f'{item}, Threshold {t+1}'
-                            sub = pd.DataFrame(index=self.raters)
-                            sub['Estimate'] = np.array([severities[rater][item][t+1]
-                                                        for rater in self.raters]).round(dp)
-                            sub['SE'] = np.array([rse.get(rater, {}).get(
-                                item, np.zeros(self.max_score+1))[t+1]
-                                for rater in self.raters]).round(dp)
+                            key = f"{item}, Threshold {t+1}"
+                            sub = pd.DataFrame(index=self.facet_names)
+                            sub["Estimate"] = severities.loc[
+                                (slice(None), item), t
+                            ].values.round(dp)
+                            if (
+                                rse is not None
+                                and not isinstance(rse, dict)
+                                and not rse.empty
+                            ):
+                                sub["SE"] = rse.loc[
+                                    (slice(None), item), t
+                                ].values.round(dp)
                             if interval is not None and rlo is not None:
-                                sub[f'{round((1-interval)*50,1)}%'] = np.array(
-                                    [rlo[rater][item][t+1] for rater in self.raters]).round(dp)
-                                sub[f'{round((1+interval)*50,1)}%'] = np.array(
-                                    [rhi[rater][item][t+1] for rater in self.raters]).round(dp)
+                                sub[f"{round((1-interval)*50, 1)}%"] = rlo.loc[
+                                    (slice(None), item), t
+                                ].values.round(dp)
+                                sub[f"{round((1+interval)*50, 1)}%"] = rhi.loc[
+                                    (slice(None), item), t
+                                ].values.round(dp)
                             result[key] = sub.T
 
-            result['Overall statistics'] = _ov_stats()
+            result["Overall statistics"] = _ov_stats()
             stats = pd.concat(result.values(), keys=result.keys()).T
-            setattr(self, f'rater_stats_{model}', stats)
+            setattr(self, f"rater_stats_{model}", stats)
+        self._set_facet_aliases(model)
 
-    def rater_stats_df_global(self, **kw):     self.rater_stats_df(model='global', **kw)
-    def rater_stats_df_items(self, **kw):      self.rater_stats_df(model='items', **kw)
-    def rater_stats_df_thresholds(self, **kw): self.rater_stats_df(model='thresholds', **kw)
-    def rater_stats_df_matrix(self, **kw):     self.rater_stats_df(model='matrix', **kw)
+    def rater_stats_df_global(self, **kw):
+        """Alias for rater_stats_df(model='global'). See rater_stats_df for full documentation."""
+        self.rater_stats_df(model="global", **kw)
+
+    def rater_stats_df_items(self, **kw):
+        """Alias for rater_stats_df(model='items'). See rater_stats_df for full documentation."""
+        self.rater_stats_df(model="items", **kw)
+
+    def rater_stats_df_thresholds(self, **kw):
+        """Alias for rater_stats_df(model='thresholds'). See rater_stats_df for full documentation."""
+        self.rater_stats_df(model="thresholds", **kw)
+
+    def rater_stats_df_matrix(self, **kw):
+        """Alias for rater_stats_df(model='matrix'). See rater_stats_df for full documentation."""
+        self.rater_stats_df(model="matrix", **kw)
+
+    def rater_stats_df_bivector(self, **kw):
+        """Alias for rater_stats_df(model='bivector'). See rater_stats_df for full documentation."""
+        self.rater_stats_df(model="bivector", **kw)
 
     # ------------------------------------------------------------------
     # Save statistics
     # ------------------------------------------------------------------
 
-    def save_stats(self, model='global', filename='', format='csv', dp=3,
-                   warm_corr=True, tolerance=0.00001, max_iters=100,
-                   ext_score_adjustment=0.5, method='cos', constant=0.1,
-                   matrix_power=3, log_lik_tol=0.000001,
-                   no_of_samples=100, interval=None):
+    def save_stats(
+        self,
+        model="global",
+        filename="",
+        format="csv",
+        dp=3,
+        warm_corr=True,
+        tolerance=0.00001,
+        max_iters=100,
+        ext_score_adjustment=0.5,
+        method="cos",
+        constant=0.1,
+        matrix_power=3,
+        log_lik_tol=0.000001,
+        no_of_samples=500,
+        interval=None,
+    ):
         """
-        Export item, threshold, rater, person, and test statistics to file.
+        Export item, threshold, facet_element, person, and test statistics to file.
 
         Auto-triggers all stats_df methods if not yet run. Saves all five
         tables to either a single Excel workbook or separate CSV files.
@@ -3273,58 +5219,112 @@ class MFRM(Rasch):
             Matrix power.
         log_lik_tol : float, default 0.000001
             Calibration convergence tolerance.
-        no_of_samples : int, default 100
+        no_of_samples : int, default 500
             Bootstrap samples.
         interval : float or None, default None
             CI width for SEs.
         """
 
-        kw = dict(dp=dp, warm_corr=warm_corr, tolerance=tolerance,
-                  max_iters=max_iters, ext_score_adjustment=ext_score_adjustment,
-                  method=method, constant=constant, matrix_power=matrix_power,
-                  log_lik_tol=log_lik_tol)
+        kw = dict(
+            dp=dp,
+            warm_corr=warm_corr,
+            tolerance=tolerance,
+            max_iters=max_iters,
+            ext_score_adjustment=ext_score_adjustment,
+            method=method,
+            constant=constant,
+            matrix_power=matrix_power,
+            log_lik_tol=log_lik_tol,
+        )
 
         for attr, method_name, extra in [
-            (f'item_stats_{model}',      'item_stats_df',      dict(no_of_samples=no_of_samples, interval=interval)),
-            (f'threshold_stats_{model}', 'threshold_stats_df', dict(no_of_samples=no_of_samples, interval=interval)),
-            (f'rater_stats_{model}',     'rater_stats_df',     dict(no_of_samples=no_of_samples, interval=interval)),
-            (f'person_stats_{model}',    'person_stats_df',    {}),
-            (f'test_stats_{model}',      'test_stats_df',      {}),
+            (
+                f"item_stats_{model}",
+                "item_stats_df",
+                dict(no_of_samples=no_of_samples, interval=interval),
+            ),
+            (
+                f"threshold_stats_{model}",
+                "threshold_stats_df",
+                dict(no_of_samples=no_of_samples, interval=interval),
+            ),
+            (
+                f"rater_stats_{model}",
+                "rater_stats_df",
+                dict(no_of_samples=no_of_samples, interval=interval),
+            ),
+            (f"person_stats_{model}", "person_stats_df", {}),
+            (f"test_stats_{model}", "test_stats_df", {}),
         ]:
             if not hasattr(self, attr):
                 getattr(self, method_name)(model=model, **kw, **extra)
 
-        if format == 'xlsx':
-            if not filename.endswith('.xlsx'):
-                filename += '.xlsx'
-            with pd.ExcelWriter(filename, engine='openpyxl') as writer:
-                getattr(self, f'item_stats_{model}').to_excel(
-                    writer, sheet_name='Item statistics')
-                getattr(self, f'threshold_stats_{model}').to_excel(
-                    writer, sheet_name='Threshold statistics')
-                getattr(self, f'rater_stats_{model}').to_excel(
-                    writer, sheet_name='Rater statistics')
-                getattr(self, f'person_stats_{model}').to_excel(
-                    writer, sheet_name='Person statistics')
-                getattr(self, f'test_stats_{model}').to_excel(
-                    writer, sheet_name='Test statistics')
+        if format == "xlsx":
+            if not filename.endswith(".xlsx"):
+                filename += ".xlsx"
+            with pd.ExcelWriter(filename, engine="openpyxl") as writer:
+                getattr(self, f"item_stats_{model}").to_excel(
+                    writer, sheet_name="Item statistics"
+                )
+                getattr(self, f"threshold_stats_{model}").to_excel(
+                    writer, sheet_name="Threshold statistics"
+                )
+                getattr(self, f"rater_stats_{model}").to_excel(
+                    writer, sheet_name="Rater statistics"
+                )
+                getattr(self, f"person_stats_{model}").to_excel(
+                    writer, sheet_name="Person statistics"
+                )
+                getattr(self, f"test_stats_{model}").to_excel(
+                    writer, sheet_name="Test statistics"
+                )
         else:
-            if filename.endswith('.csv'):
+            if filename.endswith(".csv"):
                 filename = filename[:-4]
-            getattr(self, f'item_stats_{model}').to_csv(f'{filename}_item_stats.csv')
-            getattr(self, f'threshold_stats_{model}').to_csv(f'{filename}_threshold_stats.csv')
-            getattr(self, f'rater_stats_{model}').to_csv(f'{filename}_rater_stats.csv')
-            getattr(self, f'person_stats_{model}').to_csv(f'{filename}_person_stats.csv')
-            getattr(self, f'test_stats_{model}').to_csv(f'{filename}_test_stats.csv')
+            getattr(self, f"item_stats_{model}").to_csv(f"{filename}_item_stats.csv")
+            getattr(self, f"threshold_stats_{model}").to_csv(
+                f"{filename}_threshold_stats.csv"
+            )
+            getattr(self, f"rater_stats_{model}").to_csv(f"{filename}_rater_stats.csv")
+            getattr(self, f"person_stats_{model}").to_csv(
+                f"{filename}_person_stats.csv"
+            )
+            getattr(self, f"test_stats_{model}").to_csv(f"{filename}_test_stats.csv")
 
-    def save_stats_global(self, **kw):     self.save_stats(model='global', **kw)
-    def save_stats_items(self, **kw):      self.save_stats(model='items', **kw)
-    def save_stats_thresholds(self, **kw): self.save_stats(model='thresholds', **kw)
-    def save_stats_matrix(self, **kw):     self.save_stats(model='matrix', **kw)
+    def save_stats_global(self, **kw):
+        """Alias for save_stats(model='global'). See save_stats for full documentation."""
+        self.save_stats(model="global", **kw)
 
-    def save_residuals(self, eigenvectors, eigenvalues, variance_explained,
-                       loadings, fit_statistics_method, eigenvector_string,
-                       filename, format='csv', single=True, dp=3, **kw):
+    def save_stats_items(self, **kw):
+        """Alias for save_stats(model='items'). See save_stats for full documentation."""
+        self.save_stats(model="items", **kw)
+
+    def save_stats_thresholds(self, **kw):
+        """Alias for save_stats(model='thresholds'). See save_stats for full documentation."""
+        self.save_stats(model="thresholds", **kw)
+
+    def save_stats_matrix(self, **kw):
+        """Alias for save_stats(model='matrix'). See save_stats for full documentation."""
+        self.save_stats(model="matrix", **kw)
+
+    def save_stats_bivector(self, **kw):
+        """Alias for save_stats(model='bivector'). See save_stats for full documentation."""
+        self.save_stats(model="bivector", **kw)
+
+    def save_residuals(
+        self,
+        eigenvectors,
+        eigenvalues,
+        variance_explained,
+        loadings,
+        fit_statistics_method,
+        eigenvector_string,
+        filename,
+        format="csv",
+        single=True,
+        dp=3,
+        **kw,
+    ):
         """
         Export residual correlation analysis results to file.
 
@@ -3360,1019 +5360,2012 @@ class MFRM(Rasch):
             Additional keyword arguments passed to the fit statistics method.
         """
 
-        frames  = [eigenvectors, eigenvalues, variance_explained, loadings]
+        frames = [eigenvectors, eigenvalues, variance_explained, loadings]
         if not hasattr(self, eigenvector_string):
             getattr(self, fit_statistics_method)(**kw)
 
-        if format == 'xlsx':
-            if not filename.endswith('.xlsx'):
-                filename += '.xlsx'
-            with pd.ExcelWriter(filename, engine='openpyxl') as writer:
+        if format == "xlsx":
+            if not filename.endswith(".xlsx"):
+                filename += ".xlsx"
+            with pd.ExcelWriter(filename, engine="openpyxl") as writer:
                 if single:
                     row = 0
                     for frame in frames:
-                        frame.round(dp).to_excel(writer,
-                                                  sheet_name='Residual analysis',
-                                                  startrow=row, startcol=0)
+                        frame.round(dp).to_excel(
+                            writer,
+                            sheet_name="Residual analysis",
+                            startrow=row,
+                            startcol=0,
+                        )
                         row += frame.shape[0] + 2
                 else:
-                    for frame, sheet in zip(frames, ['Eigenvectors', 'Eigenvalues',
-                                                      'Variance explained',
-                                                      'Loadings']):
+                    for frame, sheet in zip(
+                        frames,
+                        [
+                            "Eigenvectors",
+                            "Eigenvalues",
+                            "Variance explained",
+                            "Loadings",
+                        ],
+                    ):
                         frame.round(dp).to_excel(writer, sheet_name=sheet)
         else:
             if single:
-                if not filename.endswith('.csv'):
-                    filename += '.csv'
-                with open(filename, 'a') as f:
+                if not filename.endswith(".csv"):
+                    filename += ".csv"
+                with open(filename, "a") as f:
                     for frame in frames:
                         frame.round(dp).to_csv(f)
-                        f.write('\n')
+                        f.write("\n")
             else:
-                if filename.endswith('.csv'):
+                if filename.endswith(".csv"):
                     filename = filename[:-4]
-                for frame, suffix in zip(frames, ['_eigenvectors', '_eigenvalues',
-                                                    '_variance_explained',
-                                                    '_loadings']):
-                    frame.round(dp).to_csv(f'{filename}{suffix}.csv')
+                for frame, suffix in zip(
+                    frames,
+                    [
+                        "_eigenvectors",
+                        "_eigenvalues",
+                        "_variance_explained",
+                        "_loadings",
+                    ],
+                ):
+                    frame.round(dp).to_csv(f"{filename}{suffix}.csv")
 
     def _save_residuals_for(self, model, which, filename, **kw):
-        '''Shared implementation for save_residuals_items/raters aliases.'''
-        attr = f'{which}_eigenvectors_{model}'
+        """Shared implementation for save_residuals_items/facet_elements aliases."""
+        attr = f"{which}_eigenvectors_{model}"
         if not hasattr(self, attr):
-            runner = self._run_item_res_corr if which == 'item' else self._run_rater_res_corr
+            runner = (
+                self._run_item_res_corr if which == "item" else self._run_facet_res_corr
+            )
             runner(model, **kw)
         self.save_residuals(
-            getattr(self, f'{which}_eigenvectors_{model}'),
-            getattr(self, f'{which}_eigenvalues_{model}'),
-            getattr(self, f'{which}_variance_explained_{model}'),
-            getattr(self, f'{which}_loadings_{model}'),
-            f'{which}_res_corr_analysis_{model}',
-            attr, filename, **kw
+            getattr(self, f"{which}_eigenvectors_{model}"),
+            getattr(self, f"{which}_eigenvalues_{model}"),
+            getattr(self, f"{which}_variance_explained_{model}"),
+            getattr(self, f"{which}_loadings_{model}"),
+            f"{which}_res_corr_analysis_{model}",
+            attr,
+            filename,
+            **kw,
         )
 
     def save_residuals_items_global(self, filename, **kw):
-        self._save_residuals_for('global', 'item', filename, **kw)
+        """Alias for save_residuals_items(model='global'). See save_residuals_items for full documentation."""
+        self._save_residuals_for("global", "item", filename, **kw)
+
     def save_residuals_items_items(self, filename, **kw):
-        self._save_residuals_for('items', 'item', filename, **kw)
+        """Alias for save_residuals_items(model='items'). See save_residuals_items for full documentation."""
+        self._save_residuals_for("items", "item", filename, **kw)
+
     def save_residuals_items_thresholds(self, filename, **kw):
-        self._save_residuals_for('thresholds', 'item', filename, **kw)
+        """Alias for save_residuals_items(model='thresholds'). See save_residuals_items for full documentation."""
+        self._save_residuals_for("thresholds", "item", filename, **kw)
+
     def save_residuals_items_matrix(self, filename, **kw):
-        self._save_residuals_for('matrix', 'item', filename, **kw)
+        """Alias for save_residuals_items(model='matrix'). See save_residuals_items for full documentation."""
+        self._save_residuals_for("matrix", "item", filename, **kw)
+
+    def save_residuals_items_bivector(self, filename, **kw):
+        """Alias for save_residuals_items(model='bivector'). See save_residuals_items for full documentation."""
+        self._save_residuals_for("bivector", "item", filename, **kw)
 
     def save_residuals_raters_global(self, filename, **kw):
-        self._save_residuals_for('global', 'rater', filename, **kw)
-    def save_residuals_raters_items(self, filename, **kw):
-        self._save_residuals_for('items', 'rater', filename, **kw)
-    def save_residuals_raters_thresholds(self, filename, **kw):
-        self._save_residuals_for('thresholds', 'rater', filename, **kw)
-    def save_residuals_raters_matrix(self, filename, **kw):
-        self._save_residuals_for('matrix', 'rater', filename, **kw)
+        """Alias for save_residuals_raters(model='global'). See save_residuals_raters for full documentation."""
+        self._save_residuals_for("global", "rater", filename, **kw)
 
+    def save_residuals_raters_items(self, filename, **kw):
+        """Alias for save_residuals_raters(model='items'). See save_residuals_raters for full documentation."""
+        self._save_residuals_for("items", "rater", filename, **kw)
+
+    def save_residuals_raters_thresholds(self, filename, **kw):
+        """Alias for save_residuals_raters(model='thresholds'). See save_residuals_raters for full documentation."""
+        self._save_residuals_for("thresholds", "rater", filename, **kw)
+
+    def save_residuals_raters_matrix(self, filename, **kw):
+        """Alias for save_residuals_raters(model='matrix'). See save_residuals_raters for full documentation."""
+        self._save_residuals_for("matrix", "rater", filename, **kw)
+
+    def save_residuals_raters_bivector(self, filename, **kw):
+        """Alias for save_residuals_raters(model='bivector'). See save_residuals_raters for full documentation."""
+        self._save_residuals_for("bivector", "rater", filename, **kw)
 
     # ------------------------------------------------------------------
     # Class intervals
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _class_masks(abils, no_of_classes):
-        '''Compute class interval index masks from ability values.'''
-        class_groups = [f'class_{i + 1}' for i in range(no_of_classes)]
-        q = abils.quantile([(i + 1) / no_of_classes
-                            for i in range(no_of_classes - 1)])
+    def _class_masks(estimates, no_of_classes):
+        """Compute class interval index masks from ability values."""
+        class_groups = [f"class_{i + 1}" for i in range(no_of_classes)]
+        q = estimates.quantile(
+            [(i + 1) / no_of_classes for i in range(no_of_classes - 1)]
+        )
         mask = {
-            'class_1':              abils < q.values[0],
-            f'class_{no_of_classes}': abils >= q.values[-1],
-            **{f'class_{i + 2}':  ((abils >= q.values[i]) &
-                                    (abils < q.values[i + 1]))
-               for i in range(no_of_classes - 2)}
+            "class_1": estimates < q.values[0],
+            f"class_{no_of_classes}": estimates >= q.values[-1],
+            **{
+                f"class_{i + 2}": (
+                    (estimates >= q.values[i]) & (estimates < q.values[i + 1])
+                )
+                for i in range(no_of_classes - 2)
+            },
         }
         return {cg: mask[cg][mask[cg]].index for cg in class_groups}
 
-    def _severity_item_offset(self, model, severities, rater):
-        '''Return per-item severity offset Series for a given rater and model.'''
-        if model == 'global':
-            return pd.Series(float(severities.loc[rater].iloc[0]) if isinstance(severities.loc[rater], pd.Series) else float(severities.loc[rater]), index=self.items)
-        elif model == 'items':
-            return pd.Series({item: severities[rater][item] for item in self.items})
-        elif model == 'thresholds':
-            return pd.Series(float(severities[rater][1:].mean()), index=self.items)
-        elif model == 'matrix':
-            return pd.Series({item: np.mean(severities[rater][item][1:])
-                              for item in self.items})
+    def _severity_item_offset(self, model, severities, facet_element):
+        """Return per-item severity offset Series for a given facet_element and model."""
+        if model == "global":
+            return pd.Series(
+                float(severities.loc[facet_element]), index=self.item_names
+            )
+        elif model == "items":
+            return severities.loc[facet_element]
+        elif model == "thresholds":
+            return pd.Series(
+                float(severities.loc[facet_element].mean()), index=self.item_names
+            )
+        elif model in ("bivector", "matrix"):
+            # severities is MultiIndex (facet_element, item) × thresholds
+            return severities.loc[facet_element].mean(axis=1)
 
-    def class_intervals(self, abilities, items=None, raters=None,
-                        shift=0, no_of_classes=5):
-        '''Class intervals for TCC/ICC observed data overlay.'''
-        if isinstance(items, str) and items in ('all', 'none'):
+    def _zero_severities(self, model, severities):
+        """Return severities structure identical in shape but all values zero.
+        Used to evaluate neutral (severity=0) curves in plotting methods."""
+        if model == "global":
+            return pd.Series(0.0, index=severities.index)
+        elif model == "items":
+            return pd.DataFrame(0.0, index=severities.index, columns=severities.columns)
+        elif model == "thresholds":
+            return pd.DataFrame(0.0, index=severities.index, columns=severities.columns)
+        elif model in ("bivector", "matrix"):
+            return pd.DataFrame(0.0, index=severities.index, columns=severities.columns)
+
+    def _mean_severities(self, model, severities, facet_element):
+        """Return a severities structure where `facet_element` has the mean severity
+        across all facet_elements.  Used to plot curves that match obs averaged across
+        the full facet_element pool."""
+        if model == "global":
+            result = severities.copy()
+            result[facet_element] = float(severities.mean())
+            return result
+        elif model == "items":
+            result = severities.copy()
+            result.loc[facet_element] = severities.mean(axis=0)
+            return result
+        elif model == "thresholds":
+            result = severities.copy()
+            result.loc[facet_element] = severities.mean(axis=0)
+            return result
+        elif model in ("bivector", "matrix"):
+            result = severities.copy()
+            result.loc[facet_element] = severities.groupby(level=1).mean()
+            return result
+
+    def class_intervals(
+        self, abilities, items=None, facet_elements=None, shift=0, no_of_classes=5
+    ):
+        """Class intervals for TCC/ICC observed data overlay."""
+        if isinstance(items, str) and items in ("all", "none"):
             items = None
-        if isinstance(raters, str):
-            if raters in ('none', 'zero'):
-                raters = None
-            elif raters == 'all':
-                raters = self.raters.tolist()
+        if isinstance(facet_elements, str):
+            if facet_elements in ("none", "zero"):
+                facet_elements = None
+            elif facet_elements == "all":
+                facet_elements = self.facet_names.tolist()
             else:
-                raters = [raters]
+                facet_elements = [facet_elements]
 
-        class_groups = [f'class_{i + 1}' for i in range(no_of_classes)]
-        df = self.dataframe.copy()
+        class_groups = [f"class_{i + 1}" for i in range(no_of_classes)]
+        df = self.responses.copy()
 
         # Get person index (persons with non-missing data on relevant items)
         if items is None:
-            abil_index = self.dataframe.unstack(level=0).dropna(how='any').index
+            abil_index = self.responses.unstack(level=0).dropna(how="any").index
         else:
-            abil_index = self.dataframe[items].unstack(level=0).dropna(how='any').index
+            abil_index = self.responses[items].unstack(level=0).dropna(how="any").index
 
-        abils = abilities.loc[abil_index]
+        estimates = abilities.loc[abil_index]
 
-        # Subset by raters
-        if isinstance(raters, list):
-            df = pd.concat({r: df.xs(r) for r in raters}, keys=raters)
+        # Subset by facet_elements
+        if isinstance(facet_elements, list):
+            df = pd.concat({r: df.xs(r) for r in facet_elements}, keys=facet_elements)
 
-        # Subset by items (after rater subsetting to preserve index structure)
+        # Subset by items (after facet_element subsetting to preserve index structure)
         if items is not None:
             df = df[items]
 
-		# Subset by person index — handle string vs list items separately
+        # Subset by person index — handle string vs list items separately
         # When items is a single string, df[items] is a Series; pd.IndexSlice
         # with three levels raises "Too many indexers" on a Series, so use
         # xs+loc instead.
         if isinstance(items, str):
-            rater_list = raters if isinstance(raters, list) else list(self.raters)
-            df = pd.concat({r: df.xs(r).loc[abil_index] for r in rater_list},
-            				keys=rater_list)
+            rater_list = (
+                facet_elements
+                if isinstance(facet_elements, list)
+                else list(self.facet_names)
+            )
+            df = pd.concat(
+                {r: df.xs(r).loc[abil_index] for r in rater_list}, keys=rater_list
+            )
         elif isinstance(items, list):
             df = df.loc[pd.IndexSlice[:, abil_index], :]
         else:
             df = df.loc[pd.IndexSlice[:, abil_index], :]
 
         # Class quantile masks
-        quantiles = abils.quantile([(i + 1) / no_of_classes
-                                    for i in range(no_of_classes - 1)])
-        mask_dict = {'class_1': abils < quantiles.values[0],
-                     f'class_{no_of_classes}': abils >= quantiles.values[-1]}
+        quantiles = estimates.quantile(
+            [(i + 1) / no_of_classes for i in range(no_of_classes - 1)]
+        )
+        mask_dict = {
+            "class_1": estimates < quantiles.values[0],
+            f"class_{no_of_classes}": estimates >= quantiles.values[-1],
+        }
         for i in range(no_of_classes - 2):
-            mask_dict[f'class_{i + 2}'] = ((abils >= quantiles.values[i]) &
-                                            (abils < quantiles.values[i + 1]))
+            mask_dict[f"class_{i + 2}"] = (estimates >= quantiles.values[i]) & (
+                estimates < quantiles.values[i + 1]
+            )
 
         # Expand masks to (Rater, Person) MultiIndex
-        rater_list = list(self.raters) if raters is None else raters
+        rater_list = (
+            list(self.facet_names) if facet_elements is None else facet_elements
+        )
         df_mask_dict = {}
         for cg in class_groups:
-            expanded = pd.concat({r: mask_dict[cg] for r in rater_list},
-                                 keys=rater_list)
+            expanded = pd.concat(
+                {r: mask_dict[cg] for r in rater_list}, keys=rater_list
+            )
             df_mask_dict[cg] = expanded[expanded].index
 
-        mean_abilities = pd.Series({cg: abils[mask_dict[cg]].mean()
-                                    for cg in class_groups}) - shift
+        mean_abilities = (
+            pd.Series({cg: estimates[mask_dict[cg]].mean() for cg in class_groups})
+            - shift
+        )
 
-        if raters is None:
-            obs = pd.Series({cg: df.loc[df_mask_dict[cg]].mean().sum()
-                             for cg in class_groups})
+        if facet_elements is None:
+            obs = pd.Series(
+                {cg: df.loc[df_mask_dict[cg]].mean().sum() for cg in class_groups}
+            )
         else:
-            obs = pd.Series({
-                cg: sum(
-                    df.xs(r).loc[
-                        df_mask_dict[cg][
-                            df_mask_dict[cg].get_level_values(0) == r
-                        ].get_level_values(1)
-                    ].mean().sum()
-                    if (df_mask_dict[cg].get_level_values(0) == r).any()
-                    else 0.0
-                    for r in raters
-                )
-                for cg in class_groups
-            })
+            obs = pd.Series(
+                {
+                    cg: sum(
+                        (
+                            df.xs(r)
+                            .loc[
+                                df_mask_dict[cg][
+                                    df_mask_dict[cg].get_level_values(0) == r
+                                ].get_level_values(1)
+                            ]
+                            .mean()
+                            .sum()
+                            if (df_mask_dict[cg].get_level_values(0) == r).any()
+                            else 0.0
+                        )
+                        for r in facet_elements
+                    )
+                    for cg in class_groups
+                }
+            )
 
         return mean_abilities, obs
 
-    def class_intervals_cats(self, abilities, difficulties, thresholds,
-                              severities, model='global', item=None,
-                              rater=None, shift=0, no_of_classes=5):
-        '''Class intervals for CRC observed data overlay.'''
-        if rater in ('none', 'zero'):
-            rater = None
+    def class_intervals_cats(
+        self,
+        abilities,
+        difficulties,
+        thresholds,
+        severities,
+        model="global",
+        item=None,
+        facet_element=None,
+        shift=0,
+        no_of_classes=5,
+    ):
+        """Class intervals for CRC observed data overlay."""
+        if facet_element in ("none", "zero"):
+            facet_element = None
 
-        class_groups = [f'class_{i + 1}' for i in range(no_of_classes)]
-        df = self.dataframe.copy()
+        class_groups = [f"class_{i + 1}" for i in range(no_of_classes)]
+        df = self.responses.copy()
 
         # Build ability DataFrame: (Person, Items)
-        abil_df = pd.DataFrame({it: abilities for it in self.dataframe.columns})
+        abil_df = pd.DataFrame({it: abilities for it in self.responses.columns})
+        raw_abil_base = abil_df.copy()
         if item is None:
-            for it in self.dataframe.columns:
+            for it in self.responses.columns:
                 abil_df[it] -= float(difficulties[it])
 
-        # Subtract rater severity from ability
+        # Subtract facet_element severity from ability
         abil_dict = {}
-        for r in self.raters:
+        for r in self.facet_names:
             a = abil_df.copy()
-            if rater is None:
+            if facet_element is None:
                 sev = self._severity_item_offset(model, severities, r)
-                for it in self.dataframe.columns:
+                for it in self.responses.columns:
                     a[it] -= float(sev[it])
             abil_dict[r] = a
         abil_df_full = pd.concat(abil_dict.values(), keys=abil_dict.keys())
 
-        # Subset by item/rater
-        if item is None and rater is None:
-            pf = self.dataframe.notna().astype(float).replace(0, np.nan)
+        # Subset by item/facet_element
+        if item is None and facet_element is None:
+            pf = self.responses.notna().astype(float).replace(0, np.nan)
             abil_full = abil_df_full * pf
             mask_scores = df.unstack().unstack()
-            mask_abils  = abil_full.unstack().unstack()
-        elif item is None and rater is not None:
-            df_r = df.xs(rater)
-            pf   = df_r.notna().astype(float).replace(0, np.nan)
+            mask_estimates = abil_full.unstack().unstack()
+        elif item is None and facet_element is not None:
+            df_r = df.xs(facet_element)
+            pf = df_r.notna().astype(float).replace(0, np.nan)
             mask_scores = df_r.unstack()
-            mask_abils  = (abil_df_full.xs(rater) * pf).unstack()
-        elif item is not None and rater is None:
+            mask_estimates = (abil_df_full.xs(facet_element) * pf).unstack()
+        elif item is not None and facet_element is None:
             df_i = df[item].unstack(level=0)
-            pf   = df_i.notna().astype(float).replace(0, np.nan)
+            pf = df_i.notna().astype(float).replace(0, np.nan)
             mask_scores = df_i.unstack()
-            mask_abils  = (abil_df_full[item].unstack(level=0) * pf).unstack()
+            mask_estimates = (abil_df_full[item].unstack(level=0) * pf).unstack()
         else:
-            df_ri = df.xs(rater)[item]
-            pf    = df_ri.notna().astype(float).replace(0, np.nan)
+            df_ri = df.xs(facet_element)[item]
+            pf = df_ri.notna().astype(float).replace(0, np.nan)
             mask_scores = df_ri
-            mask_abils  = abil_df_full.xs(rater)[item] * pf
+            mask_estimates = abil_df_full.xs(facet_element)[item] * pf
 
-        masks = self._class_masks(mask_abils, no_of_classes)
-        mean_abilities = np.array([
-            mask_abils.loc[masks[cg]].mean() for cg in class_groups
-        ])
-        obs_props = np.array([
-            [(mask_scores.loc[masks[cg]] == cat).sum() / len(masks[cg])
-             for cg in class_groups]
-            for cat in range(self.max_score + 1)
-        ])
+        masks = self._class_masks(mask_estimates, no_of_classes)
+        if item is None and facet_element is None:
+            raw_abil_full = pd.concat(
+                {r: raw_abil_base for r in self.facet_names}, keys=self.facet_names
+            )
+            raw_for_x = (raw_abil_full * pf).unstack().unstack()
+        elif item is None and facet_element is not None:
+            raw_for_x = (raw_abil_base * pf).unstack()
+        elif item is not None and facet_element is None:
+            raw_frame = pd.DataFrame(
+                {r: raw_abil_base[item] for r in self.facet_names}
+            )
+            raw_for_x = (raw_frame * pf).unstack()
+        else:
+            raw_for_x = raw_abil_base[item] * pf
+        mean_abilities = np.array(
+            [raw_for_x.loc[masks[cg]].mean() for cg in class_groups]
+        )
+        obs_props = np.array(
+            [
+                [
+                    (mask_scores.loc[masks[cg]] == cat).sum() / len(masks[cg])
+                    for cg in class_groups
+                ]
+                for cat in range(self.max_score + 1)
+            ]
+        )
         return mean_abilities, obs_props
 
-    def class_intervals_thr(self, abilities, difficulties, severities,
-                             model='global', item=None, rater=None,
-                             shift=None, no_of_classes=5):
-        '''Class intervals for threshold CCC observed data overlay.'''
-        if item in ('none',):
+    def class_intervals_thr(
+        self,
+        abilities,
+        difficulties,
+        severities,
+        model="global",
+        item=None,
+        facet_element=None,
+        shift=None,
+        no_of_classes=5,
+    ):
+        """Class intervals for threshold CCC observed data overlay."""
+        if item in ("none",):
             item = None
-        if rater in ('none', 'zero'):
-            rater = None
+        if facet_element in ("none", "zero"):
+            facet_element = None
         if shift is None:
             shift = 0
 
-        class_groups = [f'class_{i + 1}' for i in range(no_of_classes)]
-        df = self.dataframe.copy()
+        class_groups = [f"class_{i + 1}" for i in range(no_of_classes)]
+        df = self.responses.copy()
 
-        abil_df = pd.DataFrame({it: abilities for it in self.dataframe.columns})
+        abil_df = pd.DataFrame({it: abilities for it in self.responses.columns})
         if item is None:
-            for it in self.dataframe.columns:
+            for it in self.responses.columns:
                 abil_df[it] -= float(difficulties[it])
 
         abil_dict = {}
-        for r in self.raters:
+        for r in self.facet_names:
             a = abil_df.copy()
-            if rater is None:
+            if facet_element is None:
                 sev = self._severity_item_offset(model, severities, r)
-                for it in self.dataframe.columns:
+                for it in self.responses.columns:
                     a[it] -= float(sev[it])
             abil_dict[r] = a
         abil_df_full = pd.concat(abil_dict.values(), keys=abil_dict.keys())
+        abil_df_full.index.names = self.responses.index.names
 
         if item is not None:
             df = df[item]
             abil_df_full = abil_df_full[item]
-        if rater is not None:
-            df = df.xs(rater)
-            abil_df_full = abil_df_full.xs(rater)
+        if facet_element is not None:
+            df = df.xs(facet_element)
+            abil_df_full = abil_df_full.xs(facet_element)
 
         mean_abilities_all, obs_props_all = [], []
         for t in range(self.max_score):
-            cond_df   = df[df.isin([t, t + 1])] - t
+            cond_df = df[df.isin([t, t + 1])] - t
             cond_mask = cond_df.notna().astype(float).replace(0, np.nan)
-            cond_abils = abil_df_full * cond_mask
+            cond_estimates = abil_df_full * cond_mask
 
             if item is None:
-                obs_data = pd.DataFrame({
-                    'ability': cond_abils.stack(),
-                    'score':   cond_df.stack()
-                }).droplevel(level=1)
+                obs_data = pd.DataFrame(
+                    {"ability": cond_estimates.stack(), "score": cond_df.stack()}
+                ).droplevel(level=1)
             else:
-                obs_data = pd.DataFrame({'ability': cond_abils, 'score': cond_df})
+                obs_data = pd.DataFrame({"ability": cond_estimates, "score": cond_df})
 
-            masks = self._class_masks(obs_data['ability'], no_of_classes)
-            mean_abilities_all.append([
-                obs_data.loc[masks[cg]]['ability'].mean() + shift
-                for cg in class_groups
-            ])
-            obs_props_all.append([
-                obs_data.loc[masks[cg]]['score'].mean()
-                for cg in class_groups
-            ])
+            masks = self._class_masks(obs_data["ability"], no_of_classes)
+            mean_abilities_all.append(
+                [
+                    obs_data.loc[masks[cg]]["ability"].mean() + shift
+                    for cg in class_groups
+                ]
+            )
+            obs_props_all.append(
+                [obs_data.loc[masks[cg]]["score"].mean() for cg in class_groups]
+            )
 
         return np.array(mean_abilities_all), np.array(obs_props_all)
 
     # Backwards-compatible per-model aliases
-    def class_intervals_cats_global(self, abilities, difficulties, thresholds, severities, **kw):
-        return self.class_intervals_cats(abilities, difficulties, thresholds, severities, 'global', **kw)
-    def class_intervals_cats_items(self, abilities, difficulties, thresholds, severities, **kw):
-        return self.class_intervals_cats(abilities, difficulties, thresholds, severities, 'items', **kw)
-    def class_intervals_cats_thresholds(self, abilities, difficulties, thresholds, severities, **kw):
-        return self.class_intervals_cats(abilities, difficulties, thresholds, severities, 'thresholds', **kw)
-    def class_intervals_cats_matrix(self, abilities, difficulties, thresholds, severities, **kw):
-        return self.class_intervals_cats(abilities, difficulties, thresholds, severities, 'matrix', **kw)
+    def class_intervals_cats_global(
+        self, abilities, difficulties, thresholds, severities, **kw
+    ):
+        """Alias for class_intervals_cats(model='global'). See class_intervals_cats for full documentation."""
+        return self.class_intervals_cats(
+            abilities, difficulties, thresholds, severities, "global", **kw
+        )
+
+    def class_intervals_cats_items(
+        self, abilities, difficulties, thresholds, severities, **kw
+    ):
+        """Alias for class_intervals_cats(model='items'). See class_intervals_cats for full documentation."""
+        return self.class_intervals_cats(
+            abilities, difficulties, thresholds, severities, "items", **kw
+        )
+
+    def class_intervals_cats_thresholds(
+        self, abilities, difficulties, thresholds, severities, **kw
+    ):
+        """Alias for class_intervals_cats(model='thresholds'). See class_intervals_cats for full documentation."""
+        return self.class_intervals_cats(
+            abilities, difficulties, thresholds, severities, "thresholds", **kw
+        )
+
+    def class_intervals_cats_matrix(
+        self, abilities, difficulties, thresholds, severities, **kw
+    ):
+        """Alias for class_intervals_cats(model='matrix'). See class_intervals_cats for full documentation."""
+        return self.class_intervals_cats(
+            abilities, difficulties, thresholds, severities, "matrix", **kw
+        )
+
+    def class_intervals_cats_bivector(
+        self, abilities, difficulties, thresholds, severities, **kw
+    ):
+        """Alias for class_intervals_cats(model='bivector'). See class_intervals_cats for full documentation."""
+        return self.class_intervals_cats(
+            abilities, difficulties, thresholds, severities, "bivector", **kw
+        )
 
     def class_intervals_thr_global(self, abilities, difficulties, severities, **kw):
-        return self.class_intervals_thr(abilities, difficulties, severities, 'global', **kw)
-    def class_intervals_thr_items(self, abilities, difficulties, severities, **kw):
-        return self.class_intervals_thr(abilities, difficulties, severities, 'items', **kw)
-    def class_intervals_thr_thresholds(self, abilities, difficulties, severities, **kw):
-        return self.class_intervals_thr(abilities, difficulties, severities, 'thresholds', **kw)
-    def class_intervals_thr_matrix(self, abilities, difficulties, severities, **kw):
-        return self.class_intervals_thr(abilities, difficulties, severities, 'matrix', **kw)
+        """Alias for class_intervals_thr(model='global'). See class_intervals_thr for full documentation."""
+        return self.class_intervals_thr(
+            abilities, difficulties, severities, "global", **kw
+        )
 
+    def class_intervals_thr_items(self, abilities, difficulties, severities, **kw):
+        """Alias for class_intervals_thr(model='items'). See class_intervals_thr for full documentation."""
+        return self.class_intervals_thr(
+            abilities, difficulties, severities, "items", **kw
+        )
+
+    def class_intervals_thr_thresholds(self, abilities, difficulties, severities, **kw):
+        """Alias for class_intervals_thr(model='thresholds'). See class_intervals_thr for full documentation."""
+        return self.class_intervals_thr(
+            abilities, difficulties, severities, "thresholds", **kw
+        )
+
+    def class_intervals_thr_matrix(self, abilities, difficulties, severities, **kw):
+        """Alias for class_intervals_thr(model='matrix'). See class_intervals_thr for full documentation."""
+        return self.class_intervals_thr(
+            abilities, difficulties, severities, "matrix", **kw
+        )
+
+    def class_intervals_thr_bivector(self, abilities, difficulties, severities, **kw):
+        """Alias for class_intervals_thr(model='bivector'). See class_intervals_thr for full documentation."""
+        return self.class_intervals_thr(
+            abilities, difficulties, severities, "bivector", **kw
+        )
 
     # ------------------------------------------------------------------
     # Plots
     # ------------------------------------------------------------------
 
-    def plot_data(self,
-                  x_data,
-                  y_data,
-                  model='global',
-                  anchor=False,
-                  items=None,
-                  raters=None,
-                  obs=None,
-                  thresh_obs=None,
-                  x_obs_data=np.array([]),
-                  y_obs_data=np.array([]),
-                  thresh_lines=False,
-                  central_diff=False,
-                  score_lines_item=[None, None],
-                  score_lines_test=None,
-                  point_info_lines_item=[None, None],
-                  point_info_lines_test=None,
-                  point_csem_lines=None,
-                  score_labels=False,
-                  x_min=-5,
-                  x_max=5,
-                  y_max=0,
-                  warm=True,
-                  cat_highlight=None,
-                  graph_title='',
-                  y_label='',
-                  plot_style='white',
-                  palette='dark blue',
-                  black=False,
-                  figsize=(8, 6),
-                  font='Times New Roman',
-                  title_font_size=15,
-                  axis_font_size=12,
-                  labelsize=12,
-                  tex=True,
-                  plot_density=300,
-                  filename=None,
-                  file_format='png'):
-        '''
+    def plot_data(
+        self,
+        x_data,
+        y_data,
+        model="global",
+        anchor=False,
+        items=None,
+        facet_elements=None,
+        obs=None,
+        thresh_obs=None,
+        x_obs_data=np.array([]),
+        y_obs_data=np.array([]),
+        thresh_lines=False,
+        central_diff=False,
+        score_lines_item=[None, None],
+        score_lines_test=None,
+        point_info_lines_item=[None, None],
+        point_info_lines_test=None,
+        point_csem_lines=None,
+        score_labels=False,
+        x_min=-5,
+        x_max=5,
+        y_max=0,
+        warm=True,
+        cat_highlight=None,
+        graph_title="",
+        y_label="",
+        plot_style="white",
+        palette="dark blue",
+        black=False,
+        figsize=(8, 6),
+        font="Times New Roman",
+        title_font_size=15,
+        axis_font_size=12,
+        labelsize=12,
+        tex=True,
+        plot_density=300,
+        filename=None,
+        file_format="png",
+    ):
+        """
         Core plotting function for ability-function curves (MFRM).
-        Shared across all four rater parameterisations.
-        '''
+        Shared across all four facet_element parameterisations.
+        """
         difficulties, thresholds, severities = self._get_params(model, anchor)
 
-        if isinstance(raters, str):
-            raters = (None if raters in ('none', 'zero', 'all')
-                      else [raters])
+        if isinstance(facet_elements, str):
+            facet_elements = (
+                None if facet_elements in ("none", "zero", "all") else [facet_elements]
+            )
         if isinstance(items, str):
-            items = None if items == 'all' else items
+            items = None if items == "all" else items
 
-        if plot_style == 'dark':
-            sns.set_style('darkgrid')
+        if plot_style == "dark":
+            sns.set_style("darkgrid")
         else:
-            sns.set_style('whitegrid')
+            sns.set_style("whitegrid")
 
         palette_dict = {
-            'dark blue':   ['dark', 'royalblue'],
-            'light blue':  ['light', 'cornflowerblue'],
-            'dark red':    ['dark', 'firebrick'],
-            'light red':   ['light', 'indianred'],
-            'dark green':  ['dark', 'forestgreen'],
-            'light green': ['light', 'mediumseagreen'],
-            'dark grey':   ['dark', 'dimgrey'],
-            'light grey':  ['light', 'darkgrey'],
-            'dark multi':  ['dark', 'dark'],
-            'light multi': ['light', 'muted'],
+            "dark blue": ["dark", "royalblue"],
+            "light blue": ["light", "cornflowerblue"],
+            "dark red": ["dark", "firebrick"],
+            "light red": ["light", "indianred"],
+            "dark green": ["dark", "forestgreen"],
+            "light green": ["light", "mediumseagreen"],
+            "dark grey": ["dark", "dimgrey"],
+            "light grey": ["light", "darkgrey"],
+            "dark multi": ["dark", "dark"],
+            "light multi": ["light", "muted"],
         }
         shade, base_color = palette_dict[palette]
-        if shade == 'dark':
-            color_map = (sns.color_palette('dark', as_cmap=True) if palette == 'dark multi'
-                         else sns.dark_palette(base_color, reverse=True, as_cmap=True))
+        if shade == "dark":
+            color_map = (
+                sns.color_palette("dark", as_cmap=True)
+                if palette == "dark multi"
+                else sns.dark_palette(base_color, reverse=True, as_cmap=True)
+            )
         else:
-            color_map = (sns.color_palette('muted', as_cmap=True) if palette == 'light multi'
-                         else sns.light_palette(base_color, reverse=True, as_cmap=True))
+            color_map = (
+                sns.color_palette("muted", as_cmap=True)
+                if palette == "light multi"
+                else sns.light_palette(base_color, reverse=True, as_cmap=True)
+            )
 
-        with plt.rc_context({'font.family': font, 'font.size': axis_font_size}):
+        with plt.rc_context({"font.family": font, "font.size": axis_font_size}):
             graph, ax = plt.subplots(figsize=figsize)
             no_of_plots = y_data.shape[1]
             cNorm = colors.Normalize(vmin=0, vmax=no_of_plots + 2)
-            if 'multi' not in palette:
+            if "multi" not in palette:
                 scalarMap = cmx.ScalarMappable(norm=cNorm, cmap=color_map)
 
             for i in range(no_of_plots):
-                col = ('black' if black
-                       else (scalarMap.to_rgba(i) if 'multi' not in palette
-                             else color_map[i]))
-                ax.plot(x_data, y_data[:, i], '', color=col, label=i + 1)
+                col = (
+                    "black"
+                    if black
+                    else (
+                        scalarMap.to_rgba(i) if "multi" not in palette else color_map[i]
+                    )
+                )
+                ax.plot(x_data, y_data[:, i], "", color=col, label=i + 1)
 
             if obs is not None:
                 try:
                     if isinstance(y_obs_data, pd.Series):
-                        col = scalarMap.to_rgba(0) if 'multi' not in palette else color_map[0]
-                        ax.plot(x_obs_data, y_obs_data, 'o', color=col)
+                        col = (
+                            scalarMap.to_rgba(0)
+                            if "multi" not in palette
+                            else color_map[0]
+                        )
+                        ax.plot(x_obs_data, y_obs_data, "o", color=col)
                     else:
                         for j in range(y_obs_data.shape[0]):
-                            col = (scalarMap.to_rgba(j) if 'multi' not in palette
-                                   else color_map[j])
-                            ax.plot(x_obs_data, y_obs_data[j, :], 'o', color=col)
+                            col = (
+                                scalarMap.to_rgba(j)
+                                if "multi" not in palette
+                                else color_map[j]
+                            )
+                            ax.plot(x_obs_data, y_obs_data[j, :], "o", color=col)
                 except Exception:
                     pass
 
             if thresh_obs is not None:
                 try:
                     for j in range(x_obs_data.shape[0]):
-                        col = (scalarMap.to_rgba(j) if 'multi' not in palette
-                               else color_map[j])
-                        ax.plot(x_obs_data[j, :], y_obs_data[j, :],
-                                'o', color=col)
+                        col = (
+                            scalarMap.to_rgba(j)
+                            if "multi" not in palette
+                            else color_map[j]
+                        )
+                        ax.plot(x_obs_data[j, :], y_obs_data[j, :], "o", color=col)
                 except Exception:
                     pass
 
             if thresh_lines:
+                r_sc = (
+                    facet_elements[0]
+                    if isinstance(facet_elements, list)
+                    else (
+                        facet_elements
+                        if facet_elements is not None
+                        else list(self.facet_names)[0]
+                    )
+                )
                 for t in range(self.max_score):
-                    if items is None and raters is None:
-                        xval = thresholds[t + 1]
-                    elif items is None:
-                        r_sc = raters[0] if isinstance(raters, list) else raters
-                        xval = thresholds[t + 1] + float(
-                            self._severity_item_offset(model, severities, r_sc).mean()
+                    diff_val = 0.0 if items is None else float(difficulties[items])
+                    # Per-threshold severity for models that vary by threshold
+                    if facet_elements is None:
+                        sev_val = 0.0
+                    elif model == "thresholds":
+                        sev_val = float(severities.loc[r_sc, t])
+                    elif model in ("bivector", "matrix"):
+                        item_key = (
+                            items if items is not None else list(self.item_names)[0]
+                        )
+                        sev_val = float(severities.loc[(r_sc, item_key), t])
+                    elif model == "items" and items is not None:
+                        sev_val = float(
+                            self._severity_item_offset(model, severities, r_sc)[items]
                         )
                     else:
-                        xval = float(difficulties[items]) + thresholds[t + 1]
-                    ax.axvline(x=xval, color='black', linestyle='--')
+                        sev_val = float(
+                            self._severity_item_offset(model, severities, r_sc).mean()
+                        )
+                    xval = diff_val + thresholds[t] + sev_val
+                    ax.axvline(x=xval, color="black", linestyle="--")
 
             if central_diff:
                 if items is None:
-                    ax.axvline(x=0, color='darkred', linestyle='--')
+                    ax.axvline(x=0, color="darkred", linestyle="--")
                 else:
-                    ax.axvline(x=float(difficulties[items]), color='darkred', linestyle='--')
+                    ax.axvline(
+                        x=float(difficulties[items]), color="darkred", linestyle="--"
+                    )
 
             if score_lines_item[1] is not None:
                 item = score_lines_item[0]
-                if (all(s > 0 for s in score_lines_item[1]) and
-                        all(s < self.max_score for s in score_lines_item[1])):
+                if all(s > 0 for s in score_lines_item[1]) and all(
+                    s < self.max_score for s in score_lines_item[1]
+                ):
+                    # ICC score line: invert the curve numerically by finding
+                    # the x value where y_data is closest to s
                     for s in score_lines_item[1]:
-                        abil = self.score_abil(s, model=model, anchor=anchor,
-                                               items=[item] if item else None,
-                                               raters=raters, warm_corr=False)
-                        ax.vlines(x=abil, ymin=-100, ymax=s,
-                                  color='black', linestyles='dashed')
-                        ax.hlines(y=s, xmin=-100, xmax=abil,
-                                  color='black', linestyles='dashed')
+                        idx = np.argmin(np.abs(y_data[:, 0] - s))
+                        estimate = x_data[idx]
+                        ax.vlines(
+                            x=estimate,
+                            ymin=0,
+                            ymax=s,
+                            color="black",
+                            linestyles="dashed",
+                        )
+                        ax.hlines(
+                            y=s,
+                            xmin=x_min,
+                            xmax=estimate,
+                            color="black",
+                            linestyles="dashed",
+                        )
                         if score_labels:
-                            ax.text(abil + (x_max - x_min) / 100, y_max / 50,
-                                    str(round(abil, 2)))
-                            ax.text(x_min + (x_max - x_min) / 100, s + y_max / 50, str(s))
+                            ax.text(
+                                estimate + (x_max - x_min) / 100,
+                                y_max / 50,
+                                str(round(estimate, 2)),
+                            )
+                            ax.text(
+                                x_min + (x_max - x_min) / 100, s + y_max / 50, str(s)
+                            )
                 else:
-                    warnings.warn('Invalid score for score line: values must be '
-                                  'strictly between 0 and the item maximum score.',
-                                  UserWarning, stacklevel=2)
+                    warnings.warn(
+                        "Invalid score for score line: values must be "
+                        "strictly between 0 and the item maximum score.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
 
             if score_lines_test is not None:
-                item_keys = list(self.items) if items is None else (
-                    [items] if isinstance(items, str) else items
+                item_keys = (
+                    list(self.item_names)
+                    if items is None
+                    else ([items] if isinstance(items, str) else items)
                 )
                 n_items = len(item_keys)
-                n_raters = len(raters) if raters is not None else self.no_of_raters
+                n_raters = (
+                    len(facet_elements)
+                    if facet_elements is not None
+                    else self.no_of_facet_elements
+                )
                 max_total = self.max_score * n_items * n_raters
                 if all(0 < s < max_total for s in score_lines_test):
                     for s in score_lines_test:
-                        abil = self.score_abil(s, model=model, anchor=anchor,
-                                               items=item_keys, raters=raters,
-                                               warm_corr=warm)
-                        ax.vlines(x=abil, ymin=-100, ymax=s,
-                                  color='black', linestyles='dashed')
-                        ax.hlines(y=s, xmin=-100, xmax=abil,
-                                  color='black', linestyles='dashed')
+                        estimate = self.score_lookup(
+                            s,
+                            model=model,
+                            anchor=anchor,
+                            items=item_keys,
+                            facet_elements=facet_elements,
+                            warm_corr=warm,
+                        )
+                        ax.vlines(
+                            x=estimate,
+                            ymin=0,
+                            ymax=s,
+                            color="black",
+                            linestyles="dashed",
+                        )
+                        ax.hlines(
+                            y=s,
+                            xmin=x_min,
+                            xmax=estimate,
+                            color="black",
+                            linestyles="dashed",
+                        )
                         if score_labels:
-                            ax.text(abil + (x_max - x_min) / 100, y_max / 50,
-                                    str(round(abil, 2)))
-                            ax.text(x_min + (x_max - x_min) / 100, s + y_max / 50, str(s))
+                            ax.text(
+                                estimate + (x_max - x_min) / 100,
+                                y_max / 50,
+                                str(round(estimate, 2)),
+                            )
+                            ax.text(
+                                x_min + (x_max - x_min) / 100, s + y_max / 50, str(s)
+                            )
                 else:
-                    warnings.warn('Invalid score for score line: values must be '
-                                  'strictly between 0 and the test maximum score.',
-                                  UserWarning, stacklevel=2)
+                    warnings.warn(
+                        "Invalid score for score line: values must be "
+                        "strictly between 0 and the test maximum score.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
 
             if point_info_lines_item[1] is not None:
                 item = point_info_lines_item[0]
-                r    = (raters[0] if isinstance(raters, list) else
-                    raters if raters is not None else list(self.raters)[0])
-                for abil in point_info_lines_item[1]:
-                    info = self.variance(abil, item, difficulties, r,
-                                         severities, thresholds, model)
-                    ax.vlines(x=abil, ymin=-100, ymax=info,
-                              color='black', linestyles='dashed')
-                    ax.hlines(y=info, xmin=-100, xmax=abil,
-                              color='black', linestyles='dashed')
+                r = (
+                    facet_elements[0]
+                    if isinstance(facet_elements, list)
+                    else (
+                        facet_elements
+                        if facet_elements is not None
+                        else list(self.facet_names)[0]
+                    )
+                )
+                for estimate in point_info_lines_item[1]:
+                    info = self.variance(
+                        estimate, item, difficulties, r, severities, thresholds, model
+                    )
+                    ax.vlines(
+                        x=estimate,
+                        ymin=-100,
+                        ymax=info,
+                        color="black",
+                        linestyles="dashed",
+                    )
+                    ax.hlines(
+                        y=info,
+                        xmin=-100,
+                        xmax=estimate,
+                        color="black",
+                        linestyles="dashed",
+                    )
                     if score_labels:
-                        ax.text(abil + (x_max - x_min) / 100, y_max / 50,
-                                str(round(abil, 2)))
-                        ax.text(x_min + (x_max - x_min) / 100, info + y_max / 50,
-                                str(round(info, 3)))
+                        ax.text(
+                            estimate + (x_max - x_min) / 100,
+                            y_max / 50,
+                            str(round(estimate, 2)),
+                        )
+                        ax.text(
+                            x_min + (x_max - x_min) / 100,
+                            info + y_max / 50,
+                            str(round(info, 3)),
+                        )
 
             if point_info_lines_test is not None:
-                item_keys  = list(self.items) if items is None else items
-                rater_list = list(self.raters) if raters is None else raters
-                for abil in point_info_lines_test:
+                item_keys = list(self.item_names) if items is None else items
+                rater_list = (
+                    list(self.facet_names) if facet_elements is None else facet_elements
+                )
+                for estimate in point_info_lines_test:
                     info = sum(
-                        self.variance(abil, it, difficulties, r,
-                                      severities, thresholds, model)
-                        for it in item_keys for r in rater_list
+                        self.variance(
+                            estimate, it, difficulties, r, severities, thresholds, model
+                        )
+                        for it in item_keys
+                        for r in rater_list
                     )
-                    ax.vlines(x=abil, ymin=-100, ymax=info,
-                              color='black', linestyles='dashed')
-                    ax.hlines(y=info, xmin=-100, xmax=abil,
-                              color='black', linestyles='dashed')
+                    ax.vlines(
+                        x=estimate,
+                        ymin=-100,
+                        ymax=info,
+                        color="black",
+                        linestyles="dashed",
+                    )
+                    ax.hlines(
+                        y=info,
+                        xmin=-100,
+                        xmax=estimate,
+                        color="black",
+                        linestyles="dashed",
+                    )
                     if score_labels:
-                        ax.text(abil + (x_max - x_min) / 100, y_max / 50,
-                                str(round(abil, 2)))
-                        ax.text(x_min + (x_max - x_min) / 100, info + y_max / 50,
-                                str(round(info, 3)))
+                        ax.text(
+                            estimate + (x_max - x_min) / 100,
+                            y_max / 50,
+                            str(round(estimate, 2)),
+                        )
+                        ax.text(
+                            x_min + (x_max - x_min) / 100,
+                            info + y_max / 50,
+                            str(round(info, 3)),
+                        )
 
             if point_csem_lines is not None:
-                item_keys  = list(self.items) if items is None else items
-                rater_list = list(self.raters) if raters is None else raters
-                for abil in point_csem_lines:
+                item_keys = list(self.item_names) if items is None else items
+                rater_list = (
+                    list(self.facet_names) if facet_elements is None else facet_elements
+                )
+                for estimate in point_csem_lines:
                     info = sum(
-                        self.variance(abil, it, difficulties, r,
-                                      severities, thresholds, model)
-                        for it in item_keys for r in rater_list
+                        self.variance(
+                            estimate, it, difficulties, r, severities, thresholds, model
+                        )
+                        for it in item_keys
+                        for r in rater_list
                     )
-                    csem = 1.0 / (info ** 0.5)
-                    ax.vlines(x=abil, ymin=-100, ymax=csem,
-                              color='black', linestyles='dashed')
-                    ax.hlines(y=csem, xmin=-100, xmax=abil,
-                              color='black', linestyles='dashed')
+                    csem = 1.0 / (info**0.5)
+                    ax.vlines(
+                        x=estimate,
+                        ymin=-100,
+                        ymax=csem,
+                        color="black",
+                        linestyles="dashed",
+                    )
+                    ax.hlines(
+                        y=csem,
+                        xmin=-100,
+                        xmax=estimate,
+                        color="black",
+                        linestyles="dashed",
+                    )
                     if score_labels:
-                        ax.text(abil + (x_max - x_min) / 100, y_max / 50,
-                                str(round(abil, 2)))
-                        ax.text(x_min + (x_max - x_min) / 100, csem + y_max / 50,
-                                str(round(csem, 3)))
+                        ax.text(
+                            estimate + (x_max - x_min) / 100,
+                            y_max / 50,
+                            str(round(estimate, 2)),
+                        )
+                        ax.text(
+                            x_min + (x_max - x_min) / 100,
+                            csem + y_max / 50,
+                            str(round(csem, 3)),
+                        )
 
             if cat_highlight in range(self.max_score + 1):
                 sev_shift = 0.0
-                if raters is not None:
-                    # _severity_item_offset expects a scalar rater
-                    r_scalar = raters[0] if isinstance(raters, list) else raters
-                    sev_shift = float(
-                        self._severity_item_offset(model, severities, r_scalar).mean()
+                if facet_elements is not None:
+                    # _severity_item_offset expects a scalar facet_element
+                    r_scalar = (
+                        facet_elements[0]
+                        if isinstance(facet_elements, list)
+                        else facet_elements
                     )
+                    sev_offset = self._severity_item_offset(model, severities, r_scalar)
+                    if model == "items" and items is not None:
+                        sev_shift = float(sev_offset[items])
+                    else:
+                        sev_shift = float(sev_offset.mean())
                 diff_shift = 0.0 if items is None else float(difficulties[items])
 
                 if cat_highlight == 0:
-                    ax.axvspan(-100, diff_shift + thresholds[1] + sev_shift,
-                               facecolor='blue', alpha=0.2)
+                    ax.axvspan(
+                        -100,
+                        diff_shift + thresholds[1] + sev_shift,
+                        facecolor="blue",
+                        alpha=0.2,
+                    )
                 elif cat_highlight == self.max_score:
-                    ax.axvspan(diff_shift + thresholds[self.max_score] + sev_shift,
-                               100, facecolor='blue', alpha=0.2)
+                    ax.axvspan(
+                        diff_shift + thresholds[self.max_score] + sev_shift,
+                        100,
+                        facecolor="blue",
+                        alpha=0.2,
+                    )
                 else:
                     lo = diff_shift + thresholds[cat_highlight] + sev_shift
-                    hi = diff_shift + thresholds[cat_highlight + 1] + sev_shift
+                    hi = diff_shift + thresholds[cat_highlight] + sev_shift
                     if hi > lo:
-                        ax.axvspan(lo, hi, facecolor='blue', alpha=0.2)
+                        ax.axvspan(lo, hi, facecolor="blue", alpha=0.2)
 
             if y_max <= 0:
                 y_max = float(y_data.max()) * 1.1
             ax.set_xlim(x_min, x_max)
             ax.set_ylim(0, y_max)
-            ax.set_xlabel('Ability', fontsize=axis_font_size, fontweight='bold')
-            ax.set_ylabel(y_label, fontsize=axis_font_size, fontweight='bold')
-            ax.set_title(graph_title, fontsize=title_font_size, fontweight='bold')
+            ax.set_xlabel("Person estimate", fontsize=axis_font_size, fontweight="bold")
+            ax.set_ylabel(y_label, fontsize=axis_font_size, fontweight="bold")
+            ax.set_title(graph_title, fontsize=title_font_size, fontweight="bold")
             ax.grid(True)
-            ax.tick_params(axis='x', labelsize=labelsize)
-            ax.tick_params(axis='y', labelsize=labelsize)
+            ax.tick_params(axis="x", labelsize=labelsize)
+            ax.tick_params(axis="y", labelsize=labelsize)
 
             if filename is not None:
-                graph.savefig(f'{filename}.{file_format}', dpi=plot_density)
+                graph.savefig(f"{filename}.{file_format}", dpi=plot_density)
             plt.close(graph)
 
         return graph
 
     # Backwards-compatible plot_data aliases
     def plot_data_global(self, *args, **kw):
-        return self.plot_data(*args, model='global', **kw)
+        """Alias for plot_data(model='global'). See plot_data for full documentation."""
+        return self.plot_data(*args, model="global", **kw)
+
     def plot_data_items(self, *args, **kw):
-        return self.plot_data(*args, model='items', **kw)
+        """Alias for plot_data(model='items'). See plot_data for full documentation."""
+        return self.plot_data(*args, model="items", **kw)
+
     def plot_data_thresholds(self, *args, **kw):
-        return self.plot_data(*args, model='thresholds', **kw)
+        """Alias for plot_data(model='thresholds'). See plot_data for full documentation."""
+        return self.plot_data(*args, model="thresholds", **kw)
+
     def plot_data_matrix(self, *args, **kw):
-        return self.plot_data(*args, model='matrix', **kw)
+        """Alias for plot_data(model='matrix'). See plot_data for full documentation."""
+        return self.plot_data(*args, model="matrix", **kw)
+
+    def plot_data_bivector(self, *args, **kw):
+        """Alias for plot_data(model='bivector'). See plot_data for full documentation."""
+        return self.plot_data(*args, model="bivector", **kw)
 
     # ------------------------------------------------------------------
     # ICC, CRCS, Threshold CCS, IIC, TCC, Test info, Test CSEM, Residuals
     # ------------------------------------------------------------------
 
-    def icc(self, item, model='global', anchor=False, rater=None, obs=None,
-            warm=True, xmin=-5, xmax=5, no_of_classes=5, title=None,
-            thresh_lines=False, score_lines=None, score_labels=False,
-            central_diff=False, cat_highlight=None, plot_style='white',
-            palette='dark blue', black=False, font='Times New Roman',
-            title_font_size=15, axis_font_size=12, labelsize=12,
-            filename=None, file_format='png', dpi=300):
-        '''Item Characteristic Curve.'''
+    def icc(
+        self,
+        item,
+        model="global",
+        anchor=False,
+        facet_element=None,
+        obs=None,
+        warm=True,
+        xmin=-5,
+        xmax=5,
+        no_of_classes=5,
+        title=None,
+        thresh_lines=False,
+        score_lines=None,
+        score_labels=False,
+        central_diff=False,
+        cat_highlight=None,
+        plot_style="white",
+        palette="dark blue",
+        black=False,
+        font="Times New Roman",
+        title_font_size=15,
+        axis_font_size=12,
+        labelsize=12,
+        filename=None,
+        file_format="png",
+        dpi=300,
+    ):
+        """Item Characteristic Curve."""
         difficulties, thresholds, severities = self._get_params(model, anchor)
-        if rater in ('none', 'zero'):
-            rater = None
+        if facet_element in ("none", "zero"):
+            facet_element = None
 
-        if obs:
-            if not hasattr(self, f'abils_{model}'):
-                self.person_abils(model=model)
-            abilities = getattr(self, f'abils_{model}')
+        abilities_arr = np.arange(-20, 20, 0.1)
+        r_use = (
+            facet_element if facet_element is not None else list(self.facet_names)[0]
+        )
+        # When no specific facet_element requested, average exp_score across all facet_elements
+        # to match the obs y-values which are mean scores across the facet_element pool.
+        if facet_element is None:
+            all_raters = list(self.facet_names)
+            y = np.array(
+                [
+                    np.mean(
+                        [
+                            self.exp_score(
+                                a, item, difficulties, r, severities, thresholds, model
+                            )
+                            for r in all_raters
+                        ]
+                    )
+                    for a in abilities_arr
+                ]
+            ).reshape(-1, 1)
+        else:
+            y = np.array(
+                [
+                    self.exp_score(
+                        a, item, difficulties, r_use, severities, thresholds, model
+                    )
+                    for a in abilities_arr
+                ]
+            ).reshape(-1, 1)
+
+        if obs is not None:
+            persons_attr = f'{"anchor_" if anchor else ""}persons_{model}'
+            if not hasattr(self, persons_attr):
+                self.person_estimates(model=model, anchor=anchor)
+            person_estimates = getattr(self, persons_attr)
             xobsdata, yobsdata = self.class_intervals(
-                abilities, items=item, raters=rater,
-                no_of_classes=no_of_classes
+                person_estimates,
+                items=item,
+                facet_elements=facet_element,
+                no_of_classes=no_of_classes,
             )
-            yobsdata = np.array(yobsdata).reshape(-1, 1)
+            # Keep yobsdata as a pd.Series so plot_data uses the scalar
+            # obs branch (ax.plot(x, y, 'o')) rather than the row-iteration
+            # branch, which mismatches shapes for the single-curve ICC case.
         else:
             xobsdata = yobsdata = np.array(np.nan)
 
-        abilities = np.arange(-20, 20, 0.1)
-        r_use = (rater if rater is not None
-                 else list(self.raters)[0])
-        y = np.array([
-            self.exp_score(a, item, difficulties, r_use,
-                           severities, thresholds, model)
-            for a in abilities
-        ]).reshape(-1, 1)
-
         return self.plot_data(
-            x_data=abilities, y_data=y, model=model, anchor=anchor,
-            items=item, raters=rater, obs=obs, warm=warm,
-            x_obs_data=xobsdata, y_obs_data=yobsdata,
-            x_min=xmin, x_max=xmax, y_max=self.max_score,
-            thresh_lines=thresh_lines, graph_title=title or '',
-            score_lines_item=[item, score_lines], score_labels=score_labels,
-            central_diff=central_diff, cat_highlight=cat_highlight,
-            y_label='Expected score', plot_style=plot_style, palette=palette,
-            black=black, font=font, title_font_size=title_font_size,
-            axis_font_size=axis_font_size, labelsize=labelsize,
-            filename=filename, plot_density=dpi, file_format=file_format
+            x_data=abilities_arr,
+            y_data=y,
+            model=model,
+            anchor=anchor,
+            items=item,
+            facet_elements=facet_element,
+            obs=obs,
+            warm=warm,
+            x_obs_data=xobsdata,
+            y_obs_data=yobsdata,
+            x_min=xmin,
+            x_max=xmax,
+            y_max=self.max_score,
+            thresh_lines=thresh_lines,
+            graph_title=title or "",
+            score_lines_item=[item, score_lines],
+            score_labels=score_labels,
+            central_diff=central_diff,
+            cat_highlight=cat_highlight,
+            y_label="Expected score",
+            plot_style=plot_style,
+            palette=palette,
+            black=black,
+            font=font,
+            title_font_size=title_font_size,
+            axis_font_size=axis_font_size,
+            labelsize=labelsize,
+            filename=filename,
+            plot_density=dpi,
+            file_format=file_format,
         )
 
-    def icc_global(self, item, **kw):     return self.icc(item, model='global', **kw)
-    def icc_items(self, item, **kw):      return self.icc(item, model='items', **kw)
-    def icc_thresholds(self, item, **kw): return self.icc(item, model='thresholds', **kw)
-    def icc_matrix(self, item, **kw):     return self.icc(item, model='matrix', **kw)
+    def icc_global(self, item, **kw):
+        """Alias for icc(model='global'). See icc for full documentation."""
+        return self.icc(item, model="global", **kw)
 
-    def crcs(self, model='global', anchor=False, item=None, rater=None,
-             obs=None, no_of_classes=5, title=None, thresh_lines=False,
-             central_diff=False, cat_highlight=None, xmin=-5, xmax=5,
-             plot_style='white', palette='dark blue', black=False,
-             font='Times New Roman', title_font_size=15, axis_font_size=12,
-             labelsize=12, filename=None, file_format='png', dpi=300):
-        '''Category Response Curves.'''
+    def icc_items(self, item, **kw):
+        """Alias for icc(model='items'). See icc for full documentation."""
+        return self.icc(item, model="items", **kw)
+
+    def icc_thresholds(self, item, **kw):
+        """Alias for icc(model='thresholds'). See icc for full documentation."""
+        return self.icc(item, model="thresholds", **kw)
+
+    def icc_matrix(self, item, **kw):
+        """Alias for icc(model='matrix'). See icc for full documentation."""
+        return self.icc(item, model="matrix", **kw)
+
+    def icc_bivector(self, item, **kw):
+        """Alias for icc(model='bivector'). See icc for full documentation."""
+        return self.icc(item, model="bivector", **kw)
+
+    def crcs(
+        self,
+        model="global",
+        anchor=False,
+        item=None,
+        facet_element=None,
+        obs=None,
+        no_of_classes=5,
+        title=None,
+        thresh_lines=False,
+        central_diff=False,
+        cat_highlight=None,
+        xmin=-5,
+        xmax=5,
+        plot_style="white",
+        palette="dark blue",
+        black=False,
+        font="Times New Roman",
+        title_font_size=15,
+        axis_font_size=12,
+        labelsize=12,
+        filename=None,
+        file_format="png",
+        dpi=300,
+    ):
+        """Category Response Curves."""
         difficulties, thresholds, severities = self._get_params(model, anchor)
-        if item in ('none',): item = None
-        if rater in ('none', 'zero'): rater = None
+        if item in ("none",):
+            item = None
+        if facet_element in ("none", "zero"):
+            facet_element = None
+
+        abilities_arr = np.arange(-20, 20, 0.1)
+        r_use = (
+            facet_element[0]
+            if isinstance(facet_element, list)
+            else (
+                facet_element
+                if facet_element is not None
+                else list(self.facet_names)[0]
+            )
+        )
+        # Use mean severities for the neutral curve so it represents a
+        # typical facet_element, matching obs proportions averaged across all facet_elements.
+        sev_for_curve = (
+            severities
+            if facet_element is not None
+            else self._mean_severities(model, severities, r_use)
+        )
 
         if obs is not None:
-            if not hasattr(self, f'abils_{model}'):
-                self.person_abils(model=model)
-            abilities = getattr(self, f'abils_{model}')
+            persons_attr = f'{"anchor_" if anchor else ""}persons_{model}'
+            if not hasattr(self, persons_attr):
+                self.person_estimates(model=model, anchor=anchor)
+            abilities = getattr(self, persons_attr)
             xobsdata, yobsdata = self.class_intervals_cats(
-                abilities, difficulties, thresholds, severities,
-                model=model, item=item, rater=rater, no_of_classes=no_of_classes
+                abilities,
+                difficulties,
+                thresholds,
+                severities,
+                model=model,
+                item=item,
+                facet_element=facet_element,
+                no_of_classes=no_of_classes,
             )
-            if isinstance(obs, str) and obs == 'all':
+            if isinstance(obs, str) and obs == "all":
                 obs = np.arange(self.max_score + 1)
             if not all(c in np.arange(self.max_score + 1) for c in obs):
-                warnings.warn("Invalid 'obs' value. Valid values are None, 'all', "
-                              'or a list of category indices.',
-                              UserWarning, stacklevel=2)
+                warnings.warn(
+                    "Invalid 'obs' value. Valid values are None, 'all', "
+                    "or a list of category indices.",
+                    UserWarning,
+                    stacklevel=2,
+                )
                 return
             yobsdata = yobsdata[obs, :]
         else:
             xobsdata = yobsdata = np.array(np.nan)
-
-        abilities_arr = np.arange(-20, 20, 0.1)
-        r_use = (rater[0] if isinstance(rater, list) else
-                 rater if rater is not None else list(self.raters)[0])
-        diff_use = 0.0 if item is None else float(difficulties[item])
-        y = np.array([
-            [self.cat_prob(a, (item or list(self.items)[0]),
-                           difficulties, r_use, severities, cat, thresholds, model)
-             for cat in range(self.max_score + 1)]
-            for a in abilities_arr
-        ])
-
-        return self.plot_data(
-            x_data=abilities_arr, y_data=y, model=model, anchor=anchor,
-            items=item, raters=rater, obs=obs,
-            x_obs_data=xobsdata, y_obs_data=yobsdata,
-            x_min=xmin, x_max=xmax, y_max=1,
-            thresh_lines=thresh_lines, central_diff=central_diff,
-            cat_highlight=cat_highlight, graph_title=title or '',
-            y_label='Probability', plot_style=plot_style, palette=palette,
-            black=black, font=font, title_font_size=title_font_size,
-            axis_font_size=axis_font_size, labelsize=labelsize,
-            filename=filename, plot_density=dpi, file_format=file_format
+        y = np.array(
+            [
+                [
+                    self.cat_prob(
+                        a,
+                        (item or list(self.item_names)[0]),
+                        difficulties,
+                        r_use,
+                        sev_for_curve,
+                        cat,
+                        thresholds,
+                        model,
+                    )
+                    for cat in range(self.max_score + 1)
+                ]
+                for a in abilities_arr
+            ]
         )
 
-    def crcs_global(self, item=None, **kw):     return self.crcs(model='global', item=item, **kw)
-    def crcs_items(self, item=None, **kw):      return self.crcs(model='items', item=item, **kw)
-    def crcs_thresholds(self, item=None, **kw): return self.crcs(model='thresholds', item=item, **kw)
-    def crcs_matrix(self, item=None, **kw):     return self.crcs(model='matrix', item=item, **kw)
+        return self.plot_data(
+            x_data=abilities_arr,
+            y_data=y,
+            model=model,
+            anchor=anchor,
+            items=item,
+            facet_elements=facet_element,
+            obs=obs,
+            x_obs_data=xobsdata,
+            y_obs_data=yobsdata,
+            x_min=xmin,
+            x_max=xmax,
+            y_max=1,
+            thresh_lines=thresh_lines,
+            central_diff=central_diff,
+            cat_highlight=cat_highlight,
+            graph_title=title or "",
+            y_label="Probability",
+            plot_style=plot_style,
+            palette=palette,
+            black=black,
+            font=font,
+            title_font_size=title_font_size,
+            axis_font_size=axis_font_size,
+            labelsize=labelsize,
+            filename=filename,
+            plot_density=dpi,
+            file_format=file_format,
+        )
 
-    def threshold_ccs(self, model='global', anchor=False, item=None,
-                      rater=None, obs=None, no_of_classes=5, title=None,
-                      thresh_lines=False, central_diff=False, cat_highlight=None,
-                      xmin=-5, xmax=5, plot_style='white', palette='dark blue',
-                      black=False, font='Times New Roman', title_font_size=15,
-                      axis_font_size=12, labelsize=12, filename=None,
-                      file_format='png', dpi=300):
-        '''Threshold Characteristic Curves.'''
+    def crcs_global(self, item=None, **kw):
+        """Alias for crcs(model='global'). See crcs for full documentation."""
+        return self.crcs(model="global", item=item, **kw)
+
+    def crcs_items(self, item=None, **kw):
+        """Alias for crcs(model='items'). See crcs for full documentation."""
+        return self.crcs(model="items", item=item, **kw)
+
+    def crcs_thresholds(self, item=None, **kw):
+        """Alias for crcs(model='thresholds'). See crcs for full documentation."""
+        return self.crcs(model="thresholds", item=item, **kw)
+
+    def crcs_matrix(self, item=None, **kw):
+        """Alias for crcs(model='matrix'). See crcs for full documentation."""
+        return self.crcs(model="matrix", item=item, **kw)
+
+    def crcs_bivector(self, item=None, **kw):
+        """Alias for crcs(model='bivector'). See crcs for full documentation."""
+        return self.crcs(model="bivector", item=item, **kw)
+
+    def threshold_ccs(
+        self,
+        model="global",
+        anchor=False,
+        item=None,
+        facet_element=None,
+        obs=None,
+        no_of_classes=5,
+        title=None,
+        thresh_lines=False,
+        central_diff=False,
+        cat_highlight=None,
+        xmin=-5,
+        xmax=5,
+        plot_style="white",
+        palette="dark blue",
+        black=False,
+        font="Times New Roman",
+        title_font_size=15,
+        axis_font_size=12,
+        labelsize=12,
+        filename=None,
+        file_format="png",
+        dpi=300,
+    ):
+        """Threshold Characteristic Curves."""
         difficulties, thresholds, severities = self._get_params(model, anchor)
-        if item in ('none',): item = None
-        if rater in ('none', 'zero'): rater = None
+        if item in ("none",):
+            item = None
+        if facet_element in ("none", "zero"):
+            facet_element = None
+
+        abilities_arr = np.arange(-20, 20, 0.1)
+        r_use = (
+            facet_element[0]
+            if isinstance(facet_element, list)
+            else (
+                facet_element
+                if facet_element is not None
+                else list(self.facet_names)[0]
+            )
+        )
+        diff_shift = 0.0 if item is None else float(difficulties[item])
+
+        # Neutral threshold CCS: for a neutral plot (no specific facet_element
+        # requested) use zero severity so thresholds are placed at diff + tau.
+        # For the thresholds model with a specific facet_element, each threshold has its
+        # own facet_element severity — use per-threshold values rather than the mean.
+        if facet_element is None:
+            sev_thresh = np.zeros(self.max_score)
+        elif model == "thresholds":
+            sev_thresh = severities.loc[r_use].values.astype(float)
+        elif model in ("bivector", "matrix"):
+            item_key = item if item is not None else list(self.item_names)[0]
+            sev_thresh = severities.loc[(r_use, item_key)].values.astype(float)
+        elif model == "items" and item is not None:
+            sev_thresh = np.full(
+                self.max_score,
+                float(self._severity_item_offset(model, severities, r_use)[item]),
+            )
+        else:
+            sev_thresh = np.full(
+                self.max_score,
+                float(self._severity_item_offset(model, severities, r_use).mean()),
+            )
+        abs_thresh = thresholds + diff_shift + sev_thresh
 
         xobsdata = yobsdata = np.array(np.nan)
         if obs is not None:
-            if not hasattr(self, f'abils_{model}'):
-                self.person_abils(model=model)
-            abilities = getattr(self, f'abils_{model}')
+            persons_attr = f'{"anchor_" if anchor else ""}persons_{model}'
+            if not hasattr(self, persons_attr):
+                self.person_estimates(model=model, anchor=anchor)
+            abilities = getattr(self, persons_attr)
             mean_abs, obs_props = self.class_intervals_thr(
-                abilities, difficulties, severities,
-                model=model, item=item, rater=rater, no_of_classes=no_of_classes
+                abilities,
+                difficulties,
+                severities,
+                model=model,
+                item=item,
+                facet_element=facet_element,
+                no_of_classes=no_of_classes,
             )
-            xobsdata, yobsdata = mean_abs, obs_props
-            if obs != 'all':
+            # mean_abs frame depends on what class_intervals_thr subtracted:
+            # - facet_element=None: severity subtracted → need to add it back
+            # - facet_element specified: nothing subtracted → no shift needed
+            # - item=None: difficulty also subtracted → add that back too
+            if facet_element is None:
+                # sev_thresh is zero for neutral plot — shift is diff only
+                x_shift = float(difficulties.mean()) if item is None else 0.0
+                xobsdata = mean_abs + x_shift
+            else:
+                # For facet_element-specific plot: mean_abs is raw ability, no shift needed.
+                # For thresholds/matrix model the per-threshold severity is already
+                # absorbed into abs_thresh for the curve; obs stay on raw ability axis.
+                xobsdata = mean_abs
+            yobsdata = obs_props
+            if obs != "all":
                 if not all(c in np.arange(self.max_score) + 1 for c in obs):
-                    warnings.warn("Invalid 'obs' value. Valid values are None, 'all', "
-                                  'or a list of threshold numbers.',
-                                  UserWarning, stacklevel=2)
+                    warnings.warn(
+                        "Invalid 'obs' value. Valid values are None, 'all', "
+                        "or a list of threshold numbers.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
                     return
-                obs_idx  = [o - 1 for o in obs]
+                obs_idx = [o - 1 for o in obs]
                 xobsdata = xobsdata[obs_idx, :]
                 yobsdata = yobsdata[obs_idx, :]
-
-        abilities_arr = np.arange(-20, 20, 0.1)
-        r_use = (rater[0] if isinstance(rater, list) else
-                 rater if rater is not None else list(self.raters)[0])
-        diff_shift = 0.0 if item is None else float(difficulties[item])
-
-        # Threshold locations including rater severity offset
-        sev_offset = float(self._severity_item_offset(model, severities, r_use).mean())
-        abs_thresh = thresholds[1:] + diff_shift + sev_offset
-        y = np.array([
-            [1.0 / (1.0 + np.exp(thr - a)) for thr in abs_thresh]
-            for a in abilities_arr
-        ])
-
-        return self.plot_data(
-            x_data=abilities_arr, y_data=y, model=model, anchor=anchor,
-            items=item, raters=rater, obs=None, thresh_obs=obs,
-            x_obs_data=xobsdata, y_obs_data=yobsdata,
-            x_min=xmin, x_max=xmax, y_max=1,
-            thresh_lines=thresh_lines, central_diff=central_diff,
-            cat_highlight=cat_highlight, graph_title=title or '',
-            y_label='Probability', plot_style=plot_style, palette=palette,
-            black=black, font=font, title_font_size=title_font_size,
-            axis_font_size=axis_font_size, labelsize=labelsize,
-            filename=filename, file_format=file_format, plot_density=dpi
+        y = np.array(
+            [
+                [1.0 / (1.0 + np.exp(thr - a)) for thr in abs_thresh]
+                for a in abilities_arr
+            ]
         )
 
-    def threshold_ccs_global(self, item=None, **kw):     return self.threshold_ccs(model='global', item=item, **kw)
-    def threshold_ccs_items(self, item=None, **kw):      return self.threshold_ccs(model='items', item=item, **kw)
-    def threshold_ccs_thresholds(self, item=None, **kw): return self.threshold_ccs(model='thresholds', item=item, **kw)
-    def threshold_ccs_matrix(self, item=None, **kw):     return self.threshold_ccs(model='matrix', item=item, **kw)
+        return self.plot_data(
+            x_data=abilities_arr,
+            y_data=y,
+            model=model,
+            anchor=anchor,
+            items=item,
+            facet_elements=facet_element,
+            obs=None,
+            thresh_obs=obs,
+            x_obs_data=xobsdata,
+            y_obs_data=yobsdata,
+            x_min=xmin,
+            x_max=xmax,
+            y_max=1,
+            thresh_lines=thresh_lines,
+            central_diff=central_diff,
+            cat_highlight=cat_highlight,
+            graph_title=title or "",
+            y_label="Probability",
+            plot_style=plot_style,
+            palette=palette,
+            black=black,
+            font=font,
+            title_font_size=title_font_size,
+            axis_font_size=axis_font_size,
+            labelsize=labelsize,
+            filename=filename,
+            file_format=file_format,
+            plot_density=dpi,
+        )
 
-    def iic(self, item, model='global', anchor=False, rater=None, ymax=None,
-            thresh_lines=False, central_diff=False, point_info_lines=None,
-            point_info_labels=False, cat_highlight=None, title=None,
-            xmin=-5, xmax=5, plot_style='white', palette='dark blue',
-            black=False, font='Times New Roman', title_font_size=15,
-            axis_font_size=12, labelsize=12, filename=None,
-            file_format='png', dpi=300):
-        '''Item Information Curve.'''
+    def threshold_ccs_global(self, item=None, **kw):
+        """Alias for threshold_ccs(model='global'). See threshold_ccs for full documentation."""
+        return self.threshold_ccs(model="global", item=item, **kw)
+
+    def threshold_ccs_items(self, item=None, **kw):
+        """Alias for threshold_ccs(model='items'). See threshold_ccs for full documentation."""
+        return self.threshold_ccs(model="items", item=item, **kw)
+
+    def threshold_ccs_thresholds(self, item=None, **kw):
+        """Alias for threshold_ccs(model='thresholds'). See threshold_ccs for full documentation."""
+        return self.threshold_ccs(model="thresholds", item=item, **kw)
+
+    def threshold_ccs_matrix(self, item=None, **kw):
+        """Alias for threshold_ccs(model='matrix'). See threshold_ccs for full documentation."""
+        return self.threshold_ccs(model="matrix", item=item, **kw)
+
+    def threshold_ccs_bivector(self, item=None, **kw):
+        """Alias for threshold_ccs(model='bivector'). See threshold_ccs for full documentation."""
+        return self.threshold_ccs(model="bivector", item=item, **kw)
+
+    def iic(
+        self,
+        item,
+        model="global",
+        anchor=False,
+        facet_element=None,
+        ymax=None,
+        thresh_lines=False,
+        central_diff=False,
+        point_info_lines=None,
+        point_info_labels=False,
+        cat_highlight=None,
+        title=None,
+        xmin=-5,
+        xmax=5,
+        plot_style="white",
+        palette="dark blue",
+        black=False,
+        font="Times New Roman",
+        title_font_size=15,
+        axis_font_size=12,
+        labelsize=12,
+        filename=None,
+        file_format="png",
+        dpi=300,
+    ):
+        """Item Information Curve."""
         difficulties, thresholds, severities = self._get_params(model, anchor)
-        r_use = (rater[0] if isinstance(rater, list) else
-                 rater if rater is not None and rater not in ('none', 'zero')
-                 else list(self.raters)[0])
-        abilities = np.arange(-20, 20, 0.1)
-        y = np.array([
-            self.variance(a, item, difficulties, r_use,
-                          severities, thresholds, model)
-            for a in abilities
-        ]).reshape(-1, 1)
+        r_use = (
+            facet_element[0]
+            if isinstance(facet_element, list)
+            else (
+                facet_element
+                if facet_element is not None and facet_element not in ("none", "zero")
+                else list(self.facet_names)[0]
+            )
+        )
+        estimates = np.arange(-20, 20, 0.1)
+        y = np.array(
+            [
+                self.variance(
+                    a, item, difficulties, r_use, severities, thresholds, model
+                )
+                for a in estimates
+            ]
+        ).reshape(-1, 1)
         if ymax is None:
             ymax = float(y.max()) * 1.1
         return self.plot_data(
-            x_data=abilities, y_data=y, model=model, anchor=anchor,
-            items=item, raters=rater, x_min=xmin, x_max=xmax, y_max=ymax,
-            thresh_lines=thresh_lines, central_diff=central_diff,
+            x_data=estimates,
+            y_data=y,
+            model=model,
+            anchor=anchor,
+            items=item,
+            facet_elements=facet_element,
+            x_min=xmin,
+            x_max=xmax,
+            y_max=ymax,
+            thresh_lines=thresh_lines,
+            central_diff=central_diff,
             point_info_lines_item=[item, point_info_lines],
-            score_labels=point_info_labels, cat_highlight=cat_highlight,
-            graph_title=title or '', y_label='Fisher information',
-            plot_style=plot_style, palette=palette, black=black, font=font,
-            title_font_size=title_font_size, axis_font_size=axis_font_size,
-            labelsize=labelsize, filename=filename, plot_density=dpi,
-            file_format=file_format
+            score_labels=point_info_labels,
+            cat_highlight=cat_highlight,
+            graph_title=title or "",
+            y_label="Fisher information",
+            plot_style=plot_style,
+            palette=palette,
+            black=black,
+            font=font,
+            title_font_size=title_font_size,
+            axis_font_size=axis_font_size,
+            labelsize=labelsize,
+            filename=filename,
+            plot_density=dpi,
+            file_format=file_format,
         )
 
-    def iic_global(self, item, **kw):     return self.iic(item, model='global', **kw)
-    def iic_items(self, item, **kw):      return self.iic(item, model='items', **kw)
-    def iic_thresholds(self, item, **kw): return self.iic(item, model='thresholds', **kw)
-    def iic_matrix(self, item, **kw):     return self.iic(item, model='matrix', **kw)
+    def iic_global(self, item, **kw):
+        """Alias for iic(model='global'). See iic for full documentation."""
+        return self.iic(item, model="global", **kw)
 
-    def tcc(self, model='global', anchor=False, items=None, raters=None,
-            obs=False, no_of_classes=5, title=None, score_lines=None,
-            score_labels=False, xmin=-5, xmax=5, plot_style='white',
-            palette='dark blue', black=False, font='Times New Roman',
-            title_font_size=15, axis_font_size=12, labelsize=12,
-            filename=None, file_format='png', dpi=300):
-        '''Test Characteristic Curve.'''
+    def iic_items(self, item, **kw):
+        """Alias for iic(model='items'). See iic for full documentation."""
+        return self.iic(item, model="items", **kw)
+
+    def iic_thresholds(self, item, **kw):
+        """Alias for iic(model='thresholds'). See iic for full documentation."""
+        return self.iic(item, model="thresholds", **kw)
+
+    def iic_matrix(self, item, **kw):
+        """Alias for iic(model='matrix'). See iic for full documentation."""
+        return self.iic(item, model="matrix", **kw)
+
+    def iic_bivector(self, item, **kw):
+        """Alias for iic(model='bivector'). See iic for full documentation."""
+        return self.iic(item, model="bivector", **kw)
+
+    def tcc(
+        self,
+        model="global",
+        anchor=False,
+        items=None,
+        facet_elements=None,
+        obs=False,
+        no_of_classes=5,
+        title=None,
+        score_lines=None,
+        score_labels=False,
+        xmin=-5,
+        xmax=5,
+        plot_style="white",
+        palette="dark blue",
+        black=False,
+        font="Times New Roman",
+        title_font_size=15,
+        axis_font_size=12,
+        labelsize=12,
+        filename=None,
+        file_format="png",
+        dpi=300,
+    ):
+        """Test Characteristic Curve."""
         difficulties, thresholds, severities = self._get_params(model, anchor)
-        if isinstance(items, str) and items in ('all', 'none'):
+        if isinstance(items, str) and items in ("all", "none"):
             items = None
-        if isinstance(raters, str) and raters in ('all', 'none', 'zero'):
-            raters = None
+        if isinstance(facet_elements, str) and facet_elements in (
+            "all",
+            "none",
+            "zero",
+        ):
+            facet_elements = None
 
         xobsdata = yobsdata = np.array(np.nan)
-        if obs:
-            if not hasattr(self, f'abils_{model}'):
-                self.person_abils(model=model)
-            abilities = getattr(self, f'abils_{model}')
-            mean_abs, obs_means = self.class_intervals(
-                abilities, items=items, raters=raters,
-                no_of_classes=no_of_classes
+        item_keys = (
+            list(self.item_names)
+            if items is None
+            else ([items] if isinstance(items, str) else items)
+        )
+        rater_list = (
+            list(self.facet_names)
+            if facet_elements is None
+            else (
+                [facet_elements] if isinstance(facet_elements, str) else facet_elements
             )
-            xobsdata = mean_abs
-            yobsdata = np.array(obs_means).reshape(no_of_classes, 1)
+        )
 
-        item_keys  = list(self.items) if items is None else (
-            [items] if isinstance(items, str) else items
-        )
-        rater_list = list(self.raters) if raters is None else (
-            [raters] if isinstance(raters, str) else raters
-        )
+        if obs:
+            persons_attr = f'{"anchor_" if anchor else ""}persons_{model}'
+            if not hasattr(self, persons_attr):
+                self.person_estimates(model=model, anchor=anchor)
+            person_estimates = getattr(self, persons_attr)
+
+            df_sub = (
+                self.responses.loc[pd.IndexSlice[rater_list, :], item_keys]
+                if item_keys != list(self.item_names)
+                else self.responses.loc[pd.IndexSlice[rater_list, :], :]
+            )
+
+            # TCC obs: restrict to persons with complete data across all
+            # facet_element×item combinations in scope, so all totals share the same
+            # ceiling and are directly comparable.
+            n_expected = len(rater_list) * len(item_keys)
+            obs_counts = df_sub.notna().sum(axis=1).groupby(level=1).sum()
+            complete_persons = obs_counts[obs_counts == n_expected].index
+            n_complete = len(complete_persons)
+
+            if n_complete == 0:
+                warnings.warn(
+                    "TCC observed score overlay suppressed: no persons have "
+                    "complete data across all facet_element×item combinations in scope.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                xobsdata = yobsdata = np.array(np.nan)
+            else:
+                if n_complete < len(obs_counts):
+                    warnings.warn(
+                        f"TCC observed score overlay uses {n_complete} of "
+                        f"{len(obs_counts)} persons with complete data across "
+                        f"all facet_element×item combinations in scope.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+                abil_index = person_estimates.index
+                total_scores = df_sub.sum(axis=1).groupby(level=1).sum()
+                total_scores = (
+                    total_scores.reindex(complete_persons).reindex(abil_index).dropna()
+                )
+                estimates_aligned = person_estimates.reindex(total_scores.index)
+
+                class_groups = [f"class_{i + 1}" for i in range(no_of_classes)]
+                quantiles = estimates_aligned.quantile(
+                    [(i + 1) / no_of_classes for i in range(no_of_classes - 1)]
+                )
+                mask_dict = {
+                    "class_1": estimates_aligned < quantiles.values[0],
+                    f"class_{no_of_classes}": estimates_aligned >= quantiles.values[-1],
+                }
+                for i in range(no_of_classes - 2):
+                    mask_dict[f"class_{i + 2}"] = (
+                        estimates_aligned >= quantiles.values[i]
+                    ) & (estimates_aligned < quantiles.values[i + 1])
+
+                xobsdata = pd.Series(
+                    {cg: estimates_aligned[mask_dict[cg]].mean() for cg in class_groups}
+                )
+                yobsdata = pd.Series(
+                    {cg: total_scores[mask_dict[cg]].mean() for cg in class_groups}
+                )
 
         abilities_arr = np.arange(-20, 20, 0.1)
-        y = np.array([
-            sum(self.exp_score(a, it, difficulties, r,
-                               severities, thresholds, model)
-                for it in item_keys for r in rater_list)
-            for a in abilities_arr
-        ]).reshape(-1, 1)
+        # Neutral TCC: observed points are mean raw scores on the raw ability
+        # axis with no severity adjustment.  When no specific facet_elements are
+        # requested, remove each facet_element's severity contribution from the curve
+        # so it also represents a zero-severity baseline.
+        # Curve: total expected score summed across all facet_element×item combinations.
+        y = np.array(
+            [
+                sum(
+                    self.exp_score(
+                        a, it, difficulties, r, severities, thresholds, model
+                    )
+                    for it in item_keys
+                    for r in rater_list
+                )
+                for a in abilities_arr
+            ]
+        ).reshape(-1, 1)
         y_max = self.max_score * len(item_keys) * len(rater_list)
 
         return self.plot_data(
-            x_data=abilities_arr, y_data=y, model=model, anchor=anchor,
-            items=items, raters=raters, obs=obs,
-            x_obs_data=xobsdata, y_obs_data=yobsdata,
-            x_min=xmin, x_max=xmax, y_max=y_max,
-            score_lines_test=score_lines, score_labels=score_labels,
-            graph_title=title or '', y_label='Expected score',
-            plot_style=plot_style, palette=palette, black=black, font=font,
-            title_font_size=title_font_size, axis_font_size=axis_font_size,
-            labelsize=labelsize, filename=filename, plot_density=dpi,
-            file_format=file_format
+            x_data=abilities_arr,
+            y_data=y,
+            model=model,
+            anchor=anchor,
+            items=items,
+            facet_elements=facet_elements,
+            obs=obs,
+            x_obs_data=xobsdata,
+            y_obs_data=yobsdata,
+            x_min=xmin,
+            x_max=xmax,
+            y_max=y_max,
+            score_lines_test=score_lines,
+            score_labels=score_labels,
+            graph_title=title or "",
+            y_label="Expected score",
+            plot_style=plot_style,
+            palette=palette,
+            black=black,
+            font=font,
+            title_font_size=title_font_size,
+            axis_font_size=axis_font_size,
+            labelsize=labelsize,
+            filename=filename,
+            plot_density=dpi,
+            file_format=file_format,
         )
 
-    def tcc_global(self, **kw):     return self.tcc(model='global', **kw)
-    def tcc_items(self, **kw):      return self.tcc(model='items', **kw)
-    def tcc_thresholds(self, **kw): return self.tcc(model='thresholds', **kw)
-    def tcc_matrix(self, **kw):     return self.tcc(model='matrix', **kw)
+    def tcc_global(self, **kw):
+        """Alias for tcc(model='global'). See tcc for full documentation."""
+        return self.tcc(model="global", **kw)
 
-    def test_info(self, model='global', anchor=False, items=None, raters=None,
-                  point_info_lines=None, point_info_labels=False, xmin=-5,
-                  xmax=5, ymax=None, title=None, plot_style='white',
-                  palette='dark blue', black=False, font='Times New Roman',
-                  title_font_size=15, axis_font_size=12, labelsize=12,
-                  filename=None, file_format='png', dpi=300):
-        '''Test Information Curve.'''
+    def tcc_items(self, **kw):
+        """Alias for tcc(model='items'). See tcc for full documentation."""
+        return self.tcc(model="items", **kw)
+
+    def tcc_thresholds(self, **kw):
+        """Alias for tcc(model='thresholds'). See tcc for full documentation."""
+        return self.tcc(model="thresholds", **kw)
+
+    def tcc_matrix(self, **kw):
+        """Alias for tcc(model='matrix'). See tcc for full documentation."""
+        return self.tcc(model="matrix", **kw)
+
+    def tcc_bivector(self, **kw):
+        """Alias for tcc(model='bivector'). See tcc for full documentation."""
+        return self.tcc(model="bivector", **kw)
+
+    def test_info(
+        self,
+        model="global",
+        anchor=False,
+        items=None,
+        facet_elements=None,
+        point_info_lines=None,
+        point_info_labels=False,
+        xmin=-5,
+        xmax=5,
+        ymax=None,
+        title=None,
+        plot_style="white",
+        palette="dark blue",
+        black=False,
+        font="Times New Roman",
+        title_font_size=15,
+        axis_font_size=12,
+        labelsize=12,
+        filename=None,
+        file_format="png",
+        dpi=300,
+    ):
+        """Test Information Curve."""
         difficulties, thresholds, severities = self._get_params(model, anchor)
-        if isinstance(items, str) and items in ('all', 'none'): items = None
-        if isinstance(raters, str) and raters in ('all', 'none', 'zero'): raters = None
+        if isinstance(items, str) and items in ("all", "none"):
+            items = None
+        if isinstance(facet_elements, str) and facet_elements in (
+            "all",
+            "none",
+            "zero",
+        ):
+            facet_elements = None
         if isinstance(items, str):
-            items = None if items in ('all', 'none') else [items]
-        if isinstance(raters, str):
-            raters = None if raters in ('all', 'none', 'zero') else [raters]
-        item_keys  = list(self.items) if items is None else items
-        rater_list = list(self.raters) if raters is None else raters
+            items = None if items in ("all", "none") else [items]
+        if isinstance(facet_elements, str):
+            facet_elements = (
+                None if facet_elements in ("all", "none", "zero") else [facet_elements]
+            )
+        item_keys = list(self.item_names) if items is None else items
+        rater_list = (
+            list(self.facet_names) if facet_elements is None else facet_elements
+        )
 
-        abilities = np.arange(-20, 20, 0.1)
-        y = np.array([
-            sum(self.variance(a, it, difficulties, r, severities, thresholds, model)
-                for it in item_keys for r in rater_list)
-            for a in abilities
-        ]).reshape(-1, 1)
+        estimates = np.arange(-20, 20, 0.1)
+        y = np.array(
+            [
+                sum(
+                    self.variance(a, it, difficulties, r, severities, thresholds, model)
+                    for it in item_keys
+                    for r in rater_list
+                )
+                for a in estimates
+            ]
+        ).reshape(-1, 1)
         if ymax is None:
             ymax = float(y.max()) * 1.1
 
         return self.plot_data(
-            x_data=abilities, y_data=y, model=model, anchor=anchor,
-            items=items, raters=raters, x_min=xmin, x_max=xmax, y_max=ymax,
-            graph_title=title or '', point_info_lines_test=point_info_lines,
-            score_labels=point_info_labels, y_label='Fisher information',
-            plot_style=plot_style, palette=palette, black=black, font=font,
-            title_font_size=title_font_size, axis_font_size=axis_font_size,
-            labelsize=labelsize, filename=filename, plot_density=dpi,
-            file_format=file_format
+            x_data=estimates,
+            y_data=y,
+            model=model,
+            anchor=anchor,
+            items=items,
+            facet_elements=facet_elements,
+            x_min=xmin,
+            x_max=xmax,
+            y_max=ymax,
+            graph_title=title or "",
+            point_info_lines_test=point_info_lines,
+            score_labels=point_info_labels,
+            y_label="Fisher information",
+            plot_style=plot_style,
+            palette=palette,
+            black=black,
+            font=font,
+            title_font_size=title_font_size,
+            axis_font_size=axis_font_size,
+            labelsize=labelsize,
+            filename=filename,
+            plot_density=dpi,
+            file_format=file_format,
         )
 
-    def test_info_global(self, **kw):     return self.test_info(model='global', **kw)
-    def test_info_items(self, **kw):      return self.test_info(model='items', **kw)
-    def test_info_thresholds(self, **kw): return self.test_info(model='thresholds', **kw)
-    def test_info_matrix(self, **kw):     return self.test_info(model='matrix', **kw)
+    def test_info_global(self, **kw):
+        """Alias for test_info(model='global'). See test_info for full documentation."""
+        return self.test_info(model="global", **kw)
 
-    def test_csem(self, model='global', anchor=False, items=None, raters=None,
-                  point_csem_lines=None, point_csem_labels=False,
-                  xmin=-5, xmax=5, ymax=5, title=None, plot_style='white',
-                  palette='dark blue', black=False, font='Times New Roman',
-                  title_font_size=15, axis_font_size=12, labelsize=12,
-                  filename=None, file_format='png', dpi=300):
-        '''Test Conditional Standard Error of Measurement Curve.'''
+    def test_info_items(self, **kw):
+        """Alias for test_info(model='items'). See test_info for full documentation."""
+        return self.test_info(model="items", **kw)
+
+    def test_info_thresholds(self, **kw):
+        """Alias for test_info(model='thresholds'). See test_info for full documentation."""
+        return self.test_info(model="thresholds", **kw)
+
+    def test_info_matrix(self, **kw):
+        """Alias for test_info(model='matrix'). See test_info for full documentation."""
+        return self.test_info(model="matrix", **kw)
+
+    def test_info_bivector(self, **kw):
+        """Alias for test_info(model='bivector'). See test_info for full documentation."""
+        return self.test_info(model="bivector", **kw)
+
+    def test_csem(
+        self,
+        model="global",
+        anchor=False,
+        items=None,
+        facet_elements=None,
+        point_csem_lines=None,
+        point_csem_labels=False,
+        xmin=-5,
+        xmax=5,
+        ymax=5,
+        title=None,
+        plot_style="white",
+        palette="dark blue",
+        black=False,
+        font="Times New Roman",
+        title_font_size=15,
+        axis_font_size=12,
+        labelsize=12,
+        filename=None,
+        file_format="png",
+        dpi=300,
+    ):
+        """Test Conditional Standard Error of Measurement Curve."""
         difficulties, thresholds, severities = self._get_params(model, anchor)
-        if isinstance(items, str) and items in ('all', 'none'): items = None
-        if isinstance(raters, str) and raters in ('all', 'none', 'zero'): raters = None
+        if isinstance(items, str) and items in ("all", "none"):
+            items = None
+        if isinstance(facet_elements, str) and facet_elements in (
+            "all",
+            "none",
+            "zero",
+        ):
+            facet_elements = None
         if isinstance(items, str):
-            items = None if items in ('all', 'none') else [items]
-        if isinstance(raters, str):
-            raters = None if raters in ('all', 'none', 'zero') else [raters]
-        item_keys  = list(self.items) if items is None else items
-        rater_list = list(self.raters) if raters is None else raters
+            items = None if items in ("all", "none") else [items]
+        if isinstance(facet_elements, str):
+            facet_elements = (
+                None if facet_elements in ("all", "none", "zero") else [facet_elements]
+            )
+        item_keys = list(self.item_names) if items is None else items
+        rater_list = (
+            list(self.facet_names) if facet_elements is None else facet_elements
+        )
 
-        abilities = np.arange(-20, 20, 0.1)
-        info = np.array([
-            sum(self.variance(a, it, difficulties, r, severities, thresholds, model)
-                for it in item_keys for r in rater_list)
-            for a in abilities
-        ])
-        y = (1.0 / (info ** 0.5)).reshape(-1, 1)
+        estimates = np.arange(-20, 20, 0.1)
+        info = np.array(
+            [
+                sum(
+                    self.variance(a, it, difficulties, r, severities, thresholds, model)
+                    for it in item_keys
+                    for r in rater_list
+                )
+                for a in estimates
+            ]
+        )
+        y = (1.0 / (info**0.5)).reshape(-1, 1)
 
         return self.plot_data(
-            x_data=abilities, y_data=y, model=model, anchor=anchor,
-            items=items, raters=raters, x_min=xmin, x_max=xmax, y_max=ymax,
-            graph_title=title or '', point_csem_lines=point_csem_lines,
-            score_labels=point_csem_labels, y_label='Conditional SEM',
-            plot_style=plot_style, palette=palette, black=black, font=font,
-            title_font_size=title_font_size, axis_font_size=axis_font_size,
-            labelsize=labelsize, filename=filename, plot_density=dpi,
-            file_format=file_format
+            x_data=estimates,
+            y_data=y,
+            model=model,
+            anchor=anchor,
+            items=items,
+            facet_elements=facet_elements,
+            x_min=xmin,
+            x_max=xmax,
+            y_max=ymax,
+            graph_title=title or "",
+            point_csem_lines=point_csem_lines,
+            score_labels=point_csem_labels,
+            y_label="Conditional SEM",
+            plot_style=plot_style,
+            palette=palette,
+            black=black,
+            font=font,
+            title_font_size=title_font_size,
+            axis_font_size=axis_font_size,
+            labelsize=labelsize,
+            filename=filename,
+            plot_density=dpi,
+            file_format=file_format,
         )
 
-    def test_csem_global(self, **kw):     return self.test_csem(model='global', **kw)
-    def test_csem_items(self, **kw):      return self.test_csem(model='items', **kw)
-    def test_csem_thresholds(self, **kw): return self.test_csem(model='thresholds', **kw)
-    def test_csem_matrix(self, **kw):     return self.test_csem(model='matrix', **kw)
+    def test_csem_global(self, **kw):
+        """Alias for test_csem(model='global'). See test_csem for full documentation."""
+        return self.test_csem(model="global", **kw)
 
-    def std_residuals_plot(self, model='global', items=None, raters=None,
-                           bin_width=0.5, x_min=-6, x_max=6, normal=False,
-                           title=None, plot_style='white', font='Times New Roman',
-                           title_font_size=15, axis_font_size=12, labelsize=12,
-                           filename=None, file_format='png', plot_density=300):
-        '''Standardised residuals histogram with optional item/rater subsetting.'''
-        if not hasattr(self, f'std_residual_df_{model}'):
+    def test_csem_items(self, **kw):
+        """Alias for test_csem(model='items'). See test_csem for full documentation."""
+        return self.test_csem(model="items", **kw)
+
+    def test_csem_thresholds(self, **kw):
+        """Alias for test_csem(model='thresholds'). See test_csem for full documentation."""
+        return self.test_csem(model="thresholds", **kw)
+
+    def test_csem_matrix(self, **kw):
+        """Alias for test_csem(model='matrix'). See test_csem for full documentation."""
+        return self.test_csem(model="matrix", **kw)
+
+    def test_csem_bivector(self, **kw):
+        """Alias for test_csem(model='bivector'). See test_csem for full documentation."""
+        return self.test_csem(model="bivector", **kw)
+
+    def std_residuals_plot(
+        self,
+        model="global",
+        items=None,
+        facet_elements=None,
+        bin_width=0.5,
+        x_min=-6,
+        x_max=6,
+        normal=False,
+        title=None,
+        plot_style="white",
+        font="Times New Roman",
+        title_font_size=15,
+        axis_font_size=12,
+        labelsize=12,
+        filename=None,
+        file_format="png",
+        plot_density=300,
+    ):
+        """Standardised residuals histogram with optional item/facet_element subsetting."""
+        if not hasattr(self, f"std_residual_df_{model}"):
             self.fit_statistics(model=model)
 
-        std_res = getattr(self, f'std_residual_df_{model}')
+        std_res = getattr(self, f"std_residual_df_{model}")
 
         # Normalise string arguments
-        if isinstance(raters, str):
-            if raters in ('all', 'none'):
-                raters = None
+        if isinstance(facet_elements, str):
+            if facet_elements in ("all", "none"):
+                facet_elements = None
             else:
-                raters = [raters]
+                facet_elements = [facet_elements]
         if isinstance(items, str):
-            if items in ('all', 'none'):
+            if items in ("all", "none"):
                 items = None
             else:
                 items = [items]
 
         # Subset
-        if items is None and raters is None:
+        if items is None and facet_elements is None:
             residuals = pd.Series(std_res.values.flatten()).dropna()
         elif items is None:
-            residuals = pd.Series(std_res.loc[raters].values.flatten()).dropna()
-        elif raters is None:
+            residuals = pd.Series(std_res.loc[facet_elements].values.flatten()).dropna()
+        elif facet_elements is None:
             residuals = pd.Series(std_res[items].values.flatten()).dropna()
         else:
-            residuals = pd.Series(std_res[items].loc[raters].values.flatten()).dropna()
+            residuals = pd.Series(
+                std_res[items].loc[facet_elements].values.flatten()
+            ).dropna()
 
         return self.std_residuals_hist(
-            residuals, bin_width=bin_width, x_min=x_min, x_max=x_max,
-            normal=normal, title=title, plot_style=plot_style, font=font,
-            title_font_size=title_font_size, axis_font_size=axis_font_size,
-            labelsize=labelsize, filename=filename, file_format=file_format,
-            plot_density=plot_density
+            residuals,
+            bin_width=bin_width,
+            x_min=x_min,
+            x_max=x_max,
+            normal=normal,
+            title=title,
+            plot_style=plot_style,
+            font=font,
+            title_font_size=title_font_size,
+            axis_font_size=axis_font_size,
+            labelsize=labelsize,
+            filename=filename,
+            file_format=file_format,
+            plot_density=plot_density,
         )
 
-    def std_residuals_plot_global(self, **kw):     return self.std_residuals_plot(model='global', **kw)
-    def std_residuals_plot_items(self, **kw):      return self.std_residuals_plot(model='items', **kw)
-    def std_residuals_plot_thresholds(self, **kw): return self.std_residuals_plot(model='thresholds', **kw)
-    def std_residuals_plot_matrix(self, **kw):     return self.std_residuals_plot(model='matrix', **kw)
+    def std_residuals_plot_global(self, **kw):
+        """Alias for std_residuals_plot(model='global'). See std_residuals_plot for full documentation."""
+        return self.std_residuals_plot(model="global", **kw)
+
+    def std_residuals_plot_items(self, **kw):
+        """Alias for std_residuals_plot(model='items'). See std_residuals_plot for full documentation."""
+        return self.std_residuals_plot(model="items", **kw)
+
+    def std_residuals_plot_thresholds(self, **kw):
+        """Alias for std_residuals_plot(model='thresholds'). See std_residuals_plot for full documentation."""
+        return self.std_residuals_plot(model="thresholds", **kw)
+
+    def std_residuals_plot_matrix(self, **kw):
+        """Alias for std_residuals_plot(model='matrix'). See std_residuals_plot for full documentation."""
+        return self.std_residuals_plot(model="matrix", **kw)
+
+    def std_residuals_plot_bivector(self, **kw):
+        """Alias for std_residuals_plot(model='bivector'). See std_residuals_plot for full documentation."""
+        return self.std_residuals_plot(model="bivector", **kw)
