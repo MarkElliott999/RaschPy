@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "raschpy"
-version = "1.0.0"
+version = "1.0.1"
 description = "Rasch measurement in Python: SLM, PCM, RSM, and Many-Facet Rasch models"
 readme = "README.md"
 license = { file = "LICENSE" }

@@ -1,0 +1,145 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="AutoImportSettings">
+    <option name="autoReloadType" value="SELECTIVE" />
+  </component>
+  <component name="ChangeListManager">
+    <list default="true" id="7f1f9cfd-b3cb-402c-8aca-0efbcf2bca73" name="Changes" comment="">
+      <change beforePath="$PROJECT_DIR$/CITATION.cff" beforeDir="false" afterPath="$PROJECT_DIR$/CITATION.cff" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/RaschPy/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/RaschPy/__init__.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/RaschPy_manual.pdf" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/anchor_selection.png" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/edge_case_tests_mfrm.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/edge_case_tests_pcm_rsm.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/edge_case_tests_slm.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/pyproject.toml" beforeDir="false" afterPath="$PROJECT_DIR$/pyproject.toml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/raschpy/base.py" beforeDir="false" afterPath="$PROJECT_DIR$/raschpy/base.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/raschpy/mfrm.py" beforeDir="false" afterPath="$PROJECT_DIR$/raschpy/mfrm.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/raschpy/pcm.py" beforeDir="false" afterPath="$PROJECT_DIR$/raschpy/pcm.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/raschpy/rsm.py" beforeDir="false" afterPath="$PROJECT_DIR$/raschpy/rsm.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/raschpy/simulation/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/raschpy/simulation/__init__.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/raschpy/simulation/base_sim.py" beforeDir="false" afterPath="$PROJECT_DIR$/raschpy/simulation/base_sim.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/raschpy/simulation/mfrm_sim.py" beforeDir="false" afterPath="$PROJECT_DIR$/raschpy/simulation/mfrm_sim.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/raschpy/simulation/pcm_sim.py" beforeDir="false" afterPath="$PROJECT_DIR$/raschpy/simulation/pcm_sim.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/raschpy/simulation/rsm_sim.py" beforeDir="false" afterPath="$PROJECT_DIR$/raschpy/simulation/rsm_sim.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/raschpy/simulation/slm_sim.py" beforeDir="false" afterPath="$PROJECT_DIR$/raschpy/simulation/slm_sim.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/raschpy/slm.py" beforeDir="false" afterPath="$PROJECT_DIR$/raschpy/slm.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/global/abils_global.csv" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/global/abils_global.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/global/item_se.csv" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/global/item_se.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/global/plots/regression_tests_mfrm.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/global/rater_se_global.csv" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/global/rater_se_global.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/global/threshold_se_global.npy" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/global/threshold_se_global.npy" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/items/abils_items.csv" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/items/abils_items.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/items/item_se.csv" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/items/item_se.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/items/rater_se_items/Rater_1.csv" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/items/rater_se_items/Rater_1.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/items/rater_se_items/Rater_2.csv" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/items/rater_se_items/Rater_2.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/items/rater_se_items/Rater_3.csv" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/items/rater_se_items/Rater_3.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/items/rater_se_items/Rater_4.csv" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/items/rater_se_items/Rater_4.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/items/rater_stats_items.csv" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/items/rater_stats_items.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/items/threshold_se_items.npy" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/items/threshold_se_items.npy" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/matrix/abils_matrix.csv" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/matrix/abils_matrix.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/matrix/item_se.csv" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/matrix/item_se.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_1/Item_1.npy" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_1/Item_1.npy" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_1/Item_2.npy" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_1/Item_2.npy" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_1/Item_3.npy" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_1/Item_3.npy" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_1/Item_5.npy" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_1/Item_5.npy" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_1/Item_6.npy" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_1/Item_6.npy" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_2/Item_1.npy" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_2/Item_1.npy" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_2/Item_3.npy" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_2/Item_3.npy" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_2/Item_4.npy" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_2/Item_4.npy" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_2/Item_6.npy" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_2/Item_6.npy" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_3/Item_1.npy" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_3/Item_1.npy" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_3/Item_3.npy" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_3/Item_3.npy" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_3/Item_4.npy" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_3/Item_4.npy" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_3/Item_5.npy" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_3/Item_5.npy" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_3/Item_6.npy" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_3/Item_6.npy" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_4/Item_1.npy" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_4/Item_1.npy" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_4/Item_2.npy" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_4/Item_2.npy" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_4/Item_3.npy" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_4/Item_3.npy" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_4/Item_4.npy" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_4/Item_4.npy" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_4/Item_5.npy" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_4/Item_5.npy" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_4/Item_6.npy" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/matrix/rater_se_matrix/Rater_4/Item_6.npy" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/matrix/test_stats_matrix.csv" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/matrix/test_stats_matrix.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/matrix/threshold_se_matrix.npy" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/matrix/threshold_se_matrix.npy" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/rsm/cat_width_se.csv" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/rsm/cat_width_se.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/rsm/item_se.csv" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/rsm/item_se.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/rsm/person_abilities.csv" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/rsm/person_abilities.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/rsm/threshold_se.csv" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/rsm/threshold_se.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/thresholds/abils_thresholds.csv" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/thresholds/abils_thresholds.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/thresholds/item_se.csv" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/thresholds/item_se.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/thresholds/item_stats_thresholds.csv" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/thresholds/item_stats_thresholds.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/thresholds/person_stats_thresholds.csv" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/thresholds/person_stats_thresholds.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/thresholds/rater_se_thresholds/Rater_1.npy" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/thresholds/rater_se_thresholds/Rater_1.npy" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/thresholds/rater_se_thresholds/Rater_2.npy" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/thresholds/rater_se_thresholds/Rater_2.npy" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/thresholds/rater_se_thresholds/Rater_3.npy" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/thresholds/rater_se_thresholds/Rater_3.npy" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/thresholds/rater_se_thresholds/Rater_4.npy" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/thresholds/rater_se_thresholds/Rater_4.npy" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/thresholds/rater_stats_thresholds.csv" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/thresholds/rater_stats_thresholds.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/thresholds/test_stats_thresholds.csv" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/thresholds/test_stats_thresholds.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/thresholds/threshold_se_thresholds.npy" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/thresholds/threshold_se_thresholds.npy" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_data/thresholds/threshold_stats_thresholds.csv" beforeDir="false" afterPath="$PROJECT_DIR$/regression_data/thresholds/threshold_stats_thresholds.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_tests_mfrm.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/regression_tests_slm_pcm_rsm.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/session_summary_2026_06_15.txt" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/smoke_tests_mfrm.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/smoke_tests_pcm.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/smoke_tests_rsm.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/smoke_tests_slm.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/validation_anchor_calibratio.textClipping" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/validation_anchor_calibration.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/validation_res_corr_mfrm.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/validation_res_corr_slm_pcm_rsm.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/validation_save_stats_residuals.py" beforeDir="false" />
+    </list>
+    <option name="SHOW_DIALOG" value="false" />
+    <option name="HIGHLIGHT_CONFLICTS" value="true" />
+    <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
+    <option name="LAST_RESOLUTION" value="IGNORE" />
+  </component>
+  <component name="Git.Settings">
+    <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
+  </component>
+  <component name="ProjectColorInfo">{
+  &quot;associatedIndex&quot;: 8
+}</component>
+  <component name="ProjectId" id="33yEbHJmguMdBkKssHFb2dENzlw" />
+  <component name="ProjectViewState">
+    <option name="hideEmptyMiddlePackages" value="true" />
+    <option name="showLibraryContents" value="true" />
+  </component>
+  <component name="PropertiesComponent">{
+  &quot;keyToString&quot;: {
+    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
+    &quot;git-widget-placeholder&quot;: &quot;main&quot;
+  }
+}</component>
+  <component name="SharedIndexes">
+    <attachedChunks>
+      <set>
+        <option value="bundled-python-sdk-9f8e2b94138c-36ea0e71a18c-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-251.26094.141" />
+      </set>
+    </attachedChunks>
+  </component>
+  <component name="TaskManager">
+    <task active="true" id="Default" summary="Default task">
+      <changelist id="7f1f9cfd-b3cb-402c-8aca-0efbcf2bca73" name="Changes" comment="" />
+      <created>1760280982067</created>
+      <option name="number" value="Default" />
+      <option name="presentableId" value="Default" />
+      <updated>1760280982067</updated>
+    </task>
+    <servers />
+  </component>
+  <component name="Vcs.Log.Tabs.Properties">
+    <option name="TAB_STATES">
+      <map>
+        <entry key="MAIN">
+          <value>
+            <State />
+          </value>
+        </entry>
+      </map>
+    </option>
+  </component>
+</project>
