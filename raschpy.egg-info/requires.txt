@@ -1,0 +1,11 @@
+numpy>=1.24
+pandas>=2.0
+scipy>=1.9
+scikit-learn>=1.1
+matplotlib>=3.6
+seaborn>=0.12
+openpyxl>=3.0
+
+[dev]
+pytest>=7.0
+pytest-cov

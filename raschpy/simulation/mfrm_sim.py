@@ -351,7 +351,7 @@ class MFRM_Sim(Rasch_Sim):
                 )  # (R, K)
                 sev *= self.facet_range / (sev.max() - sev.min())
                 sev -= sev.mean()
-                return pd.DataFrame(sev, index=self.facet_names)
+                return pd.DataFrame(sev, index=self.facet_names, columns=range(1, self.max_score + 1))
 
         elif self.model == "matrix":
             if manual_facet_effects is not None:
@@ -378,7 +378,7 @@ class MFRM_Sim(Rasch_Sim):
                 mi = pd.MultiIndex.from_product(
                     [self.facet_names, self.item_names], names=["facet_element", "item"]
                 )
-                return pd.DataFrame(sev.reshape(-1, self.max_score), index=mi)
+                return pd.DataFrame(sev.reshape(-1, self.max_score), index=mi, columns=range(1, self.max_score + 1))
 
     # ------------------------------------------------------------------
     # Category probability computation
@@ -932,7 +932,7 @@ class MFRM_Sim_Bivector:
             )  # (R, K)
             raw *= threshold_facet_range / (raw.max() - raw.min())
             raw -= raw.mean(axis=1, keepdims=True)
-            threshold_effects = pd.DataFrame(raw, index=facet_elements)
+            threshold_effects = pd.DataFrame(raw, index=facet_elements, columns=range(1, max_score + 1))
 
         # ------------------------------------------------------------------
         # Reconstruct full severity matrix as MultiIndex DataFrame
@@ -955,7 +955,7 @@ class MFRM_Sim_Bivector:
                 )
                 row = np.array([ie + te[k] for k in range(max_score)])
                 rows.append(row)
-        manual_facet_effects = pd.DataFrame(rows, index=mi)
+        manual_facet_effects = pd.DataFrame(rows, index=mi, columns=range(1, max_score + 1))
 
         # ------------------------------------------------------------------
         # Delegate all score sampling to MFRM_Sim_Matrix

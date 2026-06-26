@@ -1096,7 +1096,7 @@ class MFRM(Rasch):
                 log_lik_tol=log_lik_tol,
             )
         self.facet_effects_thresholds = pd.DataFrame(
-            facet_elements, index=self.facet_names
+            facet_elements, index=self.facet_names, columns=range(1, self.max_score + 1)
         )
 
     def _matrix_rater_element(
@@ -1154,7 +1154,7 @@ class MFRM(Rasch):
             [self.facet_names, self.responses.columns], names=[self.facet, "item"]
         )
         self.facet_effects_matrix = pd.DataFrame(
-            facet_elements.reshape(-1, self.max_score), index=mi
+            facet_elements.reshape(-1, self.max_score), index=mi, columns=range(1, self.max_score + 1)
         )
 
         # Marginal severities
@@ -1163,7 +1163,7 @@ class MFRM(Rasch):
             sev_arr.mean(axis=2), index=self.facet_names, columns=self.responses.columns
         )
         self.marginal_facet_effects_thresholds = pd.DataFrame(
-            sev_arr.mean(axis=1), index=self.facet_names
+            sev_arr.mean(axis=1), index=self.facet_names, columns=range(1, self.max_score + 1)
         )
 
     def _estimate_raters_bivector(self, matrix_marginals=True, **kw):
@@ -1237,11 +1237,11 @@ class MFRM(Rasch):
                     [
                         self.facet_effects_bivector_items.loc[facet_element, item]
                         + self.facet_effects_bivector_thresholds.loc[facet_element, k]
-                        for k in range(self.max_score)
+                        for k in range(1, self.max_score + 1)
                     ]
                 )
                 rows.append(row)
-        self.facet_effects_bivector = pd.DataFrame(rows, index=mi)
+        self.facet_effects_bivector = pd.DataFrame(rows, index=mi, columns=range(1, self.max_score + 1))
 
     # ------------------------------------------------------------------
     # Calibration — top-level methods
@@ -1491,7 +1491,7 @@ class MFRM(Rasch):
             [self.facet_names, self.responses.columns], names=[self.facet, "item"]
         )
         self.anchor_facet_effects_matrix = pd.DataFrame(
-            sev_adj.reshape(-1, self.max_score), index=mi
+            sev_adj.reshape(-1, self.max_score), index=mi, columns=range(1, self.max_score + 1)
         )
 
         # Marginal severities (no sentinel to skip)
@@ -1499,7 +1499,7 @@ class MFRM(Rasch):
             sev_adj.mean(axis=2), index=self.facet_names, columns=self.responses.columns
         )
         self.anchor_marginal_facet_effects_thresholds = pd.DataFrame(
-            sev_adj.mean(axis=1), index=self.facet_names
+            sev_adj.mean(axis=1), index=self.facet_names, columns=range(1, self.max_score + 1)
         )
         # Zero-sum per facet_element
         adj_thr = self.anchor_marginal_facet_effects_thresholds.mean(axis=1)
@@ -1554,11 +1554,11 @@ class MFRM(Rasch):
                         + self.anchor_facet_effects_bivector_thresholds.loc[
                             facet_element, k
                         ]
-                        for k in range(self.max_score)
+                        for k in range(1, self.max_score + 1)
                     ]
                 )
                 rows.append(row)
-        self.anchor_facet_effects_bivector = pd.DataFrame(rows, index=mi)
+        self.anchor_facet_effects_bivector = pd.DataFrame(rows, index=mi, columns=range(1, self.max_score + 1))
 
     # Backwards-compatible aliases
     def calibrate_global_anchor(self, anchors, **kw):
@@ -1812,21 +1812,21 @@ class MFRM(Rasch):
                 [getattr(s, sev_attr).values for s in samples
                  if getattr(s, sev_attr).shape[0] == self.no_of_facet_elements]
             )  # (B, R, K+1)
-            se = pd.DataFrame(np.nanstd(rater_ests, axis=0), index=self.facet_names)
+            se = pd.DataFrame(np.nanstd(rater_ests, axis=0), index=self.facet_names, columns=range(1, self.max_score + 1))
             setattr(self, f"{prefix}rater_se_{model}", se)
             if interval is not None:
                 setattr(
                     self,
                     f"{prefix}rater_low_{model}",
                     pd.DataFrame(
-                        np.percentile(rater_ests, lo_p, axis=0), index=self.facet_names
+                        np.percentile(rater_ests, lo_p, axis=0), index=self.facet_names, columns=range(1, self.max_score + 1)
                     ),
                 )
                 setattr(
                     self,
                     f"{prefix}rater_high_{model}",
                     pd.DataFrame(
-                        np.percentile(rater_ests, hi_p, axis=0), index=self.facet_names
+                        np.percentile(rater_ests, hi_p, axis=0), index=self.facet_names, columns=range(1, self.max_score + 1)
                     ),
                 )
 
@@ -1856,7 +1856,7 @@ class MFRM(Rasch):
                 columns=self.responses.columns,
             )
             se_thresholds = pd.DataFrame(
-                np.nanstd(thr_ests, axis=0), index=self.facet_names
+                np.nanstd(thr_ests, axis=0), index=self.facet_names, columns=range(1, self.max_score + 1)
             )
             setattr(self, f"{prefix}rater_se_marginal_items", se_items)
             setattr(self, f"{prefix}rater_se_marginal_thresholds", se_thresholds)
@@ -1879,7 +1879,7 @@ class MFRM(Rasch):
             mi = pd.MultiIndex.from_product(
                 [self.facet_names, self.responses.columns], names=[self.facet, "item"]
             )
-            se = pd.DataFrame(np.nanstd(rater_ests, axis=0), index=mi)
+            se = pd.DataFrame(np.nanstd(rater_ests, axis=0), index=mi, columns=range(1, self.max_score + 1))
             setattr(self, f"{prefix}rater_se_{model}", se)
 
             # Marginal SEs: item = mean over K, threshold = mean over I
@@ -1895,14 +1895,9 @@ class MFRM(Rasch):
                 columns=self.responses.columns,
             )
             thr_means = sev_4d.mean(axis=2)  # (B, R, K) — mean over I
-            thr_se_arr = np.concatenate(
-                [
-                    np.zeros((self.no_of_facet_elements, 1)),
-                    np.nanstd(thr_means, axis=0),
-                ],
-                axis=1,
+            se_marginal_thresholds = pd.DataFrame(
+                np.nanstd(thr_means, axis=0), index=self.facet_names, columns=range(1, self.max_score + 1)
             )
-            se_marginal_thresholds = pd.DataFrame(thr_se_arr, index=self.facet_names)
             setattr(self, f"{prefix}rater_se_marginal_items", se_marginal_items)
             setattr(
                 self, f"{prefix}rater_se_marginal_thresholds", se_marginal_thresholds
@@ -1912,12 +1907,12 @@ class MFRM(Rasch):
                 setattr(
                     self,
                     f"{prefix}rater_low_{model}",
-                    pd.DataFrame(np.percentile(rater_ests, lo_p, axis=0), index=mi),
+                    pd.DataFrame(np.percentile(rater_ests, lo_p, axis=0), index=mi, columns=range(1, self.max_score + 1)),
                 )
                 setattr(
                     self,
                     f"{prefix}rater_high_{model}",
-                    pd.DataFrame(np.percentile(rater_ests, hi_p, axis=0), index=mi),
+                    pd.DataFrame(np.percentile(rater_ests, hi_p, axis=0), index=mi, columns=range(1, self.max_score + 1)),
                 )
 
         self._set_facet_aliases(model, anchor=(prefix == "anchor_"))
@@ -3461,7 +3456,7 @@ class MFRM(Rasch):
                 elif model == "items":
                     row = difficulties + thr_loc + severities.loc[facet_element]
                 elif model == "thresholds":
-                    row = difficulties + thr_loc + severities.loc[facet_element, t]
+                    row = difficulties + thr_loc + severities.loc[facet_element, t + 1]
                 elif model in ("bivector", "matrix"):
                     row = (
                         difficulties
@@ -5117,8 +5112,8 @@ class MFRM(Rasch):
 
                 else:
                     for item in self.item_names:
-                        for t in range(self.max_score):
-                            key = f"{item}, Threshold {t+1}"
+                        for t in range(1, self.max_score + 1):
+                            key = f"{item}, Threshold {t}"
                             sub = pd.DataFrame(index=self.facet_names)
                             sub["Estimate"] = severities.loc[
                                 (slice(None), item), t
@@ -6033,12 +6028,12 @@ class MFRM(Rasch):
                     if facet_elements is None:
                         sev_val = 0.0
                     elif model == "thresholds":
-                        sev_val = float(severities.loc[r_sc, t])
+                        sev_val = float(severities.loc[r_sc, t + 1])
                     elif model in ("bivector", "matrix"):
                         item_key = (
                             items if items is not None else list(self.item_names)[0]
                         )
-                        sev_val = float(severities.loc[(r_sc, item_key), t])
+                        sev_val = float(severities.loc[(r_sc, item_key), t + 1])
                     elif model == "items" and items is not None:
                         sev_val = float(
                             self._severity_item_offset(model, severities, r_sc)[items]

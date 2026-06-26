@@ -1,0 +1,83 @@
+RaschPy Priority List — updated 2026-06-25
+==========================================
+
+COMPLETED THIS SESSION
+----------------------
+#2  Bootstrap rater-drop edge case — shape guard added to all _store_rater_se branches
+#3  anchor_rater_names comparison — sorted() != sorted() replaced with set() != set()
+#4  class_intervals_cats redundant rebuild — pf reused from block 1; raw_abil_df concat
+    eliminated in 3 of 4 branches
+#9  Bivector threshold parameter recovery — direct pooled-PAIR estimator implemented
+    (matrix_marginals=False, now default). Items PAIR + thresholds PAIR with mu_r
+    correction. Wins in 72.9% of replications vs marginal-means, mean Pearson +0.029.
+    matrix_marginals=True retains old behaviour.
+    Also: matrix_marginals parameter added to calibrate() and _estimate_raters_bivector().
+
+RELEASE
+-------
+- Version 1.0.0, Development Status: Production/Stable
+- Published to PyPI: https://pypi.org/project/raschpy/
+- conda-forge PR submitted — awaiting human reviewer
+
+OUTSTANDING
+-----------
+#13 Manual — additive smoothing clarification (LOW PRIORITY, post-release)
+    The `constant` parameter in PAIR/CPAT is a finite-sample safeguard against
+    zero counts (log undefined), not a regularisation choice. Worth one sentence
+    in the manual distinguishing theory from practical necessity.
+
+JSS manuscript — OUTSTANDING
+
+FUTURE / LOW PRIORITY
+---------------------
+#6  Bivector weighted marginal means — investigate inverse-SE weighting
+#7  Model selection via AIC/BIC/LR
+#8  Multi-facet extension / no_of_facet_elements naming
+
+
+SESSION SUMMARY — 2026-06-25
+=============================
+
+Fixes
+-----
+1. category_probability_dict hasattr bug (from previous session): anchor=True case
+   used stale non-anchor person estimates. Fixed hasattr check to be anchor-aware.
+
+2. Bootstrap rater-drop (#2): Bootstrap resampling can produce samples where a rater
+   has all-NaN data. Added shape guard to global, items, thresholds, and bivector
+   branches of _store_rater_se (matrix already had the guard).
+
+3. anchor_rater_names comparison (#3): sorted() != sorted() replaced with
+   set() != set() for order-independent, duplicate-safe comparison.
+
+4. class_intervals_cats redundant rebuild (#4): block 2 now reuses pf from block 1;
+   raw_abil_df pd.concat eliminated in 3 of 4 branches.
+
+Bivector estimator (#9)
+-----------------------
+Investigation of weak threshold parameter recovery in bivector model.
+
+Simulation comparison across 11 conditions (20 reps each) showed:
+  - Items r:     marginal 0.899  vs  direct 0.904  (approx equal)
+  - Threshold r: marginal 0.671  vs  direct 0.797  (+0.126 mean, direct wins uniformly)
+
+Large-scale simulation (87,481 rows, varying rater range, item range, missing rate):
+  - Direct wins in 72.9% of replications, mean Pearson advantage +0.029
+  - Advantage largest at low item range, diminishes as item range increases
+  - No bias — threshold estimates unbiased, residual error is pure variance
+
+Direct estimator = items model + thresholds model run simultaneously, with correction:
+  - facet_effects_bivector_items: identical to items model (PAIR summed over thresholds)
+  - facet_effects_bivector_thresholds: thresholds model PAIR (summed over items),
+    minus per-rater mean item effect mu_r, then zero-summed per rater
+  This is the natural decomposition: items and thresholds models jointly, with
+  threshold estimates deconfounded for overall rater severity using item estimates.
+
+matrix_marginals=False is now the default. matrix_marginals=True retains the
+marginal-means approach (full matrix PAIR -> marginal means).
+
+Release
+-------
+- pyproject.toml updated to Production/Stable
+- Published to PyPI: https://pypi.org/project/raschpy/
+- conda-forge staged-recipes PR submitted (meta.yaml created)
