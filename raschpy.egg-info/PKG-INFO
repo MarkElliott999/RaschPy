@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: raschpy
-Version: 1.0.0
+Version: 1.0.1
 Summary: Rasch measurement in Python: SLM, PCM, RSM, and Many-Facet Rasch models
 Author-email: Mark Elliott <mwe24@cam.ac.uk>
 License:                                  Apache License

@@ -6,7 +6,7 @@ _RaschPy_ has a parent class `Rasch` for analysis, with the following child clas
 - `SLM` for the simple logistic model (dichotomous Rasch model) (Rasch 1960)
 - `PCM` for the partial credit model (Masters 1982)
 - `RSM` for the rating scale model (Andrich 1978)
-- `MFRM` for the many-facet Rasch model (rating scale model formulation) (Linacre 1994), including extended rater representations (Elliott and Buttery 2022a), with four rater parameterisations (global, items, thresholds, matrix) and a bivector formulation
+- `MFRM` for the many-facet Rasch model (rating scale model formulation) (Linacre 1994), including extended rater representations (Elliott and Buttery 2022a, Elliott 2025), with five rater parameterisations (global, items, thresholds, bivector and matrix formulations)
 
 ## Analysis
 To analyse data, create an object in the appropriate class, passing a pandas DataFrame of response data as an argument along with other arguments relevant to the chosen Rasch model, such as the maximum score for `RSM` or `MFRM`, or a vector of maximum scores for `PCM`. At the time of writing, the `RSM` and `MFRM` classes only support a single response group (i.e. all items must have the same threshold structure), and the `MFRM` class only supports one additional facet for rater severity. Parameter estimation uses variants of PAIR (Choppin 1968, 1985), the eigenvector method (Garner & Engelhard 2002, 2009) and CPAT (Elliott & Buttery 2022a, 2022b).
@@ -57,40 +57,40 @@ from raschpy.simulation import SLM_Sim
 
 # Pass a simulation object directly — generating parameters are attached to m.generating
 sim = SLM_Sim(no_of_items=10, no_of_persons=300)
-m = SLM(sim)
+slm = SLM(sim)
 
 # Or pass a DataFrame as usual
-m = SLM(responses)
-m.calibrate()          # PAIR item difficulty estimation
-m.fit_statistics()     # item, person, and test-level fit
+slm = SLM(responses)
+slm.calibrate()          # PAIR item difficulty estimation
+slm.fit_statistics()     # item, person, and test-level fit
 
-m.item_stats_df(full=True)
-print(m.item_stats)    # Estimate, SE, Infit MS, Outfit MS, ...
+slm.item_stats_df(full=True)
+print(slm.item_stats)    # Estimate, SE, Infit MS, Outfit MS, ...
 
-m.person_stats_df()
-print(m.person_stats)  # Ability, CSEM, Score, Infit MS, ...
+slm.person_stats_df()
+print(slm.person_stats)  # Ability, CSEM, Score, Infit MS, ...
 
-m.test_stats_df()
-print(m.test_stats)    # ISI, PSI, reliability
+slm.test_stats_df()
+print(slm.test_stats)    # ISI, PSI, reliability
 
-m.icc(item='Item_1', obs=True)     # Item Characteristic Curve
-m.tcc(obs=True)                    # Test Characteristic Curve
-m.test_info()                      # Test Information Curve
-m.std_residuals_plot(normal=True)  # Standardised residuals histogram
+slm.icc(item='Item_1', obs=True)     # Item Characteristic Curve
+slm.tcc(obs=True)                    # Test Characteristic Curve
+slm.test_info()                      # Test Information Curve
+slm.std_residuals_plot(normal=True)  # Standardised residuals histogram
 
-m.save_stats('slm_results', format='xlsx')
+slm.save_stats('slm_results', format='xlsx')
 ```
 
 **Score lookup and person estimation**
 
 ```python
 # Convert raw scores to ability estimates
-m.score_lookup_table()
-print(m.score_lookup)   # pandas Series indexed by raw score
+model.score_lookup_table()
+print(model.score_lookup)   # pandas Series indexed by raw score
 
-# By default, extreme scores (0 and perfect) are excluded from person estimates.
+# By default, missing responses are excluded from person estimates.
 # To include them, treated as incorrect rather than missing:
-m.person_estimates(missing_as_incorrect=False)
+model.person_estimates(missing_as_incorrect=True)
 ```
 
 ---
@@ -105,29 +105,29 @@ from raschpy.simulation import PCM_Sim
 
 # Pass a simulation object directly — generating parameters are attached to m.generating
 sim = PCM_Sim(no_of_items=5, no_of_persons=300, max_score_vector=[3, 3, 4, 4, 3])
-m = PCM(sim)
+pcm = PCM(sim)
 
 # Or pass a DataFrame as usual
-m = PCM(responses, max_score_vector=[3, 3, 4, 4, 3])
-m.calibrate()
-m.fit_statistics()
+pcm = PCM(responses, max_score_vector=[3, 3, 4, 4, 3])
+pcm.calibrate()
+pcm.fit_statistics()
 
-m.item_stats_df(full=True)
-print(m.item_stats)                  # Central item difficulties
+pcm.item_stats_df(full=True)
+print(pcm.item_stats)                  # Central item difficulties
 
-m.threshold_stats_df(full=True)
-print(m.threshold_stats_uncentred)   # Uncentred threshold estimates
-print(m.threshold_stats_centred)     # Centred threshold offsets
+pcm.threshold_stats_df(full=True)
+print(pcm.threshold_stats_uncentred)   # Uncentred threshold estimates
+print(pcm.threshold_stats_centred)     # Centred threshold offsets
 
-m.icc(item='Item_1', obs=True)             # Expected score curve
-m.crcs(item='Item_1', obs='all')           # Category Response Curves
-m.threshold_ccs(item='Item_1', obs='all')  # Threshold Characteristic Curves
-m.tcc(obs=True)
+pcm.icc(item='Item_1', obs=True)             # Expected score curve
+pcm.crcs(item='Item_1', obs='all')           # Category Response Curves
+pcm.threshold_ccs(item='Item_1', obs='all')  # Threshold Characteristic Curves
+pcm.tcc(obs=True)
 
-m.score_lookup_table()
-print(m.score_lookup)   # pandas Series indexed by raw score
+pcm.score_lookup_table()
+print(pcm.score_lookup)   # pandas Series indexed by raw score
 
-m.save_stats('pcm_results', format='xlsx')
+pcm.save_stats('pcm_results', format='xlsx')
 ```
 
 ---
@@ -142,76 +142,77 @@ from raschpy.simulation import RSM_Sim
 
 # Pass a simulation object directly — generating parameters are attached to m.generating
 sim = RSM_Sim(no_of_items=8, no_of_persons=300, max_score=4)
-m = RSM(sim)
+rsm = RSM(sim)
 
 # Or pass a DataFrame as usual
-m = RSM(responses, max_score=4)
-m.calibrate()
-m.fit_statistics()
+rsm = RSM(responses, max_score=4)
+rsm.calibrate()
+rsm.fit_statistics()
 
-m.item_stats_df(full=True)
-print(m.item_stats)      # Item difficulties
+rsm.item_stats_df(full=True)
+print(rsm.item_stats)      # Item difficulties
 
-m.threshold_stats_df(full=True)
-print(m.threshold_stats) # Shared Rasch-Andrich thresholds
+rsm.threshold_stats_df(full=True)
+print(rsm.threshold_stats) # Shared Rasch-Andrich thresholds
 
-m.icc(item='Item_1', obs=True)
-m.crcs(obs='all')         # Pooled across all items
-m.threshold_ccs(obs='all')
-m.tcc(obs=True)
+rsm.icc(item='Item_1', obs=True)
+rsm.crcs(obs='all')         # Pooled across all items
+rsm.threshold_ccs(obs='all')
+rsm.tcc(obs=True)
 
-m.score_lookup_table()
-print(m.score_lookup)   # pandas Series indexed by raw score
+rsm.score_lookup_table()
+print(rsm.score_lookup)   # pandas Series indexed by raw score
 
-m.save_stats('rsm_results', format='xlsx')
+rsm.save_stats('rsm_results', format='xlsx')
 ```
 
 ---
 
 ### Many-Facet Rasch Model (MFRM)
 
-Polytomous data with multiple raters. Data must be a DataFrame with a `(Rater, Person)` MultiIndex and items as columns. Four rater parameterisations are available, selected at calibration time:
+Polytomous data with multiple raters. Data must be a DataFrame with a `(Rater, Person)` MultiIndex and items as columns. Five rater parameterisations are available, selected at calibration time:
 
 | `model=` | Rater severity structure |
 |---|---|
 | `'global'` | Single scalar severity per rater |
 | `'items'` | Separate severity per rater × item |
 | `'thresholds'` | Separate severity per rater × threshold |
-| `'matrix'` | Full severity per rater × item × threshold |
+| `'bivector'` | Separate severities per rater × item and per rater × threshold |
+| `'matrix'` | Full severity matrix per rater × item × threshold |
 
 ```python
 from raschpy import MFRM
 
-m = MFRM(responses)
-m.calibrate(model='global')
-m.fit_statistics(model='global')
+mfrm = MFRM(responses)
+mfrm.calibrate(model='global')
+mfrm.fit_statistics(model='global')
 
-m.item_stats_df(model='global', full=True)
-print(m.item_stats_global)        # Item difficulties
+mfrm.item_stats_df(model='global', full=True)
+print(mfrm.item_stats_global)        # Item difficulties
 
-m.threshold_stats_df(model='global', full=True)
-print(m.threshold_stats_global)   # Shared thresholds
+mfrm.threshold_stats_df(model='global', full=True)
+print(mfrm.threshold_stats_global)   # Shared thresholds
 
-m.rater_stats_df(model='global', full=True)
-print(m.rater_stats_global)       # Rater severities and fit
+mfrm.rater_stats_df(model='global', full=True)
+print(mfrm.rater_stats_global)       # Rater severities and fit
 
-m.person_stats_df(model='global')
-m.test_stats_df(model='global')
+mfrm.person_stats_df(model='global')
+mfrm.test_stats_df(model='global')
 
-m.icc(item='Item_1', model='global', obs=True)
-m.crcs(item='Item_1', model='global')
-m.tcc(model='global', obs=True)
+mfrm.icc(item='Item_1', model='global', obs=True)
+mfrm.crcs(item='Item_1', model='global')
+mfrm.tcc(model='global', obs=True)
 
-m.save_stats(model='global', filename='mfrm_results', format='xlsx')
+mfrm.save_stats(model='global', filename='mfrm_results', format='xlsx')
 ```
 
 The same object can hold calibrations for multiple parameterisations simultaneously:
 
 ```python
-m.calibrate(model='items')
-m.fit_statistics(model='items')
-m.rater_stats_df(model='items', full=True)
-print(m.rater_stats_items)  # Per-item severity table
+mfrm.calibrate(model='items')
+mfrm.fit_statistics(model='items')
+mfrm.rater_stats_df(model='items', full=True)
+print(mfrm.rater_stats_items)  # Per-item severity table
 ```
 
 **Extreme and invalid persons**
@@ -222,22 +223,22 @@ Persons with entirely missing data are always removed at instantiation and store
 
 ### Many-Facet Rasch Model — Bivector formulation
 
-The bivector formulation represents rater severity as an additive combination of per-item leniency effects and per-threshold consistency effects, allowing rater behaviour to vary systematically across the latent continuum. It is available as a fifth parameterisation:
+The bivector formulation represents rater severity as an additive combination of per-item leniency effects and per-threshold consistency effects, allowing rater behaviour to vary systematically across the latent continuum. It functions as rater-as-RSM, as opposed to the matrix formulation, which functions as rater-as-PCM
 
 ```python
-m.calibrate(model='bivector')
-m.fit_statistics(model='bivector')
+mfrm.calibrate(model='bivector')
+mfrm.fit_statistics(model='bivector')
 
-m.rater_stats_df(model='bivector', full=True)
+mfrm.rater_stats_df(model='bivector', full=True)
 # rater_stats_bivector has MultiIndex columns:
 # per-item marginal severities, then per-threshold marginal severities,
 # plus overall fit statistics
-print(m.rater_stats_bivector)
+print(mfrm.rater_stats_bivector)
 
-m.icc(item='Item_1', model='bivector', obs=True)
-m.tcc(model='bivector', obs=True)
+mfrm.icc(item='Item_1', model='bivector', obs=True)
+mfrm.tcc(model='bivector', obs=True)
 
-m.save_stats(model='bivector', filename='mfrm_bivector_results', format='xlsx')
+mfrm.save_stats(model='bivector', filename='mfrm_bivector_results', format='xlsx')
 ```
 
 ---
@@ -248,30 +249,34 @@ _RaschPy_ includes simulation classes for generating synthetic data under each m
 
 ```python
 from raschpy.simulation import SLM_Sim, RSM_Sim, PCM_Sim
-from raschpy.simulation import MFRM_Sim_Global, MFRM_Sim_Items, MFRM_Sim_Thresholds, MFRM_Sim_Matrix
+from raschpy.simulation import MFRM_Sim_Global, MFRM_Sim_Items, MFRM_Sim_Thresholds, MFRM_Sim_Bivector, MFRM_Sim_Matrix
 
 sim = SLM_Sim(no_of_items=10, no_of_persons=300, item_range=3, person_sd=1.5)
-data = sim.responses   # pandas DataFrame, ready to pass to SLM()
+data = sim.responses   # pandas DataFrame
 
 sim = RSM_Sim(no_of_items=8, no_of_persons=300, max_score=4)
-data = sim.responses
+data = sim.responses   # pandas DataFrame
 
 sim = PCM_Sim(no_of_items=6, no_of_persons=300, max_score_vector=[3, 3, 3, 4, 4, 4])
-data = sim.responses
+data = sim.responses   # pandas DataFrame
 
 sim = MFRM_Sim_Global(no_of_items=6, no_of_persons=200, no_of_raters=4, max_score=3)
-data = sim.responses   # (Rater, Person) MultiIndex DataFrame, ready to pass to MFRM()
+data = sim.responses   # (Rater, Person) MultiIndex DataFrame
 
 # Pass the sim object directly to the model constructor to attach generating parameters
 from raschpy import MFRM
-m = MFRM(sim)
-m.calibrate(model='global')
+mfrm = MFRM(sim)
+mfrm.calibrate(model='global')
 
 # Compare generating and estimated parameters
-print(sim.items)              # Generating item difficulties
-print(m.generating.items)    # Same, accessible on the model object
-print(sim.facet_effects)     # Generating rater severities
-print(m.generating.facet_effects)
+print(sim.items)                      # Generating item locations
+print(mfrm.generating.items)          # Same, accessible on the model object
+print(mfrm.items)                     # Estimated item locations
+
+# Also for rater severities etc,
+print(sim.facet_effects)              # Generating rater severities
+print(mfrm.generating.facet_effects)  # Same, accessible on the model object
+print(mfrm.raters_global)             # Estimated rater locations
 ```
 
 ---
@@ -281,20 +286,23 @@ print(m.generating.facet_effects)
 Standard errors are computed by bootstrap resampling. They are triggered automatically inside `fit_statistics()`, or can be run explicitly to request confidence intervals:
 
 ```python
-m.std_errors(no_of_samples=200, interval=0.95)
-m.item_stats_df(interval=0.95)  # adds 2.5% and 97.5% columns
+model.std_errors(no_of_samples=200, interval=0.95)
+model.item_stats_df(interval=0.95)  # adds 2.5% and 97.5% columns
 ```
 
 ---
 
 ### Anchor calibration
 
-To place item difficulties on an external scale, supply anchor difficulties as a pandas Series indexed by item name:
+To place MFRM estimate within an anchored frame of reference, relative to the mean of a set of 'gold standard' raters, pass a list of anchor raters. A new set of anchored estimates will be generated:
 
 ```python
-import pandas as pd
-anchors = pd.Series({'Item_1': -1.2, 'Item_3': 0.4, 'Item_5': 1.1})
-m.calibrate_anchor(anchors)
+mfrm.calibrate_global()
+print(mfrm.raters_global)                    # Unanchored rater severities
+
+anchors = ['Rater_1', 'Rater_3', 'Rater_6']
+mfrm.calibrate_global_anchor(anchors)
+print(mfrm.anchor_raters_global)             # Anchored rater severities
 ```
 
 ## Usage and citation
@@ -309,11 +317,13 @@ Choppin, B. (1968). Item bank using sample-free calibration. _Nature_, _219_(515
 
 Choppin, B. (1985). A fully conditional estimation procedure for Rasch model parameters. _Evaluation in Education_, _9_(1), 29–42.
 
+Elliott, M. (2025). Extended many-facet Rasch models: Accounting for rater effects in automated essay scoring systems (Doctoral dissertation, University of Cambridge).
+
 Elliott, M., & Buttery, P. J. (2022a). Extended rater representations in the many-facet Rasch model. _Journal of Applied Measurement_, _22_(1), 133–160.
 
 Elliott, M., & Buttery, P. J. (2022b). Non-iterative conditional pairwise estimation for the rating scale model. _Educational and Psychological Measurement_, _82_(5), 989–1019.
 
-Garner, M., & Engelhard, G. (2002). An eigenvector method for estimating item parameters of the dichotomous and polytomous Rasch models. _Journal of Applied Measurement_, 3(2), 107–128.
+Garner, M., & Engelhard, G. (2002). An eigenvector method for estimating item parameters of the dichotomous and polytomous Rasch models. _Journal of Applied Measurement_, _3_(2), 107–128.
 
 Garner, M., & Engelhard, G. (2009). Using paired comparison matrices to estimate parameters of the partial credit Rasch measurement model for rater-mediated assessments. _Journal of Applied Measurement_, _10_(1), 30–41.
 
