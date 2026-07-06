@@ -12,6 +12,7 @@ Models
 
 Loaders
 -------
+    loadup_exogenous        — load person-level DIF covariates (Gender, L1, etc.)
     loadup_slm              — load SLM data from CSV/Excel/JSON
     loadup_pcm              — load PCM data
     loadup_rsm              — load RSM data
@@ -38,6 +39,7 @@ from raschpy.rsm import RSM
 from raschpy.mfrm import MFRM
 
 from raschpy.loaders import (
+    loadup_exogenous,
     loadup_slm,
     loadup_pcm,
     loadup_rsm,
@@ -58,7 +60,7 @@ from raschpy.simulation.mfrm_sim import (
     MFRM_Sim_Matrix,
 )
 
-__version__ = "0.1.0"
+__version__ = "1.1.0"
 __author__ = "Mark Elliott"
 
 __all__ = [
@@ -68,6 +70,7 @@ __all__ = [
     "RSM",
     "MFRM",
     # Loaders
+    "loadup_exogenous",
     "loadup_slm",
     "loadup_pcm",
     "loadup_rsm",
