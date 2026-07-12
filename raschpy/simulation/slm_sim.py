@@ -9,7 +9,7 @@ class SLM_Sim(Rasch_Sim):
     Simulate dichotomous response data according to the Simple Logistic Model (SLM).
 
     Generates item difficulties from a uniform distribution scaled to item_range,
-    person abilities from a normal distribution, and response scores by comparing
+    person locations from a normal distribution, and response scores by comparing
     uniform random draws against the SLM response probability. Simulation runs
     automatically on instantiation; access results via self.responses.
 
@@ -22,22 +22,23 @@ class SLM_Sim(Rasch_Sim):
     item_range : float, default 3
         Total spread of item difficulties in logits (max - min before centring).
     person_sd : float, default 1.5
-        Standard deviation of the person ability distribution (normal).
+        Standard deviation of the person location distribution (normal).
     offset : float, default 0
-        Mean shift applied to person abilities after centring. Positive values
+        Mean shift applied to person locations after centring. Positive values
         place persons above the items on average.
     missing : float, default 0
         Proportion of responses to set as missing at random, in [0, 1).
-    manual_abilities : array-like or None, default None
-        If provided, uses these values as person abilities instead of sampling.
-        Length must equal no_of_persons.
-    manual_diffs : array-like or None, default None
-        If provided, uses these values as item difficulties instead of sampling.
-        Length must equal no_of_items.
+    manual_persons : array-like or None, default None
+        Custom person measures. Length must equal no_of_persons.
+    manual_items : array-like or None, default None
+        Custom item difficulties. Length must equal no_of_items.
     manual_person_names : list of str or None, default None
         Custom person labels. If None, labels are 'Person_1', 'Person_2', etc.
     manual_item_names : list of str or None, default None
         Custom item labels. If None, labels are 'Item_1', 'Item_2', etc.
+    seed : int or None, default None
+        Seed for the random number generator. Pass an int for a fully
+        reproducible simulation; None (default) draws fresh entropy each run.
 
     Attributes set
     --------------
@@ -45,7 +46,7 @@ class SLM_Sim(Rasch_Sim):
         Simulated response matrix, shape (no_of_persons, no_of_items).
         Values are 0, 1, or NaN (missing). This is the primary output.
     persons : pandas.Series
-        True person ability parameters used for simulation, indexed by person.
+        True person location parameters used for simulation, indexed by person.
     items : pandas.Series
         True item difficulty parameters used for simulation, indexed by item.
     probs : pandas.DataFrame
@@ -68,10 +69,11 @@ class SLM_Sim(Rasch_Sim):
         person_sd=1.5,
         offset=0,
         missing=0,
-        manual_abilities=None,
-        manual_diffs=None,
+        manual_persons=None,
+        manual_items=None,
         manual_person_names=None,
         manual_item_names=None,
+        seed=None,
     ):
         """
         Instantiate and run an SLM simulation.
@@ -81,14 +83,15 @@ class SLM_Sim(Rasch_Sim):
         instance attributes; see self.responses for the primary output.
         """
 
+        self._rng = np.random.default_rng(seed)
         self.no_of_items = int(no_of_items)
         self.no_of_persons = int(no_of_persons)
         self.item_range = item_range
         self.person_sd = person_sd
         self.offset = offset
         self.missing = missing
-        self.persons = manual_abilities
-        self.items = manual_diffs
+        self.persons = manual_persons
+        self.items = manual_items
         self.person_names = manual_person_names
         self.item_names = manual_item_names
         self._dummy_df = pd.DataFrame([1])
@@ -114,18 +117,18 @@ class SLM_Sim(Rasch_Sim):
             ]
 
         if self.persons is None:
-            self.persons = np.random.normal(0, self.person_sd, self.no_of_persons)
+            self.persons = self._rng.normal(0, self.person_sd, self.no_of_persons)
             self.persons -= np.mean(self.persons)
             self.persons += self.offset
 
         else:
             assert (
                 len(self.persons) == self.no_of_persons
-            ), "Length of manual abilities must match number of persons."
+            ), "Length of manual persons must match number of persons."
             self.persons = np.array(self.persons)
 
         self.persons = {
-            person: ability for person, ability in zip(self.person_names, self.persons)
+            person: location for person, location in zip(self.person_names, self.persons)
         }
         self.persons = pd.Series(self.persons)
 
@@ -136,7 +139,7 @@ class SLM_Sim(Rasch_Sim):
             self.item_names = [f"Item_{item + 1}" for item in range(self.no_of_items)]
 
         if self.items is None:
-            self.items = np.random.uniform(0, 1, self.no_of_items)
+            self.items = self._rng.uniform(0, 1, self.no_of_items)
             self.items *= self.item_range / (np.max(self.items) - np.min(self.items))
             self.items -= np.mean(self.items)
 

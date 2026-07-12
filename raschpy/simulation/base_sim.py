@@ -17,19 +17,31 @@ class Rasch_Sim:
         """Initialise the abstract base simulation object. Not intended for direct use."""
         pass
 
+    @property
+    def item_ids(self):
+        """Alias for self.item_names."""
+        return self.item_names
+
+    @property
+    def person_ids(self):
+        """Alias for self.person_names."""
+        return self.person_names
+
     def randoms(self):
         """
         Generate a (no_of_persons, no_of_items) array of uniform random numbers.
 
         Used internally by all simulation subclasses to sample response scores
-        and apply missing data patterns.
+        and apply missing data patterns. Draws from self._rng (seeded via the
+        subclass's seed= constructor argument) rather than the numpy global
+        random state, so simulations are reproducible when seed is set.
 
         Returns
         -------
         numpy.ndarray
             Shape (no_of_persons, no_of_items), values in [0, 1).
         """
-        return np.random.rand(self.no_of_persons, self.no_of_items)
+        return self._rng.random((self.no_of_persons, self.no_of_items))
 
     def rename_item(self, old, new):
         """

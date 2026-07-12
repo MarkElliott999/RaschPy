@@ -1,5 +1,6 @@
 from math import log, sqrt
 import warnings
+from scipy.stats import chi2, norm, t as t_dist
 
 import numpy as np
 import pandas as pd
@@ -15,7 +16,14 @@ from raschpy.base import Rasch
 
 class SLM(Rasch):
 
-    def __init__(self, responses, extreme_persons=True, no_of_classes=5, validate=True):
+    def __init__(
+        self,
+        responses,
+        extreme_persons=True,
+        no_of_classes=5,
+        validate=True,
+        exogenous=None,
+    ):
         """
         Initialise a Simple Logistic Model (Rasch model) object.
 
@@ -40,6 +48,15 @@ class SLM(Rasch):
             Issues a UserWarning if the data is split into disconnected
             sub-networks, which makes item difficulties incomparable
             across sub-groups.
+        exogenous : pandas.DataFrame or None, default None
+            Optional person-level covariates (e.g. Gender, L1) for
+            differential item functioning analysis, indexed by person
+            identifier. Values are kept as raw category labels. Persons
+            in responses without a matching exogenous record (and vice
+            versa) are allowed — such gaps are common when exogenous
+            data is optional (e.g. for GDPR reasons) — and are reported
+            via UserWarning plus the exogenous_only_persons /
+            no_exogenous_persons attributes, rather than raising.
 
         Attributes set
         --------------
@@ -63,6 +80,13 @@ class SLM(Rasch):
             Result of check_data_connectivity(), present only if
             validate=True. Contains at minimum a 'connected' key (bool)
             and 'components_count' (int).
+        exogenous : pandas.DataFrame or None
+            Person-level covariates reindexed onto person_names, or None
+            if not supplied.
+        no_exogenous_persons : pandas.Index
+            Persons present in responses with no matching exogenous record.
+        exogenous_only_persons : pandas.Index
+            Persons present in the exogenous data but not in responses.
         """
 
         super().__init__()
@@ -104,6 +128,40 @@ class SLM(Rasch):
         self.no_of_classes = no_of_classes
         self.max_score = 1
 
+        # Optional person-level covariates for DIF (e.g. Gender, L1)
+        if exogenous is not None:
+            self.no_exogenous_persons = self.person_names[
+                ~self.person_names.isin(exogenous.index)
+            ]
+            self.exogenous_only_persons = exogenous.index[
+                ~exogenous.index.isin(self.person_names)
+            ]
+            self.exogenous = exogenous.reindex(self.person_names)
+
+            if len(self.no_exogenous_persons) > 0:
+                warnings.warn(
+                    f"{len(self.no_exogenous_persons)} person(s) in the response data "
+                    f"have no matching exogenous record (exogenous data is often "
+                    f"optional, e.g. for GDPR reasons). See no_exogenous_persons for "
+                    f"the full list. These persons will be excluded from any DIF "
+                    f"grouping that relies on the missing covariate(s).",
+                    UserWarning,
+                    stacklevel=2,
+                )
+
+            if len(self.exogenous_only_persons) > 0:
+                warnings.warn(
+                    f"{len(self.exogenous_only_persons)} person(s) in the exogenous "
+                    f"data are not present in the response data and will be ignored. "
+                    f"See exogenous_only_persons for the full list.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+        else:
+            self.exogenous = None
+            self.no_exogenous_persons = pd.Index([])
+            self.exogenous_only_persons = pd.Index([])
+
         # RUN AUTOMATIC CONNECTION CHECK VALIDATION
         if validate:
             self.connectivity_status = self.check_data_connectivity()
@@ -118,6 +176,25 @@ class SLM(Rasch):
                     f"empirical comparisons spanning across these isolated groups, the item parameter "
                     f"estimates for each independent subset will separately sum to zero. This means items "
                     f"belonging to different subsets cannot be compared or calibrated onto a single scale.",
+                    category=UserWarning,
+                    stacklevel=2,
+                )
+
+            # THROW SYSTEM WARNING FOR "FAKE CONNECTIVITY" — ITEMS THAT PASS THE
+            # STANDARD CHECK BUT WILL STILL BREAK CALIBRATE()'S DIRECTED MATRIX
+            directionally_isolated = self.connectivity_status.get(
+                "directionally_isolated_items", []
+            )
+            if directionally_isolated:
+                warnings.warn(
+                    f"\n"
+                    f"⚠️  DATA INTEGRITY WARNING: {len(directionally_isolated)} item(s) have no "
+                    f"zero-scored or no maximum-scored responses: {directionally_isolated}.\n"
+                    f"These items pass the standard connectivity check (they have at least one "
+                    f"empirical comparison in some direction) but have a structurally unresolvable "
+                    f"zero in calibrate()'s directed pairwise matrix. This can silently produce NaN "
+                    f"or overflow during calibration rather than a clear error. Consider dropping "
+                    f"these items or gathering more responses before calibrating.",
                     category=UserWarning,
                     stacklevel=2,
                 )
@@ -311,25 +388,356 @@ class SLM(Rasch):
         matrix = np.dot(is_one.T, is_zero)
 
         # 3. Compute matrix powers (Keep the diagonal as 0 so Choppin's math stays pure)
-        mat = np.linalg.matrix_power(matrix, matrix_power)
-        mat_pow = matrix_power
+        # Sparse/disconnected resamples can blow this up to inf/nan before the zero-check
+        # loop below terminates; the resulting isolated items are already surfaced via
+        # check_data_connectivity's UserWarning, so the raw numpy RuntimeWarning is noise.
+        with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+            mat = np.linalg.matrix_power(matrix, matrix_power)
+            mat_pow = matrix_power
 
-        # 4. CHOPPIN ZERO CHECK (Ignore the main diagonal)
-        off_diagonal_mask = ~np.eye(self.no_of_items, dtype=bool)
+            # 4. CHOPPIN ZERO CHECK (Ignore the main diagonal)
+            off_diagonal_mask = ~np.eye(self.no_of_items, dtype=bool)
 
-        # The loop now only checks for structural zeroes where item_1 != item_2
-        while np.any(mat[off_diagonal_mask] == 0):
-            mat = np.dot(mat, matrix)
-            mat_pow += 1
+            # The loop now only checks for structural zeroes where item_1 != item_2
+            while np.any(mat[off_diagonal_mask] == 0):
+                mat = np.dot(mat, matrix)
+                mat_pow += 1
 
-            # Breakout safeguard if the item network is fundamentally disconnected
-            if mat_pow >= matrix_power + 5:
-                # If graph is disconnected, apply the constant strictly to remaining off-diagonal zeroes
-                mat[off_diagonal_mask & (mat == 0)] = constant
-                break
+                # Breakout safeguard if the item network is fundamentally disconnected
+                if mat_pow >= matrix_power + 5:
+                    # If graph is disconnected, apply the constant strictly to remaining off-diagonal zeroes
+                    mat[off_diagonal_mask & (mat == 0)] = constant
+                    break
 
         # 5. Extract Priority Vector using the corrected numerical matrix
         self.items = self.priority_vector(mat, method=method, log_lik_tol=log_lik_tol)
+
+    def calibrate_anchor(
+        self,
+        anchors,
+        calibrate=False,
+        selection_method="robust_z",
+        corr_tol=0.95,
+        sd_ratio_tol=1.1,
+        min_anchors=6,
+        wald_alpha=0.05,
+        no_of_samples=500,
+        adj=None,
+        overwrite_anchors="none",
+        plot=True,
+        plot_kwargs=None,
+        constant=0.1,
+        method="cos",
+        matrix_power=3,
+        log_lik_tol=0.000001,
+        seed=None,
+    ):
+        """
+        Anchor item difficulty estimates onto externally-supplied values.
+
+        Supports item banking: calibrates this dataset's own item
+        difficulties as usual, then shifts the whole scale by a translation
+        constant so that a subset of common ("anchor") items line up with
+        externally-supplied reference difficulties (e.g. from a bank of
+        previously-calibrated items). Since SLM item discrimination is
+        fixed at 1, this is a simple mean-shift, not full linear equating.
+
+        By default (selection_method='robust_z'), the translation constant
+        is computed via _robust_anchor_selection() (Iglewicz & Hoaglin
+        modified z-score against the anchor set's own median/MAD), which
+        iteratively excludes anchor items whose calibrated value has
+        drifted too far from its supplied reference value, so a handful of
+        stale or misbehaving anchor items cannot distort the shift applied
+        to the rest of the scale. selection_method='wald' is an
+        alternative using a formal significance test instead of a
+        descriptive-statistics trim (see _wald_anchor_selection). Set
+        selection_method='none' for a plain mean shift over all supplied
+        anchors, no trimming.
+
+        Parameters
+        ----------
+        anchors : dict or pandas.Series
+            Externally-supplied reference difficulties, keyed/indexed by
+            item name. Only items also present in this dataset are used.
+        calibrate : bool, default False
+            If True, (re-)runs calibrate() before anchoring. If False,
+            calibrate() is still auto-triggered if self.items does not
+            yet exist.
+        selection_method : {'robust_z', 'wald', 'none'}, default 'robust_z'
+            'robust_z': _robust_anchor_selection() — Iglewicz & Hoaglin
+            modified z-score / MAD-based iterative trim (corr_tol,
+            sd_ratio_tol, min_anchors).
+            'wald': _wald_anchor_selection() — a genuine significance test
+            per anchor item (z = (anchor - (observed + tc)) / SE(observed),
+            tc precision-weighted, sequential exclusion) rather than a
+            descriptive-statistics trim. Needs bootstrap item SEs — auto-
+            triggers std_errors() if not already computed. Uses wald_alpha
+            and min_anchors, not corr_tol/sd_ratio_tol.
+            'none': plain mean shift over every supplied anchor, no
+            trimming at all.
+        corr_tol : float, default 0.95
+            Passed to _robust_anchor_selection() (selection_method=
+            'robust_z' only).
+        sd_ratio_tol : float, default 1.1
+            Passed to _robust_anchor_selection() (selection_method=
+            'robust_z' only).
+        min_anchors : int, default 6
+            Floor on surviving anchor items — passed to whichever
+            selection method is active ('robust_z' or 'wald').
+        wald_alpha : float, default 0.05
+            Significance level for each anchor item's Wald test
+            (selection_method='wald' only).
+        no_of_samples : int, default 500
+            Bootstrap samples for std_errors(), only used if item SEs
+            aren't already computed (selection_method='wald' only).
+        seed : int or None, default None
+            Seed passed through to the internal std_errors() call (only
+            used if item SEs aren't already computed). None draws fresh
+            entropy each call.
+        adj : float or None, default None
+            If provided, this translation constant is applied directly and
+            the selection step is skipped entirely. Intended for reuse
+            across bootstrap resamples, where recomputing anchor selection
+            on every resample would otherwise inflate standard errors with
+            anchor-item sampling variance.
+        overwrite_anchors : 'none', 'rejected', or 'all', default 'none'
+            Controls what anchor_items holds for the anchor items
+            themselves (any item present in both anchors and this
+            dataset), as opposed to non-anchor items, which always get
+            the shifted (calibrated + translation constant) value.
+            'none' (default): every anchor item keeps exactly its
+            externally-supplied value from anchors, unchanged — the usual
+            convention for a genuine anchor (its value is fixed by
+            definition, not re-estimated).
+            'rejected': anchors kept by selection still keep their exact
+            supplied value, but anchors rejected as outliers instead
+            receive their own shifted, freshly-calibrated value — useful
+            when a rejected anchor's supplied value is itself suspected to
+            be stale or wrong, so you'd rather trust this dataset's own
+            estimate for that specific item. Requires selection_method in
+            ('robust_z', 'wald') and no adj override; otherwise there is
+            no selected/rejected distinction to act on, and this falls
+            back to 'none' with a warning.
+            'all': every anchor item receives its own shifted value like
+            any other item, overwriting the supplied anchor value with
+            what this dataset actually observed.
+        plot : bool, default True
+            If True and selection_method in ('robust_z', 'wald') (so a
+            selection table exists), calls plot_anchor_selection()
+            automatically at the end. Has no effect when
+            selection_method='none' or adj is supplied directly, since no
+            selection table is produced in those cases.
+        plot_kwargs : dict or None, default None
+            Extra keyword arguments forwarded to plot_anchor_selection()
+            when plot=True (e.g. filename, x_min/x_max, graph_title).
+        constant, method, matrix_power, log_lik_tol : floats
+            Calibration/bootstrap kwargs, used only if calibrate or
+            std_errors (selection_method='wald') is triggered.
+
+        Attributes set
+        --------------
+        anchor_items : pandas.Series
+            Item difficulties shifted onto the anchor scale.
+        anchor_item_names : pandas.Index
+            Names of the items supplied as anchors.
+        anchor_adj : float
+            The translation constant actually applied.
+        anchor_selection : pandas.DataFrame or None
+            Per-item diagnostics from whichever selection method was used
+            — Anchor, Observed, Deviation, Robust z, Selected
+            ('robust_z'), or Anchor, Observed, SE, Deviation, z, p,
+            Selected ('wald'). None if selection_method='none' or adj was
+            supplied directly.
+        anchor_selected_items, anchor_dropped_items : pandas.Index or None
+            Items retained / excluded as outliers. None if
+            selection_method='none' or adj was supplied directly.
+        anchor_original_corr, anchor_original_sd_ratio : float or None
+            Correlation / SD ratio before trimming. None if
+            selection_method='none' or adj was supplied directly.
+        anchor_corr, anchor_sd_ratio : float or None
+            Correlation / SD ratio after trimming. None if
+            selection_method='none' or adj was supplied directly.
+        anchor_summary : pandas.Series
+            One-line summary: anchors supplied/common/selected/dropped,
+            correlation and SD ratio before/after trimming (NaN if not
+            computed), and the translation constant applied.
+        anchor_plot : matplotlib.figure.Figure or None
+            The figure from the auto-triggered plot_anchor_selection()
+            call. None if plot=False, selection_method='none', or adj was
+            supplied directly (no selection table to plot in those cases).
+        calibrate_anchor_runs : dict
+            Every call's anchor_items/anchor_adj/anchor_summary/etc.,
+            keyed by tuple(sorted(anchors.items())), so results from an
+            earlier anchors call survive a later call with a different
+            anchor set instead of being overwritten. E.g.
+            slm.calibrate_anchor_runs[tuple(sorted(anchors_1.items()))].anchor_summary.
+        """
+        if overwrite_anchors not in ("none", "rejected", "all"):
+            raise ValueError("overwrite_anchors must be 'none', 'rejected', or 'all'")
+        if selection_method not in ("robust_z", "wald", "none"):
+            raise ValueError("selection_method must be 'robust_z', 'wald', or 'none'")
+
+        if not isinstance(anchors, pd.Series):
+            anchors = pd.Series(anchors)
+
+        if calibrate or not hasattr(self, "items"):
+            self.calibrate(
+                constant=constant,
+                method=method,
+                matrix_power=matrix_power,
+                log_lik_tol=log_lik_tol,
+            )
+
+        n_common = len(anchors.index.intersection(self.items.index))
+
+        if adj is not None:
+            tc = adj
+            self.anchor_selection = None
+            self.anchor_selected_items = None
+            self.anchor_dropped_items = None
+            self.anchor_original_corr = None
+            self.anchor_original_sd_ratio = None
+            self.anchor_corr = None
+            self.anchor_sd_ratio = None
+        elif selection_method == "wald":
+            if not hasattr(self, "item_se"):
+                self.std_errors(
+                    no_of_samples=no_of_samples,
+                    constant=constant,
+                    method=method,
+                    matrix_power=matrix_power,
+                    log_lik_tol=log_lik_tol,
+                    seed=seed,
+                )
+            result = self._wald_anchor_selection(
+                anchors,
+                self.items,
+                self.item_se,
+                alpha=wald_alpha,
+                min_anchors=min_anchors,
+            )
+            tc = result["tc"]
+            self.anchor_selection = result["table"]
+            self.anchor_selected_items = result["selected_anchors"]
+            self.anchor_dropped_items = result["dropped_anchors"]
+            self.anchor_original_corr = result["original_anchor_corr"]
+            self.anchor_original_sd_ratio = result["original_anchor_sd_ratio"]
+            self.anchor_corr = result["anchor_corr"]
+            self.anchor_sd_ratio = result["anchor_sd_ratio"]
+        elif selection_method == "robust_z":
+            result = self._robust_anchor_selection(
+                anchors,
+                self.items,
+                corr_tol=corr_tol,
+                sd_ratio_tol=sd_ratio_tol,
+                min_anchors=min_anchors,
+            )
+            tc = result["tc"]
+            self.anchor_selection = result["table"]
+            self.anchor_selected_items = result["selected_anchors"]
+            self.anchor_dropped_items = result["dropped_anchors"]
+            self.anchor_original_corr = result["original_anchor_corr"]
+            self.anchor_original_sd_ratio = result["original_anchor_sd_ratio"]
+            self.anchor_corr = result["anchor_corr"]
+            self.anchor_sd_ratio = result["anchor_sd_ratio"]
+        else:
+            common = anchors.index.intersection(self.items.index)
+            if len(common) == 0:
+                raise ValueError(
+                    "No items are common to both anchors and this dataset's "
+                    "items — cannot compute a translation constant."
+                )
+            tc = anchors.loc[common].mean() - self.items.loc[common].mean()
+            self.anchor_selection = None
+            self.anchor_selected_items = None
+            self.anchor_dropped_items = None
+            self.anchor_original_corr = None
+            self.anchor_original_sd_ratio = None
+            self.anchor_corr = None
+            self.anchor_sd_ratio = None
+
+        self.anchor_adj = tc
+        self.anchor_item_names = anchors.index
+        self.anchor_items = self.items + tc
+
+        common_anchor_items = anchors.index.intersection(self.items.index)
+
+        if overwrite_anchors == "all":
+            keep_given = pd.Index([])
+        elif overwrite_anchors == "rejected":
+            if self.anchor_selected_items is not None:
+                keep_given = common_anchor_items.intersection(
+                    self.anchor_selected_items
+                )
+            else:
+                warnings.warn(
+                    "overwrite_anchors='rejected' has no selected/rejected "
+                    "distinction to act on here (selection_method='none' or "
+                    "adj was supplied directly). Falling back to keeping all "
+                    "anchor items at their supplied value, as with "
+                    "overwrite_anchors='none'.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                keep_given = common_anchor_items
+        else:
+            keep_given = common_anchor_items
+
+        self.anchor_items.loc[keep_given] = anchors.loc[keep_given]
+
+        n_selected = (
+            len(self.anchor_selected_items)
+            if self.anchor_selected_items is not None
+            else n_common
+        )
+        n_dropped = (
+            len(self.anchor_dropped_items)
+            if self.anchor_dropped_items is not None
+            else 0
+        )
+        self.anchor_summary = pd.Series(
+            {
+                "Anchors supplied": len(anchors),
+                "Anchors common": n_common,
+                "Anchors selected": n_selected,
+                "Anchors dropped": n_dropped,
+                "Original corr": self.anchor_original_corr,
+                "Original SD ratio": self.anchor_original_sd_ratio,
+                "Final corr": self.anchor_corr,
+                "Final SD ratio": self.anchor_sd_ratio,
+                "Translation constant": tc,
+            },
+            name="Anchor calibration",
+        )
+
+        if plot and self.anchor_selection is not None:
+            self.anchor_plot = self.plot_anchor_selection(
+                self.anchor_selection, **(plot_kwargs or {})
+            )
+        else:
+            self.anchor_plot = None
+
+        # Snapshot this run keyed by the anchors supplied, so results from an
+        # earlier calibrate_anchor() call survive a later call with a
+        # different anchor set instead of being overwritten in place.
+        from types import SimpleNamespace
+        if not hasattr(self, "calibrate_anchor_runs"):
+            self.calibrate_anchor_runs = {}
+        key = tuple(sorted(anchors.items()))
+        self.calibrate_anchor_runs[key] = SimpleNamespace(
+            anchor_items=self.anchor_items,
+            anchor_item_names=self.anchor_item_names,
+            anchor_adj=self.anchor_adj,
+            anchor_selection=self.anchor_selection,
+            anchor_selected_items=self.anchor_selected_items,
+            anchor_dropped_items=self.anchor_dropped_items,
+            anchor_original_corr=self.anchor_original_corr,
+            anchor_original_sd_ratio=self.anchor_original_sd_ratio,
+            anchor_corr=self.anchor_corr,
+            anchor_sd_ratio=self.anchor_sd_ratio,
+            anchor_summary=self.anchor_summary,
+            anchor_plot=self.anchor_plot,
+        )
 
     def std_errors(
         self,
@@ -339,6 +747,7 @@ class SLM(Rasch):
         method="cos",
         matrix_power=3,
         log_lik_tol=0.000001,
+        seed=None,
     ):
         """
         Estimate bootstrap standard errors for item difficulty estimates.
@@ -367,6 +776,9 @@ class SLM(Rasch):
             Matrix power passed to calibrate().
         log_lik_tol : float, default 0.000001
             Convergence tolerance passed to calibrate().
+        seed : int or None, default None
+            Seed for the bootstrap resampling RNG. Pass an int for fully
+            reproducible standard errors; None (default) draws fresh entropy.
 
         Attributes set
         --------------
@@ -388,8 +800,9 @@ class SLM(Rasch):
             keyed by 'Sample_1', 'Sample_2', etc.
         """
 
+        rng = np.random.default_rng(seed)
         samples = [
-            SLM(self.responses.sample(frac=1, replace=True), validate=False)
+            SLM(self.responses.sample(frac=1, replace=True, random_state=rng), validate=False)
             for sample in range(no_of_samples)
         ]
 
@@ -981,6 +1394,23 @@ class SLM(Rasch):
 
         self.category_counts = category_counts_df
 
+    def _log_likelihood(self, responses=None, persons=None):
+        if responses is None:
+            responses = self.responses
+        if persons is None:
+            persons = self.persons
+        scores = responses.sum(axis=1)
+        max_scores = responses.notna().sum(axis=1)
+        non_extreme = responses.index[(scores > 0) & (scores < max_scores)]
+        persons = persons.reindex(non_extreme).dropna()
+        obs = responses.loc[persons.index].values
+        p1 = 1 / (1 + np.exp(self.items.values[None, :] - persons.values[:, None]))
+        p0 = 1 - p1
+        valid = ~np.isnan(obs)
+        prob_obs = np.where(obs == 1, p1, p0)
+        prob_obs[~valid] = np.nan
+        return float(np.nansum(np.log(prob_obs)))
+
     def fit_statistics(
         self,
         warm_corr=True,
@@ -996,6 +1426,7 @@ class SLM(Rasch):
         log_lik_tol=0.000001,
         no_of_samples=500,
         interval=None,
+        seed=None,
     ):
         """
         Compute all item, person, and test-level fit statistics.
@@ -1040,6 +1471,10 @@ class SLM(Rasch):
             Bootstrap samples for standard error estimation.
         interval : float or None, default None
             Confidence interval width for bootstrap CIs.
+        seed : int or None, default None
+            Seed passed through to the internal std_errors() call (only
+            used if item SEs aren't already computed). None draws fresh
+            entropy each call.
 
         Attributes set
         --------------
@@ -1121,6 +1556,7 @@ class SLM(Rasch):
                     method=method,
                     matrix_power=matrix_power,
                     log_lik_tol=log_lik_tol,
+                    seed=seed,
                 )
 
         if not hasattr(self, "persons"):
@@ -1171,6 +1607,13 @@ class SLM(Rasch):
         p0 = self.cat_prob_dict[0]
         self.kurtosis_df = p0 * (p1**4) + p1 * (p0**4)
         self.kurtosis_df *= missing_mask
+
+        self.log_likelihood = self._log_likelihood()
+
+        n_persons = int(((scores > 0) & (scores < max_scores)).sum())
+        k = self.no_of_items - 1
+        self.aic = 2 * k - 2 * self.log_likelihood
+        self.bic = k * np.log(n_persons) - 2 * self.log_likelihood
 
         self.residual_df = self.responses - self.exp_score_df
         self.std_residual_df = self.residual_df / (self.info_df**0.5)
@@ -1286,6 +1729,776 @@ class SLM(Rasch):
         self.person_residual_corr = self.std_residual_df.corrwith(
             self.persons.loc[self.std_residual_df.index], axis=0
         )
+
+    def andersen_lr_test(
+        self,
+        split_by="ability",
+        covariate=None,
+        warm_corr=True,
+        tolerance=0.00001,
+        max_iters=100,
+        ext_score_adjustment=0.5,
+        constant=0.1,
+        method="cos",
+        matrix_power=3,
+        log_lik_tol=0.000001,
+    ):
+        """
+        Andersen (1973) likelihood ratio test of parameter invariance.
+
+        split_by='ability'/'score' (general model-fit / invariance testing)
+        is DISABLED as of 2026-07-06 — see NotImplementedError raised below.
+        split_by='exogenous' (DIF testing) is unaffected and remains fully
+        supported.
+
+        Splits persons into two groups, fits the model separately in each
+        group, and tests whether item parameters are invariant across
+        groups. Groups are formed either by a median split on ability or
+        raw score, or by an exogenous person covariate (e.g. Gender) for
+        differential item functioning.
+
+        Parameters
+        ----------
+        split_by : str, default 'ability'
+            Split criterion: 'ability' (ML person estimates, median split),
+            'score' (raw scores, median split), or 'exogenous' (an
+            external person covariate — requires `covariate` and
+            self.exogenous to be set). 'exogenous' requires the covariate
+            to have exactly two distinct non-null values; covariates with
+            more than two levels are not supported here — use dif_test()
+            instead, which supports multi-level covariates directly.
+        covariate : str or None, default None
+            Column name in self.exogenous to split by. Required (and
+            only used) when split_by='exogenous'. Persons with a missing
+            value for this covariate are excluded from both groups and
+            from the full-sample comparison fit, so the LR decomposition
+            stays valid.
+        warm_corr : bool, default True
+            Warm bias correction for ability estimates.
+        tolerance, max_iters, ext_score_adjustment : floats
+            Person estimation kwargs passed to group models.
+        constant, method, matrix_power, log_lik_tol : floats
+            Calibration kwargs passed to group models.
+
+        Attributes set
+        --------------
+        andersen_lr : float
+            Likelihood ratio statistic. Each group's own log-likelihood
+            (the H1 side) is computed by plugging in ability estimates
+            from the pooled (combined-group) model rather than the
+            group's own separately-fit abilities, so the comparison
+            differs from the pooled model only in item parameters —
+            otherwise nuisance ability parameters are re-optimised
+            independently on each side, inflating the statistic beyond
+            what df accounts for.
+        andersen_df : int
+            Degrees of freedom (no_of_items - 1).
+        andersen_p : float
+            p-value from chi-squared distribution.
+        andersen_groups : dict
+            {group_name: SLM} — fitted group models for inspection. Group
+            names are 'low'/'high' for split_by='ability'/'score', or the
+            two observed covariate values for split_by='exogenous'.
+        """
+        from raschpy.slm import SLM
+
+        if split_by not in ("ability", "score", "exogenous"):
+            raise ValueError("split_by must be 'ability', 'score', or 'exogenous'")
+
+        if split_by in ("ability", "score"):
+            raise NotImplementedError(
+                "andersen_lr_test(split_by='ability'/'score') is disabled as a "
+                "general Rasch model-fit / parameter-invariance test. A 2026-07 "
+                "simulation study (varying N from 100 to 4000) found the LR "
+                "statistic floors to 0 (p=1.0, 'no misfit') in 30-90% of "
+                "replications depending on model and N, and the floor rate does "
+                "NOT improve with more data. A follow-up power study injecting "
+                "genuine item-difficulty differences of up to 3 logits between "
+                "the compared groups found the rejection rate and mean LR do not "
+                "respond to the true effect size at all — the test has no "
+                "demonstrated power in either direction. Root cause: PAIR/CPAT "
+                "are matrix-algebraic pairwise-comparison estimators, not "
+                "likelihood methods of any kind (not even pseudo-likelihood) — "
+                "they do not maximise the Rasch response likelihood that "
+                "_log_likelihood() evaluates afterward. A valid LR test requires "
+                "both the restricted and unrestricted models to be fit by "
+                "maximising the same likelihood surface, so that the "
+                "unrestricted model's log-likelihood is guaranteed >= the "
+                "restricted model's; PAIR/CPAT gives no such guarantee, and "
+                "there is no reason to expect the gap to close with more data, "
+                "since neither was ever targeting the likelihood surface. This "
+                "will be re-enabled once a genuine (C)ML calibration path is "
+                "available for this test. NOTE: this does NOT extend to "
+                "split_by='exogenous' or to dif_test() (Wald test, per-item LR "
+                "test, and omnibus LR test) — those were separately verified via "
+                "simulation to have correct null calibration and power that "
+                "scales cleanly with true DIF magnitude, and remain fully "
+                "supported."
+            )
+
+        if not hasattr(self, "items"):
+            self.calibrate(
+                constant=constant,
+                method=method,
+                matrix_power=matrix_power,
+                log_lik_tol=log_lik_tol,
+            )
+        if not hasattr(self, "persons"):
+            self.person_estimates(
+                warm_corr=warm_corr,
+                tolerance=tolerance,
+                max_iters=max_iters,
+                ext_score_adjustment=ext_score_adjustment,
+            )
+
+        # Non-extreme persons
+        scores = self.responses.sum(axis=1)
+        max_scores = self.responses.notna().sum(axis=1)
+        non_extreme = self.responses.index[(scores > 0) & (scores < max_scores)]
+
+        group_idx = self._resolve_andersen_groups(
+            split_by, covariate, non_extreme, self.persons, scores
+        )
+
+        # Full-model LL restricted to persons in either group
+        combined_idx = group_idx[list(group_idx)[0]].append(group_idx[list(group_idx)[1]])
+        # Re-estimate full model on combined subset so the LR comparison is fair
+        m_full = SLM(self.responses.loc[combined_idx])
+        m_full.calibrate(
+            constant=constant,
+            method=method,
+            matrix_power=matrix_power,
+            log_lik_tol=log_lik_tol,
+        )
+        m_full.person_estimates(
+            warm_corr=warm_corr,
+            tolerance=tolerance,
+            max_iters=max_iters,
+            ext_score_adjustment=ext_score_adjustment,
+        )
+        ll_full = m_full._log_likelihood()
+
+        group_lls = {}
+        group_models = {}
+        for name, idx in group_idx.items():
+            m = SLM(self.responses.loc[idx])
+            m.calibrate(
+                constant=constant,
+                method=method,
+                matrix_power=matrix_power,
+                log_lik_tol=log_lik_tol,
+            )
+            m.person_estimates(
+                warm_corr=warm_corr,
+                tolerance=tolerance,
+                max_iters=max_iters,
+                ext_score_adjustment=ext_score_adjustment,
+            )
+            pooled_persons = m_full.persons.reindex(m.responses.index)
+            group_lls[name] = m._log_likelihood(persons=pooled_persons)
+            group_models[name] = m
+
+        lr = -2 * (ll_full - sum(group_lls.values()))
+        if lr < 0:
+            warnings.warn(
+                "Andersen LR statistic is negative due to PAIR estimation approximation "
+                "and has been floored at 0. This indicates no evidence of misfit.",
+                UserWarning,
+            )
+            lr = 0.0
+        df = self.no_of_items - 1
+
+        self.andersen_lr = lr
+        self.andersen_df = df
+        self.andersen_p = float(chi2.sf(lr, df))
+        self.andersen_groups = group_models
+        self.andersen_summary = pd.Series(
+            {"LR statistic": lr, "df": df, "p-value": self.andersen_p},
+            name="Andersen LR test",
+        )
+
+    def dif_test(
+        self,
+        covariate,
+        reference=None,
+        selection_method="wald",
+        corr_tol=0.95,
+        sd_ratio_tol=1.1,
+        min_anchors=6,
+        wald_alpha=0.05,
+        test="wald",
+        omnibus=True,
+        welch=False,
+        size_adjust=False,
+        reference_n=100,
+        correction="bh",
+        alpha=0.05,
+        logit_threshold=0.43,
+        category=False,
+        category_thresholds=(0.43, 0.64),
+        category_alpha=0.05,
+        no_of_samples=500,
+        plot=False,
+        plot_kwargs=None,
+        warm_corr=True,
+        tolerance=0.00001,
+        max_iters=100,
+        ext_score_adjustment=0.5,
+        constant=0.1,
+        method="cos",
+        matrix_power=3,
+        log_lik_tol=0.000001,
+        seed=None,
+    ):
+        """
+        Differential Item Functioning (DIF) test by an exogenous person
+        covariate (e.g. Gender, L1).
+
+        Splits non-extreme persons into groups by the named column in
+        self.exogenous, designates one group as the reference (by default
+        the largest), and compares each other ("focal") group against it
+        individually — a reference-group design, not all-pairwise.
+
+        For each focal group: both groups are calibrated independently
+        (each self-centred), then purified onto a common scale before
+        testing — so that genuine DIF items cannot contaminate the scale
+        used to test for DIF in the first place — via either
+        _wald_anchor_selection() (default) or _robust_anchor_selection().
+        Item-level DIF is then tested on the purified scale for every item
+        (not only the ones used to define the scale), via a per-item Wald
+        test (test='wald', default), a per-item likelihood-ratio test
+        (test='lr'), or both (test='both'). An omnibus LR test (Andersen-
+        style: reference vs focal, all items jointly) runs by default
+        (omnibus=True) alongside whichever per-item test(s) are chosen,
+        answering "is there DIF at all" before the per-item table answers
+        "in which items".
+
+        The Wald test uses bootstrap standard errors from std_errors(),
+        which are computed for both groups regardless of selection_method
+        (needed for the per-item Wald test either way — so
+        selection_method='wald' costs nothing extra here, unlike
+        calibrate_anchor where it triggers an otherwise-unneeded
+        bootstrap). The LR test (per-item and omnibus) instead needs
+        person abilities, which this method does NOT otherwise estimate —
+        so test='lr'/'both' or omnibus=True adds person_estimates() calls
+        that test='wald' with omnibus=False skips entirely.
+
+        Per-item LR mechanics: H1 (every item free per group) log-
+        likelihood is just ref_model._log_likelihood() +
+        focal_model._log_likelihood() — each group's own natively-
+        calibrated fit, computed once and reused for every item's test
+        (translating one group's scale by a constant doesn't change its
+        own internal fit, so no combined-dataset object is needed for
+        this). For H0 on item i: replace item i's difficulty in each
+        group with a single value pooled across both groups (precision-
+        weighted, on the reference/common scale, converted back to each
+        group's own scale for the focal side), re-estimate that group's
+        abilities under the modified item set, and recompute its log-
+        likelihood. LR_i = 2*(LL_H1 - LL_H0_i), df=1. This is quite a bit
+        more expensive than the Wald test (two ability re-estimations per
+        item per focal-group comparison, versus none for Wald), though
+        each individual re-estimation is typically fast.
+
+        Parameters
+        ----------
+        covariate : str
+            Column name in self.exogenous to group persons by.
+        reference : str or None, default None
+            Value of `covariate` to use as the reference group. If None,
+            the largest group is used.
+        selection_method : {'wald', 'robust_z', 'none'}, default 'wald'
+            'wald': _wald_anchor_selection() — per-item significance test
+            (z = (reference - (focal + tc)) / SE(focal), tc precision-
+            weighted, sequential exclusion) using the bootstrap SEs this
+            method computes anyway. Uses wald_alpha and min_anchors.
+            'robust_z': _robust_anchor_selection() — Iglewicz & Hoaglin
+            modified z-score / MAD-based iterative trim (corr_tol,
+            sd_ratio_tol, min_anchors) — no significance test, purely
+            descriptive-statistics based.
+            'none': plain mean shift over every common item, no trimming.
+        corr_tol, sd_ratio_tol : floats
+            Passed to _robust_anchor_selection() (selection_method=
+            'robust_z' only).
+        min_anchors : int, default 6
+            Floor on surviving common items — passed to whichever
+            selection method is active ('robust_z' or 'wald').
+        wald_alpha : float, default 0.05
+            Significance level for each item's Wald test during
+            purification (selection_method='wald' only) — distinct from
+            `alpha` below, which governs DIF flagging itself.
+        test : {'wald', 'lr', 'both'}, default 'wald'
+            Per-item DIF test(s) to compute. 'wald' matches prior
+            behaviour exactly (no added cost). 'lr'/'both' additionally
+            compute the per-item likelihood-ratio test described above
+            (extra cost: two ability re-estimations per item per focal
+            group). The existing 'Flagged' column always reflects the
+            Wald test (backward compatible); a separate 'Flagged_LR'
+            column is added when test is 'lr' or 'both'.
+        omnibus : bool, default True
+            If True, also runs an Andersen-style omnibus LR test
+            (reference vs. focal, every item jointly) per focal group,
+            stored in dif_omnibus_table. Cheap relative to the per-item LR
+            test — one extra combined-group model fit per focal group, not
+            per item. The H1 side (ll_ref + ll_focal) plugs in ability
+            estimates from the pooled reference+focal model rather than
+            each group's own separately-fit abilities — otherwise the two
+            sides of the comparison re-optimise nuisance ability parameters
+            independently, which inflates the LR statistic beyond what
+            df=k-1 accounts for (confirmed by null-DIF simulation: ~1.3-1.7x
+            nominal Type I error with own-group abilities, ~nominal with
+            pooled abilities).
+        welch : bool, default False
+            If True, the Wald test (test='wald' or 'both') becomes a
+            Welch's t-test: the statistic is unchanged (diff / combined
+            SE) but its p-value is computed against a t-distribution with
+            Welch-Satterthwaite degrees of freedom (using each group's own
+            person count) instead of a normal distribution — more
+            conservative than a z-test when group sizes are small,
+            unequal, or the two SEs differ substantially. Adds a 'df'
+            column to dif_table. Does not affect the LR test or omnibus
+            (already exact chi-squared tests, not z/t-based) or
+            _wald_anchor_selection (a one-sample comparison against a
+            fixed anchor value, not the two-independent-samples case
+            Welch's t-test addresses).
+        size_adjust : bool, default False
+            If True, rescales each group's item SE to what it would be at
+            a standard reference sample size (Tristán, 2006, Rasch
+            Measurement Transactions 20:3 — an adjustment for the opposite
+            problem from welch's: at very large N, SE shrinks enough that
+            trivial differences become "significant", swamping the
+            logit-magnitude thresholds' intent). Each group's own SE is
+            rescaled independently by sqrt(actual_n / reference_n) using
+            that group's own person count, then combined as usual — so
+            unequal reference/focal group sizes are put on equal footing
+            too, not just corrected for extremity. Applied to the Wald/
+            Welch test, the category tests, and (if welch=True) the
+            Welch-Satterthwaite df, which then also uses reference_n
+            rather than each group's actual n, for internal consistency —
+            everything behaves as if the data had been collected at
+            reference_n. Does not affect the LR test's own precision-
+            weighted pooling (a nuisance-parameter estimation detail, not
+            the significance-test artefact this targets) or the omnibus
+            test (an exact chi-squared test, not SE-based).
+        reference_n : int, default 100
+            Reference sample size for size_adjust=True. 100 is Tristán's own
+            default recommendation; ~60 is suggested there for closer
+            alignment with the ETS Category B boundary specifically
+            (100*(0.43/0.55)**2). Unused unless size_adjust=True.
+        correction : 'bh', 'bonferroni', or None, default 'bh'
+            Multiple-comparison correction applied across items within
+            each focal-group comparison (DIF flagging, not purification) —
+            applied separately to the Wald and per-item LR p-values if
+            both are computed. Not applied to the omnibus test (one test
+            per focal group, not a family of item-level comparisons).
+        alpha : float, default 0.05
+            p-value threshold for DIF flagging (Wald, per-item LR, and
+            omnibus alike). Compared against the corrected p-value where
+            correction applies.
+        logit_threshold : float, default 0.43
+            Absolute logit-difference threshold for flagging (ETS-style
+            convention). An item is flagged (Flagged or Flagged_LR) only if
+            both this and the relevant p-value threshold are met — the
+            LR-based flag reuses the same purified item-location Difference
+            estimate as the Wald flag as its effect-size gate (the LR
+            statistic itself has no natural logit-magnitude analogue, but
+            the underlying quantity it's testing does).
+        category : bool, default False
+            If True, adds an ETS-style 'Category' column to dif_table:
+            'A' (negligible), 'B+'/'B-' (slight to moderate), or 'C+'/'C-'
+            (moderate to large), following Zwick, Thayer & Lewis (1999).
+            Sign: '+' means Difference > 0 (item harder for focal, i.e.
+            DIF against reference by the ETS convention as confirmed for
+            this package); '-' means DIF against focal. Uses two tests,
+            not one: 'B' requires |Difference| >= category_thresholds[0]
+            AND prob(DIF=0) < category_alpha (this is just the existing
+            Wald/Welch p-value, reused, not recomputed); 'C' requires
+            |Difference| >= category_thresholds[1] AND a *different*,
+            one-sided test — prob(|DIF| <= category_thresholds[0]) <
+            category_alpha, i.e. whether |Difference| is significantly
+            *above* the B/C boundary itself, not just significantly
+            nonzero. Uses the same reference distribution as welch (t
+            with Satterthwaite df, or normal). Independent of test=/
+            logit_threshold=/Flagged — this reproduces the ETS scheme
+            exactly, not a repackaging of the existing Wald flag. Scoped
+            to dif_table only (item-location DIF) — the 0.43/0.64 logit
+            defaults are specifically calibrated for item-difficulty DIF
+            in the literature, not threshold/step DIF.
+        category_thresholds : (float, float), default (0.43, 0.64)
+            (B boundary, C boundary) in logits, per Zwick et al. (1999).
+            Override with your own values if you're working from a
+            different source or convention.
+        category_alpha : float, default 0.05
+            Significance level for both of the category tests above — the
+            ETS scheme's own literature-standard .05, kept independent of
+            `alpha` (which governs Flagged/Flagged_LR) so overriding one
+            doesn't silently change the other.
+        no_of_samples : int, default 500
+            Bootstrap resamples for each group's std_errors() call.
+        seed : int or None, default None
+            Seed passed through to each group's internal std_errors() call.
+            None draws fresh entropy each call.
+        plot : bool, default False
+            If True, calls plot_anchor_selection() for each focal group
+            that has a selection table (selection_method in ('wald',
+            'robust_z')) and stores the resulting figures in dif_plots.
+            Defaults to False (unlike calibrate_anchor's plot=True) since
+            dif_test can compare multiple focal groups against the
+            reference in one call, and auto-rendering several plot windows
+            at once isn't the right default.
+        plot_kwargs : dict or None, default None
+            Extra keyword arguments forwarded to plot_anchor_selection()
+            for every focal group when plot=True (e.g. filename, x_min/
+            x_max, graph_title).
+        warm_corr, tolerance, max_iters, ext_score_adjustment : floats
+            Person estimation kwargs, passed through to group models. Only
+            actually used when test in ('lr', 'both') or omnibus=True —
+            with test='wald' and omnibus=False, no abilities are estimated
+            at all and these are unused, but kept for signature
+            consistency with other group-fitting methods such as
+            andersen_lr_test.
+        constant, method, matrix_power, log_lik_tol : floats
+            Calibration kwargs passed to group models.
+
+        Attributes set
+        --------------
+        dif_table : pandas.DataFrame
+            One row per (item, focal group) pair. Columns: 'Group'
+            (focal group value), 'Reference' / 'Focal' / 'Focal (purified)'
+            (item difficulty estimates), 'Difference' (purified focal -
+            reference), 'SE', 'z', 'p', 'p (corrected)', 'Selected' (used
+            to define the purified scale), 'Flagged' (Wald p and logit-
+            difference thresholds both met). If welch=True, also 'df'
+            (Welch-Satterthwaite), and 'p'/'p (corrected)' are t-based
+            rather than normal-based ('z' is unchanged either way). If
+            test is 'lr' or 'both', also: 'LR', 'p_LR', 'p_LR (corrected)',
+            'Flagged_LR'. If category=True, also 'Category' ('A', 'B+',
+            'B-', 'C+', or 'C-').
+        dif_omnibus_table : pandas.DataFrame or None
+            One row per focal group: 'LR', 'df', 'p', 'Flagged' — Andersen-
+            style joint test of every common item at once. None if
+            omnibus=False.
+        dif_reference : the reference group value.
+        dif_covariate : the covariate column name used.
+        dif_reference_model : SLM
+            Fitted model for the reference group.
+        dif_focal_models : dict {focal_value: SLM}
+            Fitted models for each focal group.
+        dif_tc : dict {focal_value: float}
+            Translation constant applied to each focal group.
+        dif_anchor_selection : dict {focal_value: pandas.DataFrame or None}
+            Per-item selection diagnostics for each focal group (None if
+            selection_method='none').
+        dif_plots : dict {focal_value: matplotlib.figure.Figure or None}
+            plot_anchor_selection() figure for each focal group, if
+            plot=True and a selection table exists for that group; None
+            otherwise.
+        dif_group_sizes : dict {group_value: int}
+            Non-extreme, non-missing-covariate N used for each group.
+        """
+        from raschpy.slm import SLM
+
+        if correction not in ("bh", "bonferroni", None):
+            raise ValueError("correction must be 'bh', 'bonferroni', or None")
+        if selection_method not in ("wald", "robust_z", "none"):
+            raise ValueError("selection_method must be 'wald', 'robust_z', or 'none'")
+        if test not in ("wald", "lr", "both"):
+            raise ValueError("test must be 'wald', 'lr', or 'both'")
+        if len(category_thresholds) != 2 or category_thresholds[0] >= category_thresholds[1]:
+            raise ValueError(
+                "category_thresholds must be (b_threshold, c_threshold) with "
+                "b_threshold < c_threshold."
+            )
+        if reference_n <= 1:
+            raise ValueError("reference_n must be greater than 1.")
+
+        if getattr(self, "exogenous", None) is None:
+            raise ValueError(
+                "No exogenous data available. Pass exogenous= to the "
+                "constructor before calling dif_test()."
+            )
+        if covariate not in self.exogenous.columns:
+            raise ValueError(f"'{covariate}' is not a column in self.exogenous.")
+
+        # Non-extreme persons, matching andersen_lr_test's convention
+        scores = self.responses.sum(axis=1)
+        max_scores = self.responses.notna().sum(axis=1)
+        non_extreme = self.responses.index[(scores > 0) & (scores < max_scores)]
+
+        cov_values = self.exogenous.loc[non_extreme, covariate].dropna()
+        n_missing = len(non_extreme) - len(cov_values)
+
+        levels = cov_values.value_counts()
+        if len(levels) < 2:
+            raise ValueError(
+                f"'{covariate}' has fewer than 2 distinct non-null values "
+                f"among non-extreme persons — cannot run a DIF test."
+            )
+
+        if reference is None:
+            reference = levels.index[0]
+        elif reference not in levels.index:
+            raise ValueError(f"reference='{reference}' is not a value of '{covariate}'.")
+
+        focal_levels = [lvl for lvl in levels.index if lvl != reference]
+        if len(focal_levels) > 1:
+            warnings.warn(
+                f"'{covariate}' has {len(levels)} levels. dif_test() compares "
+                f"each focal level to the reference level '{reference}' "
+                f"individually (reference-group design); all-pairwise "
+                f"comparisons between non-reference levels are not supported.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        group_sizes = {reference: int(levels.loc[reference])}
+        for focal in focal_levels:
+            group_sizes[focal] = int(levels.loc[focal])
+
+        if n_missing > 0:
+            warnings.warn(
+                f"{n_missing} non-extreme person(s) have a missing value for "
+                f"'{covariate}' and were excluded. Group sizes used: "
+                f"{group_sizes}.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        needs_ll = test in ("lr", "both") or omnibus
+        pe_kw = dict(
+            warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
+            ext_score_adjustment=ext_score_adjustment,
+        )
+
+        ref_idx = cov_values.index[cov_values == reference]
+        ref_model = SLM(self.responses.loc[ref_idx], validate=False)
+        ref_model.calibrate(
+            constant=constant, method=method, matrix_power=matrix_power,
+            log_lik_tol=log_lik_tol,
+        )
+        ref_model.std_errors(
+            no_of_samples=no_of_samples, constant=constant, method=method,
+            matrix_power=matrix_power, log_lik_tol=log_lik_tol, seed=seed,
+        )
+        if needs_ll:
+            ref_model.person_estimates(**pe_kw)
+            ll_ref = ref_model._log_likelihood()
+
+        all_rows = []
+        focal_models = {}
+        tc_dict = {}
+        anchor_selection_dict = {}
+        plot_dict = {}
+        omnibus_rows = {}
+
+        for focal in focal_levels:
+            focal_idx = cov_values.index[cov_values == focal]
+            focal_model = SLM(self.responses.loc[focal_idx], validate=False)
+            focal_model.calibrate(
+                constant=constant, method=method, matrix_power=matrix_power,
+                log_lik_tol=log_lik_tol,
+            )
+            focal_model.std_errors(
+                no_of_samples=no_of_samples, constant=constant, method=method,
+                matrix_power=matrix_power, log_lik_tol=log_lik_tol, seed=seed,
+            )
+            if needs_ll:
+                focal_model.person_estimates(**pe_kw)
+                ll_focal = focal_model._log_likelihood()
+
+            if selection_method == "wald":
+                anchor_result = self._wald_anchor_selection(
+                    ref_model.items, focal_model.items, focal_model.item_se,
+                    alpha=wald_alpha, min_anchors=min_anchors,
+                )
+                tc = anchor_result["tc"]
+                selected = anchor_result["selected_anchors"]
+                anchor_selection_dict[focal] = anchor_result["table"]
+            elif selection_method == "robust_z":
+                anchor_result = self._robust_anchor_selection(
+                    ref_model.items, focal_model.items,
+                    corr_tol=corr_tol, sd_ratio_tol=sd_ratio_tol,
+                    min_anchors=min_anchors,
+                )
+                tc = anchor_result["tc"]
+                selected = anchor_result["selected_anchors"]
+                anchor_selection_dict[focal] = anchor_result["table"]
+            else:
+                common = ref_model.items.index.intersection(focal_model.items.index)
+                tc = (
+                    ref_model.items.loc[common].mean()
+                    - focal_model.items.loc[common].mean()
+                )
+                selected = common
+                anchor_selection_dict[focal] = None
+
+            focal_shifted = focal_model.items + tc
+
+            common_items = ref_model.items.index.intersection(focal_model.items.index)
+            diff = focal_shifted.loc[common_items] - ref_model.items.loc[common_items]
+
+            ref_se_item = ref_model.item_se.loc[common_items]
+            focal_se_item = focal_model.item_se.loc[common_items]
+            ref_n_item = ref_model.no_of_persons
+            focal_n_item = focal_model.no_of_persons
+            if size_adjust:
+                ref_se_item = ref_se_item * np.sqrt(ref_n_item / reference_n)
+                focal_se_item = focal_se_item * np.sqrt(focal_n_item / reference_n)
+                ref_n_item = focal_n_item = reference_n
+
+            se = np.sqrt(ref_se_item ** 2 + focal_se_item ** 2)
+            if welch:
+                z_vals, df_vals, p_vals = self._welch_satterthwaite(
+                    diff.values,
+                    ref_se_item.values, ref_n_item,
+                    focal_se_item.values, focal_n_item,
+                )
+                z = pd.Series(z_vals, index=common_items)
+                welch_df = pd.Series(df_vals, index=common_items)
+                p = pd.Series(p_vals, index=common_items)
+            else:
+                z = diff / se
+                p = pd.Series(2 * norm.sf(np.abs(z.values)), index=common_items)
+
+            if correction == "bonferroni":
+                p_corrected = (p * len(p)).clip(upper=1.0)
+            elif correction == "bh":
+                p_corrected = self._bh_correction(p)
+            else:
+                p_corrected = p
+
+            flagged = (p_corrected < alpha) & (diff.abs() >= logit_threshold)
+
+            if category:
+                b_thr, c_thr = category_thresholds
+                abs_diff = diff.abs()
+                boundary_stat = (abs_diff.values - b_thr) / se.values
+                if welch:
+                    p_boundary = pd.Series(
+                        t_dist.cdf(-boundary_stat, welch_df.values), index=common_items
+                    )
+                else:
+                    p_boundary = pd.Series(norm.cdf(-boundary_stat), index=common_items)
+
+                category_col = []
+                for item in common_items:
+                    if abs_diff[item] >= c_thr and p_boundary[item] < category_alpha:
+                        base = "C"
+                    elif abs_diff[item] >= b_thr and p[item] < category_alpha:
+                        base = "B"
+                    else:
+                        base = "A"
+                    category_col.append(
+                        base if base == "A" else base + ("+" if diff[item] > 0 else "-")
+                    )
+                category_col = pd.Series(category_col, index=common_items)
+
+            if omnibus:
+                combined_idx = ref_idx.append(focal_idx)
+                m_full = SLM(self.responses.loc[combined_idx], validate=False)
+                m_full.calibrate(
+                    constant=constant, method=method, matrix_power=matrix_power,
+                    log_lik_tol=log_lik_tol,
+                )
+                m_full.person_estimates(**pe_kw)
+                ll_full = m_full._log_likelihood()
+                pooled_ref_persons = m_full.persons.reindex(ref_model.responses.index)
+                pooled_focal_persons = m_full.persons.reindex(focal_model.responses.index)
+                ll_ref_omni = ref_model._log_likelihood(persons=pooled_ref_persons)
+                ll_focal_omni = focal_model._log_likelihood(persons=pooled_focal_persons)
+                lr_omni = max(0.0, -2 * (ll_full - (ll_ref_omni + ll_focal_omni)))
+                df_omni = len(common_items) - 1
+                p_omni = float(chi2.sf(lr_omni, df_omni))
+                omnibus_rows[focal] = {
+                    "LR": lr_omni, "df": df_omni, "p": p_omni,
+                    "Flagged": p_omni < alpha,
+                }
+
+            if test in ("lr", "both"):
+                ll_h1 = ll_ref + ll_focal
+                ref_scratch = SLM(ref_model.responses, validate=False)
+                focal_scratch = SLM(focal_model.responses, validate=False)
+                lr_rows = {}
+                for item in common_items:
+                    w_ref = 1.0 / ref_model.item_se[item] ** 2
+                    w_focal = 1.0 / focal_model.item_se[item] ** 2
+                    pooled = (
+                        w_ref * ref_model.items[item] + w_focal * focal_shifted[item]
+                    ) / (w_ref + w_focal)
+                    pooled_focal_scale = pooled - tc
+
+                    ref_scratch.items = ref_model.items.copy()
+                    ref_scratch.items[item] = pooled
+                    ref_scratch.person_estimates(**pe_kw)
+                    ll_ref_h0 = ref_scratch._log_likelihood()
+
+                    focal_scratch.items = focal_model.items.copy()
+                    focal_scratch.items[item] = pooled_focal_scale
+                    focal_scratch.person_estimates(**pe_kw)
+                    ll_focal_h0 = focal_scratch._log_likelihood()
+
+                    lr_i = max(0.0, 2 * (ll_h1 - (ll_ref_h0 + ll_focal_h0)))
+                    lr_rows[item] = {"LR": lr_i, "p_LR": float(chi2.sf(lr_i, 1))}
+
+                lr_table = pd.DataFrame(lr_rows).T.loc[common_items]
+                if correction == "bonferroni":
+                    lr_table["p_LR (corrected)"] = (
+                        lr_table["p_LR"] * len(lr_table)
+                    ).clip(upper=1.0)
+                elif correction == "bh":
+                    lr_table["p_LR (corrected)"] = self._bh_correction(lr_table["p_LR"])
+                else:
+                    lr_table["p_LR (corrected)"] = lr_table["p_LR"]
+                lr_table["Flagged_LR"] = (lr_table["p_LR (corrected)"] < alpha) & (
+                    diff.abs() >= logit_threshold
+                )
+
+            table = pd.DataFrame(
+                {
+                    "Group": focal,
+                    "Reference": ref_model.items.loc[common_items],
+                    "Focal": focal_model.items.loc[common_items],
+                    "Focal (purified)": focal_shifted.loc[common_items],
+                    "Difference": diff,
+                    "SE": se,
+                    "z": z,
+                    "p": p,
+                    "p (corrected)": p_corrected,
+                    "Selected": common_items.isin(selected),
+                    "Flagged": flagged,
+                },
+                index=common_items,
+            )
+            table.index.name = "Item"
+            if welch:
+                table["df"] = welch_df
+            if category:
+                table["Category"] = category_col
+            if test in ("lr", "both"):
+                table = table.join(lr_table)
+
+            all_rows.append(table)
+            focal_models[focal] = focal_model
+            tc_dict[focal] = tc
+
+            if plot and anchor_selection_dict[focal] is not None:
+                plot_dict[focal] = self.plot_anchor_selection(
+                    anchor_selection_dict[focal], **(plot_kwargs or {})
+                )
+            else:
+                plot_dict[focal] = None
+
+        self.dif_table = pd.concat(all_rows)
+        self.dif_omnibus_table = (
+            pd.DataFrame(omnibus_rows).T if omnibus else None
+        )
+        self.dif_reference = reference
+        self.dif_covariate = covariate
+        self.dif_reference_model = ref_model
+        self.dif_focal_models = focal_models
+        self.dif_tc = tc_dict
+        self.dif_anchor_selection = anchor_selection_dict
+        self.dif_plots = plot_dict
+        self.dif_group_sizes = group_sizes
 
     def res_corr_analysis(
         self,
@@ -1423,6 +2636,7 @@ class SLM(Rasch):
         constant=0.1,
         no_of_samples=500,
         interval=None,
+        seed=None,
     ):
         """
         Build and store the item statistics summary table.
@@ -1464,6 +2678,10 @@ class SLM(Rasch):
         interval : float or None, default None
             Confidence interval width for bootstrap CIs (e.g. 0.95).
             If provided, lower and upper percentile columns are included.
+        seed : int or None, default None
+            Seed passed through to the internal std_errors()/fit_statistics()
+            calls (only used if not already computed). None draws fresh
+            entropy each call.
 
         Attributes set
         --------------
@@ -1490,6 +2708,7 @@ class SLM(Rasch):
                 no_of_samples=no_of_samples,
                 constant=constant,
                 method=method,
+                seed=seed,
             )
 
         if not hasattr(self, "item_infit_ms"):
@@ -1502,6 +2721,7 @@ class SLM(Rasch):
                 constant=constant,
                 no_of_samples=no_of_samples,
                 interval=interval,
+                seed=seed,
             )
 
         self.item_stats = pd.DataFrame()
@@ -1637,6 +2857,8 @@ class SLM(Rasch):
         ext_score_adjustment=0.5,
         method="cos",
         constant=0.1,
+        alpha=False,
+        seed=None,
     ):
         """
         Build and store the test-level summary statistics table.
@@ -1661,6 +2883,16 @@ class SLM(Rasch):
             Priority vector extraction method for calibration.
         constant : float, default 0.1
             Additive smoothing constant for calibration.
+        alpha : bool, default False
+            If True, adds a 'Cronbach alpha' row (Persons column only —
+            Items is left NaN, since Cronbach's alpha is a person-side
+            reliability statistic). Computed on complete cases; if the
+            data contain missing responses, a UserWarning is raised and
+            alpha is computed after listwise deletion, which may
+            underestimate the true value.
+        seed : int or None, default None
+            Seed passed through to the internal fit_statistics() call (only
+            used if not already computed). None draws fresh entropy.
 
         Attributes set
         --------------
@@ -1677,33 +2909,33 @@ class SLM(Rasch):
                 ext_score_adjustment=ext_score_adjustment,
                 method=method,
                 constant=constant,
+                seed=seed,
             )
 
-        self.test_stats = pd.DataFrame()
-
-        self.test_stats["Items"] = [
+        items_col = [
             self.items.mean(),
             self.items.std(),
             self.isi,
             self.item_strata,
             self.item_reliability,
         ]
-
-        self.test_stats["Persons"] = [
+        persons_col = [
             self.persons.mean(),
             self.persons.std(),
             self.psi,
             self.person_strata,
             self.person_reliability,
         ]
+        index = ["Mean", "SD", "Separation ratio", "Strata", "Reliability"]
 
-        self.test_stats.index = [
-            "Mean",
-            "SD",
-            "Separation ratio",
-            "Strata",
-            "Reliability",
-        ]
+        if alpha:
+            items_col.append(np.nan)
+            persons_col.append(self._cronbach_alpha())
+            index.append("Cronbach alpha")
+
+        self.test_stats = pd.DataFrame(
+            {"Items": items_col, "Persons": persons_col}, index=index
+        )
         self.test_stats = round(self.test_stats, dp)
 
     def save_stats(
@@ -2280,7 +3512,10 @@ class SLM(Rasch):
                 colorVal = (
                     scalarMap.to_rgba(0) if "multi" not in palette else color_map[0]
                 )
-                ax.plot(x_obs_data, y_obs_data, "o", color=colorVal)
+                ax.scatter(
+                    x_obs_data, y_obs_data, color=colorVal, s=40, alpha=0.7,
+                    edgecolors="k",
+                )
             else:
                 no_of_obs_plots = y_obs_data.shape[1]
                 for j in range(no_of_obs_plots):
@@ -2288,7 +3523,10 @@ class SLM(Rasch):
                         colorVal = scalarMap.to_rgba(j)
                     else:
                         colorVal = color_map[j]
-                    ax.plot(x_obs_data, y_obs_data[:, j], "o", color=colorVal)
+                    ax.scatter(
+                        x_obs_data, y_obs_data[:, j], color=colorVal, s=40,
+                        alpha=0.7, edgecolors="k",
+                    )
 
         if items is not None:
             difficulties = self.items.loc[items]

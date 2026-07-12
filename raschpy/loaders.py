@@ -81,6 +81,42 @@ def _mfrm_reindex_and_stack(responses_dict, item_ids, scores):
 # ---------------------------------------------------------------------------
 
 
+def loadup_exogenous(filename, person_names=True):
+    """
+    Load person-level exogenous covariates (e.g. Gender, L1) for DIF analysis.
+
+    Reads a person-indexed covariate table from CSV, Excel (.xlsx), or JSON.
+    Unlike the response loaders, values are not coerced to numeric or
+    validated against a score range — exogenous covariates are typically
+    categorical labels (e.g. 'Female', 'Chinese') and are kept as supplied.
+    Loaded independently of the response file rather than as extra columns
+    in it, so a covariate never risks being parsed as an item score.
+
+    Parameters
+    ----------
+    filename : str
+        Path to the data file. Format inferred from extension:
+        '.xlsx' -> Excel; '.json' -> JSON; anything else -> CSV.
+    person_names : bool, default True
+        If True, first column is used as person identifiers (the index).
+        If False, persons are labelled 'Person_1', 'Person_2', etc., in
+        file row order.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Person-indexed covariate table. Pass directly as the `exogenous`
+        argument to the SLM/PCM/RSM/MFRM constructors.
+    """
+    index_col = 0 if person_names else None
+    exogenous = _read_file(filename, header=0, index_col=index_col)
+
+    if not person_names:
+        exogenous.index = [f"Person_{i + 1}" for i in range(exogenous.shape[0])]
+
+    return exogenous
+
+
 def loadup_slm(filename, item_names=True, person_names=True, long=False):
     """
     Load and validate response data for the Simple Logistic Model (SLM).

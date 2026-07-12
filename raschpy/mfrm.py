@@ -1,5 +1,7 @@
 from math import log
+import re
 import warnings
+from scipy.stats import chi2, norm
 
 import numpy as np
 import pandas as pd
@@ -10,6 +12,25 @@ from matplotlib import cm as cmx
 import seaborn as sns
 
 from raschpy.base import Rasch
+
+
+def _copy_alias_docstrings(cls):
+    """Append each primary method's docstring onto its 'Alias for <primary>(...)' wrappers.
+
+    Without this, help() on a model-variant alias (e.g. fit_statistics_global)
+    only shows the one-line pointer, not the primary method's parameter docs.
+    """
+    alias_re = re.compile(r"^Alias for (\w+)\(")
+    for member in vars(cls).values():
+        doc = getattr(member, "__doc__", None)
+        if not callable(member) or not doc:
+            continue
+        match = alias_re.match(doc.strip())
+        if not match:
+            continue
+        primary = getattr(cls, match.group(1), None)
+        if primary is not None and primary.__doc__:
+            member.__doc__ = f"{doc}\n\n{primary.__doc__}"
 
 
 class MFRM(Rasch):
@@ -42,6 +63,36 @@ class MFRM(Rasch):
     # ------------------------------------------------------------------
     _MODELS = ("global", "items", "thresholds", "bivector", "matrix")
 
+    # Attributes each _calibrate_anchor_{model}() sets, used to snapshot a
+    # calibrate_anchor() run into calibrate_anchor_runs (see calibrate_anchor).
+    _ANCHOR_CALIBRATION_ATTRS = {
+        "global": (
+            "anchor_items_global", "anchor_thresholds_global",
+            "anchor_facet_effects_global",
+        ),
+        "items": (
+            "anchor_items_items", "anchor_thresholds_items",
+            "anchor_facet_effects_items",
+        ),
+        "thresholds": (
+            "anchor_items_thresholds", "anchor_thresholds_thresholds",
+            "anchor_facet_effects_thresholds",
+        ),
+        "matrix": (
+            "anchor_items_matrix", "anchor_thresholds_matrix",
+            "anchor_items_mixed", "anchor_thresholds_mixed",
+            "anchor_facet_effects_matrix",
+            "anchor_marginal_facet_effects_items",
+            "anchor_marginal_facet_effects_thresholds",
+        ),
+        "bivector": (
+            "anchor_items_bivector", "anchor_thresholds_bivector",
+            "anchor_facet_effects_bivector_items",
+            "anchor_facet_effects_bivector_thresholds",
+            "anchor_facet_effects_bivector",
+        ),
+    }
+
     def _attr(self, model, name, anchor=False):
         """Return the attribute name for a given model and statistic."""
         prefix = "anchor_" if anchor else ""
@@ -53,6 +104,15 @@ class MFRM(Rasch):
         Return (difficulties, thresholds, severities) for the requested model.
         Auto-triggers calibration if not yet run.
         """
+        if model == "mixed":
+            attr = "anchor_facet_effects_mixed" if anchor else "facet_effects_mixed"
+            if not hasattr(self, attr):
+                raise AttributeError(
+                    f"Mixed-model severities not found. "
+                    f"Run per_rater_model_selection(anchors={'...' if anchor else 'None'}) first."
+                )
+            return self.items, self.thresholds, getattr(self, attr)
+
         if anchor:
             diff_attr = f"anchor_items_{model}"
             thr_attr = f"anchor_thresholds_{model}"
@@ -220,11 +280,31 @@ class MFRM(Rasch):
         self.item_names = self.responses.columns
         self.facet_names = self.responses.index.get_level_values(0).unique()
         self.rater_names = self.facet_names  # alias for default facet
+        self.facet_ids = self.facet_names
+        self.rater_ids = self.facet_names  # alias for default facet
         self.person_names = self.responses.index.get_level_values(1).unique()
+
+        # Canonicalise physical row order into contiguous per-facet_element
+        # blocks, each in the identical self.person_names order. item_diffs()
+        # and _estimate_raters_{model}() read self.responses.values via a raw
+        # positional reshape(no_of_facet_elements, no_of_persons, -1) that
+        # silently misaligns persons across facet_element blocks whenever the
+        # physical row order isn't exactly this (e.g. after any MultiIndex
+        # .loc[(slice(None), idx), :] selection with a shuffled/resampled idx,
+        # or a boolean mask) — this has been observed to corrupt facet/rater
+        # severity estimates (collapsing them toward zero) while leaving item
+        # difficulty estimates unaffected, since only the former needs
+        # cross-facet_element alignment for the same person.
+        _index_names = self.responses.index.names
+        self.responses = pd.concat(
+            {fe: self.responses.xs(fe).reindex(self.person_names) for fe in self.facet_names}
+        )
+        self.responses.index.names = _index_names
 
         # Facet name aliases (e.g. self.judge_names, self.judges)
         setattr(self, f"{self.facet}_names", self.facet_names)
         setattr(self, self.facets, self.facet_names)
+        setattr(self, f"{self.facet}_ids", self.facet_names)
 
         # Anchor facet_element tracking per model
         for model in self._MODELS:
@@ -371,8 +451,11 @@ class MFRM(Rasch):
             self.responses = pd.concat(df_dict.values(), keys=df_dict.keys())
             self.facet_names = self.responses.index.get_level_values(0).unique()
             self.rater_names = self.facet_names  # keep alias in sync
+            self.facet_ids = self.facet_names
+            self.rater_ids = self.facet_names  # keep alias in sync
             setattr(self, f"{self.facet}_names", self.facet_names)
             setattr(self, self.facets, self.facet_names)
+            setattr(self, f"{self.facet}_ids", self.facet_names)
 
     def rename_person(self, old, new):
         """
@@ -505,7 +588,7 @@ class MFRM(Rasch):
             log_nums -= np.concatenate(
                 [[0.0], np.cumsum(severities.loc[facet_element].values)]
             )
-        elif model in ("bivector", "matrix"):
+        elif model in ("bivector", "matrix", "mixed"):
             log_nums -= np.concatenate(
                 [[0.0], np.cumsum(severities.loc[facet_element, item].values)]
             )
@@ -766,6 +849,9 @@ class MFRM(Rasch):
           thresholds: k*(θ_n − δ_i) − Σ(τ_k + λ_{r,k})
           matrix:     k*(θ_n − δ_i) − Σ(τ_k + λ_{r,i,k})
         """
+        if model == "mixed":
+            model = "matrix"
+
         cats = np.arange(len(thresholds) + 1, dtype=float)  # (K+1,)
         cumtau = np.concatenate([[0.0], np.cumsum(thresholds)])  # (K+1,)
         ab = np.asarray(abilities, dtype=float)  # (N,)
@@ -869,14 +955,15 @@ class MFRM(Rasch):
         matrix += constant_matrix
         np.fill_diagonal(matrix, matrix.diagonal() + constant)
 
-        mat = np.linalg.matrix_power(matrix, matrix_power)
-        mat_pow = matrix_power
-        while 0 in mat:
-            mat = mat @ matrix
-            mat_pow += 1
-            if mat_pow == matrix_power + 5:
-                mat += constant
-                break
+        with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+            mat = np.linalg.matrix_power(matrix, matrix_power)
+            mat_pow = matrix_power
+            while 0 in mat:
+                mat = mat @ matrix
+                mat_pow += 1
+                if mat_pow == matrix_power + 5:
+                    mat += constant
+                    break
 
         self.items = self.priority_vector(mat, method=method, log_lik_tol=log_lik_tol)
 
@@ -896,12 +983,13 @@ class MFRM(Rasch):
         # Sum count matrices across facet_elements
         num_matrix = np.zeros((self.no_of_items, self.no_of_items))
         den_matrix = np.zeros((self.no_of_items, self.no_of_items))
-        for r in range(self.no_of_facet_elements):
-            at_k = (data[:, r, :] == threshold).astype(np.float64)
-            at_km1 = (data[:, r, :] == threshold - 1).astype(np.float64)
-            at_kp1 = (data[:, r, :] == threshold + 1).astype(np.float64)
-            num_matrix += at_k @ at_k.T
-            den_matrix += at_km1 @ at_kp1.T
+        with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+            for r in range(self.no_of_facet_elements):
+                at_k = (data[:, r, :] == threshold).astype(np.float64)
+                at_km1 = (data[:, r, :] == threshold - 1).astype(np.float64)
+                at_kp1 = (data[:, r, :] == threshold + 1).astype(np.float64)
+                num_matrix += at_k @ at_k.T
+                den_matrix += at_km1 @ at_kp1.T
 
         valid = (num_matrix + den_matrix) > 0
         num_s = np.where(valid, num_matrix + constant, 0.0)
@@ -975,14 +1063,15 @@ class MFRM(Rasch):
         numpy.ndarray
             Powered matrix with zeros resolved or smoothed.
         """
-        mat = np.linalg.matrix_power(matrix, matrix_power)
-        mat_pow = matrix_power
-        while 0 in mat:
-            mat = mat @ matrix
-            mat_pow += 1
-            if mat_pow == matrix_power + 5:
-                mat += constant
-                break
+        with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+            mat = np.linalg.matrix_power(matrix, matrix_power)
+            mat_pow = matrix_power
+            while 0 in mat:
+                mat = mat @ matrix
+                mat_pow += 1
+                if mat_pow == matrix_power + 5:
+                    mat += constant
+                    break
         return mat
 
     def _estimate_raters_global(
@@ -1067,10 +1156,11 @@ class MFRM(Rasch):
 
         # Sum across items: count(X_{i,r1}==k+1 AND X_{i,r2}==k)
         matrix = np.zeros((self.no_of_facet_elements, self.no_of_facet_elements))
-        for i in range(self.no_of_items):
-            at_k = (data[i, :, :] == category + 1).astype(np.float64)  # (R, P)
-            at_km1 = (data[i, :, :] == category).astype(np.float64)
-            matrix += at_k @ at_km1.T
+        with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+            for i in range(self.no_of_items):
+                at_k = (data[i, :, :] == category + 1).astype(np.float64)  # (R, P)
+                at_km1 = (data[i, :, :] == category).astype(np.float64)
+                matrix += at_k @ at_km1.T
 
         matrix = matrix.astype(np.float64)
         constant_matrix = ((matrix + matrix.T) > 0).astype(np.float64) * constant
@@ -1119,7 +1209,8 @@ class MFRM(Rasch):
 
         at_k = (data[item, :, :] == category + 1).astype(np.float64)  # (R, P)
         at_km1 = (data[item, :, :] == category).astype(np.float64)
-        matrix = at_k @ at_km1.T
+        with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+            matrix = at_k @ at_km1.T
 
         matrix = matrix.astype(np.float64)
         constant_matrix = ((matrix + matrix.T) > 0).astype(np.float64) * constant
@@ -1268,12 +1359,17 @@ class MFRM(Rasch):
         ----------
         model : one of 'global', 'items', 'thresholds', 'matrix', 'bivector'
         matrix_marginals : bool, default False
-            Bivector model only. If True (default), estimate item and threshold
+            Bivector model only. If True, estimate item and threshold
             vectors as marginal means of the full matrix PAIR estimates. If
-            False, estimate each vector directly using its own pooled PAIR
-            (items PAIR summed across thresholds; thresholds PAIR summed across
-            items, corrected for per-facet_element mean item effect).
+            False (default), estimate each vector directly using its own pooled
+            PAIR (items PAIR summed across thresholds; thresholds PAIR summed
+            across items, corrected for per-facet_element mean item effect).
         """
+        if model == "mixed":
+            raise ValueError(
+                "model='mixed' is not a calibration target. "
+                "Run per_rater_model_selection() to build the mixed-model severities."
+            )
         if model not in self._MODELS:
             raise ValueError(f"model must be one of {self._MODELS}")
 
@@ -1320,7 +1416,7 @@ class MFRM(Rasch):
             matrix_power=matrix_power,
             log_lik_tol=log_lik_tol,
         )
-        self.thresholds = pd.Series(self.ra_thresholds(self.items, constant=constant))
+        self.thresholds = pd.Series(self.ra_thresholds(self.items, constant=constant), index=range(1, self.max_score + 1))
         kw = dict(constant=constant, method=method,
                   matrix_power=matrix_power, log_lik_tol=log_lik_tol)
         if model == "bivector":
@@ -1372,6 +1468,17 @@ class MFRM(Rasch):
             If provided, used as a fixed constant instead of re-estimating
             from self. Pass this in bootstrap loops to avoid inflating SEs
             with anchor rater sampling variance.
+
+        Attributes set
+        --------------
+        anchor_rater_names_{model}, anchor_items_{model}, anchor_thresholds_{model},
+        anchor_facet_effects_{model}, etc. (see _ANCHOR_CALIBRATION_ATTRS) — always
+        overwritten in place with this call's results.
+        calibrate_anchor_runs : dict
+            Snapshot of the above, keyed by (model, tuple(anchors)), so results
+            from an earlier anchors= call for this model survive a later call
+            with a different anchor set instead of being overwritten. E.g.
+            mfrm.calibrate_anchor_runs[("matrix", tuple(my_anchors_1))].anchor_facet_effects_matrix.
         """
         if calibrate:
             self.calibrate(
@@ -1396,6 +1503,353 @@ class MFRM(Rasch):
         setattr(self, f"anchor_rater_names_{model}", anchors)
         self._set_facet_aliases(model, anchor=True)
 
+        from types import SimpleNamespace
+        if not hasattr(self, "calibrate_anchor_runs"):
+            self.calibrate_anchor_runs = {}
+        ns = SimpleNamespace(anchors=list(anchors))
+        for a in self._ANCHOR_CALIBRATION_ATTRS[model]:
+            if hasattr(self, a):
+                setattr(ns, a, getattr(self, a))
+        self.calibrate_anchor_runs[(model, tuple(anchors))] = ns
+
+    def check_anchor_homogeneity(
+        self,
+        model,
+        anchors,
+        rater_homogeneity_test="cochran",
+        per_component="auto",
+        alpha=0.05,
+        correction="bh",
+        robust_z_threshold=3.5,
+        no_of_samples=500,
+        constant=0.1,
+        method="cos",
+        matrix_power=3,
+        log_lik_tol=0.000001,
+        seed=None,
+    ):
+        """
+        Test whether the raters proposed as `anchors` actually agree with
+        each other, before calibrate_anchor() recentres their group mean
+        to zero.
+
+        calibrate_anchor() only ever imposes mean(anchor severities) == 0 —
+        it has no way to notice whether that mean is a stable, shared
+        reference point or an artefact of averaging over raters who don't
+        behave alike. If one or more anchor raters have a genuinely
+        different severity from the rest, the anchor-implied "zero" is
+        unstable and the whole anchored scale inherits that instability.
+        This is unrelated to per_rater_model_selection (which asks how
+        COMPLEX a rater's own severity structure needs to be) — this asks
+        whether the specific set of raters chosen to DEFINE the anchor
+        actually agree with each other. A separate, opt-in diagnostic
+        (not run automatically by calibrate_anchor) since the 'cochran'
+        test needs bootstrap SEs, which aren't otherwise computed by
+        default and would add unexpected cost to every calibrate_anchor
+        call.
+
+        Uses each rater's own free (unanchored) facet_effects_{model} —
+        deliberately not anchor_facet_effects_{model} — since the point is
+        to check whether this candidate anchor SET is internally
+        consistent before it gets used to define anything, using an
+        unanchored bootstrap so the test isn't circularly biased toward
+        finding homogeneity by construction.
+
+        Parameters
+        ----------
+        model : str
+            One of 'global', 'items', 'thresholds', 'matrix', 'bivector'.
+        anchors : list
+            Rater identifiers to test — the same set you'd pass to
+            calibrate_anchor(model, anchors). At least 2 required.
+        rater_homogeneity_test : {'cochran', 'robust'}, default 'cochran'
+            'cochran': Cochran's Q heterogeneity test (Cochran, 1954,
+            "The combination of estimates from different experiments,"
+            Biometrics 10:101-129 — the meta-analysis heterogeneity Q, not
+            Cochran's 1950 test for k related binary samples).
+            Q = sum(w_i*(severity_i - weighted_mean)^2),
+            weights w_i=1/SE_i^2 from bootstrap SEs, chi-squared with
+            df=n_anchors-1, evaluated on the anchor set exactly as
+            supplied. Which specific rater(s) are responsible is then
+            identified by sequential exclusion (standard meta-analysis
+            outlier diagnostic): repeatedly drop the rater with the
+            largest |z| against the CURRENT remaining group's own
+            weighted mean and retest, until Q is no longer significant. A
+            single-pass z-test against the full group's mean isn't used
+            for per-rater flagging because one severely deviant rater
+            drags that mean far enough that every OTHER rater also looks
+            significant relative to it — sequential exclusion re-centres
+            on each remaining subgroup instead, so it isolates the true
+            offender(s) rather than flagging the whole set.
+            'robust': Iglewicz & Hoaglin modified z-score against the
+            anchor group's own median/MAD (same convention as
+            _robust_anchor_selection, applied within the group rather
+            than against an external reference). Purely descriptive
+            outlier flagging (threshold=robust_z_threshold) — there's no
+            standard significance test/p-value for this statistic, so no
+            omnibus result is produced.
+        per_component : 'auto', True, or False, default 'auto'
+            For items/thresholds/matrix/bivector models (severity is a
+            vector or surface, not one number per rater), also test
+            homogeneity component-by-component (per item, per threshold,
+            or per (item, threshold) cell for matrix/bivector) in addition
+            to the scalar (whole-profile-mean) test. 'auto' turns this on
+            for every model except 'global' (nothing to break out there).
+            Can produce many rows for matrix/bivector
+            (no_of_items * max_score).
+        alpha : float, default 0.05
+            Significance level for all Cochran's Q tests here: the initial
+            omnibus test, each step of the sequential-exclusion procedure,
+            and the per-component tests (rater_homogeneity_test='cochran'
+            only).
+        correction : {'bh', 'bonferroni', None}, default 'bh'
+            Multiple-comparison correction across the per-component tests
+            (if run) — genuinely independent tests, one per component, so
+            correcting across them is appropriate. Not used for per-rater
+            flagging: sequential exclusion (above) already decides that
+            via repeated omnibus tests, not a family of independent
+            per-rater p-values, so a correction doesn't apply there.
+            rater_homogeneity_test='cochran' only.
+        robust_z_threshold : float, default 3.5
+            Flagging threshold for rater_homogeneity_test='robust'
+            (Iglewicz & Hoaglin's own recommended default).
+        no_of_samples : int, default 500
+            Bootstrap samples, only used if unanchored SEs for this model
+            aren't already stored (rater_homogeneity_test='cochran' only).
+        constant, method, matrix_power, log_lik_tol : floats
+            Calibration/bootstrap kwargs, used only if calibration or SEs
+            for this model aren't already computed.
+        seed : int or None, default None
+            Seed passed through to the internal std_errors() call (only
+            used if unanchored SEs aren't already computed). None draws
+            fresh entropy each call.
+
+        Attributes set
+        --------------
+        anchor_homogeneity_test : pandas.Series or None
+            Q, df, p, Flagged, N_dropped_for_homogeneity for the scalar
+            (whole-profile) omnibus test, evaluated on the anchor set as
+            supplied (N_dropped_for_homogeneity is how many raters the
+            sequential-exclusion procedure needed to remove before Q
+            stopped being significant). None if
+            rater_homogeneity_test='robust' (no omnibus statistic exists
+            for that method).
+        anchor_homogeneity_per_rater : pandas.DataFrame
+            One row per anchor rater. rater_homogeneity_test='cochran':
+            Severity, SE, z, p, Flagged — Flagged is whether
+            sequential exclusion removed this rater (z/p are relative to
+            whichever group they were tested against: their own removal
+            step if dropped, or the final retained group if not).
+            rater_homogeneity_test='robust': Severity, Robust z, Flagged.
+        anchor_homogeneity_per_component : pandas.DataFrame or None
+            One row per component (item name / threshold number / (item,
+            threshold) tuple) with that component's own omnibus result —
+            Q, df, p, p_corrected, Flagged (cochran), or Flagged only
+            (robust, meaning at least one rater exceeded the threshold on
+            that component). None if per_component resolves to False.
+        """
+        if model not in self._MODELS:
+            raise ValueError(f"model must be one of {self._MODELS}")
+        if rater_homogeneity_test not in ("cochran", "robust"):
+            raise ValueError("rater_homogeneity_test must be 'cochran' or 'robust'")
+        if correction not in ("bh", "bonferroni", None):
+            raise ValueError("correction must be 'bh', 'bonferroni', or None")
+        if len(anchors) < 2:
+            raise ValueError(
+                "anchors must contain at least 2 raters to test homogeneity."
+            )
+        if per_component == "auto":
+            per_component = model != "global"
+
+        if not hasattr(self, f"facet_effects_{model}"):
+            self.calibrate(
+                model=model,
+                constant=constant,
+                method=method,
+                matrix_power=matrix_power,
+                log_lik_tol=log_lik_tol,
+            )
+
+        sev_attr = f"facet_effects_{model}"
+        sev0 = getattr(self, sev_attr)
+
+        def _get_component(sev, rater, component):
+            if model == "global":
+                return sev.loc[rater]
+            if model in ("items", "thresholds"):
+                return sev.loc[rater].mean() if component is None else sev.loc[rater, component]
+            # matrix / bivector: MultiIndex (facet_element, item) rows, columns=thresholds
+            if component is None:
+                return sev.loc[rater].values.mean()
+            item, k = component
+            return sev.loc[(rater, item), k]
+
+        if model == "items" or model == "thresholds":
+            components = list(sev0.columns)
+        elif model in ("matrix", "bivector"):
+            components = [
+                (item, k)
+                for item in self.item_names
+                for k in range(1, self.max_score + 1)
+            ]
+        else:
+            components = []
+
+        cochran = rater_homogeneity_test == "cochran"
+        samples = None
+        if cochran:
+            if not getattr(self, f"_bootstrap_stored_{model}", False):
+                self.std_errors(
+                    model=model,
+                    no_of_samples=no_of_samples,
+                    store_bootstrap=True,
+                    constant=constant,
+                    method=method,
+                    matrix_power=matrix_power,
+                    log_lik_tol=log_lik_tol,
+                    seed=seed,
+                )
+            samples = getattr(self, f"_bootstrap_samples_{model}")
+
+        def _severities_and_se(component):
+            severities = pd.Series(
+                {r: _get_component(sev0, r, component) for r in anchors}
+            )
+            if not cochran:
+                return severities, None
+            ests = np.array([
+                [_get_component(getattr(s, sev_attr), r, component) for r in anchors]
+                for s in samples
+            ])
+            se = pd.Series(np.nanstd(ests, axis=0), index=anchors)
+            return severities, se
+
+        def _omnibus(severities, se):
+            weights = 1.0 / se**2
+            weighted_mean = (weights * severities).sum() / weights.sum()
+            q = float((weights * (severities - weighted_mean) ** 2).sum())
+            df = len(severities) - 1
+            p = float(chi2.sf(q, df))
+            z = (severities - weighted_mean) / se
+            return weighted_mean, q, df, p, z
+
+        def _sequential_exclusion(severities, se, min_group=2):
+            """Iteratively drop the rater with the largest |z| against the
+            CURRENT group's weighted mean, recomputing Q each time, until Q
+            is no longer significant or min_group raters remain.
+
+            A single-pass Cochran's Q against the full group's weighted mean
+            is not robust to one severely deviant rater: that rater alone
+            drags the weighted mean far enough that every OTHER rater also
+            looks significantly different from it, flagging the whole group
+            instead of just the true offender. This sequential-exclusion
+            approach (standard in meta-analysis heterogeneity diagnostics)
+            avoids that by re-centring on each remaining subgroup.
+            """
+            current = list(severities.index)
+            dropped_order = []
+            while True:
+                sub_sev = severities.loc[current]
+                sub_se = se.loc[current]
+                weighted_mean, q, df, p, z = _omnibus(sub_sev, sub_se)
+                if p >= alpha or len(current) <= min_group:
+                    return current, dropped_order, weighted_mean, z
+                worst = z.abs().idxmax()
+                dropped_order.append((worst, float(z.loc[worst])))
+                current.remove(worst)
+
+        # -- Scalar (whole-profile) test --
+        scalar_severities, scalar_se = _severities_and_se(None)
+        if cochran:
+            # Omnibus reflects the anchor set exactly as supplied (before any
+            # removal) — this is the "does my proposed set look homogeneous"
+            # answer. Sequential exclusion below attributes WHICH rater(s)
+            # are responsible if it doesn't.
+            _, q, df, p, _ = _omnibus(scalar_severities, scalar_se)
+            kept, dropped_order, kept_mean, kept_z = _sequential_exclusion(
+                scalar_severities, scalar_se
+            )
+            rows = {}
+            for rater, z_val in dropped_order:
+                p_val = float(2 * (1 - norm.cdf(abs(z_val))))
+                rows[rater] = {
+                    "Severity": scalar_severities[rater],
+                    "SE": scalar_se[rater],
+                    "z": z_val,
+                    "p": p_val,
+                    "Flagged": True,
+                }
+            for rater in kept:
+                z_val = float(kept_z[rater])
+                p_val = float(2 * (1 - norm.cdf(abs(z_val))))
+                rows[rater] = {
+                    "Severity": scalar_severities[rater],
+                    "SE": scalar_se[rater],
+                    "z": z_val,
+                    "p": p_val,
+                    "Flagged": False,
+                }
+            table = pd.DataFrame(rows).T.loc[list(anchors)]
+            self.anchor_homogeneity_test = pd.Series(
+                {
+                    "Q": q,
+                    "df": df,
+                    "p": p,
+                    "Flagged": p < alpha,
+                    "N_dropped_for_homogeneity": len(dropped_order),
+                },
+                name="Anchor homogeneity test",
+            )
+        else:
+            median_val = scalar_severities.median()
+            mad = (scalar_severities - median_val).abs().median()
+            robust_z = 0.6745 * (scalar_severities - median_val) / mad
+            table = pd.DataFrame({"Severity": scalar_severities, "Robust z": robust_z})
+            table["Flagged"] = table["Robust z"].abs() > robust_z_threshold
+            self.anchor_homogeneity_test = None
+
+        self.anchor_homogeneity_per_rater = table
+
+        if table["Flagged"].any():
+            offenders = list(table.index[table["Flagged"]])
+            warnings.warn(
+                f"Anchor rater(s) {offenders} do not appear homogeneous with "
+                f"the rest of the anchor set ({rater_homogeneity_test} test; "
+                "see anchor_homogeneity_per_rater). The anchor-defined zero "
+                "point may be unstable — consider revising the anchor set.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        # -- Optional per-component breakdown --
+        if per_component and components:
+            rows = {}
+            for comp in components:
+                comp_severities, comp_se = _severities_and_se(comp)
+                if cochran:
+                    _, q_c, df_c, p_c, _ = _omnibus(comp_severities, comp_se)
+                    rows[comp] = {"Q": q_c, "df": df_c, "p": p_c}
+                else:
+                    median_val = comp_severities.median()
+                    mad = (comp_severities - median_val).abs().median()
+                    robust_z = 0.6745 * (comp_severities - median_val) / mad
+                    rows[comp] = {
+                        "Flagged": bool((robust_z.abs() > robust_z_threshold).any())
+                    }
+            comp_table = pd.DataFrame(rows).T
+            if cochran:
+                if correction == "bh":
+                    comp_table["p_corrected"] = self._bh_correction(comp_table["p"])
+                elif correction == "bonferroni":
+                    comp_table["p_corrected"] = (
+                        comp_table["p"] * len(comp_table)
+                    ).clip(upper=1)
+                p_col = "p_corrected" if correction else "p"
+                comp_table["Flagged"] = comp_table[p_col] < alpha
+            self.anchor_homogeneity_per_component = comp_table
+        else:
+            self.anchor_homogeneity_per_component = None
+
     def _extract_anchor_adj(self, model, anchors):
         """Extract the anchor adjustment from the current (full-data) calibration."""
         if model == "global":
@@ -1414,6 +1868,14 @@ class MFRM(Rasch):
             item_adj = self.facet_effects_bivector_items.loc[anchors].mean(axis=0)
             thr_adj = self.facet_effects_bivector_thresholds.loc[anchors].mean(axis=0)
             return (item_adj, thr_adj)
+        elif model == "mixed":
+            # Anchor shift derived from the underlying matrix estimates (pre-restriction),
+            # matching the sequence used in per_rater_model_selection(anchors=...).
+            sev_array = self.facet_effects_matrix.values.reshape(
+                self.no_of_facet_elements, self.no_of_items, self.max_score
+            )
+            anchor_idx = [list(self.facet_names).index(a) for a in anchors]
+            return sev_array[anchor_idx].mean(axis=0)  # (I, K)
 
     def _calibrate_anchor_global(self, anchors, adj=None):
         """Anchor calibration for global parameterisation. Shifts all facet effects so anchor mean is zero."""
@@ -1486,6 +1948,9 @@ class MFRM(Rasch):
 
         self.anchor_items_matrix -= self.anchor_items_matrix.mean()
         self.anchor_thresholds_matrix -= self.anchor_thresholds_matrix.mean()
+
+        self.anchor_items_mixed = self.anchor_items_matrix
+        self.anchor_thresholds_mixed = self.anchor_thresholds_matrix
 
         mi = pd.MultiIndex.from_product(
             [self.facet_names, self.responses.columns], names=[self.facet, "item"]
@@ -1585,25 +2050,22 @@ class MFRM(Rasch):
     # Standard errors (bootstrap)
     # ------------------------------------------------------------------
 
-    def _bootstrap_samples(self, no_of_samples):
+    def _bootstrap_samples(self, no_of_samples, seed=None):
         """Generate bootstrap person samples preserving facet_element structure."""
+        rng = np.random.default_rng(seed)
+        data_dict = {
+            fe: self.responses.xs(fe)
+            for fe in self.facet_names
+        }
         picks = [
-            self.responses.index.get_level_values(1)[
-                np.random.randint(0, self.no_of_persons, self.no_of_persons)
-            ]
+            rng.choice(self.person_names, size=self.no_of_persons, replace=True)
             for _ in range(no_of_samples)
         ]
-        data_dict = {
-            facet_element: self.responses.xs(facet_element)
-            for facet_element in self.facet_names
-        }
         samples = []
         for pick in picks:
             sample_dict = {
-                facet_element: pd.DataFrame(
-                    [data_dict[facet_element].loc[p] for p in pick]
-                ).reset_index(drop=True)
-                for facet_element in self.facet_names
+                fe: data_dict[fe].loc[pick].reset_index(drop=True)
+                for fe in self.facet_names
             }
             samples.append(pd.concat(sample_dict.values(), keys=sample_dict.keys()))
         return [MFRM(s, self.max_score) for s in samples]
@@ -1629,6 +2091,7 @@ class MFRM(Rasch):
         matrix_power=3,
         log_lik_tol=0.000001,
         store_bootstrap=False,
+        seed=None,
     ):
         """
         Bootstrap standard errors for item difficulties, thresholds, and
@@ -1643,6 +2106,9 @@ class MFRM(Rasch):
             anchor_std_errors() to reuse the same samples without
             rerunning the bootstrap. Memory cost: no_of_samples fitted
             MFRM objects.
+        seed : int or None, default None
+            Seed for the bootstrap resampling RNG. Pass an int for fully
+            reproducible standard errors; None (default) draws fresh entropy.
         """
         # Pre-compute anchor adjustment from full-data calibration so each
         # bootstrap sample uses a fixed scale shift rather than re-estimating
@@ -1650,25 +2116,62 @@ class MFRM(Rasch):
         # sampling variance).
         adj_fixed = self._extract_anchor_adj(model, anchors) if anchors is not None else None
 
-        samples = self._bootstrap_samples(no_of_samples)
-        for s in samples:
-            s.calibrate(
-                model=model,
-                constant=constant,
-                method=method,
-                matrix_power=matrix_power,
-                log_lik_tol=log_lik_tol,
+        samples = self._bootstrap_samples(no_of_samples, seed=seed)
+        if model == "mixed":
+            anc_mixed = anchors is not None
+            fixed_rater_models = (
+                self.anchor_rater_models if anc_mixed else self.rater_models
             )
-            if anchors is not None:
-                s.calibrate_anchor(
-                    model,
-                    anchors,
+            adj_mixed = self._extract_anchor_adj("mixed", anchors) if anc_mixed else None
+            for s in samples:
+                s.calibrate(
+                    model="matrix",
                     constant=constant,
                     method=method,
                     matrix_power=matrix_power,
                     log_lik_tol=log_lik_tol,
-                    adj=adj_fixed,
                 )
+                if anc_mixed:
+                    s.calibrate_anchor(
+                        "matrix",
+                        anchors,
+                        constant=constant,
+                        method=method,
+                        matrix_power=matrix_power,
+                        log_lik_tol=log_lik_tol,
+                        adj=adj_mixed,
+                    )
+                    sev_source = s.anchor_facet_effects_matrix
+                    s.anchor_facet_effects_mixed = self._apply_rater_models(
+                        sev_source, fixed_rater_models
+                    )
+                    setattr(s, f"anchor_{self.facets}_mixed", s.anchor_facet_effects_mixed)
+                    s.anchor_items_mixed = s.anchor_items_matrix
+                    s.anchor_thresholds_mixed = s.anchor_thresholds_matrix
+                else:
+                    s.facet_effects_mixed = self._apply_rater_models(
+                        s.facet_effects_matrix, fixed_rater_models
+                    )
+                s.rater_models = fixed_rater_models
+        else:
+            for s in samples:
+                s.calibrate(
+                    model=model,
+                    constant=constant,
+                    method=method,
+                    matrix_power=matrix_power,
+                    log_lik_tol=log_lik_tol,
+                )
+                if anchors is not None:
+                    s.calibrate_anchor(
+                        model,
+                        anchors,
+                        constant=constant,
+                        method=method,
+                        matrix_power=matrix_power,
+                        log_lik_tol=log_lik_tol,
+                        adj=adj_fixed,
+                    )
 
         if store_bootstrap:
             setattr(self, f"_bootstrap_samples_{model}", samples)
@@ -1711,6 +2214,7 @@ class MFRM(Rasch):
             k + 1: thresh_ests[:, k + 1] - thresh_ests[:, k]
             for k in range(self.max_score - 1)
         }
+        setattr(self, f"{prefix}cat_width_bootstrap_{model}", cat_widths)
         setattr(
             self,
             f"{prefix}cat_width_se_{model}",
@@ -1862,6 +2366,43 @@ class MFRM(Rasch):
             setattr(self, f"{prefix}rater_se_marginal_thresholds", se_thresholds)
             setattr(self, f"{prefix}rater_se_{model}", se_items)
 
+        elif model == "mixed":
+            expected_rows = self.no_of_facet_elements * self.no_of_items
+            sev_attr = "anchor_facet_effects_mixed" if anchor else "facet_effects_mixed"
+            rater_ests = np.array(
+                [
+                    getattr(s, sev_attr).values
+                    for s in samples
+                    if getattr(s, sev_attr).shape[0] == expected_rows
+                ]
+            )  # (B, R*I, K)
+            mi = pd.MultiIndex.from_product(
+                [self.facet_names, self.responses.columns], names=[self.facet, "item"]
+            )
+            se = pd.DataFrame(
+                np.nanstd(rater_ests, axis=0), index=mi, columns=range(1, self.max_score + 1)
+            )
+            setattr(self, f"{prefix}rater_se_mixed", se)
+            if interval is not None:
+                setattr(
+                    self,
+                    f"{prefix}rater_low_mixed",
+                    pd.DataFrame(
+                        np.percentile(rater_ests, lo_p, axis=0),
+                        index=mi,
+                        columns=range(1, self.max_score + 1),
+                    ),
+                )
+                setattr(
+                    self,
+                    f"{prefix}rater_high_mixed",
+                    pd.DataFrame(
+                        np.percentile(rater_ests, hi_p, axis=0),
+                        index=mi,
+                        columns=range(1, self.max_score + 1),
+                    ),
+                )
+
         elif model == "matrix":
             sev_attr = (
                 "anchor_facet_effects_matrix" if anchor else "facet_effects_matrix"
@@ -1952,6 +2493,7 @@ class MFRM(Rasch):
         method="cos",
         matrix_power=3,
         log_lik_tol=0.000001,
+        seed=None,
     ):
         """
         Compute bootstrap standard errors for anchor-adjusted parameters.
@@ -1984,6 +2526,11 @@ class MFRM(Rasch):
         no_of_samples : int
             Number of bootstrap samples. Only used when stored samples are
             not available.
+        seed : int or None, default None
+            Seed for the bootstrap resampling RNG (only used on the slow
+            path, when stored samples are not available). Pass an int for
+            fully reproducible standard errors; None (default) draws fresh
+            entropy.
         """
         # Inherit interval from std_errors() if not explicitly provided
         if interval is None:
@@ -2023,7 +2570,7 @@ class MFRM(Rasch):
                     f"anchor_rater_names_{model} is available."
                 )
             adj_fixed = self._extract_anchor_adj(model, anchors)
-            samples = self._bootstrap_samples(no_of_samples)
+            samples = self._bootstrap_samples(no_of_samples, seed=seed)
             for s in samples:
                 s.calibrate(
                     model=model,
@@ -2068,6 +2615,7 @@ class MFRM(Rasch):
             k + 1: thresh_ests[:, k + 1] - thresh_ests[:, k]
             for k in range(self.max_score - 1)
         }
+        setattr(self, f"anchor_cat_width_bootstrap_{model}", cat_widths)
         setattr(
             self,
             f"anchor_cat_width_se_{model}",
@@ -2189,7 +2737,8 @@ class MFRM(Rasch):
             df_cat *= person_filter
             cat_prob_dict[cat_idx] = df_cat
 
-        setattr(self, f"cat_prob_dict_{model}", cat_prob_dict)
+        _pfx = "anchor_" if anchor else ""
+        setattr(self, f"{_pfx}cat_prob_dict_{model}", cat_prob_dict)
 
     # Backwards-compatible aliases
     def category_probability_dict_global(self, **kw):
@@ -3135,7 +3684,7 @@ class MFRM(Rasch):
         std_residual_df = residual_df / (info_df**0.5)
         return exp_score_df, info_df, kurtosis_df, residual_df, std_residual_df
 
-    def _ensure_fit_matrices(self, model, **kw):
+    def _ensure_fit_matrices(self, model, anchor=False, **kw):
         """Ensure calibration, abilities, cat_prob_dict and fit matrices exist."""
         calib_kw = {
             k: v
@@ -3147,22 +3696,27 @@ class MFRM(Rasch):
             for k, v in kw.items()
             if k in ("warm_corr", "tolerance", "max_iters", "ext_score_adjustment")
         }
-        if not hasattr(self, f"facet_effects_{model}"):
+        _pfx = "anchor_" if anchor else ""
+        if not hasattr(self, f"{_pfx}facet_effects_{model}"):
+            if model == "mixed":
+                raise AttributeError(
+                    f"Run per_rater_model_selection({'anchors=...' if anchor else ''}) first."
+                )
             self.calibrate(model=model, **calib_kw)
-        if not hasattr(self, f"persons_{model}"):
-            self.person_estimates(model=model, **abil_kw)
-        cpd_attr = f"cat_prob_dict_{model}"
-        exp_attr = f"exp_score_df_{model}"
+        if not hasattr(self, f"{_pfx}persons_{model}"):
+            self.person_estimates(model=model, anchor=anchor, **abil_kw)
+        cpd_attr = f"{_pfx}cat_prob_dict_{model}"
+        exp_attr = f"{_pfx}exp_score_df_{model}"
         if not hasattr(self, cpd_attr):
-            self.category_probability_dict(model=model, **kw)
+            self.category_probability_dict(model=model, anchor=anchor, **kw)
         if not hasattr(self, exp_attr):
             cpd = getattr(self, cpd_attr)
             (exp, info, kur, res, std) = self.fit_matrices(cpd)
-            setattr(self, f"exp_score_df_{model}", exp)
-            setattr(self, f"info_df_{model}", info)
-            setattr(self, f"kurtosis_df_{model}", kur)
-            setattr(self, f"residual_df_{model}", res)
-            setattr(self, f"std_residual_df_{model}", std)
+            setattr(self, f"{_pfx}exp_score_df_{model}", exp)
+            setattr(self, f"{_pfx}info_df_{model}", info)
+            setattr(self, f"{_pfx}kurtosis_df_{model}", kur)
+            setattr(self, f"{_pfx}residual_df_{model}", res)
+            setattr(self, f"{_pfx}std_residual_df_{model}", std)
 
     def fit_matrices_global(self, **kw):
         """Alias for fit_matrices(model='global'). See fit_matrices for full documentation."""
@@ -3231,24 +3785,25 @@ class MFRM(Rasch):
             exp_pm,
         )
 
-    def _run_item_fit(self, model, **kw):
+    def _run_item_fit(self, model, anchor=False, **kw):
         """Internal dispatcher: ensure fit matrices then run item fit statistics for the given model."""
-        self._ensure_fit_matrices(model, **kw)
-        abilities = getattr(self, f"persons_{model}")
+        self._ensure_fit_matrices(model, anchor=anchor, **kw)
+        _pfx = "anchor_" if anchor else ""
+        abilities = getattr(self, f"{_pfx}persons_{model}")
         (outfit_ms, outfit_z, infit_ms, infit_z, pm, exp_pm) = self.item_fit_statistics(
-            getattr(self, f"exp_score_df_{model}"),
-            getattr(self, f"info_df_{model}"),
-            getattr(self, f"kurtosis_df_{model}"),
-            getattr(self, f"residual_df_{model}"),
-            getattr(self, f"std_residual_df_{model}"),
+            getattr(self, f"{_pfx}exp_score_df_{model}"),
+            getattr(self, f"{_pfx}info_df_{model}"),
+            getattr(self, f"{_pfx}kurtosis_df_{model}"),
+            getattr(self, f"{_pfx}residual_df_{model}"),
+            getattr(self, f"{_pfx}std_residual_df_{model}"),
             abilities,
         )
-        setattr(self, f"item_outfit_ms_{model}", outfit_ms)
-        setattr(self, f"item_outfit_zstd_{model}", outfit_z)
-        setattr(self, f"item_infit_ms_{model}", infit_ms)
-        setattr(self, f"item_infit_zstd_{model}", infit_z)
-        setattr(self, f"point_measure_{model}", pm)
-        setattr(self, f"exp_point_measure_{model}", exp_pm)
+        setattr(self, f"{_pfx}item_outfit_ms_{model}", outfit_ms)
+        setattr(self, f"{_pfx}item_outfit_zstd_{model}", outfit_z)
+        setattr(self, f"{_pfx}item_infit_ms_{model}", infit_ms)
+        setattr(self, f"{_pfx}item_infit_zstd_{model}", infit_z)
+        setattr(self, f"{_pfx}point_measure_{model}", pm)
+        setattr(self, f"{_pfx}exp_point_measure_{model}", exp_pm)
 
     def item_fit_statistics_global(self, **kw):
         """Alias for item_fit_statistics(model='global'). See item_fit_statistics for full documentation."""
@@ -3448,7 +4003,7 @@ class MFRM(Rasch):
         """Build the threshold location DataFrame dict for threshold fit stats."""
         diff_df_dict = {}
         for t in range(self.max_score):
-            thr_loc = thresholds[t]
+            thr_loc = thresholds[t + 1]
             rows = {}
             for facet_element in self.facet_names:
                 if model == "global":
@@ -3457,7 +4012,7 @@ class MFRM(Rasch):
                     row = difficulties + thr_loc + severities.loc[facet_element]
                 elif model == "thresholds":
                     row = difficulties + thr_loc + severities.loc[facet_element, t + 1]
-                elif model in ("bivector", "matrix"):
+                elif model in ("bivector", "matrix", "mixed"):
                     row = (
                         difficulties
                         + thr_loc
@@ -3478,11 +4033,12 @@ class MFRM(Rasch):
 
     def _run_threshold_fit(self, model, anchors=None, **kw):
         """Internal dispatcher: run threshold fit statistics for the given model."""
-        if not hasattr(self, f"persons_{model}"):
-            self.person_estimates(model=model)
-        # Always use unanchored params for fit statistics — anchor is origin shift only
-        difficulties, thresholds, severities = self._get_params(model, anchor=False)
-        abilities = getattr(self, f"persons_{model}")
+        _anc = anchors is not None
+        _pfx = "anchor_" if _anc else ""
+        if not hasattr(self, f"{_pfx}persons_{model}"):
+            self.person_estimates(model=model, anchor=_anc)
+        difficulties, thresholds, severities = self._get_params(model, anchor=_anc)
+        abilities = getattr(self, f"{_pfx}persons_{model}")
         ddd = self._diff_df_dict(model, difficulties, thresholds, severities)
         results = self.threshold_fit_statistics(abilities, ddd)
         names = [
@@ -3579,14 +4135,15 @@ class MFRM(Rasch):
 
         return rater_outfit_ms, rater_outfit_zstd, rater_infit_ms, rater_infit_zstd
 
-    def _run_facet_fit(self, model, **kw):
+    def _run_facet_fit(self, model, anchor=False, **kw):
         """Internal dispatcher: run facet/rater fit statistics for the given model."""
-        self._ensure_fit_matrices(model, **kw)
+        self._ensure_fit_matrices(model, anchor=anchor, **kw)
+        _pfx = "anchor_" if anchor else ""
         results = self.facet_fit_statistics(
-            getattr(self, f"info_df_{model}"),
-            getattr(self, f"kurtosis_df_{model}"),
-            getattr(self, f"residual_df_{model}"),
-            getattr(self, f"std_residual_df_{model}"),
+            getattr(self, f"{_pfx}info_df_{model}"),
+            getattr(self, f"{_pfx}kurtosis_df_{model}"),
+            getattr(self, f"{_pfx}residual_df_{model}"),
+            getattr(self, f"{_pfx}std_residual_df_{model}"),
         )
         for name, val in zip(
             [
@@ -3597,8 +4154,8 @@ class MFRM(Rasch):
             ],
             results,
         ):
-            setattr(self, f"{name}_{model}", val)
-        self._set_facet_aliases(model)
+            setattr(self, f"{_pfx}{name}_{model}", val)
+        self._set_facet_aliases(model, anchor=anchor)
 
     def facet_fit_statistics_global(self, **kw):
         """Alias for facet_fit_statistics(model='global'). See facet_fit_statistics for full documentation."""
@@ -3674,15 +4231,16 @@ class MFRM(Rasch):
             person_infit_zstd,
         )
 
-    def _run_person_fit(self, model, **kw):
+    def _run_person_fit(self, model, anchor=False, **kw):
         """Internal dispatcher: run person fit statistics for the given model."""
-        self._ensure_fit_matrices(model, **kw)
-        abilities = getattr(self, f"persons_{model}")
+        self._ensure_fit_matrices(model, anchor=anchor, **kw)
+        _pfx = "anchor_" if anchor else ""
+        abilities = getattr(self, f"{_pfx}persons_{model}")
         results = self.person_fit_statistics(
-            getattr(self, f"info_df_{model}"),
-            getattr(self, f"kurtosis_df_{model}"),
-            getattr(self, f"residual_df_{model}"),
-            getattr(self, f"std_residual_df_{model}"),
+            getattr(self, f"{_pfx}info_df_{model}"),
+            getattr(self, f"{_pfx}kurtosis_df_{model}"),
+            getattr(self, f"{_pfx}residual_df_{model}"),
+            getattr(self, f"{_pfx}std_residual_df_{model}"),
             abilities,
         )
         names = [
@@ -3696,7 +4254,7 @@ class MFRM(Rasch):
         for name, val in zip(names, results):
             if isinstance(val, pd.Series):
                 val = pd.to_numeric(val, errors="coerce")
-            setattr(self, f"{name}_{model}", val)
+            setattr(self, f"{_pfx}{name}_{model}", val)
 
     def person_fit_statistics_global(self, **kw):
         """Alias for person_fit_statistics(model='global'). See person_fit_statistics for full documentation."""
@@ -3742,14 +4300,15 @@ class MFRM(Rasch):
             person_reliability,
         )
 
-    def _run_test_fit(self, model, **kw):
+    def _run_test_fit(self, model, anchor=False, anchors=None, seed=None, **kw):
         """Internal dispatcher: run test-level separation statistics for the given model."""
-        if not hasattr(self, f"csem_vector_{model}"):
-            self._run_person_fit(model, **kw)
-        if not hasattr(self, "item_se"):
-            self.std_errors(model=model, **kw)
-        abilities = getattr(self, f"persons_{model}")
-        rsems = getattr(self, f"rsem_vector_{model}")
+        _pfx = "anchor_" if anchor else ""
+        if not hasattr(self, f"{_pfx}csem_vector_{model}"):
+            self._run_person_fit(model, anchor=anchor, **kw)
+        if not hasattr(self, f"{_pfx}item_se"):
+            self.std_errors(model=model, anchors=anchors, seed=seed, **kw)
+        abilities = getattr(self, f"{_pfx}persons_{model}")
+        rsems = getattr(self, f"{_pfx}rsem_vector_{model}")
         results = self.test_fit_statistics(abilities, rsems)
         for name, val in zip(
             [
@@ -3762,7 +4321,7 @@ class MFRM(Rasch):
             ],
             results,
         ):
-            setattr(self, f"{name}_{model}", val)
+            setattr(self, f"{_pfx}{name}_{model}", val)
 
     def test_fit_statistics_global(self, **kw):
         """Alias for test_fit_statistics(model='global'). See test_fit_statistics for full documentation."""
@@ -3784,6 +4343,41 @@ class MFRM(Rasch):
     # Top-level fit_statistics
     # ------------------------------------------------------------------
 
+    def _log_likelihood(self, model="global", responses=None, anchor=False, persons=None):
+        if responses is None:
+            responses = self.responses
+        _, thresholds, severities = self._get_params(model, anchor=anchor)
+        total_scores = responses.groupby(level=1).sum().sum(axis=1)
+        max_possible = responses.notna().groupby(level=1).sum().sum(axis=1) * self.max_score
+        non_extreme = total_scores.index[(total_scores > 0) & (total_scores < max_possible)]
+        if persons is None:
+            _pfx = "anchor_" if anchor else ""
+            persons = getattr(self, f"{_pfx}persons_{model}")
+        persons = persons.reindex(non_extreme).dropna()
+        persons = persons[persons.abs() <= 20]
+        facet_names = responses.index.get_level_values(0).unique()
+        probs_dict, cats = self._cat_probs_mfrm(
+            persons.values,
+            list(self.item_names),
+            list(facet_names),
+            thresholds,
+            model,
+            severities,
+        )
+        ll = 0.0
+        for facet_element in facet_names:
+            probs = probs_dict[facet_element]  # (K+1, N, I)
+            obs_arr = responses.loc[facet_element].reindex(persons.index).values  # (N, I)
+            valid = ~np.isnan(obs_arr)
+            obs_int = np.where(valid, obs_arr, 0).astype(int)
+            n_idx, i_idx = np.meshgrid(
+                np.arange(obs_arr.shape[0]), np.arange(obs_arr.shape[1]), indexing="ij"
+            )
+            prob_obs = probs[obs_int, n_idx, i_idx]
+            prob_obs[~valid] = np.nan
+            ll += float(np.nansum(np.log(prob_obs)))
+        return ll
+
     def fit_statistics(
         self,
         model="global",
@@ -3801,6 +4395,12 @@ class MFRM(Rasch):
         log_lik_tol=0.000001,
         no_of_samples=500,
         interval=None,
+        test="AIC",
+        aic_sig_test=True,
+        sampling="dynamic",
+        alpha=0.05,
+        min_effect=0,
+        seed=None,
     ):
         """
         Compute all item, threshold, facet_element, person, and test-level fit statistics.
@@ -3842,6 +4442,15 @@ class MFRM(Rasch):
             Bootstrap samples for SE estimation.
         interval : float or None, default None
             CI width for bootstrap estimates.
+        test, aic_sig_test, sampling, alpha, min_effect :
+            Only used for model='mixed', and only when per_rater_model_selection
+            hasn't been run yet (or was run with a different anchor set) —
+            forwarded to a lazily-triggered per_rater_model_selection call. See
+            that method for details.
+        seed : int or None, default None
+            Seed forwarded to the internal std_errors() call (and to the
+            lazily-triggered per_rater_model_selection call for model='mixed').
+            Only used if not already computed. None draws fresh entropy.
 
         Attributes set (model-suffixed)
         --------------------------------
@@ -3866,38 +4475,53 @@ class MFRM(Rasch):
         psi_{model}, person_strata_{model}, person_reliability_{model} : float
             Person separation index, strata, and reliability (if test_stats).
         """
-        if not hasattr(self, f"facet_effects_{model}"):
-            self.calibrate(
-                model=model,
-                constant=constant,
-                method=method,
-                matrix_power=matrix_power,
-                log_lik_tol=log_lik_tol,
+        _anc = anchors is not None
+        # _ensure_calibrated/_ensure_se already detect a changed anchor set
+        # (for any model, including mixed) and re-run calibration/persons/SEs
+        # accordingly — see their docstrings.
+        stale = self._ensure_calibrated(
+            model,
+            anchors=anchors,
+            interval=interval,
+            no_of_samples=no_of_samples,
+            constant=constant,
+            method=method,
+            matrix_power=matrix_power,
+            log_lik_tol=log_lik_tol,
+            warm_corr=warm_corr,
+            tolerance=tolerance,
+            max_iters=max_iters,
+            ext_score_adjustment=ext_score_adjustment,
+            test=test,
+            aic_sig_test=aic_sig_test,
+            sampling=sampling,
+            alpha=alpha,
+            min_effect=min_effect,
+            seed=seed,
+        )
+        if se:
+            self._ensure_se(
+                model, anchors, interval, no_of_samples, constant, method,
+                matrix_power, log_lik_tol, seed=seed,
             )
-        if se and not hasattr(self, f"threshold_se_{model}"):
-            self.std_errors(
-                model=model,
-                anchors=anchors,
-                interval=interval,
-                no_of_samples=no_of_samples,
-                constant=constant,
-                method=method,
-                matrix_power=matrix_power,
-                log_lik_tol=log_lik_tol,
-            )
-        if not hasattr(self, f"persons_{model}"):
-            self.person_estimates(
-                model=model,
-                warm_corr=warm_corr,
-                tolerance=tolerance,
-                max_iters=max_iters,
-                ext_score_adjustment=ext_score_adjustment,
-            )
-        if not se:
+        else:
             test_stats = False
+
+        if stale:
+            # Calibration/persons just moved to a new anchor set — invalidate
+            # this model's fit-matrix cache (_ensure_fit_matrices gates on
+            # exp_score_df_{model} existing) so it's rebuilt from the fresh
+            # category probabilities below instead of reusing stale ones.
+            _pfx = "anchor_" if _anc else ""
+            for _name in (
+                "exp_score_df", "info_df", "kurtosis_df",
+                "residual_df", "std_residual_df",
+            ):
+                self.__dict__.pop(f"{_pfx}{_name}_{model}", None)
 
         self.category_probability_dict(
             model=model,
+            anchor=_anc,
             warm_corr=warm_corr,
             ext_scores=ext_scores,
             tolerance=tolerance,
@@ -3908,13 +4532,52 @@ class MFRM(Rasch):
             matrix_power=matrix_power,
             log_lik_tol=log_lik_tol,
         )
-        self._ensure_fit_matrices(model)
-        self._run_item_fit(model)
+        self._ensure_fit_matrices(model, anchor=_anc)
+        self._run_item_fit(model, anchor=_anc)
         self._run_threshold_fit(model, anchors=anchors)
-        self._run_facet_fit(model)
-        self._run_person_fit(model)
+        self._run_facet_fit(model, anchor=_anc)
+        self._run_person_fit(model, anchor=_anc)
         if test_stats:
-            self._run_test_fit(model)
+            self._run_test_fit(model, anchor=_anc, anchors=anchors, seed=seed)
+
+        ll = self._log_likelihood(model, anchor=_anc)
+        setattr(self, f"log_likelihood_{model}", ll)
+        n_items = self.no_of_items
+        K = self.max_score
+        R = self.no_of_facet_elements
+        if model == "mixed":
+            _free = {"global": 1, "items": n_items, "thresholds": K, "bivector": n_items + K - 1, "matrix": n_items * K}
+            rm = getattr(self, "anchor_rater_models", None) if anchors is not None else None
+            rm = rm if rm is not None else self.rater_models
+            k = (n_items - 1) + (K - 1) + (R - 1) * sum(_free[rm[r]] for r in self.facet_names) / R
+        else:
+            k = {
+                "global":     (n_items - 1) + (K - 1) + (R - 1),
+                "items":      (n_items - 1) + (K - 1) + n_items * (R - 1),
+                "thresholds": (n_items - 1) + (K - 1) + K * (R - 1),
+                "matrix":     (n_items - 1) + (K - 1) + n_items * K * (R - 1),
+                "bivector":   (n_items - 1) + (K - 1) + n_items * (R - 1) + R * (K - 1),
+            }[model]
+        total_scores = self.responses.groupby(level=1).sum().sum(axis=1)
+        max_possible = self.responses.notna().groupby(level=1).sum().sum(axis=1) * self.max_score
+        n_persons = int(((total_scores > 0) & (total_scores < max_possible)).sum())
+        setattr(self, f"aic_{model}", 2 * k - 2 * ll)
+        setattr(self, f"bic_{model}", k * np.log(n_persons) - 2 * ll)
+
+        # Snapshot anchored mixed results keyed by anchor tuple so multiple
+        # anchor sets can be compared without overwriting each other.
+        if model == "mixed" and anchors is not None:
+            from types import SimpleNamespace
+            if not hasattr(self, "anchor_mixed_stats"):
+                self.anchor_mixed_stats = {}
+            ns = SimpleNamespace()
+            for _a, _v in self.__dict__.items():
+                if _a.startswith("anchor_") and _a.endswith("_mixed"):
+                    setattr(ns, _a, _v)
+            for _a in (f"log_likelihood_{model}", f"aic_{model}", f"bic_{model}"):
+                if hasattr(self, _a):
+                    setattr(ns, _a, getattr(self, _a))
+            self.anchor_mixed_stats[tuple(anchors)] = ns
 
     # Backwards-compatible aliases
     def fit_statistics_global(self, **kw):
@@ -3936,6 +4599,781 @@ class MFRM(Rasch):
     def fit_statistics_bivector(self, **kw):
         """Alias for fit_statistics(model='bivector'). See fit_statistics for full documentation."""
         self.fit_statistics(model="bivector", **kw)
+
+    # ------------------------------------------------------------------
+    # Andersen LR test
+    # ------------------------------------------------------------------
+
+    def andersen_lr_test(
+        self,
+        model="global",
+        split_by="ability",
+        warm_corr=True,
+        tolerance=0.00001,
+        max_iters=100,
+        ext_score_adjustment=0.5,
+        constant=0.1,
+        method="cos",
+        matrix_power=3,
+        log_lik_tol=0.000001,
+    ):
+        """
+        Andersen (1973) likelihood ratio test of parameter invariance.
+
+        DISABLED as of 2026-07-06 — see NotImplementedError raised below.
+
+        Splits persons into low and high groups by median ability or total raw
+        score, fits the model separately in each group, and tests whether item
+        and facet parameters are invariant across groups.
+
+        Parameters
+        ----------
+        model : str, default 'global'
+            Rater parameterisation: 'global', 'items', 'thresholds', 'matrix', or 'bivector'.
+        split_by : str, default 'ability'
+            Split criterion: 'ability' (ML person estimates) or 'score' (total raw scores
+            summed across all raters and items).
+        warm_corr : bool, default True
+            Warm bias correction for ability estimates.
+        tolerance, max_iters, ext_score_adjustment : floats
+            Person estimation kwargs passed to group models.
+        constant, method, matrix_power, log_lik_tol : floats
+            Calibration kwargs passed to group models.
+
+        Attributes set
+        --------------
+        andersen_lr_{model} : float
+            Likelihood ratio statistic. Each group's own log-likelihood
+            (the H1 side) is computed by plugging in ability estimates
+            from the pooled (combined-group) model rather than the
+            group's own separately-fit abilities, so the comparison
+            differs from the pooled model only in item/facet parameters —
+            otherwise nuisance ability parameters are re-optimised
+            independently on each side, inflating the statistic beyond
+            what df accounts for.
+        andersen_df_{model} : int
+            Degrees of freedom.
+        andersen_p_{model} : float
+            p-value from chi-squared distribution.
+        andersen_groups_{model} : dict
+            {'low': MFRM, 'high': MFRM} — fitted group models for inspection.
+        andersen_summary_{model} : pandas.Series
+            LR statistic, df, and p-value.
+        """
+        raise NotImplementedError(
+            "MFRM.andersen_lr_test() is disabled. A 2026-07-06 simulation study "
+            "(I=5, K=3, R=3, N=100..4000, split_by='ability' and 'score') found "
+            "the LR statistic floors to 0 (p=1.0, 'no misfit') in 58-100% of "
+            "replications depending on model, and this floor rate does NOT "
+            "improve with sample size — it is flat or worse at N=4000 than at "
+            "N=100 for every parameterisation except matrix. Root cause: PAIR "
+            "(Choppin 1968) is a matrix-algebraic pairwise-comparison estimator, "
+            "not a likelihood method of any kind (not even pseudo-likelihood) — "
+            "it does not maximise the Rasch response likelihood that "
+            "_log_likelihood() evaluates afterward. An LR test requires both "
+            "the restricted and unrestricted models to be fit by maximising the "
+            "same likelihood surface, so that the unrestricted model's "
+            "log-likelihood is guaranteed >= the restricted model's. PAIR gives "
+            "no such guarantee, and there is no reason to expect the gap to "
+            "shrink with more data, since PAIR was never targeting the "
+            "likelihood surface. This method will be re-enabled once MFRM "
+            "supports a genuine (C)ML calibration path for use in this test. "
+            "For rater-parameterisation comparisons (not group-invariance "
+            "testing), use model_selection() instead, which is unaffected."
+        )
+
+    def andersen_lr_test_global(self, **kw):
+        """Alias for andersen_lr_test(model='global'). See andersen_lr_test for full documentation."""
+        self.andersen_lr_test(model="global", **kw)
+
+    def andersen_lr_test_items(self, **kw):
+        """Alias for andersen_lr_test(model='items'). See andersen_lr_test for full documentation."""
+        self.andersen_lr_test(model="items", **kw)
+
+    def andersen_lr_test_thresholds(self, **kw):
+        """Alias for andersen_lr_test(model='thresholds'). See andersen_lr_test for full documentation."""
+        self.andersen_lr_test(model="thresholds", **kw)
+
+    def andersen_lr_test_matrix(self, **kw):
+        """Alias for andersen_lr_test(model='matrix'). See andersen_lr_test for full documentation."""
+        self.andersen_lr_test(model="matrix", **kw)
+
+    def andersen_lr_test_bivector(self, **kw):
+        """Alias for andersen_lr_test(model='bivector'). See andersen_lr_test for full documentation."""
+        self.andersen_lr_test(model="bivector", **kw)
+
+    # ------------------------------------------------------------------
+    # Model selection — rater parameterisation comparison
+    # ------------------------------------------------------------------
+
+    def model_selection(
+        self,
+        test="AIC",
+        aic_sig_test=True,
+        alpha=0.05,
+        sampling="dynamic",
+        warm_corr=True,
+        tolerance=0.00001,
+        max_iters=100,
+        ext_score_adjustment=0.5,
+        constant=0.1,
+        method="cos",
+        matrix_power=3,
+        log_lik_tol=0.000001,
+        seed=None,
+    ):
+        """
+        Compare the five MFRM rater parameterisations using AIC, BIC, or LR.
+
+        Calibrates all five models (global, items, thresholds, bivector, matrix)
+        if not already done, computes the log-likelihood for each, and ranks
+        them by the chosen criterion.
+
+        Parameters
+        ----------
+        test : str, default 'AIC'
+            Criterion: 'AIC', 'BIC', or 'LR'. For 'LR', nested pairwise tests
+            are computed (global vs each alternative, bivector vs matrix).
+        aic_sig_test : bool, default True
+            When True and test='AIC': applies a significance test with global
+            as the null. p = e^(-|Δ|/2) where Δ = AIC_global - AIC_best.
+            A more complex model is preferred only if p < alpha; otherwise global
+            is retained.
+        alpha : float, default 0.05
+            Significance level for the AIC relative-likelihood test
+            (used only when test='AIC' and aic_sig_test=True).
+        sampling : None, 'dynamic', or int, default 'dynamic'
+            Subsamples non-extreme persons before LL computation (parameters
+            estimated on full data; only the LL evaluation is subsampled).
+            'dynamic' uses T = min(20*(I-1)*(R-1), 1500); an integer fixes T
+            directly; None disables. n_ll (= T when triggered) is used in
+            BIC's ln(n) term.
+        warm_corr, tolerance, max_iters, ext_score_adjustment : floats
+            Person estimation kwargs.
+        constant, method, matrix_power, log_lik_tol : floats
+            Calibration kwargs.
+        seed : int or None, default None
+            Seed for the person subsampling RNG (only used when sampling
+            triggers). Pass an int for reproducible LL evaluation; None
+            (default) draws fresh entropy.
+
+        Attributes set (AIC with aic_sig_test=True)
+        --------------------------------------------
+        model_comparison_mfrm_aic : dict  {model: AIC value}
+        model_comparison_mfrm_aic_p : float  relative likelihood p-value vs global
+        model_comparison_mfrm_aic_preferred : str  preferred model name
+        model_comparison_mfrm_aic_summary : pd.DataFrame  ranked comparison table
+
+        Attributes set (BIC)
+        --------------------
+        model_comparison_mfrm_bic : dict  {model: BIC value}
+        model_comparison_mfrm_bic_preferred : str
+        model_comparison_mfrm_bic_summary : pd.DataFrame
+
+        Attributes set (LR)
+        -------------------
+        model_comparison_mfrm_lr : dict  {pair_label: (LR, df, p)}
+        model_comparison_mfrm_lr_summary : pd.DataFrame
+        """
+        if test not in ("LR", "AIC", "BIC"):
+            raise ValueError("test must be 'LR', 'AIC', or 'BIC'")
+        if sampling is not None and sampling != "dynamic" and not isinstance(sampling, int):
+            raise ValueError("sampling must be None, 'dynamic', or an integer")
+
+        n_items = self.no_of_items
+        m = self.max_score
+        R = self.no_of_facet_elements
+
+        # Free parameter counts for each model
+        shared_k = (n_items - 1) + (m - 1)
+        rater_k = {
+            "global":     R - 1,
+            "items":      n_items * (R - 1),
+            "thresholds": m * (R - 1),
+            "bivector":   (n_items + m - 1) * (R - 1),
+            "matrix":     n_items * m * (R - 1),
+        }
+        k_model = {mod: shared_k + rater_k[mod] for mod in self._MODELS}
+
+        # Calibrate and person-estimate each model
+        cal_kw = dict(constant=constant, method=method,
+                      matrix_power=matrix_power, log_lik_tol=log_lik_tol)
+        pe_kw = dict(warm_corr=warm_corr, tolerance=tolerance,
+                     max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
+        for mod in self._MODELS:
+            if not hasattr(self, f"facet_effects_{mod}"):
+                self.calibrate(model=mod, **cal_kw)
+            if not hasattr(self, f"persons_{mod}"):
+                self.person_estimates(model=mod, **pe_kw)
+
+        # Non-extreme persons (aggregate total score across all raters)
+        total_scores = self.responses.groupby(level=1).sum().sum(axis=1)
+        max_possible = (
+            self.responses.notna().groupby(level=1).sum().sum(axis=1) * m
+        )
+        non_extreme_mask = (total_scores > 0) & (total_scores < max_possible)
+        n_persons = int(non_extreme_mask.sum())
+
+        # Determine LL responses (optional subsampling of persons)
+        ll_responses = None
+        n_ll = n_persons
+        if sampling is not None:
+            T = (
+                min(20 * (n_items - 1) * (R - 1), 1500)
+                if sampling == "dynamic"
+                else int(sampling)
+            )
+            if n_persons > T:
+                rng = np.random.default_rng(seed)
+                non_extreme_persons = total_scores.index[non_extreme_mask]
+                sampled_persons = rng.choice(non_extreme_persons, size=T, replace=False)
+                ll_responses = self.responses.loc[
+                    self.responses.index.get_level_values(1).isin(sampled_persons)
+                ]
+                n_ll = T
+
+        # Compute LL for each model
+        ll = {mod: self._log_likelihood(model=mod, responses=ll_responses)
+              for mod in self._MODELS}
+
+        if test == "AIC":
+            aic = {mod: 2 * k_model[mod] - 2 * ll[mod] for mod in self._MODELS}
+            best_mod = min(aic, key=aic.__getitem__)
+            self.model_comparison_mfrm_aic = aic
+
+            summary_rows = {
+                mod: {"LL": ll[mod], "k": k_model[mod], "AIC": aic[mod]}
+                for mod in self._MODELS
+            }
+            summary_df = (
+                pd.DataFrame(summary_rows).T
+                .sort_values("AIC")
+                .rename_axis("Model")
+            )
+
+            if aic_sig_test:
+                delta = aic["global"] - aic[best_mod]
+                aic_p = float(np.exp(-abs(delta) / 2))
+                preferred = best_mod if (delta > 0 and aic_p < alpha) else "global"
+                self.model_comparison_mfrm_aic_p = aic_p
+                self.model_comparison_mfrm_aic_preferred = preferred
+                summary_df["ΔAIC"] = summary_df["AIC"] - aic["global"]
+                self.model_comparison_mfrm_aic_summary = summary_df
+            else:
+                preferred = best_mod
+                self.model_comparison_mfrm_aic_preferred = preferred
+                self.model_comparison_mfrm_aic_summary = summary_df
+
+        elif test == "BIC":
+            bic = {mod: k_model[mod] * np.log(n_ll) - 2 * ll[mod] for mod in self._MODELS}
+            best_mod = min(bic, key=bic.__getitem__)
+            self.model_comparison_mfrm_bic = bic
+            self.model_comparison_mfrm_bic_preferred = best_mod
+            self.model_comparison_mfrm_bic_summary = (
+                pd.DataFrame(
+                    {mod: {"LL": ll[mod], "k": k_model[mod], "BIC": bic[mod]}
+                     for mod in self._MODELS}
+                ).T
+                .sort_values("BIC")
+                .rename_axis("Model")
+            )
+
+        elif test == "LR":
+            # Nested pairs: global < items, global < thresholds, global < bivector,
+            # global < matrix, items < bivector, thresholds < bivector, bivector < matrix
+            nested_pairs = [
+                ("global", "items"),
+                ("global", "thresholds"),
+                ("items", "bivector"),
+                ("thresholds", "bivector"),
+                ("bivector", "matrix"),
+            ]
+            df_map = {
+                ("global", "items"):        (n_items - 1) * (R - 1),
+                ("global", "thresholds"):   (m - 1) * (R - 1),
+                ("items", "bivector"):      (m - 1) * (R - 1),
+                ("thresholds", "bivector"): (n_items - 1) * (R - 1),
+                ("bivector", "matrix"):     (n_items - 1) * (m - 1) * (R - 1),
+            }
+            lr_results = {}
+            for null_mod, alt_mod in nested_pairs:
+                lr_stat = -2 * (ll[null_mod] - ll[alt_mod])
+                if lr_stat < 0:
+                    warnings.warn(
+                        f"LR statistic for {null_mod} vs {alt_mod} is negative "
+                        f"(PAIR approximation) and has been floored at 0.",
+                        UserWarning,
+                    )
+                    lr_stat = 0.0
+                df_val = df_map[(null_mod, alt_mod)]
+                p_val = float(chi2.sf(lr_stat, df_val))
+                label = f"{null_mod} vs {alt_mod}"
+                lr_results[label] = {"LR": lr_stat, "df": df_val, "p-value": p_val}
+
+            self.model_comparison_mfrm_lr = lr_results
+            self.model_comparison_mfrm_lr_summary = (
+                pd.DataFrame(lr_results).T.rename_axis("Comparison")
+            )
+
+    def _rater_ll_from_sev(self, sev_rik, persons, responses_r):
+        """
+        Log-likelihood contribution for one rater given an (I, m) severity array.
+
+        sev_rik : ndarray shape (I, m)
+            Per-threshold severity increments in matrix format — same as the
+            values stored in facet_effects_matrix for one rater. cumsum is
+            applied per item inside this function, matching _cat_probs_mfrm.
+        persons : pd.Series
+            Person ability estimates, already filtered to non-extreme persons.
+        responses_r : pd.DataFrame shape (N, I)
+            All responses for this rater.
+        """
+        thresholds = self.thresholds.values          # (m,)
+        cumtau = np.concatenate([[0.0], np.cumsum(thresholds)])  # (m+1,)
+        diff_arr = self.items.values                  # (I,)
+        cats = np.arange(len(thresholds) + 1, dtype=float)  # (m+1,)
+        ab = persons.values                           # (N,)
+        obs = responses_r.reindex(persons.index).values  # (N, I)
+
+        log_num = np.zeros((len(thresholds) + 1, len(ab), len(diff_arr)))
+        for j in range(len(diff_arr)):
+            ct = cumtau + np.concatenate([[0.0], np.cumsum(sev_rik[j])])
+            log_num[:, :, j] = cats[:, None] * (ab[None, :] - diff_arr[j]) - ct[:, None]
+
+        log_num -= log_num.max(axis=0, keepdims=True)
+        probs = np.exp(log_num)
+        probs /= probs.sum(axis=0, keepdims=True)  # (K+1, N, I)
+
+        valid = ~np.isnan(obs)
+        obs_int = np.where(valid, obs, 0).astype(int)
+        n_idx, i_idx = np.meshgrid(
+            np.arange(obs.shape[0]), np.arange(obs.shape[1]), indexing="ij"
+        )
+        prob_obs = probs[obs_int, n_idx, i_idx]
+        prob_obs[~valid] = np.nan
+        return float(np.nansum(np.log(prob_obs)))
+
+    def per_rater_model_selection(
+        self,
+        anchors=None,
+        test='AIC',
+        aic_sig_test=True,
+        sampling='dynamic',
+        alpha=0.05,
+        min_effect=0,
+        warm_corr=True,
+        tolerance=0.00001,
+        max_iters=100,
+        ext_score_adjustment=0.5,
+        constant=0.1,
+        method="cos",
+        matrix_power=3,
+        log_lik_tol=0.000001,
+        seed=None,
+    ):
+        """
+        Assign the simplest adequate rater parameterisation to each rater.
+
+        Calibrates the matrix model once (full data), derives all restricted
+        parameterisations as marginal means of each rater's matrix parameters,
+        then tests top-down per rater — no refitting at any step.
+
+        Each rater's LL is evaluated over all observations made by that rater
+        (whether persons were single- or multi-marked), filtered to persons
+        non-extreme on that rater's own data. Person abilities come from the
+        full-data matrix-model estimates.
+
+        Testing ladder (top-down):
+          matrix → bivector  (df = (I-1)*(m-1) per rater)
+            if rejected  → assign matrix
+            if accepted  → test both forks simultaneously:
+              bivector → items       (df = m-1)
+              bivector → thresholds  (df = I-1)
+              both pass  → global
+              items only → items
+              thresh only → thresholds
+              neither    → bivector
+
+        Derivations from matrix params σ_{r,i,k} (all via marginal means):
+          bivector  : λ_ri· + λ_r·k  where λ_ri· = mean_k σ_{r,i,k},
+                      λ_r·k = mean_i σ_{r,i,k} − μ_r  (zero-summed)
+          items     : λ_ri·  replicated across thresholds
+          thresholds: mean_i σ_{r,i,k}  replicated across items
+          global    : μ_r = mean_{i,k} σ_{r,i,k}  (scalar, replicated)
+
+        Parameters
+        ----------
+        anchors : list or None, default None
+            Rater identifiers to use as the anchor frame of reference. When
+            provided, the matrix model is calibrated in anchor mode (anchor
+            raters' mean severity fixed to zero) before testing. Different
+            anchor sets give different — all valid — per-rater assignments,
+            because the zero-sum constraint means a non-uniform rater can
+            induce apparent non-uniformity in others. All raters (anchor and
+            non-anchor) are tested; results are stored as
+            anchor_facet_effects_mixed and anchor_rater_models.
+        test : {'AIC', 'BIC', 'LR'}, default 'AIC'
+            Model selection criterion. AIC and BIC pick the minimum across all
+            five models directly. LR uses the top-down ladder (matrix→bivector,
+            then fork to items/thresholds/global) with significance level alpha.
+        aic_sig_test : bool, default True
+            When test='AIC', prefer a model more complex than global only if
+            ΔAIC > 0 (vs global) AND p = exp(-ΔAIC/2) < alpha. Prevents
+            spurious complexity at large n where ΔAIC differences are small.
+        sampling : 'dynamic', int, or None, default 'dynamic'
+            Per-rater subsampling for LL evaluation. 'dynamic' uses
+            T = min(20*(I-1)*(m-1), 1500); an integer fixes T directly;
+            None uses all of each rater's persons. Parameters are always
+            estimated on the full data; only LL evaluation is subsampled.
+            n_r (= T when triggered) is used in BIC's ln(n) term.
+        seed : int or None, default None
+            Seed for the per-rater subsampling RNG (only used when sampling
+            triggers). Pass an int for reproducible LL evaluation; None
+            (default) draws fresh entropy. Note: previously this subsampling
+            was hardcoded to random_state=0 (always deterministic); passing
+            seed=0 restores that exact prior behaviour.
+        alpha : float, default 0.05
+            Significance level. For LR: threshold for accepting a restriction.
+            For AIC with aic_sig_test=True: threshold for the relative likelihood.
+        min_effect : float, default 0
+            Minimum effect size (logits) required to retain a more complex model
+            at each step. The effect is the max absolute difference between the
+            complex and simple model's severity surfaces at that rung:
+              mat→biv: max|interaction terms|
+              biv→items: max|threshold shape λ_r·k|
+              biv→thresholds: max|item deviations λ_ri·|
+              items→global: max|λ_ri·|
+              thresholds→global: max|λ_r·k|
+            For AIC/BIC the gate is applied as a post-hoc walk-back from the
+            selected model toward global. For LR it is an additional condition
+            at each ladder step alongside the p-value. Default 0 disables.
+        warm_corr, tolerance, max_iters, ext_score_adjustment : floats
+            Person estimation kwargs (for matrix model).
+        constant, method, matrix_power, log_lik_tol : floats
+            Calibration kwargs.
+
+        Attributes set (anchors=None)
+        -----------------------------
+        rater_models : pd.Series
+        facet_effects_mixed : pd.DataFrame
+        per_rater_model_selection_table : pd.DataFrame
+        per_rater_model_selection_counts : pd.Series
+
+        Attributes set (anchors provided)
+        ----------------------------------
+        anchor_rater_models : pd.Series
+        anchor_facet_effects_mixed : pd.DataFrame
+        anchor_per_rater_model_selection_table : pd.DataFrame
+        anchor_per_rater_model_selection_counts : pd.Series
+
+        Attributes set (always)
+        ------------------------
+        per_rater_model_selection_runs : dict
+            Every call's rater_models/facet_effects_mixed/table/counts, keyed
+            by tuple(anchors) (or None for an unanchored call), so results
+            from earlier anchors= calls survive later ones with different
+            anchor sets. E.g. mfrm.per_rater_model_selection_runs[tuple(my_anchors_1)].table.
+        """
+        n_items = self.no_of_items
+        m = self.max_score
+        anchored = anchors is not None
+
+        cal_kw = dict(constant=constant, method=method,
+                      matrix_power=matrix_power, log_lik_tol=log_lik_tol)
+        pe_kw = dict(warm_corr=warm_corr, tolerance=tolerance,
+                     max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
+
+        if anchored:
+            # Calibrate matrix model then apply anchor adjustment (one pass).
+            # Re-run if the matrix model hasn't been anchor-calibrated yet, or
+            # was calibrated against a different anchor set.
+            stored = getattr(self, "anchor_rater_names_matrix", None)
+            stale = stored is None or set(stored) != set(anchors)
+            if stale:
+                self.calibrate_anchor(
+                    model="matrix", anchors=anchors, calibrate=True, **cal_kw
+                )
+                self.person_estimates(model="matrix", anchor=True, **pe_kw)
+            elif not hasattr(self, "anchor_persons_matrix"):
+                # anchor_rater_names_matrix matches, but person estimates were
+                # never computed for it (e.g. calibrate_anchor called directly).
+                self.person_estimates(model="matrix", anchor=True, **pe_kw)
+            sev_source = self.anchor_facet_effects_matrix
+            persons_all = self.anchor_persons_matrix
+        else:
+            if not hasattr(self, "facet_effects_matrix"):
+                self.calibrate(model="matrix", **cal_kw)
+            if not hasattr(self, "persons_matrix"):
+                self.person_estimates(model="matrix", **pe_kw)
+            sev_source = self.facet_effects_matrix
+            persons_all = self.persons_matrix
+
+        records = {}
+        for rater in self.facet_names:
+            # All observations made by this rater, single- or multi-marked
+            responses_r = self.responses.loc[rater]  # (N_rater, I)
+
+            # Non-extreme filter on this rater's own data
+            total_r = responses_r.sum(axis=1)
+            max_r = responses_r.notna().sum(axis=1) * m
+            non_extreme_r = (total_r > 0) & (total_r < max_r)
+            persons_r = persons_all.reindex(
+                total_r.index[non_extreme_r]
+            ).dropna()
+            persons_r = persons_r[persons_r.abs() <= 20]
+
+            # Dynamic subsampling for LL evaluation (parameters from full data)
+            if sampling == 'dynamic':
+                T = min(20 * (n_items - 1) * (m - 1), 1500)
+            elif isinstance(sampling, int):
+                T = sampling
+            else:
+                T = None
+            if T is not None and len(persons_r) > T:
+                persons_r = persons_r.sample(T, random_state=seed)
+
+            if len(persons_r) == 0:
+                records[rater] = {"selected_model": "matrix",
+                                  "LL_matrix": np.nan, "LL_bivector": np.nan,
+                                  "LL_items": np.nan, "LL_thresholds": np.nan,
+                                  "LL_global": np.nan}
+                continue
+
+            # Matrix params for this rater: shape (I, m)
+            sev_mat = sev_source.loc[rater].values
+
+            # Marginal decomposition
+            item_means = sev_mat.mean(axis=1)          # λ_ri·  (I,)
+            thresh_means = sev_mat.mean(axis=0)         # mean_i σ_{r,i,k}  (m,)
+            mu_r = sev_mat.mean()                       # overall scalar
+
+            lambda_rk = thresh_means - mu_r                          # zero-summed threshold shape (m,)
+            sev_biv = item_means[:, None] + lambda_rk[None, :]
+            sev_items = np.tile(item_means[:, None], (1, m))
+            sev_thresh = np.tile(thresh_means[None, :], (n_items, 1))
+            sev_global = np.full((n_items, m), mu_r)
+
+            # Step-wise effect sizes: max|complex_sev - simple_sev| at each rung
+            eff_mat_biv = float(np.max(np.abs(sev_mat - sev_biv)))   # interaction
+            eff_biv_itm = float(np.max(np.abs(lambda_rk)))            # threshold shape
+            eff_biv_thr = float(np.max(np.abs(item_means - mu_r)))    # item deviations
+            # items→global and thresholds→global reuse the same quantities
+            eff_itm_glb = eff_biv_thr
+            eff_thr_glb = eff_biv_itm
+
+            ll_mat = self._rater_ll_from_sev(sev_mat,    persons_r, responses_r)
+            ll_biv = self._rater_ll_from_sev(sev_biv,    persons_r, responses_r)
+            ll_itm = self._rater_ll_from_sev(sev_items,  persons_r, responses_r)
+            ll_thr = self._rater_ll_from_sev(sev_thresh, persons_r, responses_r)
+            ll_glb = self._rater_ll_from_sev(sev_global, persons_r, responses_r)
+
+            rec = {
+                "LL_matrix": ll_mat, "LL_bivector": ll_biv,
+                "LL_items": ll_itm, "LL_thresholds": ll_thr, "LL_global": ll_glb,
+            }
+
+            # Per-rater free parameter counts (rater side only)
+            k_map = {"global": 1, "items": n_items, "thresholds": m,
+                     "bivector": n_items + m - 1, "matrix": n_items * m}
+            n_r = len(persons_r)  # subsampled n when sampling triggered
+
+            if test in ("AIC", "BIC"):
+                ll_map = {"global": ll_glb, "items": ll_itm, "thresholds": ll_thr,
+                          "bivector": ll_biv, "matrix": ll_mat}
+                if test == "AIC":
+                    ic = {mod: 2 * k_map[mod] - 2 * ll for mod, ll in ll_map.items()}
+                else:
+                    ic = {mod: k_map[mod] * np.log(n_r) - 2 * ll
+                          for mod, ll in ll_map.items()}
+                rec.update({f"{test}_{mod}": v for mod, v in ic.items()})
+                best = min(ic, key=ic.get)
+                if test == "AIC" and aic_sig_test:
+                    delta = ic["global"] - ic[best]
+                    p_rel = float(np.exp(-abs(delta) / 2))
+                    rec["p_vs_global"] = p_rel
+                    selected = best if (delta > 0 and p_rel < alpha) else "global"
+                else:
+                    selected = best
+                # Effect size walk-back: simplify one rung at a time if effect too small
+                if min_effect > 0 and selected != "global":
+                    if selected == "matrix" and eff_mat_biv < min_effect:
+                        selected = "bivector"
+                    if selected == "bivector":
+                        # small threshold shape → simplify to items
+                        # small item deviation → simplify to thresholds
+                        thresh_shape_ok = eff_biv_itm >= min_effect
+                        item_dev_ok = eff_biv_thr >= min_effect
+                        if not thresh_shape_ok and not item_dev_ok:
+                            selected = "global"
+                        elif not thresh_shape_ok:
+                            selected = "items"  # drop threshold variation
+                        elif not item_dev_ok:
+                            selected = "thresholds"  # drop item variation
+                        # both ok → stay bivector
+                    if selected == "items" and eff_itm_glb < min_effect:
+                        selected = "global"
+                    if selected == "thresholds" and eff_thr_glb < min_effect:
+                        selected = "global"
+
+            else:  # LR — top-down ladder
+                lr_biv = max(0.0, -2.0 * (ll_biv - ll_mat))
+                p_biv = float(chi2.sf(lr_biv, (n_items - 1) * (m - 1)))
+                rec.update({"LR_biv_vs_matrix": lr_biv, "p_biv_vs_matrix": p_biv,
+                            "LR_items_vs_biv": np.nan, "p_items_vs_biv": np.nan,
+                            "LR_thresh_vs_biv": np.nan, "p_thresh_vs_biv": np.nan})
+                if p_biv < alpha or eff_mat_biv < min_effect:
+                    selected = "matrix" if p_biv < alpha else "bivector"
+                else:
+                    lr_itm = max(0.0, -2.0 * (ll_itm - ll_biv))
+                    lr_thr = max(0.0, -2.0 * (ll_thr - ll_biv))
+                    p_itm = float(chi2.sf(lr_itm, m - 1))
+                    p_thr = float(chi2.sf(lr_thr, n_items - 1))
+                    rec.update({"LR_items_vs_biv": lr_itm, "p_items_vs_biv": p_itm,
+                                "LR_thresh_vs_biv": lr_thr, "p_thresh_vs_biv": p_thr})
+                    # items_ok: threshold shape not significant OR not substantial → items model adequate
+                    # thresh_ok: item deviation not significant OR not substantial → thresholds model adequate
+                    items_ok = p_itm >= alpha or eff_biv_itm < min_effect
+                    thresh_ok = p_thr >= alpha or eff_biv_thr < min_effect
+                    if items_ok and thresh_ok:
+                        selected = "global"
+                    elif items_ok:
+                        # threshold shape trivial, item deviations present → items model
+                        selected = "items"
+                        if eff_itm_glb < min_effect:
+                            selected = "global"
+                    elif thresh_ok:
+                        # item deviations trivial, threshold shape present → thresholds model
+                        selected = "thresholds"
+                        if eff_thr_glb < min_effect:
+                            selected = "global"
+                    else:
+                        selected = "bivector"
+
+            rec["selected_model"] = selected
+            records[rater] = rec
+
+        # Build column order: selected_model first, then LLs, then test-specific
+        ll_cols = ["LL_matrix", "LL_bivector", "LL_items", "LL_thresholds", "LL_global"]
+        if test in ("AIC", "BIC"):
+            ic_cols = [f"{test}_{m_}" for m_ in ("matrix", "bivector", "items", "thresholds", "global")]
+            extra_cols = ic_cols + (["p_vs_global"] if test == "AIC" and aic_sig_test else [])
+        else:
+            extra_cols = ["LR_biv_vs_matrix", "p_biv_vs_matrix",
+                          "LR_items_vs_biv", "p_items_vs_biv",
+                          "LR_thresh_vs_biv", "p_thresh_vs_biv"]
+        cols = ["selected_model"] + ll_cols + extra_cols
+        table = pd.DataFrame(records).T.rename_axis("Rater")[cols]
+        rater_models = table["selected_model"]
+
+        # Build facet_effects_mixed in matrix format from assigned models
+        mi = pd.MultiIndex.from_product(
+            [self.facet_names, self.item_names], names=[self.facet, "item"]
+        )
+        rows = []
+        for rater in self.facet_names:
+            sev_mat = sev_source.loc[rater].values  # (I, m)
+            item_means = sev_mat.mean(axis=1)
+            thresh_means = sev_mat.mean(axis=0)
+            mu_r = sev_mat.mean()
+            lambda_rk = thresh_means - mu_r
+            assigned = rater_models[rater]
+            if assigned == "matrix":
+                sev = sev_mat
+            elif assigned == "bivector":
+                sev = item_means[:, None] + lambda_rk[None, :]
+            elif assigned == "items":
+                sev = np.tile(item_means[:, None], (1, m))
+            elif assigned == "thresholds":
+                sev = np.tile(thresh_means[None, :], (n_items, 1))
+            else:  # global
+                sev = np.full((n_items, m), mu_r)
+            rows.extend(sev)
+        mixed_sev = pd.DataFrame(rows, index=mi, columns=range(1, m + 1))
+
+        counts = rater_models.value_counts().rename("Count")
+
+        if anchored:
+            self.anchor_rater_models = rater_models
+            self.anchor_facet_effects_mixed = mixed_sev
+            setattr(self, f"anchor_{self.facets}_mixed", mixed_sev)
+            self.anchor_per_rater_model_selection_table = table
+            self.anchor_per_rater_model_selection_counts = counts
+        else:
+            self.rater_models = rater_models
+            self.facet_effects_mixed = mixed_sev
+            setattr(self, f"{self.facets}_mixed", mixed_sev)
+            self.per_rater_model_selection_table = table
+            self.per_rater_model_selection_counts = counts
+
+        # Snapshot this run keyed by its anchor set (None for unanchored) so
+        # results from different anchors= calls can be recovered later
+        # instead of being overwritten by the next call.
+        from types import SimpleNamespace
+        if not hasattr(self, "per_rater_model_selection_runs"):
+            self.per_rater_model_selection_runs = {}
+        key = tuple(anchors) if anchored else None
+        self.per_rater_model_selection_runs[key] = SimpleNamespace(
+            rater_models=rater_models,
+            facet_effects_mixed=mixed_sev,
+            table=table,
+            counts=counts,
+        )
+
+        return table
+
+    def _apply_rater_models(self, facet_effects_matrix, rater_models):
+        """Derive facet_effects_mixed by applying per-rater model restrictions to matrix estimates.
+
+        Parameters
+        ----------
+        facet_effects_matrix : DataFrame
+            MultiIndex (rater, item) × thresholds, as produced by calibrate(model='matrix').
+        rater_models : Series
+            Per-rater model assignment (index=rater names, values in _MODELS).
+
+        Returns
+        -------
+        DataFrame
+            Same MultiIndex structure as facet_effects_matrix, with each rater's
+            severity values replaced by the marginal-mean projection of their
+            assigned model.
+        """
+        n_items = self.no_of_items
+        m = self.max_score
+        blocks = []
+        for rater in self.facet_names:
+            sev_mat = facet_effects_matrix.loc[rater].values  # (I, m)
+            assigned = rater_models[rater]
+            if assigned == "matrix":
+                sev_r = sev_mat
+            else:
+                item_means = sev_mat.mean(axis=1)    # (I,)
+                thresh_means = sev_mat.mean(axis=0)  # (m,)
+                mu_r = sev_mat.mean()
+                if assigned == "global":
+                    sev_r = np.full((n_items, m), mu_r)
+                elif assigned == "items":
+                    sev_r = np.tile(item_means[:, None], (1, m))
+                elif assigned == "thresholds":
+                    sev_r = np.tile(thresh_means[None, :], (n_items, 1))
+                elif assigned == "bivector":
+                    lambda_rk = thresh_means - mu_r
+                    sev_r = item_means[:, None] + lambda_rk[None, :]
+            blocks.append(
+                pd.DataFrame(
+                    sev_r,
+                    index=self.responses.columns,
+                    columns=range(1, m + 1),
+                )
+            )
+        mi = pd.MultiIndex.from_product(
+            [self.facet_names, self.responses.columns], names=[self.facet, "item"]
+        )
+        return pd.DataFrame(
+            np.vstack([b.values for b in blocks]),
+            index=mi,
+            columns=range(1, m + 1),
+        )
 
     # ------------------------------------------------------------------
     # Residual correlation analysis
@@ -4059,11 +5497,21 @@ class MFRM(Rasch):
             eigenvectors = eigenvalues = variance_explained = loadings = None
         return (correlations, eigenvectors, eigenvalues, variance_explained, loadings)
 
-    def _run_item_res_corr(self, model, **kw):
+    def _run_item_res_corr(self, model, anchors=None, **kw):
         """Internal dispatcher: run item residual correlation analysis for the given model."""
-        if not hasattr(self, f"std_residual_df_{model}"):
-            self.fit_statistics(model=model, **kw)
-        results = self.item_res_corr_analysis(getattr(self, f"std_residual_df_{model}"))
+        _pfx = "anchor_" if anchors is not None else ""
+        attr = f"{_pfx}std_residual_df_{model}"
+        # _anchors_stale cheaply (read-only) reports whether this model/anchor
+        # set is new or changed; only pay for the full fit_statistics pipeline
+        # when it is (or when the residuals haven't been built at all yet) —
+        # this is what restores laziness on repeated calls with unchanged
+        # anchors. Must be read-only here: if this triggered recalibration
+        # itself, fit_statistics' own internal staleness check below would see
+        # no mismatch left and skip invalidating its downstream caches.
+        stale = self._anchors_stale(model, anchors)
+        if stale or not hasattr(self, attr):
+            self.fit_statistics(model=model, anchors=anchors, **kw)
+        results = self.item_res_corr_analysis(getattr(self, attr))
         for name, val in zip(
             [
                 "item_residual_correlations",
@@ -4074,15 +5522,19 @@ class MFRM(Rasch):
             ],
             results,
         ):
-            setattr(self, f"{name}_{model}", val)
+            setattr(self, f"{_pfx}{name}_{model}", val)
 
-    def _run_facet_res_corr(self, model, **kw):
+    def _run_facet_res_corr(self, model, anchors=None, **kw):
         """Internal dispatcher: run facet/rater residual correlation analysis for the given model."""
-        if not hasattr(self, f"std_residual_df_{model}"):
-            self.fit_statistics(model=model, **kw)
+        _pfx = "anchor_" if anchors is not None else ""
+        attr_res = f"{_pfx}residual_df_{model}"
+        attr_std = f"{_pfx}std_residual_df_{model}"
+        stale = self._anchors_stale(model, anchors)
+        if stale or not hasattr(self, attr_std):
+            self.fit_statistics(model=model, anchors=anchors, **kw)
         results = self.facet_res_corr_analysis(
-            getattr(self, f"residual_df_{model}"),
-            getattr(self, f"std_residual_df_{model}"),
+            getattr(self, attr_res),
+            getattr(self, attr_std),
         )
         for name, val in zip(
             [
@@ -4094,7 +5546,7 @@ class MFRM(Rasch):
             ],
             results,
         ):
-            setattr(self, f"{name}_{model}", val)
+            setattr(self, f"{_pfx}{name}_{model}", val)
         self._set_facet_aliases(model)
 
     def item_res_corr_analysis_global(self, **kw):
@@ -4162,9 +5614,37 @@ class MFRM(Rasch):
     # Output tables
     # ------------------------------------------------------------------
 
+    def _anchors_stale(self, model, anchors):
+        """Read-only check: True if `anchors` differs from the anchor set this
+        model was last (anchor-)calibrated with, or if it's never been
+        anchor-calibrated at all. False if anchors is None (unanchored).
+
+        Side-effect-free by design — callers that also need to trigger a
+        recalibration (e.g. _ensure_calibrated) must do that themselves based
+        on the return value, rather than this method doing it implicitly.
+        Deciding staleness by calling _ensure_calibrated as a pre-check would
+        be wrong: it mutates anchor_rater_names_{model} as a side effect, so a
+        second call (e.g. fit_statistics' own internal _ensure_calibrated)
+        would then see no mismatch and skip its own cache invalidation.
+        """
+        if anchors is None:
+            return False
+        name_attr = "anchor_rater_names_matrix" if model == "mixed" else f"anchor_rater_names_{model}"
+        stored = getattr(self, name_attr, None)
+        return stored is None or set(stored) != set(anchors)
+
     def _ensure_calibrated(self, model, **kw):
         """Lazy-load calibration and abilities. SE computation is handled
-        separately by _ensure_se to avoid redundant bootstrap runs."""
+        separately by _ensure_se to avoid redundant bootstrap runs.
+
+        Returns
+        -------
+        stale : bool
+            True if calibration was (re)run because the requested anchors
+            differ from what was last calibrated for this model. Callers with
+            their own downstream caches (e.g. fit_statistics) should treat
+            this as a signal to invalidate them too.
+        """
         calib_kw = {
             k: v
             for k, v in kw.items()
@@ -4175,16 +5655,36 @@ class MFRM(Rasch):
             for k, v in kw.items()
             if k in ("warm_corr", "tolerance", "max_iters", "ext_score_adjustment")
         }
+        sel_kw = {
+            k: v
+            for k, v in kw.items()
+            if k in ("test", "aic_sig_test", "sampling", "alpha", "min_effect", "seed")
+        }
         anchors = kw.get("anchors", None)
 
-        if not hasattr(self, f"facet_effects_{model}"):
+        _anc = anchors is not None
+        _sev_attr = f"{'anchor_' if _anc else ''}facet_effects_{model}"
+        stale = self._anchors_stale(model, anchors)
+        if model == "mixed":
+            # per_rater_model_selection is keyed to whichever anchor set it last
+            # ran with (recorded on anchor_rater_names_matrix); re-run it if
+            # that's missing, stale, or the mixed result hasn't been built yet.
+            if stale or not hasattr(self, _sev_attr):
+                self.per_rater_model_selection(
+                    anchors=anchors, **sel_kw, **calib_kw, **abil_kw
+                )
+        elif not hasattr(self, _sev_attr):
             self.calibrate(model=model, **calib_kw)
-        if anchors is not None:
-            stored = getattr(self, f"anchor_rater_names_{model}", None)
-            if not hasattr(self, f"anchor_rater_names_{model}") or set(stored) != set(anchors):
+        if _anc and model != "mixed":
+            if stale:
                 self.calibrate_anchor(model, anchors, **calib_kw)
-        if not hasattr(self, f"persons_{model}"):
-            self.person_estimates(model=model, **abil_kw)
+        # Re-estimate persons whenever the calibration above was (re)run for a
+        # new/changed anchor set — otherwise abilities would stay pinned to the
+        # previous anchors while item/threshold/severity estimates move to the new one.
+        _persons_attr = f"{'anchor_' if _anc else ''}persons_{model}"
+        if stale or not hasattr(self, _persons_attr):
+            self.person_estimates(model=model, anchor=_anc, **abil_kw)
+        return stale
 
     def _ensure_se(
         self,
@@ -4196,6 +5696,7 @@ class MFRM(Rasch):
         method,
         matrix_power,
         log_lik_tol,
+        seed=None,
     ):
         """Internal helper: compute standard errors (and optionally anchor SEs) if not yet done."""
         anc = anchors is not None
@@ -4206,18 +5707,34 @@ class MFRM(Rasch):
         ci_missing = interval is not None and not hasattr(self, ci_attr)
         if not hasattr(self, trigger) or ci_missing:
             if anc:
-                # Ensure unanchored SEs exist first (anchor_std_errors depends on them)
-                if not hasattr(self, f"threshold_se_{model}"):
+                if model == "mixed":
+                    # Mixed anchored SEs are computed in a single std_errors call
+                    # (anchor shift applied inside the bootstrap loop).
                     self.std_errors(
                         model=model,
+                        anchors=anchors,
                         interval=interval,
                         no_of_samples=no_of_samples,
                         constant=constant,
                         method=method,
                         matrix_power=matrix_power,
                         log_lik_tol=log_lik_tol,
+                        seed=seed,
                     )
-                self.anchor_std_errors(model=model, anchors=anchors)
+                else:
+                    # Ensure unanchored SEs exist first (anchor_std_errors depends on them)
+                    if not hasattr(self, f"threshold_se_{model}"):
+                        self.std_errors(
+                            model=model,
+                            interval=interval,
+                            no_of_samples=no_of_samples,
+                            constant=constant,
+                            method=method,
+                            matrix_power=matrix_power,
+                            log_lik_tol=log_lik_tol,
+                            seed=seed,
+                        )
+                    self.anchor_std_errors(model=model, anchors=anchors, seed=seed)
             else:
                 self.std_errors(
                     model=model,
@@ -4227,6 +5744,7 @@ class MFRM(Rasch):
                     method=method,
                     matrix_power=matrix_power,
                     log_lik_tol=log_lik_tol,
+                    seed=seed,
                 )
 
     def item_stats_df(
@@ -4248,6 +5766,7 @@ class MFRM(Rasch):
         log_lik_tol=0.000001,
         no_of_samples=500,
         interval=None,
+        seed=None,
     ):
         """
         Build and store the item statistics summary table.
@@ -4291,6 +5810,9 @@ class MFRM(Rasch):
             Bootstrap samples for SE estimation.
         interval : float or None, default None
             CI width; if provided, percentile bound columns included.
+        seed : int or None, default None
+            Seed forwarded to the internal std_errors() call. Only used if
+            not already computed. None draws fresh entropy.
 
         Attributes set
         --------------
@@ -4316,6 +5838,7 @@ class MFRM(Rasch):
             tolerance=tolerance,
             max_iters=max_iters,
             ext_score_adjustment=ext_score_adjustment,
+            seed=seed,
         )
         self._ensure_se(
             model,
@@ -4326,6 +5849,7 @@ class MFRM(Rasch):
             method,
             matrix_power,
             log_lik_tol,
+            seed=seed,
         )
         if not hasattr(self, f"item_outfit_ms_{model}"):
             self._run_item_fit(model)
@@ -4410,6 +5934,7 @@ class MFRM(Rasch):
         log_lik_tol=0.000001,
         no_of_samples=500,
         interval=None,
+        seed=None,
     ):
         """
         Build and store the threshold statistics summary table.
@@ -4453,6 +5978,9 @@ class MFRM(Rasch):
             Bootstrap samples.
         interval : float or None, default None
             CI width.
+        seed : int or None, default None
+            Seed forwarded to the internal std_errors() call. Only used if
+            not already computed. None draws fresh entropy.
 
         Attributes set
         --------------
@@ -4477,6 +6005,7 @@ class MFRM(Rasch):
             tolerance=tolerance,
             max_iters=max_iters,
             ext_score_adjustment=ext_score_adjustment,
+            seed=seed,
         )
         self._ensure_se(
             model,
@@ -4487,6 +6016,7 @@ class MFRM(Rasch):
             method,
             matrix_power,
             log_lik_tol,
+            seed=seed,
         )
         if not hasattr(self, f"threshold_outfit_ms_{model}"):
             self._run_threshold_fit(model, anchors=anchors)
@@ -4565,6 +6095,179 @@ class MFRM(Rasch):
     def threshold_stats_df_bivector(self, **kw):
         """Alias for threshold_stats_df(model='bivector'). See threshold_stats_df for full documentation."""
         self.threshold_stats_df(model="bivector", **kw)
+
+    def category_stats_df(
+        self,
+        model="global",
+        anchors=None,
+        dp=3,
+        warm_corr=True,
+        tolerance=0.00001,
+        max_iters=100,
+        ext_score_adjustment=0.5,
+        method="cos",
+        constant=0.1,
+        matrix_power=3,
+        log_lik_tol=0.000001,
+        no_of_samples=500,
+        interval=None,
+        seed=None,
+    ):
+        """
+        Build and store the category width statistics summary table.
+
+        Reports category *widths* (thresholds[k+1] - thresholds[k]) rather
+        than raw threshold locations — see threshold_stats_df for the full
+        rationale: a zero-summed threshold vector has only max_score-1 true
+        degrees of freedom, so the max_score per-threshold SEs threshold_
+        stats_df reports are correlated, not independent, and understate
+        the true uncertainty of the physically meaningful step-structure
+        quantity. self.thresholds (and its anchored counterpart) is shared
+        across all five rater parameterisations, so the reported widths
+        are the same regardless of model= — only their bootstrap SEs can
+        differ, since std_errors() recalibrates the whole model (rater
+        severities included) per resample. Reported *alongside*
+        threshold_stats_df's output, not instead of it — threshold-level
+        SEs remain the expected, standard report.
+
+        Deliberately lighter than threshold_stats_df: no Infit/Outfit or
+        other fit statistics, since those aren't naturally defined for a
+        difference of two threshold locations. Auto-triggers calibration/
+        SE computation via _ensure_calibrated/_ensure_se if not yet run
+        (not the full, heavier fit_statistics()).
+
+        Widths can be negative — a negative width at category k means
+        thresholds k and k+1 are disordered (category k is never the most
+        likely response at any ability level). Prop disordered makes this
+        a continuous diagnostic rather than a single point-estimate
+        yes/no: the proportion of bootstrap resamples in which that
+        category's width was negative — reasonably read as the
+        probability that the true category is disordered.
+
+        Parameters
+        ----------
+        model : str, default 'global'
+            Rater parameterisation. Affects the reported SE (via that
+            model's own bootstrap) but not the Estimate column itself.
+        anchors : list or None, default None
+            Anchor facet_elements. If given, uses anchor_thresholds_{model}
+            and the anchored bootstrap SEs.
+        dp : int, default 3
+            Decimal places.
+        warm_corr, tolerance, max_iters, ext_score_adjustment : floats
+            Person-estimation kwargs, used only if calibration hasn't
+            already been run.
+        method, constant, matrix_power, log_lik_tol : floats
+            Calibration kwargs, used only if calibration hasn't already
+            been run.
+        no_of_samples : int, default 500
+            Bootstrap samples, used only if std_errors() hasn't already
+            been run.
+        interval : float or None, default None
+            CI width. If provided, lower/upper percentile columns are
+            included — but only if std_errors() is triggered by this call
+            or was already run with an interval; it is not retroactively
+            added to an existing SE run made without one.
+        seed : int or None, default None
+            Seed for std_errors(), used only if it hasn't already been
+            run.
+
+        Attributes set
+        --------------
+        category_stats_{model} : pandas.DataFrame
+            Rows Category 1..Category max_score-1 (one fewer row than
+            threshold_stats_{model}). Columns: Estimate (the width
+            itself, can be negative), SE (from cat_width_se_{model} —
+            differenced *within* each bootstrap resample before taking
+            the std, so it already reflects Cov(threshold_k,
+            threshold_{k+1})), CI bounds if interval is not None,
+            Disordered (Estimate < 0), and Prop disordered.
+        """
+        self._ensure_calibrated(
+            model,
+            anchors=anchors,
+            interval=interval,
+            no_of_samples=no_of_samples,
+            constant=constant,
+            method=method,
+            matrix_power=matrix_power,
+            log_lik_tol=log_lik_tol,
+            warm_corr=warm_corr,
+            tolerance=tolerance,
+            max_iters=max_iters,
+            ext_score_adjustment=ext_score_adjustment,
+            seed=seed,
+        )
+        self._ensure_se(
+            model,
+            anchors,
+            interval,
+            no_of_samples,
+            constant,
+            method,
+            matrix_power,
+            log_lik_tol,
+            seed=seed,
+        )
+
+        anc = anchors is not None
+        prefix = "anchor_" if anc else ""
+
+        thresholds = (
+            getattr(self, f"anchor_thresholds_{model}") if anc else self.thresholds
+        )
+        thresholds = pd.Series(np.asarray(thresholds), index=range(1, self.max_score + 1))
+        cat_widths = thresholds.diff().dropna()
+        cat_widths.index = range(1, self.max_score)
+
+        cat_se_dict = getattr(self, f"{prefix}cat_width_se_{model}")
+        cats = sorted(cat_se_dict.keys())
+        cat_idx = [f"Category {k}" for k in cats]
+
+        stats = pd.DataFrame(index=cat_idx)
+        stats["Estimate"] = cat_widths.loc[cats].values.round(dp)
+        stats["SE"] = np.array([cat_se_dict[k] for k in cats]).round(dp)
+
+        lo_attr = f"{prefix}cat_width_low_{model}"
+        hi_attr = f"{prefix}cat_width_high_{model}"
+        if interval is not None and hasattr(self, lo_attr):
+            lo_dict = getattr(self, lo_attr)
+            hi_dict = getattr(self, hi_attr)
+            stats[f"{round((1 - interval) * 50, 1)}%"] = np.array(
+                [lo_dict[k] for k in cats]
+            ).round(dp)
+            stats[f"{round((1 + interval) * 50, 1)}%"] = np.array(
+                [hi_dict[k] for k in cats]
+            ).round(dp)
+
+        stats["Disordered"] = cat_widths.loc[cats].values < 0
+
+        bootstrap_dict = getattr(self, f"{prefix}cat_width_bootstrap_{model}")
+        stats["Prop disordered"] = np.array(
+            [(np.asarray(bootstrap_dict[k]) < 0).mean() for k in cats]
+        ).round(dp)
+
+        setattr(self, f"category_stats_{model}", stats)
+
+    def category_stats_df_global(self, **kw):
+        """Alias for category_stats_df(model='global'). See category_stats_df for full documentation."""
+        self.category_stats_df(model="global", **kw)
+
+    def category_stats_df_items(self, **kw):
+        """Alias for category_stats_df(model='items'). See category_stats_df for full documentation."""
+        self.category_stats_df(model="items", **kw)
+
+    def category_stats_df_thresholds(self, **kw):
+        """Alias for category_stats_df(model='thresholds'). See category_stats_df for full documentation."""
+        self.category_stats_df(model="thresholds", **kw)
+
+    def category_stats_df_matrix(self, **kw):
+        """Alias for category_stats_df(model='matrix'). See category_stats_df for full documentation."""
+        self.category_stats_df(model="matrix", **kw)
+
+    def category_stats_df_bivector(self, **kw):
+        """Alias for category_stats_df(model='bivector'). See category_stats_df for full documentation."""
+        self.category_stats_df(model="bivector", **kw)
 
     def person_stats_df(
         self,
@@ -4713,6 +6416,7 @@ class MFRM(Rasch):
         matrix_power=3,
         log_lik_tol=0.000001,
         no_of_samples=500,
+        seed=None,
     ):
         """
         Build and store the test-level summary statistics table.
@@ -4744,6 +6448,9 @@ class MFRM(Rasch):
             Calibration convergence tolerance.
         no_of_samples : int, default 500
             Bootstrap samples.
+        seed : int or None, default None
+            Seed forwarded to the internal std_errors() call. Only used if
+            not already computed. None draws fresh entropy.
 
         Attributes set
         --------------
@@ -4760,7 +6467,7 @@ class MFRM(Rasch):
             log_lik_tol=log_lik_tol,
         )
         if not hasattr(self, f"psi_{model}"):
-            self._run_test_fit(model)
+            self._run_test_fit(model, seed=seed)
 
         stats = pd.DataFrame(
             {
@@ -4825,6 +6532,12 @@ class MFRM(Rasch):
         log_lik_tol=0.000001,
         no_of_samples=500,
         interval=None,
+        test="AIC",
+        aic_sig_test=True,
+        sampling="dynamic",
+        alpha=0.05,
+        min_effect=0,
+        seed=None,
     ):
         """
         Build and store the facet_element statistics summary table.
@@ -4875,6 +6588,16 @@ class MFRM(Rasch):
             Bootstrap samples.
         interval : float or None, default None
             CI width.
+        test, aic_sig_test, sampling, alpha, min_effect :
+            Only used for model='mixed', and only when per_rater_model_selection
+            hasn't been run yet (or was run with a different anchor set) —
+            forwarded to a lazily-triggered per_rater_model_selection call. See
+            that method for details. If you need non-default values, prefer
+            calling per_rater_model_selection(anchors=..., ...) yourself first.
+        seed : int or None, default None
+            Seed forwarded to the internal std_errors() call (and to the
+            lazily-triggered per_rater_model_selection call for model='mixed').
+            Only used if not already computed. None draws fresh entropy.
 
         Attributes set
         --------------
@@ -4899,6 +6622,12 @@ class MFRM(Rasch):
             tolerance=tolerance,
             max_iters=max_iters,
             ext_score_adjustment=ext_score_adjustment,
+            test=test,
+            aic_sig_test=aic_sig_test,
+            sampling=sampling,
+            alpha=alpha,
+            min_effect=min_effect,
+            seed=seed,
         )
         self._ensure_se(
             model,
@@ -4909,14 +6638,16 @@ class MFRM(Rasch):
             method,
             matrix_power,
             log_lik_tol,
+            seed=seed,
         )
-        if not hasattr(self, f"rater_outfit_ms_{model}"):
-            self._run_facet_fit(model)
-
         anc = anchors is not None
-        rse = getattr(self, f"rater_se_{model}", {})
-        rlo = getattr(self, f"rater_low_{model}", None)
-        rhi = getattr(self, f"rater_high_{model}", None)
+        _pfx = "anchor_" if anc else ""
+        if not hasattr(self, f"{_pfx}rater_outfit_ms_{model}"):
+            self._run_facet_fit(model, anchor=anc)
+
+        rse = getattr(self, f"{_pfx}rater_se_{model}", {})
+        rlo = getattr(self, f"{_pfx}rater_low_{model}", None)
+        rhi = getattr(self, f"{_pfx}rater_high_{model}", None)
 
         if model == "global":
             sev_attr = (
@@ -4943,12 +6674,12 @@ class MFRM(Rasch):
             stats["Count"] = pd.Series(
                 {r: self.responses.xs(r).count().sum() for r in self.facet_names}
             )
-            stats["Infit MS"] = getattr(self, f"rater_infit_ms_{model}").round(dp)
+            stats["Infit MS"] = getattr(self, f"{_pfx}rater_infit_ms_{model}").round(dp)
             if zstd:
-                stats["Infit Z"] = getattr(self, f"rater_infit_zstd_{model}").round(dp)
-            stats["Outfit MS"] = getattr(self, f"rater_outfit_ms_{model}").round(dp)
+                stats["Infit Z"] = getattr(self, f"{_pfx}rater_infit_zstd_{model}").round(dp)
+            stats["Outfit MS"] = getattr(self, f"{_pfx}rater_outfit_ms_{model}").round(dp)
             if zstd:
-                stats["Outfit Z"] = getattr(self, f"rater_outfit_zstd_{model}").round(
+                stats["Outfit Z"] = getattr(self, f"{_pfx}rater_outfit_zstd_{model}").round(
                     dp
                 )
             stats.index = self.facet_names
@@ -4965,6 +6696,7 @@ class MFRM(Rasch):
             hi_attr = f"anchor_rater_high_{model}" if anc else f"rater_high_{model}"
             rlo = getattr(self, lo_attr, None)
             rhi = getattr(self, hi_attr, None)
+            _rm = getattr(self, "anchor_rater_models" if anc else "rater_models", None)
 
             def _ov_stats():
                 """Build the overall rater fit statistics sub-table for the current model."""
@@ -4977,11 +6709,11 @@ class MFRM(Rasch):
                 ov["Count"] = pd.Series(
                     {r: self.responses.xs(r).count().sum() for r in self.facet_names}
                 ).astype(int)
-                ov["Infit MS"] = getattr(self, f"rater_infit_ms_{model}").round(dp)
-                ov["Outfit MS"] = getattr(self, f"rater_outfit_ms_{model}").round(dp)
+                ov["Infit MS"] = getattr(self, f"{_pfx}rater_infit_ms_{model}").round(dp)
+                ov["Outfit MS"] = getattr(self, f"{_pfx}rater_outfit_ms_{model}").round(dp)
                 if zstd:
-                    ov["Infit Z"] = getattr(self, f"rater_infit_zstd_{model}").round(dp)
-                    ov["Outfit Z"] = getattr(self, f"rater_outfit_zstd_{model}").round(
+                    ov["Infit Z"] = getattr(self, f"{_pfx}rater_infit_zstd_{model}").round(dp)
+                    ov["Outfit Z"] = getattr(self, f"{_pfx}rater_outfit_zstd_{model}").round(
                         dp
                     )
                 return ov.T
@@ -5062,6 +6794,68 @@ class MFRM(Rasch):
                         sub["SE"] = mg_se_t.iloc[:, t].values.round(dp)
                     result[key] = sub.T
 
+            elif model == "mixed":
+                se_mi = getattr(self, f"{_pfx}rater_se_mixed", None)
+                if marginal:
+                    # Default: item-marginal + threshold-marginal columns.
+                    # A global rater's item marginals are all equal to its scalar;
+                    # a bivector rater's are its λ vector; matrix shows full variation.
+                    mg_items = severities.mean(axis=1).unstack(level=1).reindex(self.facet_names)
+                    mg_thrs_raw = severities.groupby(level=0).mean().reindex(self.facet_names)
+                    # Centre threshold marginals: subtract per-rater grand mean so they
+                    # sum to 0 across thresholds (consistent with RSM/PCM convention).
+                    # Item marginals retain absolute severity (mu_r already included).
+                    mu_r_series = mg_items.mean(axis=1)   # per-rater grand mean
+                    mg_thrs = mg_thrs_raw.sub(mu_r_series, axis=0)
+                    mg_se_i = (
+                        se_mi.mean(axis=1).unstack(level=1).reindex(self.facet_names)
+                        if se_mi is not None else None
+                    )
+                    mg_se_t = (
+                        se_mi.groupby(level=0).mean().reindex(self.facet_names)
+                        if se_mi is not None else None
+                    )
+                    # Zero SE for structurally zero threshold marginals
+                    if _rm is not None and mg_se_t is not None:
+                        _no_thr = [r for r in self.facet_names
+                                   if _rm.get(r) in ("global", "items")]
+                        if _no_thr:
+                            mg_se_t.loc[_no_thr] = 0.0
+                    for item in self.item_names:
+                        sub = pd.DataFrame(index=self.facet_names)
+                        sub["Estimate"] = mg_items[item].values.round(dp)
+                        if mg_se_i is not None:
+                            sub["SE"] = mg_se_i[item].values.round(dp)
+                        result[item] = sub.T
+                    for t in range(self.max_score):
+                        key = f"Threshold {t + 1}"
+                        sub = pd.DataFrame(index=self.facet_names)
+                        sub["Estimate"] = mg_thrs.iloc[:, t].values.round(dp)
+                        if mg_se_t is not None:
+                            sub["SE"] = mg_se_t.iloc[:, t].values.round(dp)
+                        result[key] = sub.T
+                else:
+                    # Full: all (item, threshold) cells — same layout as matrix marginal=False.
+                    for item in self.item_names:
+                        for t in range(1, self.max_score + 1):
+                            key = f"{item}, Threshold {t}"
+                            sub = pd.DataFrame(index=self.facet_names)
+                            sub["Estimate"] = severities.loc[
+                                (slice(None), item), t
+                            ].values.round(dp)
+                            if se_mi is not None and not se_mi.empty:
+                                sub["SE"] = se_mi.loc[
+                                    (slice(None), item), t
+                                ].values.round(dp)
+                            if interval is not None and rlo is not None:
+                                sub[f"{round((1-interval)*50, 1)}%"] = rlo.loc[
+                                    (slice(None), item), t
+                                ].values.round(dp)
+                                sub[f"{round((1+interval)*50, 1)}%"] = rhi.loc[
+                                    (slice(None), item), t
+                                ].values.round(dp)
+                            result[key] = sub.T
+
             elif model == "matrix":
                 if marginal:
                     mg_i_attr = (
@@ -5137,6 +6931,13 @@ class MFRM(Rasch):
 
             result["Overall statistics"] = _ov_stats()
             stats = pd.concat(result.values(), keys=result.keys()).T
+            if model == "mixed":
+                model_col = pd.DataFrame(
+                    {"": [_rm[r] for r in self.facet_names]},
+                    index=self.facet_names,
+                )
+                model_col.columns = pd.MultiIndex.from_tuples([("Model", "")])
+                stats = pd.concat([model_col, stats], axis=1)
             setattr(self, f"rater_stats_{model}", stats)
         self._set_facet_aliases(model)
 
@@ -5500,7 +7301,7 @@ class MFRM(Rasch):
             return pd.Series(
                 float(severities.loc[facet_element].mean()), index=self.item_names
             )
-        elif model in ("bivector", "matrix"):
+        elif model in ("bivector", "matrix", "mixed"):
             # severities is MultiIndex (facet_element, item) × thresholds
             return severities.loc[facet_element].mean(axis=1)
 
@@ -5513,7 +7314,7 @@ class MFRM(Rasch):
             return pd.DataFrame(0.0, index=severities.index, columns=severities.columns)
         elif model == "thresholds":
             return pd.DataFrame(0.0, index=severities.index, columns=severities.columns)
-        elif model in ("bivector", "matrix"):
+        elif model in ("bivector", "matrix", "mixed"):
             return pd.DataFrame(0.0, index=severities.index, columns=severities.columns)
 
     def _mean_severities(self, model, severities, facet_element):
@@ -5532,7 +7333,7 @@ class MFRM(Rasch):
             result = severities.copy()
             result.loc[facet_element] = severities.mean(axis=0)
             return result
-        elif model in ("bivector", "matrix"):
+        elif model in ("bivector", "matrix", "mixed"):
             result = severities.copy()
             result.loc[facet_element] = severities.groupby(level=1).mean()
             return result
@@ -5988,7 +7789,10 @@ class MFRM(Rasch):
                             if "multi" not in palette
                             else color_map[0]
                         )
-                        ax.plot(x_obs_data, y_obs_data, "o", color=col)
+                        ax.scatter(
+                            x_obs_data, y_obs_data, color=col, s=40, alpha=0.7,
+                            edgecolors="k",
+                        )
                     else:
                         for j in range(y_obs_data.shape[0]):
                             col = (
@@ -5996,7 +7800,10 @@ class MFRM(Rasch):
                                 if "multi" not in palette
                                 else color_map[j]
                             )
-                            ax.plot(x_obs_data, y_obs_data[j, :], "o", color=col)
+                            ax.scatter(
+                                x_obs_data, y_obs_data[j, :], color=col, s=40,
+                                alpha=0.7, edgecolors="k",
+                            )
                 except Exception:
                     pass
 
@@ -6008,7 +7815,10 @@ class MFRM(Rasch):
                             if "multi" not in palette
                             else color_map[j]
                         )
-                        ax.plot(x_obs_data[j, :], y_obs_data[j, :], "o", color=col)
+                        ax.scatter(
+                            x_obs_data[j, :], y_obs_data[j, :], color=col, s=40,
+                            alpha=0.7, edgecolors="k",
+                        )
                 except Exception:
                     pass
 
@@ -6029,7 +7839,7 @@ class MFRM(Rasch):
                         sev_val = 0.0
                     elif model == "thresholds":
                         sev_val = float(severities.loc[r_sc, t + 1])
-                    elif model in ("bivector", "matrix"):
+                    elif model in ("bivector", "matrix", "mixed"):
                         item_key = (
                             items if items is not None else list(self.item_names)[0]
                         )
@@ -6042,7 +7852,7 @@ class MFRM(Rasch):
                         sev_val = float(
                             self._severity_item_offset(model, severities, r_sc).mean()
                         )
-                    xval = diff_val + thresholds[t] + sev_val
+                    xval = diff_val + thresholds[t + 1] + sev_val
                     ax.axvline(x=xval, color="black", linestyle="--")
 
             if central_diff:
@@ -6679,7 +8489,7 @@ class MFRM(Rasch):
             sev_thresh = np.zeros(self.max_score)
         elif model == "thresholds":
             sev_thresh = severities.loc[r_use].values.astype(float)
-        elif model in ("bivector", "matrix"):
+        elif model in ("bivector", "matrix", "mixed"):
             item_key = item if item is not None else list(self.item_names)[0]
             sev_thresh = severities.loc[(r_use, item_key)].values.astype(float)
         elif model == "items" and item is not None:
@@ -7364,3 +9174,6 @@ class MFRM(Rasch):
     def std_residuals_plot_bivector(self, **kw):
         """Alias for std_residuals_plot(model='bivector'). See std_residuals_plot for full documentation."""
         return self.std_residuals_plot(model="bivector", **kw)
+
+
+_copy_alias_docstrings(MFRM)

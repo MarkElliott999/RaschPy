@@ -12,7 +12,7 @@ class PCM_Sim(Rasch_Sim):
     Simulate polytomous response data according to the Partial Credit Model (PCM).
 
     Generates item difficulties, per-item Rasch-Andrich thresholds, and person
-    abilities, then computes category probabilities and samples scores. Unlike
+    locations, then computes category probabilities and samples scores. Unlike
     the RSM, each item has its own independent threshold structure. Simulation
     runs automatically on instantiation; access results via self.responses.
 
@@ -31,26 +31,28 @@ class PCM_Sim(Rasch_Sim):
         Base width of each rating category per item. Larger values produce
         wider, more ordered categories.
     person_sd : float, default 1.5
-        Standard deviation of the person ability distribution (normal).
+        Standard deviation of the person location distribution (normal).
     max_disorder : float, default 0
         Maximum threshold disorder per item. 0 produces perfectly ordered
         thresholds; values > 0 introduce random disordering.
     offset : float, default 0
-        Mean shift applied to person abilities after centring.
+        Mean shift applied to person locations after centring.
     missing : float, default 0
         Proportion of responses to set as missing at random, in [0, 1).
-    manual_abilities : array-like or None, default None
-        Custom person abilities. Length must equal no_of_persons.
-    manual_diffs : array-like or None, default None
+    manual_persons : array-like or None, default None
+        Custom person measures. Length must equal no_of_persons.
+    manual_items : array-like or None, default None
         Custom item difficulties. Length must equal no_of_items.
     manual_thresholds : list of array-like or None, default None
         Custom per-item threshold vectors. Must be a list of no_of_items
-        arrays, each of length max_score_vector[i] + 1, beginning with 0
-        and summing to 0.
+        arrays, each of length max_score_vector[i] and summing to 0.
     manual_person_names : list of str or None, default None
         Custom person labels. If None, labels are 'Person_1', 'Person_2', etc.
     manual_item_names : list of str or None, default None
         Custom item labels. If None, labels are 'Item_1', 'Item_2', etc.
+    seed : int or None, default None
+        Seed for the random number generator. Pass an int for a fully
+        reproducible simulation; None (default) draws fresh entropy each run.
 
     Attributes set
     --------------
@@ -58,7 +60,7 @@ class PCM_Sim(Rasch_Sim):
         Simulated response matrix, shape (no_of_persons, no_of_items).
         Values are integers in [0, max_score_vector[i]] or NaN (missing).
     persons : pandas.Series
-        True person ability parameters, indexed by person.
+        True person location parameters, indexed by person.
     items : pandas.Series
         True item difficulty parameters (central difficulties), indexed by item.
     thresholds : dict
@@ -92,11 +94,12 @@ class PCM_Sim(Rasch_Sim):
         max_disorder=0,
         offset=0,
         missing=0,
-        manual_abilities=None,
-        manual_diffs=None,
+        manual_persons=None,
+        manual_items=None,
         manual_thresholds=None,
         manual_person_names=None,
         manual_item_names=None,
+        seed=None,
     ):
         """
         Instantiate and run a PCM simulation.
@@ -106,6 +109,7 @@ class PCM_Sim(Rasch_Sim):
         instance attributes; see self.responses for the primary output.
         """
 
+        self._rng = np.random.default_rng(seed)
         self.no_of_items = int(no_of_items)
         self.no_of_persons = int(no_of_persons)
         self.item_range = item_range
@@ -115,8 +119,8 @@ class PCM_Sim(Rasch_Sim):
         self.max_disorder = max_disorder
         self.offset = offset
         self.missing = missing
-        self.persons = manual_abilities
-        self.items = manual_diffs
+        self.persons = manual_persons
+        self.items = manual_items
         self.person_names = manual_person_names
         self.item_names = manual_item_names
         self._dummy_df = pd.DataFrame([1])
@@ -146,18 +150,18 @@ class PCM_Sim(Rasch_Sim):
             ]
 
         if self.persons is None:
-            self.persons = np.random.normal(0, self.person_sd, self.no_of_persons)
+            self.persons = self._rng.normal(0, self.person_sd, self.no_of_persons)
             self.persons -= np.mean(self.persons)
             self.persons += self.offset
 
         else:
             assert (
                 len(self.persons) == self.no_of_persons
-            ), "Length of manual abilities must match number of persons."
+            ), "Length of manual persons must match number of persons."
             self.persons = np.array(self.persons)
 
         self.persons = {
-            person: ability for person, ability in zip(self.person_names, self.persons)
+            person: location for person, location in zip(self.person_names, self.persons)
         }
         self.persons = pd.Series(self.persons)
 
@@ -168,7 +172,7 @@ class PCM_Sim(Rasch_Sim):
             self.item_names = [f"Item_{item + 1}" for item in range(self.no_of_items)]
 
         if self.items is None:
-            self.items = np.random.uniform(0, 1, self.no_of_items)
+            self.items = self._rng.uniform(0, 1, self.no_of_items)
             self.items *= self.item_range / (np.max(self.items) - np.min(self.items))
             self.items -= np.mean(self.items)
 
@@ -187,7 +191,7 @@ class PCM_Sim(Rasch_Sim):
         if manual_thresholds is None:
 
             category_widths = {
-                item: np.random.uniform(
+                item: self._rng.uniform(
                     self.max_disorder,
                     2 * self.category_base - self.max_disorder,
                     max_score - 1,
@@ -213,12 +217,12 @@ class PCM_Sim(Rasch_Sim):
                 len(manual_thresholds) == self.no_of_items
             ), "No of sets of manual thresholds must match number of items."
             for item in range(no_of_items):
-                assert len(manual_thresholds[item]) == self.max_score_vector[item], (
+                assert len(manual_thresholds[item]) == self.max_score_vector.iloc[item], (
                     "All sets of item thresholds "
                     + "in manual thresholds must be max score vector for the corresponding item."
                 )
             for item in range(no_of_items):
-                assert sum(manual_thresholds[item]) == 0, (
+                assert np.isclose(sum(manual_thresholds[item]), 0), (
                     "All sets of item thresholds in manual thresholds must "
                     + "sum to zero."
                 )

@@ -99,6 +99,17 @@ def flatten_columns(df):
     return df
 
 
+def flatten_multiindex_rows(df):
+    """Flatten a 2-level MultiIndex row index (e.g. PCM's threshold_dif_table,
+    indexed by (Item, Threshold)) to a single 'Item__Threshold' string index,
+    so it round-trips through save_df/load_df/assert_df (which only support
+    a single-column row index)."""
+    flat = df.copy()
+    flat.index = [f'{a}__{b}' for a, b in flat.index]
+    flat.index.name = '__'.join(str(n) for n in df.index.names)
+    return flat
+
+
 def save_df(df, path):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     flatten_columns(df).to_csv(path)
@@ -286,15 +297,14 @@ def save_plot_fixtures(plot_calls, base):
 # ── SLM ───────────────────────────────────────────────────────────────────────
 
 def build_slm():
-    np.random.seed(SIM_SEED)
-    sim = SLM_Sim(no_of_items=N_ITEMS, no_of_persons=N_PERSONS)
+    sim = SLM_Sim(no_of_items=N_ITEMS, no_of_persons=N_PERSONS, seed=SIM_SEED)
     m   = rp.SLM(sim.responses)
     m.calibrate()
-    m.item_stats_df()
+    m.item_stats_df(seed=SIM_SEED)
     m.person_stats_df()
-    m.test_stats_df()
+    m.test_stats_df(seed=SIM_SEED)
     m.person_estimates()
-    m.std_errors(no_of_samples=100)
+    m.std_errors(no_of_samples=100, seed=SIM_SEED)
     return m
 
 
@@ -336,19 +346,54 @@ def assert_slm(m, verbose):
     run_plot_checks(slm_plot_calls(m), base, verbose)
 
 
+def build_slm_dif():
+    """Second SLM instance carrying a synthetic exogenous covariate, for
+    dif_test()/andersen_lr_test(split_by='exogenous') regression coverage.
+    All randomness is now explicitly seeded via seed=SIM_SEED arguments
+    (sim generation, dif_test's bootstrap); andersen_lr_test has no
+    randomness of its own."""
+    sim = SLM_Sim(no_of_items=N_ITEMS, no_of_persons=N_PERSONS, seed=SIM_SEED)
+    group_rng = np.random.default_rng(SIM_SEED)
+    exogenous = pd.DataFrame(
+        {'Group': group_rng.choice(['A', 'B'], size=N_PERSONS)},
+        index=sim.responses.index,
+    )
+    m = rp.SLM(sim.responses, exogenous=exogenous)
+    m.calibrate()
+
+    m.andersen_lr_test(split_by='exogenous', covariate='Group')
+
+    m.dif_test('Group', reference='A', no_of_samples=100, seed=SIM_SEED)
+    return m
+
+
+def generate_slm_dif(m):
+    base = os.path.join(FIXTURE_DIR, 'slm')
+    save_df(m.dif_table, os.path.join(base, 'dif_table.csv'))
+    save_series(m.andersen_summary, os.path.join(base, 'dif_andersen_summary.csv'))
+    print('  DIF fixtures saved → regression_data/slm/')
+
+
+def assert_slm_dif(m, verbose):
+    base = os.path.join(FIXTURE_DIR, 'slm')
+    assert_df('[SLM] dif_table', m.dif_table,
+              os.path.join(base, 'dif_table.csv'), verbose)
+    assert_series('[SLM] dif_andersen_summary', m.andersen_summary,
+                  os.path.join(base, 'dif_andersen_summary.csv'), verbose)
+
+
 # ── PCM ───────────────────────────────────────────────────────────────────────
 
 def build_pcm():
-    np.random.seed(SIM_SEED)
     sim = PCM_Sim(no_of_items=N_ITEMS, no_of_persons=N_PERSONS,
-                  max_score_vector=MAX_SCORE_VEC)
+                  max_score_vector=MAX_SCORE_VEC, seed=SIM_SEED)
     m   = rp.PCM(sim.responses, max_score_vector=MAX_SCORE_VEC)
     m.calibrate()
-    m.item_stats_df()
+    m.item_stats_df(seed=SIM_SEED)
     m.person_stats_df()
-    m.test_stats_df()
+    m.test_stats_df(seed=SIM_SEED)
     m.person_estimates()
-    m.std_errors(no_of_samples=100)
+    m.std_errors(no_of_samples=100, seed=SIM_SEED)
     return m
 
 
@@ -398,19 +443,59 @@ def assert_pcm(m, verbose):
     run_plot_checks(pcm_plot_calls(m), base, verbose)
 
 
+def build_pcm_dif():
+    """Second PCM instance carrying a synthetic exogenous covariate, for
+    dif_test()/andersen_lr_test(split_by='exogenous') regression coverage.
+    All randomness is now explicitly seeded via seed=SIM_SEED arguments
+    (sim generation, dif_test's bootstrap); andersen_lr_test has no
+    randomness of its own."""
+    sim = PCM_Sim(no_of_items=N_ITEMS, no_of_persons=N_PERSONS,
+                  max_score_vector=MAX_SCORE_VEC, seed=SIM_SEED)
+    group_rng = np.random.default_rng(SIM_SEED)
+    exogenous = pd.DataFrame(
+        {'Group': group_rng.choice(['A', 'B'], size=N_PERSONS)},
+        index=sim.responses.index,
+    )
+    m = rp.PCM(sim.responses, max_score_vector=MAX_SCORE_VEC, exogenous=exogenous)
+    m.calibrate()
+
+    m.andersen_lr_test(split_by='exogenous', covariate='Group')
+
+    m.dif_test('Group', reference='A', no_of_samples=100, seed=SIM_SEED)
+    return m
+
+
+def generate_pcm_dif(m):
+    base = os.path.join(FIXTURE_DIR, 'pcm')
+    save_df(m.dif_table, os.path.join(base, 'dif_table.csv'))
+    save_df(flatten_multiindex_rows(m.threshold_dif_table),
+            os.path.join(base, 'threshold_dif_table.csv'))
+    save_series(m.andersen_summary, os.path.join(base, 'dif_andersen_summary.csv'))
+    print('  DIF fixtures saved → regression_data/pcm/')
+
+
+def assert_pcm_dif(m, verbose):
+    base = os.path.join(FIXTURE_DIR, 'pcm')
+    assert_df('[PCM] dif_table', m.dif_table,
+              os.path.join(base, 'dif_table.csv'), verbose)
+    assert_df('[PCM] threshold_dif_table', flatten_multiindex_rows(m.threshold_dif_table),
+              os.path.join(base, 'threshold_dif_table.csv'), verbose)
+    assert_series('[PCM] dif_andersen_summary', m.andersen_summary,
+                  os.path.join(base, 'dif_andersen_summary.csv'), verbose)
+
+
 # ── RSM ───────────────────────────────────────────────────────────────────────
 
 def build_rsm():
-    np.random.seed(SIM_SEED)
     sim = RSM_Sim(no_of_items=N_ITEMS, no_of_persons=N_PERSONS,
-                  max_score=MAX_SCORE)
+                  max_score=MAX_SCORE, seed=SIM_SEED)
     m   = rp.RSM(sim.responses, max_score=MAX_SCORE)
     m.calibrate()
-    m.item_stats_df()
+    m.item_stats_df(seed=SIM_SEED)
     m.person_stats_df()
-    m.test_stats_df()
+    m.test_stats_df(seed=SIM_SEED)
     m.person_estimates()
-    m.std_errors(no_of_samples=100)
+    m.std_errors(no_of_samples=100, seed=SIM_SEED)
     return m
 
 
@@ -476,28 +561,67 @@ def assert_rsm(m, verbose):
     run_plot_checks(rsm_plot_calls(m), base, verbose)
 
 
+def build_rsm_dif():
+    """Second RSM instance carrying a synthetic exogenous covariate, for
+    dif_test()/andersen_lr_test(split_by='exogenous') regression coverage.
+    All randomness is now explicitly seeded via seed=SIM_SEED arguments
+    (sim generation, dif_test's bootstrap); andersen_lr_test has no
+    randomness of its own."""
+    sim = RSM_Sim(no_of_items=N_ITEMS, no_of_persons=N_PERSONS,
+                  max_score=MAX_SCORE, seed=SIM_SEED)
+    group_rng = np.random.default_rng(SIM_SEED)
+    exogenous = pd.DataFrame(
+        {'Group': group_rng.choice(['A', 'B'], size=N_PERSONS)},
+        index=sim.responses.index,
+    )
+    m = rp.RSM(sim.responses, max_score=MAX_SCORE, exogenous=exogenous)
+    m.calibrate()
+
+    m.andersen_lr_test(split_by='exogenous', covariate='Group')
+
+    m.dif_test('Group', reference='A', no_of_samples=100, seed=SIM_SEED)
+    return m
+
+
+def generate_rsm_dif(m):
+    base = os.path.join(FIXTURE_DIR, 'rsm')
+    save_df(m.dif_table, os.path.join(base, 'dif_table.csv'))
+    save_df(m.threshold_dif_table, os.path.join(base, 'threshold_dif_table.csv'))
+    save_series(m.andersen_summary, os.path.join(base, 'dif_andersen_summary.csv'))
+    print('  DIF fixtures saved → regression_data/rsm/')
+
+
+def assert_rsm_dif(m, verbose):
+    base = os.path.join(FIXTURE_DIR, 'rsm')
+    assert_df('[RSM] dif_table', m.dif_table,
+              os.path.join(base, 'dif_table.csv'), verbose)
+    assert_df('[RSM] threshold_dif_table', m.threshold_dif_table,
+              os.path.join(base, 'threshold_dif_table.csv'), verbose)
+    assert_series('[RSM] dif_andersen_summary', m.andersen_summary,
+                  os.path.join(base, 'dif_andersen_summary.csv'), verbose)
+
+
 # ── MFRM ─────────────────────────────────────────────────────────────────────
 
 def build_mfrm(sim_cls, model_name):
-    np.random.seed(SIM_SEED)
     sim = sim_cls(no_of_items=N_ITEMS, no_of_persons=N_PERSONS,
                   no_of_raters=N_RATERS, max_score=MAX_SCORE,
-                  facet_range=RATER_RANGE)
+                  facet_range=RATER_RANGE, seed=SIM_SEED)
     m = rp.MFRM(sim.responses, max_score=MAX_SCORE)
     m.calibrate(model=model_name)
-    m.item_stats_df(model=model_name)
-    m.threshold_stats_df(model=model_name)
+    m.item_stats_df(model=model_name, seed=SIM_SEED)
+    m.threshold_stats_df(model=model_name, seed=SIM_SEED)
     m.person_stats_df(model=model_name)
-    m.test_stats_df(model=model_name)
-    m.rater_stats_df(model=model_name, marginal=True)
+    m.test_stats_df(model=model_name, seed=SIM_SEED)
+    m.rater_stats_df(model=model_name, marginal=True, seed=SIM_SEED)
     if model_name == 'matrix':
-        m.rater_stats_df(model=model_name, marginal=False)
+        m.rater_stats_df(model=model_name, marginal=False, seed=SIM_SEED)
     m.person_estimates(model=model_name)
-    m.std_errors(model=model_name, no_of_samples=100)
+    m.std_errors(model=model_name, no_of_samples=100, seed=SIM_SEED)
     # Anchor: use first two raters
     anchors = list(m.rater_names[:2])
     m.calibrate_anchor(model=model_name, anchors=anchors)
-    m.anchor_std_errors(model=model_name)
+    m.anchor_std_errors(model=model_name, seed=SIM_SEED)
     return m
 
 
@@ -668,6 +792,16 @@ def run_slm(generate=False, verbose=False):
     else:
         assert_slm(m, verbose)
 
+    try:
+        m_dif = build_slm_dif()
+    except Exception:
+        check('[SLM] DIF build', False, traceback.format_exc())
+        return
+    if generate:
+        generate_slm_dif(m_dif)
+    else:
+        assert_slm_dif(m_dif, verbose)
+
 
 def run_pcm(generate=False, verbose=False):
     section('PCM')
@@ -681,6 +815,16 @@ def run_pcm(generate=False, verbose=False):
     else:
         assert_pcm(m, verbose)
 
+    try:
+        m_dif = build_pcm_dif()
+    except Exception:
+        check('[PCM] DIF build', False, traceback.format_exc())
+        return
+    if generate:
+        generate_pcm_dif(m_dif)
+    else:
+        assert_pcm_dif(m_dif, verbose)
+
 
 def run_rsm(generate=False, verbose=False):
     section('RSM')
@@ -693,6 +837,16 @@ def run_rsm(generate=False, verbose=False):
         generate_rsm(m)
     else:
         assert_rsm(m, verbose)
+
+    try:
+        m_dif = build_rsm_dif()
+    except Exception:
+        check('[RSM] DIF build', False, traceback.format_exc())
+        return
+    if generate:
+        generate_rsm_dif(m_dif)
+    else:
+        assert_rsm_dif(m_dif, verbose)
 
 
 def run_mfrm(generate=False, verbose=False):
@@ -713,15 +867,14 @@ def run_mfrm(generate=False, verbose=False):
 # ── Bivector: parameter recovery and consistency ──────────────────────────────
 
 def build_bivector():
-    np.random.seed(SIM_SEED)
     sim = MFRM_Sim_Bivector(
         no_of_items=N_ITEMS, no_of_persons=N_PERSONS,
-        no_of_raters=N_RATERS, max_score=MAX_SCORE,
+        no_of_raters=N_RATERS, max_score=MAX_SCORE, seed=SIM_SEED,
     )
     m = rp.MFRM(sim.responses, max_score=MAX_SCORE)
     m.calibrate(model='bivector')
     m.person_estimates(model='bivector')
-    m.fit_statistics(model='bivector')
+    m.fit_statistics(model='bivector', seed=SIM_SEED)
     return sim, m
 
 
@@ -738,21 +891,20 @@ def generate_bivector(sim, m):
     for r in m.rater_names:
         for item in m.item_names:
             true_item.append(sim.item_effects.loc[r, item])
-            est_item.append(m.raters_bivector_items.loc[r, item])
+            est_item.append(m.facet_effects_bivector_items.loc[r, item])
     r_item, _ = pearsonr(true_item, est_item)
     true_thresh, est_thresh = [], []
     for r in m.rater_names:
         true_thresh.extend(sim.threshold_effects.loc[r].values.tolist())
-        est_thresh.extend(m.raters_bivector_thresholds.loc[r].values.tolist())
+        est_thresh.extend(m.facet_effects_bivector_thresholds.loc[r].values.tolist())
     r_thresh, _ = pearsonr(true_thresh, est_thresh)
     with open(os.path.join(base, 'recovery.json'), 'w') as f:
         import json
         json.dump({'r_item': r_item, 'r_thresh': r_thresh}, f)
     # Consistency vs matrix
-    np.random.seed(SIM_SEED)
     sim2 = MFRM_Sim_Bivector(
         no_of_items=N_ITEMS, no_of_persons=N_PERSONS,
-        no_of_raters=N_RATERS, max_score=MAX_SCORE,
+        no_of_raters=N_RATERS, max_score=MAX_SCORE, seed=SIM_SEED,
     )
     m_mat = rp.MFRM(sim2.responses, max_score=MAX_SCORE)
     m_mat.calibrate(model='matrix')
@@ -779,7 +931,7 @@ def assert_bivector(sim, m, verbose=False):
     for r in m.rater_names:
         for item in m.item_names:
             true_item.append(sim.item_effects.loc[r, item])
-            est_item.append(m.raters_bivector_items.loc[r, item])
+            est_item.append(m.facet_effects_bivector_items.loc[r, item])
     r_item, _ = pearsonr(true_item, est_item)
     check('[Bivector] item effect recovery r >= 0.85',
           r_item >= RECOVERY_R_MIN, f'r={r_item:.3f}', verbose)
@@ -789,19 +941,18 @@ def assert_bivector(sim, m, verbose=False):
 
     # Zero-sum constraint: across raters per item and per threshold
     for item in m.item_names:
-        s = sum(m.raters_bivector_items.loc[r, item] for r in m.rater_names)
+        s = sum(m.facet_effects_bivector_items.loc[r, item] for r in m.rater_names)
         check(f'[Bivector] item cross-rater sum ~ 0 ({item})',
               abs(s) < 0.01, f'sum={s:.6f}', verbose)
-    for k in range(MAX_SCORE):
-        s = sum(m.raters_bivector_thresholds.loc[r, k] for r in m.rater_names)
+    for k in range(1, MAX_SCORE + 1):
+        s = sum(m.facet_effects_bivector_thresholds.loc[r, k] for r in m.rater_names)
         check(f'[Bivector] threshold cross-rater sum ~ 0 (k={k})',
               abs(s) < 0.01, f'sum={s:.6f}', verbose)
 
     # Consistency vs matrix
-    np.random.seed(SIM_SEED)
     sim2 = MFRM_Sim_Bivector(
         no_of_items=N_ITEMS, no_of_persons=N_PERSONS,
-        no_of_raters=N_RATERS, max_score=MAX_SCORE,
+        no_of_raters=N_RATERS, max_score=MAX_SCORE, seed=SIM_SEED,
     )
     m_mat = rp.MFRM(sim2.responses, max_score=MAX_SCORE)
     m_mat.calibrate(model='matrix')

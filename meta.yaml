@@ -1,4 +1,4 @@
-{% set version = "1.0.0" %}
+{% set version = "1.1.0" %}
 
 package:
   name: raschpy
@@ -6,7 +6,7 @@ package:
 
 source:
   url: https://pypi.io/packages/source/r/raschpy/raschpy-{{ version }}.tar.gz
-  sha256: ffc9dfac321adab2fbb174fb943e6f9bf70fa08f3fc26d4e7be0373f0a9875c6
+  sha256: REPLACE_ME  # 1.1.0 isn't on PyPI yet (latest published is 1.0.2) — regenerate after upload, e.g. `pip download --no-deps --no-binary :all: raschpy==1.1.0 && sha256sum raschpy-1.1.0.tar.gz`
 
 build:
   noarch: python

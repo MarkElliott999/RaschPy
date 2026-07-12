@@ -9,8 +9,8 @@ authors:
     email: mwe24@cam.ac.uk
 repository-code: "https://github.com/MarkElliott999/RaschPy"
 license: Apache-2.0
-version: "0.1.0"
-date-released: "2026-06-16"
+version: "1.1.0"
+date-released: "2026-06-16"  # TODO: set to actual release date when 1.1.0 ships
 
 preferred-citation:
   type: article

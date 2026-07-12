@@ -9,7 +9,7 @@ class RSM_Sim(Rasch_Sim):
     Simulate polytomous response data according to the Rating Scale Model (RSM).
 
     Generates item difficulties, shared Rasch-Andrich thresholds, and person
-    abilities, then computes category probabilities and samples scores. All items
+    locations, then computes category probabilities and samples scores. All items
     share the same threshold structure. Simulation runs automatically on
     instantiation; access results via self.responses.
 
@@ -27,25 +27,28 @@ class RSM_Sim(Rasch_Sim):
         Base width of each rating category. Larger values produce wider,
         more ordered categories.
     person_sd : float, default 1.5
-        Standard deviation of the person ability distribution (normal).
+        Standard deviation of the person location distribution (normal).
     max_disorder : float, default 0
         Maximum threshold disorder allowed. 0 produces perfectly ordered
         thresholds; values > 0 introduce random disordering up to this limit.
     offset : float, default 0
-        Mean shift applied to person abilities after centring.
+        Mean shift applied to person locations after centring.
     missing : float, default 0
         Proportion of responses to set as missing at random, in [0, 1).
-    manual_abilities : array-like or None, default None
-        Custom person abilities. Length must equal no_of_persons.
-    manual_diffs : array-like or None, default None
+    manual_persons : array-like or None, default None
+        Custom person measures. Length must equal no_of_persons.
+    manual_items : array-like or None, default None
         Custom item difficulties. Length must equal no_of_items.
     manual_thresholds : array-like or None, default None
-        Custom threshold vector of length max_score + 1. Must satisfy:
-        thresholds[0] == 0 and sum(thresholds) == 0.
+        Custom threshold vector of length max_score. Must satisfy:
+        sum(thresholds) == 0.
     manual_person_names : list of str or None, default None
         Custom person labels. If None, labels are 'Person_1', 'Person_2', etc.
     manual_item_names : list of str or None, default None
         Custom item labels. If None, labels are 'Item_1', 'Item_2', etc.
+    seed : int or None, default None
+        Seed for the random number generator. Pass an int for a fully
+        reproducible simulation; None (default) draws fresh entropy each run.
 
     Attributes set
     --------------
@@ -53,12 +56,12 @@ class RSM_Sim(Rasch_Sim):
         Simulated response matrix, shape (no_of_persons, no_of_items).
         Values are integers in [0, max_score] or NaN (missing).
     persons : pandas.Series
-        True person ability parameters, indexed by person.
+        True person location parameters, indexed by person.
     items : pandas.Series
         True item difficulty parameters, indexed by item.
     thresholds : numpy.ndarray
-        True Rasch-Andrich threshold vector, length max_score + 1,
-        with thresholds[0] = 0.
+        True Rasch-Andrich threshold vector, length max_score,
+        zero-sum.
     cat_probs : dict
         {cat: DataFrame} of category probabilities used for simulation.
     person_names : list of str
@@ -84,11 +87,12 @@ class RSM_Sim(Rasch_Sim):
         max_disorder=0,
         offset=0,
         missing=0,
-        manual_abilities=None,
-        manual_diffs=None,
+        manual_persons=None,
+        manual_items=None,
         manual_thresholds=None,
         manual_person_names=None,
         manual_item_names=None,
+        seed=None,
     ):
         """
         Instantiate and run an RSM simulation.
@@ -98,6 +102,7 @@ class RSM_Sim(Rasch_Sim):
         instance attributes; see self.responses for the primary output.
         """
 
+        self._rng = np.random.default_rng(seed)
         self.no_of_items = int(no_of_items)
         self.no_of_persons = int(no_of_persons)
         self.item_range = item_range
@@ -107,8 +112,8 @@ class RSM_Sim(Rasch_Sim):
         self.max_disorder = max_disorder
         self.offset = offset
         self.missing = missing
-        self.persons = manual_abilities
-        self.items = manual_diffs
+        self.persons = manual_persons
+        self.items = manual_items
         self.thresholds = manual_thresholds
         self.person_names = manual_person_names
         self.item_names = manual_item_names
@@ -135,18 +140,18 @@ class RSM_Sim(Rasch_Sim):
             ]
 
         if self.persons is None:
-            self.persons = np.random.normal(0, self.person_sd, self.no_of_persons)
+            self.persons = self._rng.normal(0, self.person_sd, self.no_of_persons)
             self.persons -= np.mean(self.persons)
             self.persons += self.offset
 
         else:
             assert (
                 len(self.persons) == self.no_of_persons
-            ), "Length of manual abilities must match number of persons."
+            ), "Length of manual persons must match number of persons."
             self.persons = np.array(self.persons)
 
         self.persons = {
-            person: ability for person, ability in zip(self.person_names, self.persons)
+            person: location for person, location in zip(self.person_names, self.persons)
         }
         self.persons = pd.Series(self.persons)
 
@@ -157,7 +162,7 @@ class RSM_Sim(Rasch_Sim):
             self.item_names = [f"Item_{item + 1}" for item in range(self.no_of_items)]
 
         if self.items is None:
-            self.items = np.random.uniform(0, 1, self.no_of_items)
+            self.items = self._rng.uniform(0, 1, self.no_of_items)
             self.items *= self.item_range / (np.max(self.items) - np.min(self.items))
             self.items -= np.mean(self.items)
 
@@ -171,7 +176,7 @@ class RSM_Sim(Rasch_Sim):
         self.items = pd.Series(self.items)
 
         if self.thresholds is None:
-            category_widths = np.random.uniform(
+            category_widths = self._rng.uniform(
                 self.max_disorder,
                 2 * self.category_base - self.max_disorder,
                 self.max_score,
@@ -181,14 +186,14 @@ class RSM_Sim(Rasch_Sim):
             ]
             self.thresholds = np.array(self.thresholds)
             self.thresholds -= np.mean(self.thresholds)
-            self.thresholds = pd.Series(self.thresholds)
+            self.thresholds = pd.Series(self.thresholds, index=range(1, self.max_score + 1))
 
         else:
             assert (
                 len(self.thresholds) == self.max_score
             ), "Number of manual thresholds must be max score."
-            assert sum(manual_thresholds) == 0, "Manual thresholds must sum to zero."
-            self.thresholds = pd.Series(np.array(self.thresholds))
+            assert np.isclose(sum(manual_thresholds), 0), "Manual thresholds must sum to zero."
+            self.thresholds = pd.Series(np.array(self.thresholds), index=range(1, self.max_score + 1))
 
         # Calculate category probabilities for each person-item combination
 
