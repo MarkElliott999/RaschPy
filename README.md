@@ -61,14 +61,14 @@ slm = SLM(sim)
 
 # Or pass a DataFrame as usual
 slm = SLM(responses)
-slm.calibrate()          # PAIR item difficulty estimation
+slm.calibrate()          # PAIR item location estimation
 slm.fit_statistics()     # item, person, and test-level fit
 
 slm.item_stats_df(full=True)
 print(slm.item_stats)    # Estimate, SE, Infit MS, Outfit MS, ...
 
 slm.person_stats_df()
-print(slm.person_stats)  # Ability, CSEM, Score, Infit MS, ...
+print(slm.person_stats)  # Estimate, CSEM, Score, Infit MS, ...
 
 slm.test_stats_df()
 print(slm.test_stats)    # ISI, PSI, reliability
@@ -84,7 +84,7 @@ slm.save_stats('slm_results', format='xlsx')
 **Score lookup and person estimation**
 
 ```python
-# Convert raw scores to ability estimates
+# Convert raw scores to person location estimates
 model.score_lookup_table()
 print(model.score_lookup)   # pandas Series indexed by raw score
 
@@ -113,7 +113,7 @@ pcm.calibrate()
 pcm.fit_statistics()
 
 pcm.item_stats_df(full=True)
-print(pcm.item_stats)                  # Central item difficulties
+print(pcm.item_stats)                  # Central item locations
 
 pcm.threshold_stats_df(full=True)
 print(pcm.threshold_stats_uncentred)   # Uncentred threshold estimates
@@ -150,7 +150,7 @@ rsm.calibrate()
 rsm.fit_statistics()
 
 rsm.item_stats_df(full=True)
-print(rsm.item_stats)      # Item difficulties
+print(rsm.item_stats)      # Item locations
 
 rsm.threshold_stats_df(full=True)
 print(rsm.threshold_stats) # Shared Rasch-Andrich thresholds
@@ -188,7 +188,7 @@ mfrm.calibrate(model='global')
 mfrm.fit_statistics(model='global')
 
 mfrm.item_stats_df(model='global', full=True)
-print(mfrm.item_stats_global)        # Item difficulties
+print(mfrm.item_stats_global)        # Item locations
 
 mfrm.threshold_stats_df(model='global', full=True)
 print(mfrm.threshold_stats_global)   # Shared thresholds
@@ -243,6 +243,107 @@ mfrm.save_stats(model='bivector', filename='mfrm_bivector_results', format='xlsx
 
 ---
 
+### Model comparison — RSM vs PCM threshold structure
+
+RSM constrains every item to share the same threshold structure; PCM lets each item have its own. Since RSM is nested within PCM, `model_selection()` compares them directly via a likelihood-ratio test, AIC, or BIC (requires uniform max scores across items):
+
+```python
+rsm.model_selection(test='AIC')
+print(rsm.model_comparison_rsm_pcm_aic_summary)    # ranked comparison table
+print(rsm.model_comparison_rsm_pcm_aic_preferred)  # 'RSM' or 'PCM'
+
+# Equivalently from the PCM side
+pcm.model_selection(test='LR')
+print(pcm.model_comparison_rsm_pcm_lr_summary)
+```
+
+---
+
+### MFRM rater-parameterisation model selection
+
+`model_selection()` calibrates all five rater parameterisations (global, items, thresholds, bivector, matrix) and ranks them by the chosen criterion:
+
+```python
+mfrm.model_selection(test='AIC')
+print(mfrm.model_comparison_mfrm_aic_summary)    # ranked comparison across all five models
+print(mfrm.model_comparison_mfrm_aic_preferred)  # e.g. 'items'
+```
+
+**Mixed model: per-rater parameterisation assignment**
+
+Rather than forcing every rater into the same parameterisation, `per_rater_model_selection()` assigns each rater the simplest adequate structure individually, top-down (matrix → bivector → items/thresholds → global):
+
+```python
+mfrm.per_rater_model_selection(test='AIC')
+print(mfrm.rater_models)                      # Series: rater -> assigned parameterisation
+print(mfrm.per_rater_model_selection_table)   # full per-rater testing-ladder results
+print(mfrm.per_rater_model_selection_counts)  # how many raters landed on each parameterisation
+
+mfrm.fit_statistics(model='mixed')            # fit statistics using each rater's assigned model
+mfrm.rater_stats_df(model='mixed', full=True)
+print(mfrm.rater_stats_mixed)
+```
+
+---
+
+### Category width statistics
+
+For PCM, RSM, and MFRM, `category_stats_df()` reports each item's category *widths* (the gap between consecutive thresholds) rather than raw threshold locations — a width below 0 flags local category disordering:
+
+```python
+pcm.category_stats_df()
+print(pcm.category_stats)   # Estimate (width), SE, Disordered, Prop disordered
+
+mfrm.category_stats_df(model='global')
+print(mfrm.category_stats_global)
+```
+
+---
+
+### Differential Item Functioning (DIF) and invariance testing
+
+`dif_test()` splits persons by an exogenous covariate (e.g. Gender, L1), calibrates each group independently, purifies them onto a common scale (so genuine DIF items can't distort the scale used to detect DIF), and tests every item for DIF against a chosen reference group — supporting covariates with any number of levels, each tested individually against the reference:
+
+```python
+import pandas as pd
+from raschpy import SLM
+
+exogenous = pd.DataFrame({'Gender': [...]}, index=responses.index)  # one row per person
+slm = SLM(responses, exogenous=exogenous)
+
+slm.dif_test(covariate='Gender')
+print(slm.dif_table)          # per-item, per-focal-group DIF statistics
+print(slm.dif_omnibus_table)  # Andersen-style joint test per focal group
+```
+
+For a simpler two-group check (a single Andersen likelihood-ratio test rather than the full anchor-purification workflow), use `andersen_lr_test(split_by='exogenous')` — note `split_by='person_location'`/`'score'` is disabled as a general model-fit test (found to have no power in simulation), so this is exogenous-covariate-only:
+
+```python
+slm.andersen_lr_test(split_by='exogenous', covariate='Gender')
+print(slm.andersen_lr, slm.andersen_df, slm.andersen_p)
+```
+
+`dif_test()` is available on `SLM`, `PCM`, and `RSM` — it is not yet implemented for `MFRM`. `andersen_lr_test()` is available on all four, with per-parameterisation variants on `MFRM` (e.g. `andersen_lr_test_global`).
+
+---
+
+### Anchor calibration to an external item bank
+
+To place a new calibration on the same scale as a previously-calibrated item bank, pass a `dict` or `pandas.Series` of externally-supplied item locations, keyed by item name. A subset of "anchor" items in common with the bank is used to compute a translation constant, with outlier anchors automatically down-weighted or excluded:
+
+```python
+bank_locations = {'Item_1': -0.8, 'Item_2': 0.3, 'Item_3': 1.1}
+
+slm.calibrate_anchor(bank_locations)
+print(slm.anchor_items)      # item locations shifted onto the bank scale
+print(slm.anchor_summary)    # anchors supplied/selected/dropped, correlation, SD ratio, translation constant
+print(slm.anchor_selection)  # per-anchor-item diagnostics (which were kept/dropped as outliers)
+```
+
+Available identically on `SLM`, `RSM`, and `PCM`. Diagnostics are plotted automatically (`plot=True` by default) via `plot_anchor_selection()`, which can also be called manually against any `anchor_selection`-shaped table.
+
+---
+
 ### Simulation
 
 _RaschPy_ includes simulation classes for generating synthetic data under each model. Simulation runs automatically on instantiation; generating parameters are stored as attributes on the simulation object (`sim.items`, `sim.persons`, `sim.thresholds`, and for MFRM models `sim.facet_effects`). When a simulation object is passed directly to a model constructor, the generating parameters are also attached to the model object under a `generating` namespace, making recovery comparisons straightforward:
@@ -292,9 +393,9 @@ model.item_stats_df(interval=0.95)  # adds 2.5% and 97.5% columns
 
 ---
 
-### Anchor calibration
+### Anchor calibration — MFRM raters
 
-To place MFRM estimate within an anchored frame of reference, relative to the mean of a set of 'gold standard' raters, pass a list of anchor raters. A new set of anchored estimates will be generated:
+To place an MFRM estimate within an anchored frame of reference, relative to the mean of a set of 'gold standard' raters, pass a list of anchor raters. A new set of anchored estimates will be generated. (For anchoring SLM/RSM/PCM item locations onto an external item bank instead, see [Anchor calibration to an external item bank](#anchor-calibration-to-an-external-item-bank) above.)
 
 ```python
 mfrm.calibrate_global()
@@ -303,6 +404,16 @@ print(mfrm.raters_global)                    # Unanchored rater severities
 anchors = ['Rater_1', 'Rater_3', 'Rater_6']
 mfrm.calibrate_global_anchor(anchors)
 print(mfrm.anchor_raters_global)             # Anchored rater severities
+```
+
+**Checking anchor rater homogeneity**
+
+Anchoring only constrains the *mean* severity of the chosen anchor raters to zero — it has no way to notice whether that mean is a stable, shared reference point or an artefact of averaging over raters who don't behave alike. `check_anchor_homogeneity()` is a separate, opt-in diagnostic that tests whether the proposed anchor set actually agrees with itself before you rely on it:
+
+```python
+mfrm.check_anchor_homogeneity(model='global', anchors=anchors)
+print(mfrm.anchor_homogeneity_test)        # omnibus Cochran's Q test
+print(mfrm.anchor_homogeneity_per_rater)   # per-rater severity, SE, z, p, Flagged
 ```
 
 ## Usage and citation

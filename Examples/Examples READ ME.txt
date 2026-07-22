@@ -2,7 +2,12 @@
 
 In this folder, there are the following examples:
 
-- Worked examples for the following models: SLM, PCM, RSM, global MFRM, matrix MFRM
+- Worked examples for SLM, PCM, RSM, and all five MFRM rater parameterisations
+  (global, items, thresholds, bivector, matrix)
+- Worked examples for cross-cutting functionality that applies across several models:
+  Differential Item Functioning (DIF) testing, anchor calibration (item-bank anchoring
+  for SLM/RSM/PCM, and rater anchoring for MFRM), and model selection (RSM vs PCM,
+  MFRM rater-parameterisation selection, and the MFRM "mixed" per-rater model)
 - Code to run the RaschPy anaysis for the simulation studies in Elliott & Buttery
   (2022a) and Elliott & Buttery (2022b)
 - An Excel spreadsheet working through the PAIR algoritm for dichotomous data
@@ -10,11 +15,16 @@ In this folder, there are the following examples:
 
 *** Worked examples  ***
 
-For each class, there is a Jupyter notebook which runs through the main analysis
-functions from a simulated data set (also included). .csv files with the generating
-parameters for the simulations are included for reference and comparison, and a folder
-of output files contains the .csv files of statistcal output and .png files of graphical
-output.
+For each model, there is a Jupyter notebook which runs through the main analysis
+functions on a freshly-simulated data set. Simulations are seeded (`seed=42`), so
+rerunning a notebook always reproduces the same data set, and each notebook checks
+the calibration against the known generating parameters. Data files are saved
+alongside the notebook, and a folder of output files contains the .csv files of
+statistical output and .png files of graphical output.
+
+The cross-cutting notebooks (DIF testing, Anchor calibration, Model selection) follow
+the same style but are organised by topic rather than by model, since each topic
+applies identically across several model classes.
 
 *** Code to run the simulation studies analysis ***
 

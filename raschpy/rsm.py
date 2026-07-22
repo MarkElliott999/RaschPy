@@ -20,8 +20,8 @@ class RSM(Rasch):
 
     The RSM constrains all items to share the same set of Rasch-Andrich
     threshold parameters (tau_1..tau_m), differing only in their central
-    difficulties (delta_i). Thresholds are estimated using CPAT
-    (Elliott & Buttery, 2022); item difficulties are estimated using PAIR.
+    item locations (delta_i). Thresholds are estimated using CPAT
+    (Elliott & Buttery, 2022); item locations are estimated using PAIR.
 
     Threshold convention: self.thresholds is a numpy array of length max_score,
     where thresholds[0..max_score-1] are the Rasch-Andrich threshold parameters
@@ -34,6 +34,7 @@ class RSM(Rasch):
         max_score=None,
         extreme_persons=True,
         no_of_classes=5,
+        validate=True,
         exogenous=None,
     ):
         """
@@ -58,6 +59,12 @@ class RSM(Rasch):
         no_of_classes : int, default 5
             Number of class intervals used in observed-data overlays on
             ICC, CRC, and TCC plots.
+        validate : bool, default True
+            If True, checks whether the item response network is fully
+            connected (i.e. all items are linked via common persons).
+            Issues a UserWarning if the data is split into disconnected
+            sub-networks, which makes item locations incomparable
+            across sub-groups.
         exogenous : pandas.DataFrame or None, default None
             Optional person-level covariates (e.g. Gender, L1) for
             differential item functioning analysis, indexed by person
@@ -88,6 +95,10 @@ class RSM(Rasch):
             Person identifiers (index of responses).
         no_of_classes : int
             Number of class intervals (passed through for plot methods).
+        connectivity_status : dict
+            Result of check_data_connectivity(), present only if
+            validate=True. Contains at minimum a 'connected' key (bool)
+            and 'components_count' (int).
         exogenous : pandas.DataFrame or None
             Person-level covariates reindexed onto person_names, or None
             if not supplied.
@@ -191,23 +202,60 @@ class RSM(Rasch):
             self.no_exogenous_persons = pd.Index([])
             self.exogenous_only_persons = pd.Index([])
 
+        # RUN AUTOMATIC CONNECTION CHECK VALIDATION
+        if validate:
+            self.connectivity_status = self.check_data_connectivity()
+
+            # THROW SYSTEM WARNING WITH MATHEMATICAL DETAILS IF DISCONNECTED
+            if not self.connectivity_status["connected"]:
+                warnings.warn(
+                    f"\n"
+                    f"⚠️  CRITICAL DATA INTEGRITY WARNING: The response data is disconnected into "
+                    f"{self.connectivity_status['components_count']} separate sub-networks.\n"
+                    f"Item location estimates will be problematic because there are no empirical "
+                    f"comparisons spanning across these isolated groups, the item parameter "
+                    f"estimates for each independent subset will separately sum to zero. This means items "
+                    f"belonging to different subsets cannot be compared or calibrated onto a single scale.",
+                    category=UserWarning,
+                    stacklevel=2,
+                )
+
+            # THROW SYSTEM WARNING FOR "FAKE CONNECTIVITY" — ITEMS THAT PASS THE
+            # STANDARD CHECK BUT WILL STILL BREAK CALIBRATE()'S DIRECTED MATRIX
+            directionally_isolated = self.connectivity_status.get(
+                "directionally_isolated_items", []
+            )
+            if directionally_isolated:
+                warnings.warn(
+                    f"\n"
+                    f"⚠️  DATA INTEGRITY WARNING: {len(directionally_isolated)} item(s) have a "
+                    f"structurally unresolvable zero in calibrate()'s directed pairwise matrix: "
+                    f"{directionally_isolated}.\n"
+                    f"These items pass the standard connectivity check (they have at least one "
+                    f"empirical comparison in some direction) but can silently produce NaN "
+                    f"or overflow during calibration rather than a clear error. Consider dropping "
+                    f"these items or gathering more responses before calibrating.",
+                    category=UserWarning,
+                    stacklevel=2,
+                )
+
     # ------------------------------------------------------------------
     # Core probability / expected-score functions (scalar, used in plots)
     # ------------------------------------------------------------------
 
-    def cat_prob(self, ability, difficulty, category, thresholds):
+    def cat_prob(self, person_location, item_location, category, thresholds):
         """
         Compute the probability of a response category (centred RSM parameterisation).
 
-        Log-numerator for category k: k*(b-d) - cumsum(tau)[k], where b is ability,
-        d is item difficulty, tau[0]=0 sentinel. Numerically stabilised via log-sum-exp.
+        Log-numerator for category k: k*(b-d) - cumsum(tau)[k], where b is person location,
+        d is item location, tau[0]=0 sentinel. Numerically stabilised via log-sum-exp.
 
         Parameters
         ----------
-        ability : float
-            Person ability on the logit scale.
-        difficulty : float
-            Item difficulty (central location) on the logit scale.
+        person_location : float
+            Person location on the logit scale.
+        item_location : float
+            Central item location on the logit scale.
         category : int
             Response category (0 to max_score).
         thresholds : array-like
@@ -220,24 +268,24 @@ class RSM(Rasch):
         """
         cats = np.arange(len(thresholds) + 1, dtype=float)
         cumsum = np.concatenate([[0.0], np.cumsum(thresholds)])
-        log_nums = cats * (ability - difficulty) - cumsum
+        log_nums = cats * (person_location - item_location) - cumsum
         log_nums -= log_nums.max()
         nums = np.exp(log_nums)
         return nums[category] / nums.sum()
 
-    def exp_score(self, ability, difficulty, thresholds):
+    def exp_score(self, person_location, item_location, thresholds):
         """
         Compute the expected score on an item.
 
-        Calculates E[X | ability, difficulty, thresholds] = sum(k * P(X=k))
+        Calculates E[X | person location, item location, thresholds] = sum(k * P(X=k))
         using the RSM centred parameterisation. Numerically stabilised.
 
         Parameters
         ----------
-        ability : float
-            Person ability on the logit scale.
-        difficulty : float
-            Item difficulty on the logit scale.
+        person_location : float
+            Person location on the logit scale.
+        item_location : float
+            Item location on the logit scale.
         thresholds : array-like
             Rasch-Andrich threshold vector, length max_score.
 
@@ -248,25 +296,25 @@ class RSM(Rasch):
         """
         cats = np.arange(len(thresholds) + 1, dtype=float)
         cumsum = np.concatenate([[0.0], np.cumsum(thresholds)])
-        log_nums = cats * (ability - difficulty) - cumsum
+        log_nums = cats * (person_location - item_location) - cumsum
         log_nums -= log_nums.max()
         nums = np.exp(log_nums)
         probs = nums / nums.sum()
         return (cats * probs).sum()
 
-    def variance(self, ability, difficulty, thresholds):
+    def variance(self, person_location, item_location, thresholds):
         """
         Compute item variance (Fisher information).
 
-        Calculates Var[X | ability, difficulty, thresholds] = sum((k - E[X])^2 * P(X=k)).
-        Equal to the Fisher information at the given ability.
+        Calculates Var[X | person location, item location, thresholds] = sum((k - E[X])^2 * P(X=k)).
+        Equal to the Fisher information at the given person location.
 
         Parameters
         ----------
-        ability : float
-            Person ability on the logit scale.
-        difficulty : float
-            Item difficulty on the logit scale.
+        person_location : float
+            Person location on the logit scale.
+        item_location : float
+            Item location on the logit scale.
         thresholds : array-like
             Rasch-Andrich threshold vector, length max_score.
 
@@ -277,14 +325,14 @@ class RSM(Rasch):
         """
         cats = np.arange(len(thresholds) + 1, dtype=float)
         cumsum = np.concatenate([[0.0], np.cumsum(thresholds)])
-        log_nums = cats * (ability - difficulty) - cumsum
+        log_nums = cats * (person_location - item_location) - cumsum
         log_nums -= log_nums.max()
         nums = np.exp(log_nums)
         probs = nums / nums.sum()
         expected = (cats * probs).sum()
         return ((cats - expected) ** 2 * probs).sum()
 
-    def kurtosis(self, ability, difficulty, thresholds):
+    def kurtosis(self, person_location, item_location, thresholds):
         """
         Compute the fourth central moment of the response distribution.
 
@@ -294,10 +342,10 @@ class RSM(Rasch):
 
         Parameters
         ----------
-        ability : float
-            Person ability on the logit scale.
-        difficulty : float
-            Item difficulty on the logit scale.
+        person_location : float
+            Person location on the logit scale.
+        item_location : float
+            Item location on the logit scale.
         thresholds : array-like
             Rasch-Andrich threshold vector, length max_score.
 
@@ -308,7 +356,7 @@ class RSM(Rasch):
         """
         cats = np.arange(len(thresholds) + 1, dtype=float)
         cumsum = np.concatenate([[0.0], np.cumsum(thresholds)])
-        log_nums = cats * (ability - difficulty) - cumsum
+        log_nums = cats * (person_location - item_location) - cumsum
         log_nums -= log_nums.max()
         nums = np.exp(log_nums)
         probs = nums / nums.sum()
@@ -319,12 +367,12 @@ class RSM(Rasch):
     # Vectorised category probability engine
     # ------------------------------------------------------------------
 
-    def _cat_probs_matrix(self, abilities, difficulties, thresholds):
+    def _cat_probs_matrix(self, person_locations, item_locations, thresholds):
         """
         Vectorised RSM category probability computation.
 
         The RSM log-numerator for category k, person n, item i is:
-            k * (ability_n - difficulty_i) - cumsum(thresholds)[k]
+            k * (person_location_n - item_location_i) - cumsum(thresholds)[k]
         where cumsum(thresholds)[k] = sum(thresholds[0..k]).
 
         Because thresholds are SHARED across items (unlike PCM), cumsum is
@@ -339,8 +387,8 @@ class RSM(Rasch):
         cats_arr = np.arange(len(thresholds) + 1, dtype=float)  # (K+1,)
         thr_arr = np.asarray(thresholds, dtype=float)
         cumsum = np.concatenate([[0.0], np.cumsum(thr_arr)])  # (K+1,)
-        ab = np.asarray(abilities, dtype=float)  # (N,)
-        diff = np.asarray(difficulties, dtype=float)  # (I,)
+        ab = np.asarray(person_locations, dtype=float)  # (N,)
+        diff = np.asarray(item_locations, dtype=float)  # (I,)
 
         # log_num[k, n, i] = k*(ab[n] - diff[i]) - cumsum[k]
         log_num = (
@@ -359,14 +407,14 @@ class RSM(Rasch):
     # CPAT threshold estimation
     # ------------------------------------------------------------------
 
-    def _threshold_distance(self, threshold, difficulties, constant=0.1):
+    def _threshold_distance(self, threshold, item_locations, constant=0.1):
         """
         Estimate the distance between adjacent Rasch-Andrich thresholds (CPAT).
 
         Implements Elliott & Buttery (2022). For threshold k, counts:
           num[i,j]: persons scoring exactly k on both items i and j
           den[i,j]: persons scoring k-1 on item i and k+1 on item j
-        Conditioning on these patterns removes person ability, leaving a
+        Conditioning on these patterns removes person location, leaving a
         contrast identifying the threshold location. Harmonic mean weighting
         downweights near-zero counts. Vectorised via matrix multiplication.
 
@@ -374,8 +422,8 @@ class RSM(Rasch):
         ----------
         threshold : int
             1-based threshold index (1 to max_score-1).
-        difficulties : pandas.Series
-            Item difficulty estimates indexed by item name.
+        item_locations : pandas.Series
+            Item location estimates indexed by item name.
         constant : float, default 0.1
             Additive smoothing constant for zero cells.
 
@@ -405,11 +453,11 @@ class RSM(Rasch):
         with np.errstate(divide="ignore", invalid="ignore"):
             weight_matrix = np.where(valid, 2.0 * num_s * den_s / (num_s + den_s), 0.0)
 
-        # Difficulty contrast matrix: delta_i - delta_j  shape (I, I)
-        estimates = difficulties.values
-        diff_matrix = estimates[:, None] - estimates[None, :]
+        # Location contrast matrix: delta_i - delta_j  shape (I, I)
+        estimates = item_locations.values
+        item_location_matrix = estimates[:, None] - estimates[None, :]
 
-        # Log frequency ratio + difficulty contrast, weighted
+        # Log frequency ratio + location contrast, weighted
         with np.errstate(divide="ignore", invalid="ignore"):
             log_ratio = np.where(valid, np.log(num_s) - np.log(den_s), 0.0)
 
@@ -417,9 +465,9 @@ class RSM(Rasch):
         if total_weight == 0:
             return np.nan
 
-        return (weight_matrix * (log_ratio + diff_matrix)).sum() / total_weight
+        return (weight_matrix * (log_ratio + item_location_matrix)).sum() / total_weight
 
-    def threshold_set(self, difficulties, constant=0.1):
+    def threshold_set(self, item_locations, constant=0.1):
         """
         Compute the Rasch-Andrich threshold vector from CPAT distances.
 
@@ -428,8 +476,8 @@ class RSM(Rasch):
 
         Parameters
         ----------
-        difficulties : pandas.Series
-            Item difficulties from Stage 1 (PAIR), indexed by item name.
+        item_locations : pandas.Series
+            Item locations from Stage 1 (PAIR), indexed by item name.
         constant : float, default 0.1
             Smoothing constant passed to _threshold_distance().
 
@@ -439,7 +487,7 @@ class RSM(Rasch):
             Threshold vector of length max_score, centred at 0.
         """
         thresh_distances = [
-            self._threshold_distance(threshold + 1, difficulties, constant)
+            self._threshold_distance(threshold + 1, item_locations, constant)
             for threshold in range(self.max_score - 1)
         ]
 
@@ -454,18 +502,43 @@ class RSM(Rasch):
     # Calibration
     # ------------------------------------------------------------------
 
+    def _build_pairwise_matrix(self):
+        """
+        Raw (unsmoothed) directed pairwise comparison matrix used by
+        calibrate() and check_data_connectivity(). Entry (i, j) counts
+        persons who scored exactly one point higher on item i than item j.
+
+        Returns
+        -------
+        matrix : numpy.ndarray, shape (no_of_items, no_of_items)
+        row_items : numpy.ndarray
+            Item name for each row/column (identity mapping for RSM).
+        """
+        df_array = self.responses.to_numpy(dtype=np.float64)
+        matrix = np.array(
+            [
+                [
+                    np.count_nonzero(df_array[:, i] == df_array[:, j] + 1)
+                    for j in range(self.no_of_items)
+                ]
+                for i in range(self.no_of_items)
+            ],
+            dtype=np.float64,
+        )
+        return matrix, np.array(self.item_names)
+
     def calibrate(
         self, constant=0.1, method="cos", matrix_power=3, log_lik_tol=0.000001
     ):
         """
-        Two-stage RSM calibration: PAIR item difficulties + CPAT thresholds.
+        Two-stage RSM calibration: PAIR item locations + CPAT thresholds.
 
         Stage 1: Builds a pairwise contingency matrix (entry (i,j) = count of
         persons scoring one point higher on item i than j), resolves structural
-        zeroes via matrix powers, and extracts item difficulties with
+        zeroes via matrix powers, and extracts item locations with
         priority_vector().
 
-        Stage 2: Given item difficulties, estimates adjacent-threshold distances
+        Stage 2: Given item locations, estimates adjacent-threshold distances
         via CPAT (_threshold_distance()), chains them, and centres the result.
 
         Issues a UserWarning if only one item is present or if constant=0 and
@@ -485,7 +558,7 @@ class RSM(Rasch):
         Attributes set
         --------------
         items : pandas.Series
-            Item difficulty estimates, zero-centred.
+            Item location estimates, zero-centred.
         thresholds : numpy.ndarray
             Shared Rasch-Andrich threshold vector, length max_score,
             Threshold vector of length max_score, centred at 0.
@@ -521,23 +594,7 @@ class RSM(Rasch):
         self.responses = self.responses.drop(self.null_persons)
         self.no_of_persons = self.responses.shape[0]
 
-        df_array = self.responses.to_numpy(dtype=np.float64)
-
-        # Stage 1: PAIR item difficulty matrix.
-        # matrix[i,j] = count(X_i == X_j + 1) across all persons.
-        # Vectorised: for each adjacent score pair (s, s-1), build indicator
-        # matrices and accumulate -- but for simplicity the original loop
-        # structure is fast enough since it's O(I^2) comparisons at C speed.
-        matrix = np.array(
-            [
-                [
-                    np.count_nonzero(df_array[:, i] == df_array[:, j] + 1)
-                    for j in range(self.no_of_items)
-                ]
-                for i in range(self.no_of_items)
-            ],
-            dtype=np.float64,
-        )
+        matrix, _ = self._build_pairwise_matrix()
 
         constant_matrix = ((matrix + matrix.T) > 0).astype(np.float64) * constant
         matrix += constant_matrix
@@ -592,12 +649,12 @@ class RSM(Rasch):
         seed=None,
     ):
         """
-        Anchor item difficulty estimates onto externally-supplied values.
+        Anchor item location estimates onto externally-supplied values.
 
         Supports item banking: calibrates this dataset's own item
-        difficulties as usual, then shifts the whole item-difficulty scale
+        locations as usual, then shifts the whole item-location scale
         by a translation constant so that a subset of common ("anchor")
-        items line up with externally-supplied reference difficulties (e.g.
+        items line up with externally-supplied reference locations (e.g.
         from a bank of previously-calibrated items). This is a translation
         only (RSM item discrimination is fixed at 1 across items), exactly
         as in SLM.
@@ -605,8 +662,8 @@ class RSM(Rasch):
         The shared threshold vector (self.thresholds) is left untouched by
         anchoring itself. Thresholds describe the relative category
         structure — common to all items — not an item's location on the
-        ability scale, so an item-bank shift doesn't apply to them: adding a
-        constant to every item difficulty and re-estimating abilities
+        logit scale, so an item-bank shift doesn't apply to them: adding a
+        constant to every item location and re-estimating person locations
         against the same (unshifted) thresholds reproduces exactly the same
         category probabilities and fit statistics as before anchoring, just
         relocated on the shared scale. There is deliberately no
@@ -617,8 +674,8 @@ class RSM(Rasch):
         if you also have an externally-supplied reference threshold
         structure (e.g. the bank's own category structure), this checks
         whether it's actually compatible with this dataset: holding item
-        difficulties fixed at anchor_items, it compares the model fit (log-
-        likelihood, abilities re-estimated in each case) using this
+        locations fixed at anchor_items, it compares the model fit (log-
+        likelihood, person locations re-estimated in each case) using this
         dataset's own freely-estimated thresholds (self.thresholds) against
         using the given anchor_thresholds instead, via a likelihood-ratio
         test. (AIC/BIC don't apply here: both candidates are point-values
@@ -645,7 +702,7 @@ class RSM(Rasch):
         Parameters
         ----------
         anchors : dict or pandas.Series
-            Externally-supplied reference difficulties, keyed/indexed by
+            Externally-supplied reference item locations, keyed/indexed by
             item name. Only items also present in this dataset are used.
         calibrate : bool, default False
             If True, (re-)runs calibrate() before anchoring. If False,
@@ -717,7 +774,7 @@ class RSM(Rasch):
             selection table is produced in those cases.
         plot_kwargs : dict or None, default None
             Extra keyword arguments forwarded to plot_anchor_selection()
-            when plot=True (e.g. filename, x_min/x_max, graph_title).
+            when plot=True (e.g. filename, xmin/xmax, title).
         anchor_thresholds : array-like or None, default None
             Externally-supplied reference threshold vector (length
             max_score), e.g. from the same bank the item anchors came from.
@@ -735,7 +792,7 @@ class RSM(Rasch):
             df=max_score-1. Flags if p < alpha.
         warm_corr, tolerance, max_iters, ext_score_adjustment :
             Person-estimation kwargs, used only by the check_thresholds
-            comparison (abilities must be re-estimated under each candidate
+            comparison (person locations must be re-estimated under each candidate
             threshold vector before the log-likelihoods are comparable).
         constant, method, matrix_power, log_lik_tol : floats
             Calibration kwargs, used only if calibrate is triggered.
@@ -743,7 +800,7 @@ class RSM(Rasch):
         Attributes set
         --------------
         anchor_items : pandas.Series
-            Item difficulties shifted onto the anchor scale.
+            Item locations shifted onto the anchor scale.
         anchor_item_names : pandas.Index
             Names of the items supplied as anchors.
         anchor_adj : float
@@ -1009,10 +1066,10 @@ class RSM(Rasch):
         """
         Log-likelihood of this dataset's responses using self.anchor_items
         (held fixed) combined with a candidate threshold vector, with
-        abilities re-estimated under that specific (items, thresholds) pair.
+        person locations re-estimated under that specific (items, thresholds) pair.
 
         Used by calibrate_anchor's check_thresholds diagnostic to compare
-        two candidate threshold structures on a fair footing — abilities
+        two candidate threshold structures on a fair footing — person locations
         can't be reused across candidates since they depend on the
         threshold vector too. Uses a scratch RSM instance (same convention
         as std_errors' bootstrap and andersen_lr_test's group refits) so
@@ -1046,10 +1103,10 @@ class RSM(Rasch):
         seed=None,
     ):
         """
-        Estimate bootstrap standard errors for item difficulties and thresholds.
+        Estimate bootstrap standard errors for item locations and thresholds.
 
         Draws no_of_samples bootstrap resamples of person-level response data,
-        calibrates each, and computes SDs of item difficulty and threshold
+        calibrates each, and computes SDs of item location and threshold
         estimates across samples. Also computes category width SEs.
 
         Parameters
@@ -1073,17 +1130,17 @@ class RSM(Rasch):
         Attributes set
         --------------
         item_se : pandas.Series
-            Bootstrap SE for each item difficulty.
+            Bootstrap SE for each item location.
         threshold_se : numpy.ndarray
             Bootstrap SE for each threshold (length max_score).
         cat_width_se : pandas.Series
             Bootstrap SE for each category width (threshold spacing).
         item_low / item_high : pandas.Series or None
-            Bootstrap CI bounds for item difficulties.
+            Bootstrap CI bounds for item locations.
         threshold_low / threshold_high : numpy.ndarray or None
             Bootstrap CI bounds for thresholds.
         item_bootstrap : pandas.DataFrame
-            Bootstrap item difficulty estimates, shape (no_of_samples, items).
+            Bootstrap item location estimates, shape (no_of_samples, items).
         threshold_bootstrap : pandas.DataFrame
             Bootstrap threshold estimates, shape (no_of_samples, max_score).
         cat_width_bootstrap : pandas.DataFrame
@@ -1152,7 +1209,7 @@ class RSM(Rasch):
             self.cat_width_low = self.cat_width_high = None
 
     # ------------------------------------------------------------------
-    # Ability estimation
+    # Person location estimation
     # ------------------------------------------------------------------
 
     def person(
@@ -1166,7 +1223,7 @@ class RSM(Rasch):
         missing_as_incorrect=False,
     ):
         """
-        Estimate person abilities using Newton-Raphson maximum likelihood.
+        Estimate person locations using Newton-Raphson maximum likelihood.
 
         Iteratively solves sum_i(E[X_i | b]) = observed_score using the shared
         RSM threshold parameterisation and vectorised _cat_probs_matrix. Per-person
@@ -1191,7 +1248,7 @@ class RSM(Rasch):
         Returns
         -------
         pandas.Series
-            Ability estimates indexed by person identifier, in logits.
+            Person location estimates indexed by person identifier, in logits.
         """
         if isinstance(persons, str):
             persons = self.person_names if persons == "all" else [persons]
@@ -1201,7 +1258,7 @@ class RSM(Rasch):
         elif isinstance(items, str):
             items = list(self.item_names) if items == "all" else [items]
 
-        difficulties = self.items.loc[items]
+        item_locations = self.items.loc[items]
         person_data = self.responses.loc[persons, items]
 
         if missing_as_incorrect:
@@ -1216,25 +1273,25 @@ class RSM(Rasch):
         scores[scores == 0] = ext_score_adjustment
         scores[scores == ext_scores] -= ext_score_adjustment
 
-        mean_diff = difficulties.mean()
+        mean_item_location = item_locations.mean()
 
         try:
-            estimates = np.log(scores) - np.log(ext_scores - scores) + mean_diff
+            estimates = np.log(scores) - np.log(ext_scores - scores) + mean_item_location
 
             # Per-person convergence mask — freeze persons once change < tolerance.
             # Without this, the log-sum-exp implementation (which gives numerically
-            # valid probs for all ability values) keeps updating slowly-converging
+            # valid probs for all person location values) keeps updating slowly-converging
             # persons every iteration, allowing drift of ±1 logit per step.
             active = pd.Series(True, index=list(persons))
             iters = 0
 
-            diff_arr = difficulties.values  # (I,)
+            item_location_arr = item_locations.values  # (I,)
 
             while active.any() and iters <= max_iters:
                 active_idx = active[active].index
 
                 probs, cats_arr = self._cat_probs_matrix(
-                    estimates.loc[active_idx].values, diff_arr, self.thresholds
+                    estimates.loc[active_idx].values, item_location_arr, self.thresholds
                 )
                 # probs: (K+1, N_active, I)
                 exp_score = (cats_arr[:, None, None] * probs).sum(
@@ -1301,9 +1358,9 @@ class RSM(Rasch):
         missing_as_incorrect=False,
     ):
         """
-        Estimate abilities for all persons and store as an attribute.
+        Estimate person locations for all persons and store as an attribute.
 
-        Wrapper around estimate() that estimates abilities for all persons
+        Wrapper around estimate() that estimates person locations for all persons
         and stores the result as self.persons.
 
         Parameters
@@ -1326,7 +1383,7 @@ class RSM(Rasch):
         Attributes set
         --------------
         persons : pandas.Series
-            Ability estimates for all persons, in logits.
+            Person location estimates for all persons, in logits.
         """
         self.persons = self.person(
             self.person_names,
@@ -1348,7 +1405,7 @@ class RSM(Rasch):
         ext_score_adjustment=0.5,
     ):
         """
-        Convert a raw total score to an ability estimate via Newton-Raphson ML.
+        Convert a raw total score to a person location estimate via Newton-Raphson ML.
 
         Used internally to draw score lines on TCC plots.
 
@@ -1370,16 +1427,16 @@ class RSM(Rasch):
         Returns
         -------
         float
-            Ability estimate in logits.
+            Person location estimate in logits.
         """
         if items is None or (isinstance(items, str) and items == "all"):
             items = list(self.item_names)
         elif isinstance(items, str):
             items = [items]
 
-        difficulties = self.items.loc[items]
+        item_locations = self.items.loc[items]
         ext_score = len(items) * self.max_score
-        mean_diff = difficulties.mean()
+        mean_item_location = item_locations.mean()
 
         used_score = float(score)
         if used_score == 0:
@@ -1387,15 +1444,15 @@ class RSM(Rasch):
         elif used_score == ext_score:
             used_score -= ext_score_adjustment
 
-        estimate = log(used_score) - log(ext_score - used_score) + mean_diff
+        estimate = log(used_score) - log(ext_score - used_score) + mean_item_location
         change, iters = 1.0, 0
 
         while abs(change) > tolerance and iters <= max_iters:
             result = sum(
-                self.exp_score(estimate, diff, self.thresholds) for diff in difficulties
+                self.exp_score(estimate, diff, self.thresholds) for diff in item_locations
             )
             info = sum(
-                self.variance(estimate, diff, self.thresholds) for diff in difficulties
+                self.variance(estimate, diff, self.thresholds) for diff in item_locations
             )
             change = max(-1.0, min(1.0, (result - used_score) / info))
             estimate -= change
@@ -1427,7 +1484,7 @@ class RSM(Rasch):
         ext_score_adjustment=0.5,
     ):
         """
-        Build a score-to-ability lookup table for all possible raw scores.
+        Build a score-to-location lookup table for all possible raw scores.
 
         Parameters
         ----------
@@ -1447,7 +1504,7 @@ class RSM(Rasch):
         Attributes set
         --------------
         person_table : pandas.Series
-            Ability estimate for each possible raw score, indexed by score.
+            Person location estimate for each possible raw score, indexed by score.
         """
         if isinstance(items, str) and items in ("all", "none"):
             items = None
@@ -1457,7 +1514,7 @@ class RSM(Rasch):
             items = list(self.item_names)
 
         no_of_items = len(items)
-        difficulties = self.items.loc[items]
+        item_locations = self.items.loc[items]
         total_max = no_of_items * self.max_score
 
         if ext_scores:
@@ -1469,19 +1526,19 @@ class RSM(Rasch):
             scores = np.arange(1, total_max)
             used_scores = scores.astype(float)
 
-        mean_diff = difficulties.mean()
+        mean_item_location = item_locations.mean()
         estimates = pd.Series(
-            np.log(used_scores) - np.log(total_max - used_scores) + mean_diff,
+            np.log(used_scores) - np.log(total_max - used_scores) + mean_item_location,
             index=scores,
         )
 
         changes = pd.Series(1.0, index=scores)
         iters = 0
-        diff_arr = difficulties.values
+        item_location_arr = item_locations.values
 
         while abs(changes).max() > tolerance and iters <= max_iters:
             probs, cats_arr = self._cat_probs_matrix(
-                estimates.values, diff_arr, self.thresholds
+                estimates.values, item_location_arr, self.thresholds
             )
             exp_score = (cats_arr[:, None, None] * probs).sum(axis=0)
             exp_df = pd.DataFrame(exp_score, index=scores, columns=items)
@@ -1502,7 +1559,7 @@ class RSM(Rasch):
 
         self.score_table = estimates
 
-    def warm(self, abilities, items, person_filter):
+    def warm(self, person_locations, items, person_filter):
         """
         Apply Warm's (1989) weighted maximum likelihood bias correction.
 
@@ -1516,8 +1573,8 @@ class RSM(Rasch):
 
         Parameters
         ----------
-        abilities : pandas.Series
-            Current ability estimates, indexed by person.
+        person_locations : pandas.Series
+            Current person location estimates, indexed by person.
         items : str or list
             Item subset.
         person_filter : pandas.DataFrame
@@ -1532,11 +1589,11 @@ class RSM(Rasch):
             items = [items]
         items = list(items)
 
-        difficulties = self.items.loc[items]
+        item_locations = self.items.loc[items]
         pf = person_filter.values if isinstance(person_filter, pd.DataFrame) else None
 
         probs, cats_arr = self._cat_probs_matrix(
-            abilities.values, difficulties.values, self.thresholds
+            person_locations.values, item_locations.values, self.thresholds
         )
         # probs: (K+1, N, I)
 
@@ -1563,9 +1620,9 @@ class RSM(Rasch):
         den = 2 * info_sum**2
 
         warm_correction = (part_1 - part_2 + part_3) / den
-        return pd.Series(warm_correction, index=abilities.index)
+        return pd.Series(warm_correction, index=person_locations.index)
 
-    def csem(self, persons=None, abilities=None, items=None):
+    def csem(self, persons=None, person_locations=None, items=None):
         """
         Compute the conditional standard error of measurement.
 
@@ -1575,38 +1632,66 @@ class RSM(Rasch):
         Parameters
         ----------
         persons : list, str, or None, default None
-            Person identifiers. If provided, overrides abilities.
-        abilities : pandas.Series, float, list, or None, default None
-            Ability estimates. If None, uses self.persons.
+            Person identifiers. If provided, overrides person_locations.
+        person_locations : pandas.Series, float, list, numpy.ndarray, or None, default None
+            Person location estimates. If None, uses self.persons, calling
+            self.person_estimates() automatically to generate it if not
+            already present. A raw float/list/array of locations (or any
+            locations not indexed by a real person) is treated as
+            hypothetical: since there is no observed response row to
+            consult, all items in items are treated as answered.
         items : str, list, or None, default None
             Item subset. None uses all items.
 
         Returns
         -------
-        numpy.ndarray
-            CSEM values for each person/ability, in logits.
+        pandas.Series
+            CSEM values for each person/location, in logits.
         """
-        if abilities is None:
-            abilities = self.persons
-        if isinstance(abilities, float):
-            abilities = pd.Series({"Ability": abilities})
-        if isinstance(abilities, list):
-            abilities = pd.Series({f"Ability {a}": a for a in abilities})
+        # BUG FIX (original): when both persons and a custom person_locations
+        # were supplied, persons always overrode person_locations by looking
+        # itself up in self.persons, silently discarding the caller's table
+        # (e.g. a raw-score lookup via score_table). persons now keys into
+        # whichever table is in play: the supplied person_locations if one
+        # was given, else self.persons — matching SLM's single-argument
+        # person/person_locations behaviour.
+        person_locations_supplied = person_locations is not None
+
+        if person_locations is None:
+            if not hasattr(self, "persons"):
+                self.person_estimates()
+
+            person_locations = self.persons
+        if isinstance(person_locations, (int, float)):
+            person_locations = pd.Series({"Location": float(person_locations)})
+        if isinstance(person_locations, (list, np.ndarray)):
+            person_locations = pd.Series({f"Location {a}": a for a in person_locations})
         if persons is not None:
-            abilities = self.persons.loc[persons]
+            if not isinstance(persons, (list, pd.Index, np.ndarray)):
+                persons = [persons]
+            if person_locations_supplied:
+                person_locations = person_locations.loc[persons]
+            else:
+                person_locations = self.persons.loc[persons]
 
         if items is None or (isinstance(items, str) and items == "all"):
             items = list(self.item_names)
         elif isinstance(items, str):
             items = [items]
 
-        persons = abilities.index
-        difficulties = self.items.loc[items]
-        person_data = self.responses.loc[persons, items]
-        person_filter = person_data.notna().astype(float)
+        persons = person_locations.index
+        item_locations = self.items.loc[items]
+        # BUG FIX (original): unconditionally indexed self.responses by persons,
+        # which failed for hypothetical locations (raw floats/lists, or any
+        # person_locations index not matching self.responses) with no matching
+        # row. Real persons are still filtered by their actual missing-response
+        # pattern; hypothetical locations are treated as fully answered.
+        is_real_person = persons.isin(self.responses.index)
+        person_filter = self.responses.reindex(persons)[items].notna().astype(float)
+        person_filter.loc[~is_real_person] = 1.0
 
         probs, cats_arr = self._cat_probs_matrix(
-            abilities.values, difficulties.values, self.thresholds
+            person_locations.values, item_locations.values, self.thresholds
         )
         exp_score = (cats_arr[:, None, None] * probs).sum(axis=0)
         pf = person_filter.values
@@ -1615,64 +1700,82 @@ class RSM(Rasch):
         dev = cats_arr[:, None, None] - exp_score[None, :, :]
         info = (dev**2 * probs).sum(axis=0) * pf
 
-        return 1.0 / (info.sum(axis=1) ** 0.5)
+        return pd.Series(1.0 / (info.sum(axis=1) ** 0.5), index=persons)
 
     # ------------------------------------------------------------------
     # Descriptive / count methods
     # ------------------------------------------------------------------
 
-    def category_counts_item(self, item):
+    def category_counts_df(self, persons=None, items=None, counts_name=None):
         """
-        Return response frequency counts for a single item.
+        Build a response frequency table for one or more persons, across
+        one or more items.
+
+        All items share the same max_score in RSM, so there are no blank
+        cells. Computes category counts (0 through max_score), total
+        valid responses, and missing responses, over the requested
+        persons. Appends a Total row.
 
         Parameters
         ----------
-        item : str
-            Item identifier (must be a column in self.responses).
+        persons : str, list, or None, default None
+            Person(s) to include (a single person name or a list of
+            names) -- e.g. to compare a score-split or exogenous-variable
+            group against the rest. None uses all persons.
+        items : str, list, or None, default None
+            Item(s) to include (as elsewhere in the package, a single item
+            name or a list of item names). None uses all items.
+        counts_name : str, int, or None, default None
+            If None, stores the result as self.category_counts_table
+            (overwriting any previous call). If given, stores it instead
+            under that key in self.counts (created if it doesn't already
+            exist) -- e.g. self.counts['group_a'] and
+            self.counts.group_a (dot access works when counts_name is a
+            valid Python identifier) -- so a succession of tables (e.g.
+            one per exogenous-variable group) can be kept side by side
+            for comparison rather than overwriting each other.
 
         Returns
         -------
-        pandas.Series
-            Count of each response category (0 to max_score), indexed by
-            category value. Returns None and prints a message if not found.
-        """
-
-        if item not in self.responses.columns:
-            warnings.warn(
-                f"Invalid item name: {item!r}. Returning None.",
-                UserWarning,
-                stacklevel=2,
-            )
-            return None
-        return (
-            self.responses[item]
-            .value_counts()
-            .reindex(range(self.max_score + 1), fill_value=0)
-            .astype(int)
-        )
-
-    def category_counts_df(self):
-        """
-        Build and store a response frequency table across all items.
-
-        All items share the same max_score in RSM, so there are no blank cells.
-        Computes category counts (0 through max_score), total valid responses,
-        and missing responses. Appends a Total row.
-
-        Attributes set
-        --------------
-        category_counts : pandas.DataFrame
+        pandas.DataFrame
             Items as rows, categories plus Total and Missing as columns.
             A Total row is appended. All values are integers.
         """
+        if items is None:
+            items = list(self.responses.columns)
+        elif isinstance(items, str):
+            items = [items]
+
+        if persons is None:
+            persons = list(self.responses.index)
+        elif isinstance(persons, str):
+            persons = [persons]
+
+        subset = self.responses.loc[persons, items]
+
         cat_counts = {
-            item: self.category_counts_item(item) for item in self.responses.columns
+            item: subset[item]
+            .value_counts()
+            .reindex(range(self.max_score + 1), fill_value=0)
+            .astype(int)
+            for item in items
         }
         df = pd.DataFrame(cat_counts).T.sort_index(axis=1)
-        df["Total"] = self.responses.count()
-        df["Missing"] = self.no_of_persons - df["Total"]
+        df["Total"] = subset.count()
+        df["Missing"] = len(persons) - df["Total"]
         df.loc["Total"] = df.sum()
-        self.category_counts = df.astype(int)
+        df = df.astype(int)
+
+        if counts_name is None:
+            self.category_counts_table = df
+        else:
+            if not hasattr(self, "counts"):
+                from raschpy.base import _Namespace
+
+                self.counts = _Namespace()
+            self.counts[counts_name] = df
+
+        return df
 
     # ------------------------------------------------------------------
     # Fit statistics
@@ -1721,7 +1824,7 @@ class RSM(Rasch):
         """
         Compute all item, threshold, person, and test-level fit statistics.
 
-        Auto-triggers calibrate(), std_errors(), and person_abils() if not yet
+        Auto-triggers calibrate(), std_errors(), and person_estimates() if not yet
         run. Uses vectorised _cat_probs_matrix. Applies a cell-level guard
         (p > 0.9999) to prevent kurtosis/info^2 overflow in outfit statistics.
         Threshold fit statistics are computed by dichotomising at each threshold.
@@ -1729,7 +1832,7 @@ class RSM(Rasch):
         Parameters
         ----------
         warm_corr : bool, default True
-            Warm bias correction for ability estimates.
+            Warm bias correction for person location estimates.
         se : bool, default True
             If True, computes bootstrap SEs. Required for test-level stats.
         test_stats : bool, default True
@@ -1830,17 +1933,17 @@ class RSM(Rasch):
         max_scores = df.notna().sum(axis=1) * self.max_score
         df = df[(scores > 0) & (scores < max_scores)]
         missing_mask = df.notna().astype(float)
-        abilities = self.persons.loc[df.index]
+        person_locations = self.persons.loc[df.index]
 
-        # Exclude persons with extreme ability estimates (diverged NR)
-        abilities = abilities[abilities.abs() <= 20]
-        df = df.loc[abilities.index]
-        missing_mask = missing_mask.loc[abilities.index]
+        # Exclude persons with extreme person location estimates (diverged NR)
+        person_locations = person_locations[person_locations.abs() <= 20]
+        df = df.loc[person_locations.index]
+        missing_mask = missing_mask.loc[person_locations.index]
 
-        diff_arr = self.items.values
+        item_location_arr = self.items.values
 
         probs, cats_arr = self._cat_probs_matrix(
-            abilities.values, diff_arr, self.thresholds
+            person_locations.values, item_location_arr, self.thresholds
         )
         # probs: (K+1, N, I)
 
@@ -1848,13 +1951,13 @@ class RSM(Rasch):
         # has near-certain probability (p > 0.9999, WINSTEPS convention).
         # Prevents kurtosis/info^2 overflow in outfit q-factor calculation.
         max_cat_prob = pd.DataFrame(
-            probs.max(axis=0), index=abilities.index, columns=self.item_names
+            probs.max(axis=0), index=person_locations.index, columns=self.item_names
         )
         degenerate = max_cat_prob > 0.9999
 
         exp_score = (cats_arr[:, None, None] * probs).sum(axis=0)  # (N, I)
         self.exp_score_df = (
-            pd.DataFrame(exp_score, index=abilities.index, columns=self.item_names)
+            pd.DataFrame(exp_score, index=person_locations.index, columns=self.item_names)
             * missing_mask
         )
         self.exp_score_df[degenerate] = np.nan
@@ -1864,13 +1967,13 @@ class RSM(Rasch):
         kurtosis = ((dev**4) * probs).sum(axis=0)  # (N, I)
 
         self.info_df = (
-            pd.DataFrame(info, index=abilities.index, columns=self.item_names)
+            pd.DataFrame(info, index=person_locations.index, columns=self.item_names)
             * missing_mask
         )
         self.info_df[degenerate] = np.nan
 
         self.kurtosis_df = (
-            pd.DataFrame(kurtosis, index=abilities.index, columns=self.item_names)
+            pd.DataFrame(kurtosis, index=person_locations.index, columns=self.item_names)
             * missing_mask
         )
         self.kurtosis_df[degenerate] = np.nan
@@ -1887,7 +1990,7 @@ class RSM(Rasch):
 
         self.cat_prob_dict = {
             cat: pd.DataFrame(
-                probs[cat], index=abilities.index, columns=self.item_names
+                probs[cat], index=person_locations.index, columns=self.item_names
             )
             for cat in range(probs.shape[0])
         }
@@ -1924,7 +2027,7 @@ class RSM(Rasch):
         # --- Threshold fit (dichotomised across all items) ---
         # For RSM, thresholds are shared so dich_thresh covers ALL items
         # for each threshold level, not per-item as in PCM.
-        abil_df = pd.DataFrame(
+        person_location_df = pd.DataFrame(
             np.tile(self.persons.values[:, None], (1, self.no_of_items)),
             index=self.responses.index,
             columns=self.responses.columns,
@@ -1944,10 +2047,10 @@ class RSM(Rasch):
 
             mm = dich.notna().astype(float).replace(0, np.nan)
 
-            # Threshold location for threshold t+1: diff_i + tau_{t+1}
-            # diff_df[n,i] = delta_i + tau_{t+1}  (identical across persons,
+            # Threshold location for threshold t+1: item_location_i + tau_{t+1}
+            # item_location_df[n,i] = delta_i + tau_{t+1}  (identical across persons,
             # so tile the (1, I) row vector to (N, I) before constructing DataFrame)
-            diff_df = pd.DataFrame(
+            item_location_df = pd.DataFrame(
                 np.tile(
                     self.items.values + self.thresholds[t + 1],
                     (len(self.responses.index), 1),
@@ -1956,7 +2059,7 @@ class RSM(Rasch):
                 columns=self.responses.columns,
             )
 
-            p = 1.0 / (1.0 + np.exp(diff_df - abil_df))
+            p = 1.0 / (1.0 + np.exp(item_location_df - person_location_df))
             p_masked = p * mm
 
             dich_thresh_exp[t + 1] = p_masked
@@ -2046,7 +2149,7 @@ class RSM(Rasch):
             3 / threshold_infit_q
         ) + (threshold_infit_q / 3)
 
-        abil_deviation = self.persons - self.persons.mean()
+        person_location_deviation = self.persons - self.persons.mean()
 
         # Threshold point-measure correlations
         pm_num = pd.Series(
@@ -2054,7 +2157,7 @@ class RSM(Rasch):
                 t
                 + 1: (
                     (dich_thresh[t + 1] - dich_thresh[t + 1].mean())
-                    .mul(abil_deviation, axis=0)
+                    .mul(person_location_deviation, axis=0)
                     .sum()
                     .sum()
                     if dich_thresh[t + 1].count().sum() > 0
@@ -2068,7 +2171,7 @@ class RSM(Rasch):
                 t
                 + 1: (
                     ((dich_thresh[t + 1] - dich_thresh[t + 1].mean()) ** 2).sum().sum()
-                    * (abil_deviation**2).sum()
+                    * (person_location_deviation**2).sum()
                 )
                 ** 0.5
                 for t in range(self.max_score)
@@ -2082,7 +2185,7 @@ class RSM(Rasch):
         }
         exp_pm_num = pd.Series(
             {
-                t + 1: exp_pm_dict[t + 1].mul(abil_deviation, axis=0).sum().sum()
+                t + 1: exp_pm_dict[t + 1].mul(person_location_deviation, axis=0).sum().sum()
                 for t in range(self.max_score)
             }
         )
@@ -2092,7 +2195,7 @@ class RSM(Rasch):
                 for t in range(self.max_score)
             }
         )
-        exp_pm_den *= (abil_deviation**2).sum()
+        exp_pm_den *= (person_location_deviation**2).sum()
         exp_pm_den = exp_pm_den**0.5
         self.threshold_exp_point_measure = exp_pm_num / exp_pm_den
 
@@ -2188,7 +2291,7 @@ class RSM(Rasch):
 
     def andersen_lr_test(
         self,
-        split_by="ability",
+        split_by="person_location",
         covariate=None,
         warm_corr=True,
         tolerance=0.00001,
@@ -2202,21 +2305,21 @@ class RSM(Rasch):
         """
         Andersen (1973) likelihood ratio test of parameter invariance.
 
-        split_by='ability'/'score' (general model-fit / invariance testing)
+        split_by='person_location'/'score' (general model-fit / invariance testing)
         is DISABLED as of 2026-07-06 — see NotImplementedError raised below.
         split_by='exogenous' (DIF testing) is unaffected and remains fully
         supported.
 
         Splits persons into two groups, fits the model separately in each
         group, and tests whether item parameters are invariant across
-        groups. Groups are formed either by a median split on ability or
+        groups. Groups are formed either by a median split on person location or
         raw score, or by an exogenous person covariate (e.g. Gender) for
         differential item functioning.
 
         Parameters
         ----------
-        split_by : str, default 'ability'
-            Split criterion: 'ability' (ML person estimates, median split),
+        split_by : str, default 'person_location'
+            Split criterion: 'person_location' (ML person estimates, median split),
             'score' (raw scores, median split), or 'exogenous' (an
             external person covariate — requires `covariate` and
             self.exogenous to be set). 'exogenous' requires the covariate
@@ -2230,7 +2333,7 @@ class RSM(Rasch):
             from the full-sample comparison fit, so the LR decomposition
             stays valid.
         warm_corr : bool, default True
-            Warm bias correction for ability estimates.
+            Warm bias correction for person location estimates.
         tolerance, max_iters, ext_score_adjustment : floats
             Person estimation kwargs passed to group models.
         constant, method, matrix_power, log_lik_tol : floats
@@ -2240,11 +2343,11 @@ class RSM(Rasch):
         --------------
         andersen_lr : float
             Likelihood ratio statistic. Each group's own log-likelihood
-            (the H1 side) is computed by plugging in ability estimates
+            (the H1 side) is computed by plugging in person location estimates
             from the pooled (combined-group) model rather than the
-            group's own separately-fit abilities, so the comparison
+            group's own separately-fit person locations, so the comparison
             differs from the pooled model only in item parameters —
-            otherwise nuisance ability parameters are re-optimised
+            otherwise nuisance person location parameters are re-optimised
             independently on each side, inflating the statistic beyond
             what df accounts for.
         andersen_df : int
@@ -2253,25 +2356,25 @@ class RSM(Rasch):
             p-value from chi-squared distribution.
         andersen_groups : dict
             {group_name: RSM} — fitted group models for inspection. Group
-            names are 'low'/'high' for split_by='ability'/'score', or the
+            names are 'low'/'high' for split_by='person_location'/'score', or the
             two observed covariate values for split_by='exogenous'.
         andersen_summary : pandas.Series
             LR statistic, df, and p-value.
         """
         from raschpy.rsm import RSM
 
-        if split_by not in ("ability", "score", "exogenous"):
-            raise ValueError("split_by must be 'ability', 'score', or 'exogenous'")
+        if split_by not in ("person_location", "score", "exogenous"):
+            raise ValueError("split_by must be 'person_location', 'score', or 'exogenous'")
 
-        if split_by in ("ability", "score"):
+        if split_by in ("person_location", "score"):
             raise NotImplementedError(
-                "andersen_lr_test(split_by='ability'/'score') is disabled as a "
+                "andersen_lr_test(split_by='person_location'/'score') is disabled as a "
                 "general Rasch model-fit / parameter-invariance test. A 2026-07 "
                 "simulation study (varying N from 100 to 4000) found the LR "
                 "statistic floors to 0 (p=1.0, 'no misfit') in 30-90% of "
                 "replications depending on model and N, and the floor rate does "
                 "NOT improve with more data. A follow-up power study injecting "
-                "genuine item-difficulty differences of up to 3 logits between "
+                "genuine item-location differences of up to 3 logits between "
                 "the compared groups found the rejection rate and mean LR do not "
                 "respond to the true effect size at all — the test has no "
                 "demonstrated power in either direction. Root cause: PAIR/CPAT "
@@ -2432,12 +2535,12 @@ class RSM(Rasch):
            standard errors from std_errors(), computed for both groups
            regardless of selection_method (so selection_method='wald'
            costs nothing extra here). The LR test (per-item and omnibus)
-           needs person abilities instead, which are otherwise never
+           needs person locations instead, which are otherwise never
            estimated by this method — see calibrate_anchor's/SLM's
            dif_test docstring for the exact per-item LR mechanics (H1 =
            each group's own natively-calibrated fit, computed once;
-           H0_i = item i's difficulty pooled across groups, precision-
-           weighted, with that group's abilities re-estimated under the
+           H0_i = item i's location pooled across groups, precision-
+           weighted, with that group's person locations re-estimated under the
            swap). Results in self.dif_table and self.dif_omnibus_table.
 
         2. Threshold-structure DIF (DCF, differential category functioning):
@@ -2493,7 +2596,7 @@ class RSM(Rasch):
             Per-item item-location DIF test(s) to compute. 'wald' matches
             prior behaviour exactly (no added cost). 'lr'/'both'
             additionally compute the per-item likelihood-ratio test (extra
-            cost: two ability re-estimations per item per focal group).
+            cost: two person-location re-estimations per item per focal group).
             The existing 'Flagged' column in dif_table always reflects the
             Wald test; 'Flagged_LR' is added when test is 'lr' or 'both'.
             Does not affect threshold_dif_table.
@@ -2503,13 +2606,13 @@ class RSM(Rasch):
             the item-location component, stored in dif_omnibus_table.
             Cheap relative to the per-item LR test — one extra combined-
             group model fit per focal group, not per item. The H1 side
-            (ll_ref + ll_focal) plugs in ability estimates from the pooled
+            (ll_ref + ll_focal) plugs in person location estimates from the pooled
             reference+focal model rather than each group's own separately-
-            fit abilities — otherwise the two sides of the comparison
-            re-optimise nuisance ability parameters independently, which
+            fit person locations — otherwise the two sides of the comparison
+            re-optimise nuisance person-location parameters independently, which
             inflates the LR statistic beyond what df=k-1 accounts for
             (confirmed by null-DIF simulation: ~1.3-1.7x nominal Type I
-            error with own-group abilities, ~nominal with pooled abilities).
+            error with own-group person locations, ~nominal with pooled person locations).
         welch : bool, default False
             If True, every Wald test here (item-location AND threshold-
             structure) becomes a Welch's t-test: the statistic is
@@ -2524,7 +2627,7 @@ class RSM(Rasch):
             one-sample comparison against a fixed anchor value, not the
             two-independent-samples case Welch's t-test addresses).
         size_adjust : bool, default False
-            If True, rescales each group's own SE (item difficulty AND
+            If True, rescales each group's own SE (item location AND
             threshold — same scope as welch, unlike category below) to
             what it would be at a standard reference sample size
             (Tristán, 2006, Rasch Measurement Transactions 20:3 — the
@@ -2562,7 +2665,7 @@ class RSM(Rasch):
         category : bool, default False
             If True, adds an ETS-style 'Category' column to dif_table
             (item-location component only — the 0.43/0.64 logit defaults
-            are calibrated for item-difficulty DIF specifically, not
+            are calibrated for item-location DIF specifically, not
             threshold DIF, so this doesn't extend to threshold_dif_table):
             'A' (negligible), 'B+'/'B-' (slight to moderate), or 'C+'/'C-'
             (moderate to large), following Zwick, Thayer & Lewis (1999).
@@ -2598,8 +2701,8 @@ class RSM(Rasch):
             the right default.
         plot_kwargs : dict or None, default None
             Extra keyword arguments forwarded to plot_anchor_selection()
-            for every focal group when plot=True (e.g. filename, x_min/
-            x_max, graph_title).
+            for every focal group when plot=True (e.g. filename, xmin/
+            xmax, title).
         warm_corr, tolerance, max_iters, ext_score_adjustment : floats
             Person estimation kwargs, passed through to group models. Only
             actually used when test in ('lr', 'both') or omnibus=True.
@@ -2611,7 +2714,7 @@ class RSM(Rasch):
         dif_table : pandas.DataFrame
             One row per (item, focal group) pair. Columns: 'Group'
             (focal group value), 'Reference' / 'Focal' / 'Focal (purified)'
-            (item difficulty estimates), 'Difference' (purified focal -
+            (item location estimates), 'Difference' (purified focal -
             reference), 'SE', 'z', 'p', 'p (corrected)', 'Selected' (used
             to define the purified scale), 'Flagged' (Wald p and logit-
             difference thresholds both met). If welch=True, also 'df'
@@ -3062,13 +3165,23 @@ class RSM(Rasch):
             of RSM vs PCM: p = e^(-Δ/2) where Δ = AIC_RSM - AIC_PCM. PCM is
             preferred only if p < alpha; otherwise RSM is retained as default.
         alpha : float, default 0.05
-            Significance level for the AIC relative-likelihood test
-            (used only when test='AIC' and aic_sig_test=True).
-        sampling : None, 'dynamic', or int, default None
-            Controls subsampling of non-extreme persons before fitting. When
-            None, no sampling is applied. 'dynamic' uses T = min(20*(I-1)*
-            (m-1), 1500); an integer fixes T directly. When n <= T, sampling
-            is skipped. Applies to all tests.
+            Significance level used to decide the preferred model for the
+            LR test (RSM is the null; PCM is preferred if p < alpha) and,
+            when aic_sig_test=True, for the AIC relative-likelihood test.
+            Not used by BIC, which has no formal significance test and
+            simply prefers whichever model has the lower BIC.
+        sampling : None, 'dynamic', or int, default 'dynamic'
+            Controls subsampling of non-extreme persons before computing
+            log-likelihoods (parameters are always estimated on the full
+            data; only the LL evaluation is subsampled). Not primarily
+            about speed: at very large N, LR/AIC/BIC all become biased
+            toward the more complex (PCM) model regardless of whether the
+            difference is practically meaningful, since log-likelihood
+            differences scale with N. Capping the effective N keeps the
+            comparison from being dominated by sample size. None disables
+            subsampling. 'dynamic' uses T = min(20*(I-1)*(m-1), 1500); an
+            integer fixes T directly. When n <= T, sampling is skipped.
+            Applies to all three tests.
         warm_corr, tolerance, max_iters, ext_score_adjustment : floats
             Person estimation kwargs.
         constant, method, log_lik_tol : floats
@@ -3080,7 +3193,7 @@ class RSM(Rasch):
 
         Attributes set
         --------------
-        model_comparison_rsm_pcm_lr, _df, _p, _lr_summary : LR test results.
+        model_comparison_rsm_pcm_lr, _df, _p, _lr_preferred, _lr_summary : LR test results.
         model_comparison_rsm_pcm_aic, _aic_preferred, _aic_summary : AIC results.
         model_comparison_rsm_pcm_aic_p : relative likelihood p-value (aic_sig_test only).
         model_comparison_rsm_pcm_bic, _bic_preferred, _bic_summary : BIC results.
@@ -3151,11 +3264,13 @@ class RSM(Rasch):
                 lr = 0.0
             df = (self.no_of_items - 1) * (self.max_score - 1)
             p = float(chi2.sf(lr, df))
+            preferred = "PCM" if p < alpha else "RSM"
             self.model_comparison_rsm_pcm_lr = lr
             self.model_comparison_rsm_pcm_df = df
             self.model_comparison_rsm_pcm_p = p
+            self.model_comparison_rsm_pcm_lr_preferred = preferred
             self.model_comparison_rsm_pcm_lr_summary = pd.Series(
-                {"LR statistic": lr, "df": df, "p-value": p},
+                {"LR statistic": lr, "df": df, "p-value": p, "Preferred": preferred},
                 name="RSM vs PCM LR test",
             )
 
@@ -3210,6 +3325,7 @@ class RSM(Rasch):
         log_lik_tol=0.000001,
         no_of_samples=500,
         interval=None,
+        se=True,
     ):
         """
         Analyse standardised residual correlations for local item dependence.
@@ -3238,9 +3354,16 @@ class RSM(Rasch):
         log_lik_tol : float, default 0.000001
             Convergence tolerance for calibration.
         no_of_samples : int, default 500
-            Bootstrap samples.
+            Bootstrap samples. Unused if se=False.
         interval : float or None, default None
-            CI width.
+            CI width. Unused if se=False.
+        se : bool, default True
+            Passed through to the internal fit_statistics() call (only
+            used if not already computed). If False, skips the bootstrap
+            entirely — this analysis's own output (residual correlations,
+            PCA) does not depend on it, so se=False is purely a speed-up
+            (e.g. for repeated simulation runs) with no effect on the
+            output.
 
         Attributes set
         --------------
@@ -3253,6 +3376,7 @@ class RSM(Rasch):
         """
         if not hasattr(self, "std_residual_df"):
             self.fit_statistics(
+                se=se,
                 warm_corr=warm_corr,
                 tolerance=tolerance,
                 max_iters=max_iters,
@@ -3312,12 +3436,15 @@ class RSM(Rasch):
         zstd=False,
         point_measure_corr=False,
         dp=3,
+        se=True,
         warm_corr=True,
         tolerance=0.00001,
         max_iters=100,
         ext_score_adjustment=0.5,
         method="cos",
         constant=0.1,
+        matrix_power=3,
+        log_lik_tol=0.000001,
         no_of_samples=500,
         interval=None,
         seed=None,
@@ -3337,6 +3464,12 @@ class RSM(Rasch):
             If True, includes point-measure correlation columns.
         dp : int, default 3
             Decimal places.
+        se : bool, default True
+            If True, computes and includes the SE column (and CI bound
+            columns, if interval is set). If False, skips the bootstrap
+            entirely — useful when only Infit/Outfit MS are needed (e.g.
+            repeated simulation runs), since those do not depend on the
+            bootstrap. Forces interval to None when False.
         warm_corr : bool, default True
             Warm bias correction.
         tolerance : float, default 0.00001
@@ -3349,10 +3482,15 @@ class RSM(Rasch):
             Priority vector extraction method.
         constant : float, default 0.1
             Smoothing constant.
+        matrix_power : int, default 3
+            Matrix power for calibration.
+        log_lik_tol : float, default 0.000001
+            Log-likelihood tolerance for calibration.
         no_of_samples : int, default 500
-            Bootstrap samples.
+            Bootstrap samples. Unused if se=False.
         interval : float or None, default None
             CI width; if provided, percentile bound columns included.
+            Ignored if se=False.
         seed : int or None, default None
             Seed passed through to the internal std_errors()/fit_statistics()
             calls (only used if not already computed). None draws fresh
@@ -3362,7 +3500,8 @@ class RSM(Rasch):
         --------------
         item_stats : pandas.DataFrame
             Item statistics with items as rows. Always contains Estimate,
-            SE, Count, Facility, Infit MS, Outfit MS.
+            Count, Facility, Infit MS, Outfit MS. Optional: SE and CI
+            bounds (if se=True).
         """
 
         if full:
@@ -3371,24 +3510,33 @@ class RSM(Rasch):
             if interval is None:
                 interval = 0.95
 
-        if not hasattr(self, "threshold_se") or (
-            self.threshold_low is None and interval is not None
+        if not se:
+            interval = None
+
+        if se and (
+            not hasattr(self, "threshold_se")
+            or (self.threshold_low is None and interval is not None)
         ):
             self.std_errors(
                 interval=interval,
                 no_of_samples=no_of_samples,
                 constant=constant,
                 method=method,
+                matrix_power=matrix_power,
+                log_lik_tol=log_lik_tol,
                 seed=seed,
             )
         if not hasattr(self, "item_infit_ms"):
             self.fit_statistics(
+                se=se,
                 warm_corr=warm_corr,
                 tolerance=tolerance,
                 max_iters=max_iters,
                 ext_score_adjustment=ext_score_adjustment,
                 method=method,
                 constant=constant,
+                matrix_power=matrix_power,
+                log_lik_tol=log_lik_tol,
                 no_of_samples=no_of_samples,
                 interval=interval,
                 seed=seed,
@@ -3396,10 +3544,11 @@ class RSM(Rasch):
 
         stats = pd.DataFrame(index=self.responses.columns)
         stats["Estimate"] = self.items.round(dp)
-        stats["SE"] = self.item_se.round(dp)
-        if interval is not None:
-            stats[f"{round((1 - interval) * 50, 1)}%"] = self.item_low.round(dp)
-            stats[f"{round((1 + interval) * 50, 1)}%"] = self.item_high.round(dp)
+        if se:
+            stats["SE"] = self.item_se.round(dp)
+            if interval is not None:
+                stats[f"{round((1 - interval) * 50, 1)}%"] = self.item_low.round(dp)
+                stats[f"{round((1 + interval) * 50, 1)}%"] = self.item_high.round(dp)
         stats["Count"] = self.response_counts.astype(int)
         stats["Facility"] = self.item_facilities.round(dp)
         stats["Infit MS"] = self.item_infit_ms.round(dp)
@@ -3549,7 +3698,7 @@ class RSM(Rasch):
 
         Widths can be negative — a negative width at category k means
         thresholds k and k+1 are disordered (category k is never the most
-        likely response at any ability level). Prop disordered makes this
+        likely response at any person location). Prop disordered makes this
         a continuous diagnostic rather than a single point-estimate
         yes/no: the proportion of bootstrap resamples in which that
         category's width was negative — reasonably read as the
@@ -3627,6 +3776,7 @@ class RSM(Rasch):
         full=False,
         rsem=False,
         dp=3,
+        se=True,
         warm_corr=True,
         tolerance=0.00001,
         max_iters=100,
@@ -3647,6 +3797,12 @@ class RSM(Rasch):
             If True, includes Residual SEM (RSEM) column.
         dp : int, default 3
             Decimal places.
+        se : bool, default True
+            Passed through to the internal fit_statistics() call (only
+            used if not already computed). If False, skips the bootstrap
+            entirely — this table's own columns (CSEM, RSEM, Infit/Outfit)
+            do not depend on it, so se=False is purely a speed-up (e.g.
+            for repeated simulation runs) with no effect on the output.
         warm_corr : bool, default True
             Warm bias correction.
         tolerance : float, default 0.00001
@@ -3670,6 +3826,7 @@ class RSM(Rasch):
 
         if not hasattr(self, "person_infit_ms"):
             self.fit_statistics(
+                se=se,
                 warm_corr=warm_corr,
                 tolerance=tolerance,
                 max_iters=max_iters,
@@ -4009,10 +4166,10 @@ class RSM(Rasch):
 
     def class_intervals(self, items=None, no_of_classes=5):
         """
-        Compute class interval mean abilities and mean observed total scores.
+        Compute class interval mean person locations and mean observed total scores.
 
-        Partitions persons into quantile-based ability groups and computes
-        mean ability and mean observed total score within each group.
+        Partitions persons into quantile-based person-location groups and computes
+        mean person location and mean observed total score within each group.
         Used for observed-data overlays on TCC and ICC plots.
         Requires self.persons to exist.
 
@@ -4025,8 +4182,8 @@ class RSM(Rasch):
 
         Returns
         -------
-        mean_abilities : pandas.Series
-            Mean ability within each class interval.
+        mean_person_locations : pandas.Series
+            Mean person location within each class interval.
         obs : pandas.Series
             Mean observed total score within each class interval.
         """
@@ -4053,27 +4210,27 @@ class RSM(Rasch):
                 for i in range(no_of_classes - 2)
             },
         }
-        mean_abilities = pd.Series(
+        mean_person_locations = pd.Series(
             {cg: estimates[mask_dict[cg]].mean() for cg in class_groups}
         )
         obs = pd.concat(
             {cg: pd.Series(df[mask_dict[cg]].mean().sum()) for cg in class_groups}
         )
-        return mean_abilities, obs
+        return mean_person_locations, obs
 
-    def class_intervals_cats(self, abilities, item=None, no_of_classes=5):
+    def class_intervals_cats(self, person_locations, item=None, no_of_classes=5):
         """
-        Compute class interval mean abilities and observed category proportions.
+        Compute class interval mean person locations and observed category proportions.
 
-        Partitions persons into quantile-based ability groups and computes the
+        Partitions persons into quantile-based person-location groups and computes the
         proportion of each response category within each group. When item=None,
-        pools across all items using ability relative to each item's difficulty.
+        pools across all items using person location relative to each item's location.
         Used for observed-data overlays on CRC plots.
 
         Parameters
         ----------
-        abilities : pandas.Series
-            Person ability estimates indexed by person identifier.
+        person_locations : pandas.Series
+            Person location estimates indexed by person identifier.
         item : str or None, default None
             Item identifier. If None, pools across all items.
         no_of_classes : int, default 5
@@ -4081,8 +4238,8 @@ class RSM(Rasch):
 
         Returns
         -------
-        mean_abilities : pandas.Series
-            Mean ability within each class interval.
+        mean_person_locations : pandas.Series
+            Mean person location within each class interval.
         obs_props : numpy.ndarray
             Shape (no_of_classes, max_score+1) with proportions of each
             response category in each class interval.
@@ -4092,32 +4249,32 @@ class RSM(Rasch):
         df = self.responses.copy()
 
         if item is None:
-            # Use ability relative to each item's difficulty
-            abil_df = pd.DataFrame(
+            # Use person location relative to each item's location
+            person_location_df = pd.DataFrame(
                 {
-                    item_: abilities - self.items[item_]
+                    item_: person_locations - self.items[item_]
                     for item_ in self.responses.columns
                 }
             ) * df.notna().astype(float).replace(0, np.nan)
             mask_scores = df.unstack()
-            mask_abils = abil_df.unstack()
+            mask_person_locations = person_location_df.unstack()
         else:
             mask_scores = df[item].dropna()
-        q = mask_abils.quantile(
+        q = mask_person_locations.quantile(
             [(i + 1) / no_of_classes for i in range(no_of_classes - 1)]
         )
         mask_dict = {
-            "class_1": mask_abils < q.values[0],
-            f"class_{no_of_classes}": mask_abils >= q.values[-1],
+            "class_1": mask_person_locations < q.values[0],
+            f"class_{no_of_classes}": mask_person_locations >= q.values[-1],
             **{
                 f"class_{i + 2}": (
-                    (mask_abils >= q.values[i]) & (mask_abils < q.values[i + 1])
+                    (mask_person_locations >= q.values[i]) & (mask_person_locations < q.values[i + 1])
                 )
                 for i in range(no_of_classes - 2)
             },
         }
-        mean_abilities = pd.Series(
-            {cg: mask_abils[mask_dict[cg]].mean() for cg in class_groups}
+        mean_person_locations = pd.Series(
+            {cg: mask_person_locations[mask_dict[cg]].mean() for cg in class_groups}
         )
         obs_props = np.array(
             [
@@ -4130,17 +4287,17 @@ class RSM(Rasch):
             dtype=float,
         )
         obs_props /= obs_props.sum(axis=1, keepdims=True)
-        return mean_abilities, obs_props
+        return mean_person_locations, obs_props
 
     def class_intervals_thresholds(self, item=None, no_of_classes=5):
         """
         Compute class interval data for threshold characteristic curves.
 
         For each threshold (adjacent category pair), dichotomises responses,
-        partitions persons into quantile-based ability groups, and computes the
-        mean ability and observed proportion in the higher category within each
+        partitions persons into quantile-based person-location groups, and computes the
+        mean person location and observed proportion in the higher category within each
         group. When item=None, pools across all items.
-        Auto-triggers person_abils() if not yet run.
+        Auto-triggers person_estimates() if not yet run.
 
         Parameters
         ----------
@@ -4151,7 +4308,7 @@ class RSM(Rasch):
 
         Returns
         -------
-        mean_abilities : numpy.ndarray
+        mean_person_locations : numpy.ndarray
             Shape (no_of_classes, max_score).
         obs_props : numpy.ndarray
             Shape (no_of_classes, max_score).
@@ -4163,14 +4320,14 @@ class RSM(Rasch):
         class_groups = [f"class_{i + 1}" for i in range(no_of_classes)]
         df = self.responses.copy()
 
-        # Build ability DataFrame; subtract item difficulty if not item-specific
-        abil_df = pd.DataFrame({it: self.persons for it in self.responses.columns})
+        # Build person location DataFrame; subtract item location if not item-specific
+        person_location_df = pd.DataFrame({it: self.persons for it in self.responses.columns})
         if item is None:
             for it in self.responses.columns:
-                abil_df[it] -= self.items[it]
+                person_location_df[it] -= self.items[it]
         else:
             df = df[item]
-            abil_df = abil_df[item]
+            person_location_df = person_location_df[item]
 
         def make_masks(estimates):
             q = estimates.quantile(
@@ -4188,28 +4345,28 @@ class RSM(Rasch):
             }
             return {cg: md[cg][md[cg]].index for cg in class_groups}
 
-        mean_abilities, obs_props = [], []
+        mean_person_locations, obs_props = [], []
         for t in range(self.max_score):
             cond_df = df[df.isin([t, t + 1])] - t
             cond_mask = cond_df.notna().astype(float).replace(0, np.nan)
-            cond_abils = abil_df * cond_mask
+            cond_person_locations = person_location_df * cond_mask
 
             if item is None:
                 obs_df = pd.DataFrame(
-                    {"ability": cond_abils.stack(), "score": cond_df.stack()}
+                    {"person_location": cond_person_locations.stack(), "score": cond_df.stack()}
                 ).droplevel(level=1)
             else:
-                obs_df = pd.DataFrame({"ability": cond_abils, "score": cond_df})
+                obs_df = pd.DataFrame({"person_location": cond_person_locations, "score": cond_df})
 
-            masks = make_masks(obs_df["ability"])
-            mean_abilities.append(
-                [obs_df.loc[masks[cg]]["ability"].mean() for cg in class_groups]
+            masks = make_masks(obs_df["person_location"])
+            mean_person_locations.append(
+                [obs_df.loc[masks[cg]]["person_location"].mean() for cg in class_groups]
             )
             obs_props.append(
                 [obs_df.loc[masks[cg]]["score"].mean() for cg in class_groups]
             )
 
-        return np.array(mean_abilities).T, np.array(obs_props).T
+        return np.array(mean_person_locations).T, np.array(obs_props).T
 
     # ------------------------------------------------------------------
     # Plots
@@ -4224,7 +4381,7 @@ class RSM(Rasch):
         x_obs_data=np.array([]),
         y_obs_data=np.array([]),
         thresh_lines=False,
-        central_diff=False,
+        central_location=False,
         score_lines_item=[None, None],
         score_lines_test=None,
         point_info_lines_item=[None, None],
@@ -4254,7 +4411,7 @@ class RSM(Rasch):
         """
         Core plotting engine for all RSM item and test characteristic curves.
 
-        Renders curves against an ability x-axis with optional observed overlays,
+        Renders curves against a person-location x-axis with optional observed overlays,
         threshold lines, central difference lines, score lines, information lines,
         and CSEM lines. Called internally by icc(), crcs(), threshold_ccs(),
         iic(), tcc(), test_info(), and test_csem().
@@ -4262,7 +4419,7 @@ class RSM(Rasch):
         Parameters
         ----------
         x_data : array-like
-            X-axis values (typically ability grid -20 to 20).
+            X-axis values (typically person-location grid -20 to 20).
         y_data : numpy.ndarray
             2-D array shape (len(x_data), n_curves).
         items : str, list, or None
@@ -4273,8 +4430,8 @@ class RSM(Rasch):
             Observed data point coordinates.
         thresh_lines : bool, default False
             Draw vertical lines at absolute threshold locations.
-        central_diff : bool, default False
-            Draw a line at the item central difficulty.
+        central_location : bool, default False
+            Draw a line at the item central location.
         score_lines_item : list, default [None, None]
             [item_name, list_of_scores] for item-level score lines.
         score_lines_test : list or None
@@ -4292,7 +4449,7 @@ class RSM(Rasch):
         y_max : float, default 0
             Upper y-axis limit. If <= 0, auto-scaled.
         warm : bool, default True
-            Used for score line ability lookups.
+            Used for score line person-location lookups.
         cat_highlight : int or None
             Category to shade blue.
         graph_title, y_label : str
@@ -4408,7 +4565,7 @@ class RSM(Rasch):
                     )
                     ax.axvline(x=xval, color="black", linestyle="--")
 
-            if central_diff:
+            if central_location:
                 xval = 0 if items is None else self.items.loc[items]
                 ax.axvline(x=xval, color="darkred", linestyle="--")
 
@@ -4618,7 +4775,7 @@ class RSM(Rasch):
 
             ax.set_xlim(x_min, x_max)
             ax.set_ylim(0, y_max)
-            ax.set_xlabel("Person estimate", fontsize=axis_font_size, fontweight="bold")
+            ax.set_xlabel("Person location", fontsize=axis_font_size, fontweight="bold")
             ax.set_ylabel(y_label, fontsize=axis_font_size, fontweight="bold")
             ax.set_title(graph_title, fontsize=title_font_size, fontweight="bold")
             ax.grid(True)
@@ -4639,7 +4796,7 @@ class RSM(Rasch):
         no_of_classes=5,
         title=None,
         thresh_lines=False,
-        central_diff=False,
+        central_location=False,
         score_lines=None,
         score_labels=False,
         cat_highlight=None,
@@ -4659,7 +4816,7 @@ class RSM(Rasch):
         """
         Plot the Item Characteristic Curve (ICC) for a single item.
 
-        Displays modelled expected score as a function of ability. Optionally
+        Displays modelled expected score as a function of person location. Optionally
         overlays observed class-interval mean scores.
 
         Parameters
@@ -4674,8 +4831,8 @@ class RSM(Rasch):
             Plot title.
         thresh_lines : bool, default False
             Draw vertical lines at absolute threshold locations (tau_k + delta_i).
-        central_diff : bool, default False
-            Draw a line at the item central difficulty.
+        central_location : bool, default False
+            Draw a line at the item central location.
         score_lines : list or None, default None
             Raw scores at which to draw reference lines.
         score_labels : bool, default False
@@ -4683,7 +4840,7 @@ class RSM(Rasch):
         cat_highlight : int or None, default None
             Category to shade.
         xmin, xmax : float
-            Ability axis limits.
+            Person-location axis limits.
         plot_style, palette, black, font : see plot_data().
         title_font_size, axis_font_size, labelsize : int
             Font sizes.
@@ -4698,16 +4855,16 @@ class RSM(Rasch):
         -------
         matplotlib.figure.Figure
         """
-        # BUG FIX: typo 'person_abiliites' -> 'person_abilities'
+        # BUG FIX: typo 'person_abiliites'
         if obs and not hasattr(self, "persons"):
             self.person_estimates(warm_corr=False)
 
         xobsdata = yobsdata = np.array(np.nan)
         if obs:
-            mean_abilities, obs_means = self.class_intervals(
+            mean_person_locations, obs_means = self.class_intervals(
                 items=item, no_of_classes=no_of_classes
             )
-            xobsdata = pd.Series(mean_abilities)
+            xobsdata = pd.Series(mean_person_locations)
             yobsdata = np.array(obs_means).reshape(-1, 1)
 
         estimates = np.arange(-20, 20, 0.1)
@@ -4728,7 +4885,7 @@ class RSM(Rasch):
             y_label="Expected score",
             obs=obs,
             thresh_lines=thresh_lines,
-            central_diff=central_diff,
+            central_location=central_location,
             score_lines_item=[item, score_lines],
             score_labels=score_labels,
             plot_style=plot_style,
@@ -4751,7 +4908,7 @@ class RSM(Rasch):
         no_of_classes=5,
         title=None,
         thresh_lines=False,
-        central_diff=False,
+        central_location=False,
         cat_highlight=None,
         xmin=-5,
         xmax=5,
@@ -4770,13 +4927,13 @@ class RSM(Rasch):
         Plot Category Response Curves (CRCs) for a single item.
 
         Displays the probability of each response category as a function of
-        ability using the RSM centred parameterisation. Optionally overlays
+        person location using the RSM centred parameterisation. Optionally overlays
         observed category proportions.
 
         Parameters
         ----------
         item : str or None, default None
-            Item identifier. If None, uses zero difficulty.
+            Item identifier. If None, uses zero location.
         obs : list, 'all', or None, default None
             Observed overlay: 'all', list of category indices, or None.
         no_of_classes : int, default 5
@@ -4785,12 +4942,12 @@ class RSM(Rasch):
             Plot title.
         thresh_lines : bool, default False
             Draw vertical lines at absolute threshold locations.
-        central_diff : bool, default False
-            Draw a line at the item central difficulty.
+        central_location : bool, default False
+            Draw a line at the item central location.
         cat_highlight : int or None, default None
             Category to shade.
         xmin, xmax : float
-            Ability axis limits.
+            Person-location axis limits.
         plot_style, palette, black, font : see plot_data().
         title_font_size, axis_font_size, labelsize : int
             Font sizes.
@@ -4853,7 +5010,7 @@ class RSM(Rasch):
             y_label="Probability",
             obs=obs,
             thresh_lines=thresh_lines,
-            central_diff=central_diff,
+            central_location=central_location,
             cat_highlight=cat_highlight,
             plot_style=plot_style,
             palette=palette,
@@ -4874,7 +5031,7 @@ class RSM(Rasch):
         no_of_classes=5,
         title=None,
         thresh_lines=False,
-        central_diff=False,
+        central_location=False,
         cat_highlight=None,
         xmin=-5,
         xmax=5,
@@ -4894,7 +5051,7 @@ class RSM(Rasch):
 
         Displays the probability of scoring in the higher of two adjacent
         categories at each shared threshold. When item=None, plots thresholds
-        at their shared locations without item difficulty offset.
+        at their shared locations without item location offset.
 
         Parameters
         ----------
@@ -4908,12 +5065,12 @@ class RSM(Rasch):
             Plot title.
         thresh_lines : bool, default False
             Draw vertical lines at threshold locations.
-        central_diff : bool, default False
-            Draw a line at the item central difficulty.
+        central_location : bool, default False
+            Draw a line at the item central location.
         cat_highlight : int or None, default None
             Threshold category to shade.
         xmin, xmax : float
-            Ability axis limits.
+            Person-location axis limits.
         plot_style, palette, black, font : see plot_data().
         title_font_size, axis_font_size, labelsize : int
             Font sizes.
@@ -4936,10 +5093,10 @@ class RSM(Rasch):
 
         xobsdata = yobsdata = np.array(np.nan)
         if obs is not None:
-            mean_abilities, obs_props = self.class_intervals_thresholds(
+            mean_person_locations, obs_props = self.class_intervals_thresholds(
                 item=item, no_of_classes=no_of_classes
             )
-            xobsdata, yobsdata = mean_abilities, obs_props
+            xobsdata, yobsdata = mean_person_locations, obs_props
             if obs != "all":
                 if not all(c in np.arange(self.max_score) + 1 for c in obs):
                     warnings.warn(
@@ -4954,7 +5111,7 @@ class RSM(Rasch):
                 yobsdata = yobsdata[:, obs_idx]
 
         estimates = np.arange(-20, 20, 0.1)
-        # Absolute threshold locations: tau_k (+ item difficulty if item-specific)
+        # Absolute threshold locations: tau_k (+ item location if item-specific)
         abs_thresh = (
             self.thresholds if item is None else self.thresholds + self.items[item]
         )
@@ -4975,7 +5132,7 @@ class RSM(Rasch):
             graph_title=title or "",
             y_label="Probability",
             thresh_lines=thresh_lines,
-            central_diff=central_diff,
+            central_location=central_location,
             cat_highlight=cat_highlight,
             plot_style=plot_style,
             palette=palette,
@@ -4994,7 +5151,7 @@ class RSM(Rasch):
         item,
         ymax=None,
         thresh_lines=False,
-        central_diff=False,
+        central_location=False,
         point_info_lines=None,
         point_info_labels=False,
         cat_highlight=None,
@@ -5015,7 +5172,7 @@ class RSM(Rasch):
         """
         Plot the Item Information Curve (IIC) for a single item.
 
-        Displays Fisher information as a function of ability.
+        Displays Fisher information as a function of person location.
 
         Parameters
         ----------
@@ -5025,10 +5182,10 @@ class RSM(Rasch):
             Upper y-axis limit. Auto-scaled if None.
         thresh_lines : bool, default False
             Draw vertical lines at absolute threshold locations.
-        central_diff : bool, default False
-            Draw a line at the item central difficulty.
+        central_location : bool, default False
+            Draw a line at the item central location.
         point_info_lines : list or None, default None
-            Ability values at which to draw information reference lines.
+            Person-location values at which to draw information reference lines.
         point_info_labels : bool, default False
             Annotate information line intersections.
         cat_highlight : int or None, default None
@@ -5036,7 +5193,7 @@ class RSM(Rasch):
         title : str or None, default None
             Plot title.
         xmin, xmax : float
-            Ability axis limits.
+            Person-location axis limits.
         plot_style, palette, black, font : see plot_data().
         title_font_size, axis_font_size, labelsize : int
             Font sizes.
@@ -5066,7 +5223,7 @@ class RSM(Rasch):
             y_max=ymax,
             items=item,
             thresh_lines=thresh_lines,
-            central_diff=central_diff,
+            central_location=central_location,
             point_info_lines_item=[item, point_info_lines],
             score_labels=point_info_labels,
             cat_highlight=cat_highlight,
@@ -5108,7 +5265,7 @@ class RSM(Rasch):
         """
         Plot the Test Characteristic Curve (TCC).
 
-        Displays expected total score as a function of ability. Optionally
+        Displays expected total score as a function of person location. Optionally
         overlays observed class-interval mean total scores.
 
         Parameters
@@ -5126,7 +5283,7 @@ class RSM(Rasch):
         score_labels : bool, default False
             Annotate score line intersections.
         xmin, xmax : float
-            Ability axis limits.
+            Person-location axis limits.
         plot_style, palette, black, font : see plot_data().
         title_font_size, axis_font_size, labelsize : int
             Font sizes.
@@ -5152,10 +5309,10 @@ class RSM(Rasch):
 
         xobsdata = yobsdata = np.array(np.nan)
         if obs:
-            mean_abilities, obs_means = self.class_intervals(
+            mean_person_locations, obs_means = self.class_intervals(
                 items=items, no_of_classes=no_of_classes
             )
-            xobsdata = mean_abilities
+            xobsdata = mean_person_locations
             yobsdata = np.array(obs_means).reshape(no_of_classes, 1)
 
         estimates = np.arange(-20, 20, 0.1)
@@ -5220,18 +5377,18 @@ class RSM(Rasch):
         """
         Plot the Test Information Curve.
 
-        Displays sum of item Fisher information values as a function of ability.
+        Displays sum of item Fisher information values as a function of person location.
 
         Parameters
         ----------
         items : str, list, or None, default None
             Item subset. None uses all items.
         point_info_lines : list or None, default None
-            Ability values at which to draw reference lines.
+            Person-location values at which to draw reference lines.
         point_info_labels : bool, default False
             Annotate information line intersections.
         xmin, xmax : float
-            Ability axis limits.
+            Person-location axis limits.
         ymax : float or None, default None
             Upper y-axis limit. Auto-scaled if None.
         title : str or None, default None
@@ -5314,18 +5471,18 @@ class RSM(Rasch):
         """
         Plot the Test Conditional Standard Error of Measurement (CSEM) Curve.
 
-        Displays 1 / sqrt(I(theta)) as a function of ability.
+        Displays 1 / sqrt(I(theta)) as a function of person location.
 
         Parameters
         ----------
         items : str, list, or None, default None
             Item subset. None uses all items.
         point_csem_lines : list or None, default None
-            Ability values at which to draw CSEM reference lines.
+            Person-location values at which to draw CSEM reference lines.
         point_csem_labels : bool, default False
             Annotate CSEM line intersections.
         xmin, xmax : float
-            Ability axis limits.
+            Person-location axis limits.
         ymax : float, default 5
             Upper y-axis limit.
         title : str or None, default None

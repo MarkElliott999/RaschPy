@@ -18,6 +18,7 @@ Loaders
     loadup_mfrm_single      — load MFRM data from a single (Rater, Person) file
     loadup_mfrm_xlsx_tabs   — load MFRM data from an Excel workbook (one sheet per rater)
     loadup_mfrm_multiple    — load MFRM data from separate files per rater
+    loadup_exogenous        – load exogenous variable data (for DIF analysis) from CSV/Excel/JSON
 
 Simulation
 ----------
@@ -57,7 +58,7 @@ from raschpy.simulation.mfrm_sim import (
     MFRM_Sim_Matrix,
 )
 
-__version__ = "0.1.0"
+__version__ = "1.1.0"
 __author__ = "Mark Elliott"
 
 __all__ = [
@@ -73,6 +74,7 @@ __all__ = [
     "loadup_mfrm_single",
     "loadup_mfrm_xlsx_tabs",
     "loadup_mfrm_multiple",
+    "loadup_exogenous",
     # Simulation
     "SLM_Sim",
     "PCM_Sim",

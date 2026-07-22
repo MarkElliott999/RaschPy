@@ -33,6 +33,31 @@ class _SimParams:
     pass
 
 
+class _Namespace:
+    """
+    General-purpose namespace container for storing several named results
+    side by side (e.g. model.counts.group_a, model.counts.group_b), rather
+    than a single attribute that gets overwritten on every call.
+
+    Supports both attribute access (namespace.key) for identifier-like
+    string keys, and item access (namespace[key]) for any hashable key
+    (e.g. an integer, or a string that isn't a valid Python identifier).
+    Both forms read/write the same underlying storage.
+    """
+
+    def __getitem__(self, key):
+        return self.__dict__[key]
+
+    def __setitem__(self, key, value):
+        self.__dict__[key] = value
+
+    def __contains__(self, key):
+        return key in self.__dict__
+
+    def __repr__(self):
+        return f"{self.__class__.__name__}({self.__dict__!r})"
+
+
 class Rasch:
     """
     Abstract base class for all RaschPy model objects.
@@ -42,8 +67,17 @@ class Rasch:
     calibration, point-measure correlation computation, item and person
     rename utilities, and the standardised residuals histogram.
 
-    Not intended to be instantiated directly — use the concrete subclasses
-    SLM, PCM, RSM, or MFRM instead.
+    Not intended to be instantiated directly — use one of the concrete
+    subclasses SLM, PCM, RSM, and MFRM instead.
+
+    Concrete subclasses must implement _build_pairwise_matrix(self) ->
+    (matrix, row_items): the raw (unsmoothed) directed pairwise comparison
+    matrix calibrate() itself uses, and a same-length array mapping each
+    matrix row/column to the item name it belongs to (one-to-one for
+    SLM/RSM/MFRM; many-to-one, one row per item-category, for PCM). This
+    lets check_data_connectivity() predict calibrate()'s real structural
+    zeroes exactly, without duplicating each model's matrix-construction
+    logic.
     """
 
     def __init__(self):
@@ -63,21 +97,35 @@ class Rasch:
         """
         Validate whether the item response network is fully connected.
 
-        Constructs an undirected adjacency graph where two items are connected
-        if at least one person responded to both. Uses BFS to find connected
-        components. A disconnected network means item difficulties are estimated
-        independently per component and cannot be placed on a common scale.
+        Builds the same directed pairwise comparison matrix each concrete
+        subclass's own calibrate() uses (via self._build_pairwise_matrix(),
+        which every subclass must implement) and checks it for structural
+        zeroes — entries that stay zero no matter how many times the matrix
+        is powered, because there is no chain of comparisons linking the
+        corresponding items/categories. Connectivity here specifically means
+        what matters for PAIR/CPAT calibration: at least one person's
+        response differentiates between two items (e.g. scored higher on
+        one than the other), not merely that some person answered both — a
+        person who scores identically on two items contributes nothing to
+        their relative calibration.
 
-        Also checks for a subtler "fake connectivity" case: an item with no
-        zero-scored responses (all-maximum) or no maximum-scored responses
-        (all-minimum) can still register as connected under the undirected
-        BFS, because it has an edge in at least one direction. But calibrate()
-        uses the directed pairwise matrix, where such an item has a
-        permanently-zero row or column that no amount of matrix powering can
-        resolve — this can silently corrupt calibration (NaN/overflow) even
-        though this check reports the network as fully connected.
+        For models whose matrix is indexed at a finer grain than one row
+        per item (PCM: one row per item-category), rows are collapsed back
+        to their owning item before the undirected BFS (Breadth-First
+        Search) that finds connected components — two items are adjacent if
+        ANY pair of their rows/columns has a nonzero entry in either
+        direction. A disconnected network means item locations are
+        estimated independently per component and cannot be placed on a
+        common scale.
 
-        Called automatically by SLM.__init__() when validate=True.
+        Also flags "directionally isolated" items: those with at least one
+        row or column in the matrix that sums to zero (but not both — an
+        entirely zero row AND column means no responses at all, already
+        caught as an isolated singleton by the BFS instead). Such items can
+        appear connected under the undirected view but will break
+        calibrate()'s directed matrix, silently producing NaN/overflow.
+
+        Called automatically by __init__() when validate=True.
 
         Returns
         -------
@@ -85,55 +133,73 @@ class Rasch:
             Always contains:
             - 'connected' : bool — True if the network is fully connected.
             - 'components_count' : int — number of connected components.
-            - 'directionally_isolated_items' : list — items with no zero
-              responses or no maximum responses. These pass the undirected
-              BFS but will break calibrate()'s directed pairwise matrix.
+            - 'directionally_isolated_items' : list — items with a
+              structurally zero row or column in calibrate()'s matrix.
+              These pass the undirected BFS but will break calibrate().
             If disconnected, also contains:
             - 'isolated_items' : list — items forming singleton components.
             - 'all_sub_groups' : list of lists — all components.
         """
         if not hasattr(self, "responses") or self.responses is None:
-            return {"connected": False, "reason": "No responses loaded."}
+            return {
+                "connected": False,
+                "reason": "No responses loaded.",
+                "components_count": 0,
+                "isolated_items": [],
+                "all_sub_groups": [],
+                "directionally_isolated_items": [],
+            }
 
-        df_array = np.array(self.responses, dtype=np.float64)
-        item_names = list(self.responses.columns)
+        item_names = list(self.item_names)
         no_of_items = len(item_names)
 
         if no_of_items == 0:
-            return {"connected": False, "reason": "No items present in the responses."}
+            return {
+                "connected": False,
+                "reason": "No items present in the responses.",
+                "components_count": 0,
+                "isolated_items": [],
+                "all_sub_groups": [],
+                "directionally_isolated_items": [],
+            }
 
-        # Vectorized paired comparisons matrix (ignoring NaNs)
-        is_one = (df_array == 1) & (~np.isnan(df_array))
-        is_zero = (df_array == 0) & (~np.isnan(df_array))
-        raw_matrix = np.dot(is_one.T, is_zero).astype(np.float64)
+        matrix, row_items = self._build_pairwise_matrix()
+        row_items = np.asarray(row_items)
 
-        # Items with a structurally-zero row or column in the directed matrix:
-        # all-maximum items (never scored 0) zero out their column; all-minimum
-        # items (never scored max) zero out their row. XOR excludes items with
-        # both zero (no responses at all), which are already caught as isolated
+        # Row/column-level structural zero check, at whatever granularity
+        # the model's own matrix uses (one row per item, or — for PCM —
+        # one row per item-category). XOR excludes rows/columns that are
+        # both zero (no responses at all), already caught as isolated
         # singletons by the BFS below.
-        col_zero = raw_matrix.sum(axis=0) == 0
-        row_zero = raw_matrix.sum(axis=1) == 0
-        fake_connectivity_mask = col_zero ^ row_zero
-        directionally_isolated_items = [
-            item_names[i] for i in range(no_of_items) if fake_connectivity_mask[i]
-        ]
+        row_zero = matrix.sum(axis=1) == 0
+        col_zero = matrix.sum(axis=0) == 0
+        structurally_zero_rows = row_zero ^ col_zero
+        directionally_isolated_items = sorted(
+            set(row_items[structurally_zero_rows].tolist())
+        )
 
         if directionally_isolated_items:
             warnings.warn(
-                f"{len(directionally_isolated_items)} item(s) have no zero-scored "
-                f"or no maximum-scored responses: {directionally_isolated_items}. "
-                f"These items can appear connected under the standard connectivity "
-                f"check but have a structurally unresolvable zero in calibrate()'s "
-                f"directed pairwise matrix, which can silently corrupt calibration "
-                f"(NaN/overflow). Consider dropping these items or gathering more "
-                f"responses before calibrating.",
+                f"{len(directionally_isolated_items)} item(s) have a structurally "
+                f"unresolvable zero in calibrate()'s directed pairwise matrix: "
+                f"{directionally_isolated_items}. This can silently corrupt "
+                f"calibration (NaN/overflow) even when the item(s) otherwise "
+                f"appear connected. Consider dropping these items or gathering "
+                f"more responses before calibrating.",
                 UserWarning,
                 stacklevel=2,
             )
 
-        # Undirected adjacency matrix
-        adjacency = ((raw_matrix + raw_matrix.T) > 0).astype(np.int8)
+        # Collapse row-level (possibly sub-item) adjacency to item-level
+        # adjacency via a membership matrix, then run BFS over items.
+        undirected = ((matrix + matrix.T) > 0).astype(np.float64)
+        item_index = {item: idx for idx, item in enumerate(item_names)}
+        membership = np.zeros((len(row_items), no_of_items), dtype=np.float64)
+        for row_idx, row_item in enumerate(row_items):
+            membership[row_idx, item_index[row_item]] = 1.0
+        item_level_adjacency = (membership.T @ undirected @ membership) > 0
+        np.fill_diagonal(item_level_adjacency, False)
+        adjacency = item_level_adjacency.astype(np.int8)
 
         # Use deque for O(1) popleft instead of list.pop(0) which is O(n)
         visited = np.zeros(no_of_items, dtype=bool)
@@ -188,11 +254,11 @@ class Rasch:
         self, matrix, method="cos", log_lik_tol=0.000001, pcm=False, raters=False
     ):
         """
-        Extract a priority vector (item difficulty estimates) from a pairwise matrix.
+        Extract a priority vector (item location estimates) from a pairwise matrix.
 
         Implements the Choppin (1968) PAIR algorithm: given a matrix where
         entry (i, j) counts persons who passed item i and failed item j, extracts
-        a log-scale priority vector proportional to item difficulty. Three methods
+        a log-scale priority vector proportional to item location. Several methods
         are supported, all producing zero-centred logit estimates.
 
         Parameters
@@ -204,7 +270,8 @@ class Rasch:
             'cos'      — cosine (geometric mean) normalisation. Fast and robust.
             'ls'       — least squares (row mean of reciprocal matrix).
             'log-lik'  — iterative maximum likelihood (Bradley-Terry model).
-            'evm'      — eigenvector method via PCA. Requires scikit-learn.
+            'evm'      — eigenvector method (Garner & Engelhard, 2002)via PCA.
+                         Requires scikit-learn.
         log_lik_tol : float, default 0.000001
             Convergence tolerance for the 'log-lik' method.
         pcm : bool, default False
@@ -215,8 +282,8 @@ class Rasch:
         Returns
         -------
         pandas.Series
-            Item difficulty (or rater severity) estimates, zero-centred logits,
-            indexed by item (or rater) name. Returns None if 'evm' fails.
+            Item (or facet effect) estimates, zero-centred logits,
+            indexed by item (or facet/rater) name. Returns None if 'evm' fails.
         """
         matrix_dim = matrix.shape[0]
 
@@ -233,7 +300,6 @@ class Rasch:
             recip_matrix = np.nan_to_num(recip_matrix, nan=1.0, posinf=1.0, neginf=1.0)
 
         if method == "evm":
-            # PCA was referenced but never imported in the original code.
             if PCA is None:
                 raise ImportError(
                     "scikit-learn is required for the 'evm' method. "
@@ -319,13 +385,13 @@ class Rasch:
         Compute observed and expected point-measure correlations.
 
         Point-measure correlation is the Pearson correlation between observed
-        item scores and person ability estimates. Expected point-measure
+        item scores and person location estimates. Expected point-measure
         correlation uses modelled expected scores corrected for shrinkage.
 
         Parameters
         ----------
         abils : pandas.Series
-            Person ability estimates indexed by person identifier.
+            Person location estimates indexed by person identifier.
         exp_score_df : pandas.DataFrame
             Expected scores for non-extreme persons, shape (persons, items).
         info_df : pandas.DataFrame
@@ -347,8 +413,6 @@ class Rasch:
             columns=self.responses.columns,
         )
 
-        # Use .notna() for the validity mask — cleaner and avoids
-        # division-by-zero artifacts from the original (x+1)/(x+1) approach.
         mask = self.responses.notna().astype(float).replace(0, np.nan)
         abil_dev_df = (abil_dev_df * mask).loc[exp_score_df.index]
 
@@ -470,6 +534,11 @@ class Rasch:
         """
         Rename a single person in self.responses.
 
+        Also updates self.person_names, and (where present, e.g. for SLM,
+        PCM and RSM) re-indexes self.exogenous and self.no_exogenous_persons
+        to keep them aligned. self.exogenous_only_persons is left untouched,
+        as those persons do not appear in self.responses.
+
         Parameters
         ----------
         old : str
@@ -504,10 +573,23 @@ class Rasch:
             )
             return
         self.responses.rename(index={old: new}, inplace=True)
+        self.person_names = self.responses.index
+
+        if getattr(self, "exogenous", None) is not None:
+            self.exogenous.rename(index={old: new}, inplace=True)
+        if getattr(self, "no_exogenous_persons", None) is not None:
+            self.no_exogenous_persons = self.no_exogenous_persons.map(
+                lambda name: new if name == old else name
+            )
 
     def rename_persons_all(self, new_names):
         """
         Rename all persons at once.
+
+        Also updates self.person_names, and (where present, e.g. for SLM,
+        PCM and RSM) re-indexes self.exogenous and self.no_exogenous_persons
+        to keep them aligned with the renamed persons. self.exogenous_only_persons
+        is left untouched, as those persons do not appear in self.responses.
 
         Parameters
         ----------
@@ -535,9 +617,14 @@ class Rasch:
         elif not all(isinstance(name, str) for name in new_names):
             warnings.warn("Person names must be strings.", UserWarning, stacklevel=2)
         else:
-            self.responses.rename(
-                index=dict(zip(self.responses.index, new_names)), inplace=True
-            )
+            rename_map = dict(zip(self.responses.index, new_names))
+            self.responses.rename(index=rename_map, inplace=True)
+            self.person_names = self.responses.index
+
+            if getattr(self, "exogenous", None) is not None:
+                self.exogenous.rename(index=rename_map, inplace=True)
+            if getattr(self, "no_exogenous_persons", None) is not None:
+                self.no_exogenous_persons = self.no_exogenous_persons.map(rename_map)
 
     def std_residuals_hist(
         self,
@@ -558,11 +645,15 @@ class Rasch:
         plot_density=300,
     ):
         """
-        Plot a histogram of standardised residuals with an optional Normal overlay.
+        Plot a histogram of standardised residuals with an optional standardised
+        normal distribution overlay.
 
         Shared implementation called by std_residuals_plot() in SLM, PCM, RSM,
         and MFRM. Under a well-fitting Rasch model, standardised residuals should
-        approximate a standard normal distribution.
+        be broadly close to a standard normal distribution (though note that for
+        SLM, the density at zero must always be precisely zero, meaning that there
+        will always be a bimodal distribution, approximately symmetrical around
+        the y-axis).
 
         Parameters
         ----------
@@ -591,7 +682,7 @@ class Rasch:
         labelsize : int, default 12
             Tick label font size in points.
         filename : str or None, default None
-            If provided, saves the plot to this path.
+            If provided, saves the plot to this path. No file extension needed.
         file_format : str, default 'png'
             Output file format.
         plot_density : int, default 300
@@ -664,13 +755,13 @@ class Rasch:
         self, anchor, observed, corr_tol=0.95, sd_ratio_tol=1.1, min_anchors=6
     ):
         """
-        Robust, iterative anchor-item selection via the modified z-score
-        (Iglewicz & Hoaglin, 1993).
+        Robust, iterative anchor-item selection (purification) via the
+        modified (robust) z-score (Iglewicz & Hoaglin, 1993).
 
-        Given externally-supplied anchor values and freshly-calibrated
+        Given externally-supplied anchor values and freshly-estimated
         observed values for the same items, iteratively drops the item
-        with the largest absolute modified z-score (computed once, from
-        the full anchor set — not recomputed as items are dropped) until
+        with the largest absolute modified z-score (computed once from
+        the full anchor set, not recomputed as items are dropped) until
         both the Pearson correlation and the observed/anchor standard
         deviation ratio clear the supplied tolerances, or until only
         min_anchors items remain. The resulting translation constant is
@@ -679,7 +770,7 @@ class Rasch:
         applied to the rest of the scale.
 
         Used identically for item-bank anchoring (anchor = external bank
-        difficulties) and for DIF purification (anchor = a reference
+        locations) and for DIF purification (anchor = a reference
         group's own item estimates, observed = the focal group's).
 
         Parameters
@@ -844,15 +935,16 @@ class Rasch:
         current remaining set at each step), not a single pass against a
         translation constant fixed from the full candidate set. This
         matters for the same reason it does in MFRM's
-        check_anchor_homogeneity: tc is a precision-weighted MEAN, and a
-        single severely off anchor item can drag that mean far enough
-        that other, genuinely fine anchor items also fail the test —
-        collateral flagging, not real misfit ("artificial DIF" in
-        Andrich's sense, here applied to anchor selection rather than
-        group DIF). _robust_anchor_selection doesn't have this problem
-        because it centres on the MEDIAN, which one outlier barely moves;
-        a mean-based translation constant has no such protection, so this
-        method re-centres on each remaining subset instead.
+        check_anchor_homogeneity: tc is a precision-weighted MEAN, and is
+        therefore sensitive to outliers :a single severely off anchor
+        item can drag that mean far enough that other, genuinely fine
+        anchor items also fail the test — collateral flagging, not real
+        misfit ("artificial DIF" in Andrich's sense, here applied to
+        anchor selection rather than group DIF). _robust_anchor_selection
+        does not have this problem because it centres on the MEDIAN,
+        which one outlier barely moves; a mean-based translation constant
+        has no such protection, so this method re-centres on each
+        remaining subset instead.
 
         Parameters
         ----------
@@ -864,7 +956,7 @@ class Rasch:
         se : pandas.Series
             Bootstrap SE of `observed`, indexed by item name (same index
             as observed). This is the one thing _robust_anchor_selection
-            doesn't need but this method does — it's a genuine
+            does not need but this method does — it's a genuine
             significance test, not a descriptive-statistics trim.
         alpha : float, default 0.05
             Significance level for each item's Wald test.
@@ -1012,7 +1104,7 @@ class Rasch:
         Welch's t-test statistic, Satterthwaite degrees of freedom, and
         two-sided p-value for a difference between two independent
         estimates, each with its own already-computed standard error
-        (e.g. an item difficulty calibrated independently in a reference
+        (e.g. an item location calibrated independently in a reference
         and a focal group in dif_test) — an alternative to a plain z-test
         when group sizes are small, unequal, or the two SEs differ
         substantially, since treating the combined SE as exactly known
@@ -1052,28 +1144,28 @@ class Rasch:
         p = 2 * t_dist.sf(np.abs(t_stat), df)
         return t_stat, df, p
 
-    def _resolve_andersen_groups(self, split_by, covariate, non_extreme, ability_values, score_values):
+    def _resolve_andersen_groups(self, split_by, covariate, non_extreme, person_location_values, score_values):
         """
         Shared group-splitting logic for andersen_lr_test (SLM/PCM/RSM).
 
         Validates split_by/covariate and builds the {group_name: index}
         mapping used to split non-extreme persons into two groups, either
-        by a median split on ability/score or by an exogenous person
-        covariate. Identical across SLM/PCM/RSM's andersen_lr_test, so
-        factored out here rather than duplicated per model.
+        by a median split on person location/score or by an exogenous
+        person covariate. Identical across SLM/PCM/RSM's andersen_lr_test,
+        so factored out here rather than duplicated per model.
 
         Parameters
         ----------
         split_by : str
-            'ability', 'score', or 'exogenous'.
+            'person_location', 'score', or 'exogenous'.
         covariate : str or None
             Column name in self.exogenous. Required (and only used) when
             split_by='exogenous'.
         non_extreme : pandas.Index
             Non-extreme person index (already restricted by the caller).
-        ability_values : pandas.Series
-            Person ability/location estimates, full index — sliced to
-            non_extreme internally. Only used when split_by='ability'.
+        person_location_values : pandas.Series
+            Person location estimates, full index — sliced to
+            non_extreme internally. Only used when split_by='person_location'.
         score_values : pandas.Series
             Raw total scores, full index — sliced to non_extreme
             internally. Only used when split_by='score'.
@@ -1081,12 +1173,12 @@ class Rasch:
         Returns
         -------
         dict {group_name: pandas.Index}
-            Two entries: 'low'/'high' for split_by='ability'/'score', or
-            the two observed covariate values (as strings) for
+            Two entries: 'low'/'high' for split_by='person_location'/'score',
+            or the two observed covariate values (as strings) for
             split_by='exogenous'.
         """
-        if split_by not in ("ability", "score", "exogenous"):
-            raise ValueError("split_by must be 'ability', 'score', or 'exogenous'")
+        if split_by not in ("person_location", "score", "exogenous"):
+            raise ValueError("split_by must be 'person_location', 'score', or 'exogenous'")
 
         if split_by == "exogenous":
             if covariate is None:
@@ -1112,7 +1204,7 @@ class Rasch:
                 str(level): cov_values.index[cov_values == level] for level in levels
             }
 
-        split_var = (ability_values if split_by == "ability" else score_values).loc[non_extreme]
+        split_var = (person_location_values if split_by == "person_location" else score_values).loc[non_extreme]
         median_val = split_var.median()
         return {
             "low": split_var.index[split_var < median_val],
@@ -1150,19 +1242,19 @@ class Rasch:
     def plot_anchor_selection(
         self,
         result,
-        x_min=-4,
-        x_max=4,
-        y_min=-3,
-        y_max=3,
+        xmin=-4,
+        xmax=4,
+        ymin=-3,
+        ymax=3,
         figsize=(8, 6),
         font="Times New Roman",
         title_font_size=15,
         axis_font_size=12,
         labelsize=12,
-        graph_title="",
-        plot_density=300,
+        title="",
         filename=None,
         file_format="png",
+        dpi=300,
     ):
         """
         Plot anchor vs. observed values from _robust_anchor_selection().
@@ -1181,7 +1273,7 @@ class Rasch:
             'Anchor', 'Observed', and boolean 'Selected' columns. Selected/
             dropped item sets are derived from the 'Selected' column in
             the latter case.
-        x_min, x_max, y_min, y_max : float
+        xmin, xmax, ymin, ymax : float
             Axis limits.
         figsize : tuple, default (8, 6)
             Figure size in inches (width, height).
@@ -1189,14 +1281,14 @@ class Rasch:
             Font family for plot text.
         title_font_size, axis_font_size, labelsize : int
             Font sizes for title, axis labels, and tick labels.
-        graph_title : str, default ''
+        title : str, default ''
             Plot title string.
-        plot_density : int, default 300
-            Output DPI when saving to file.
         filename : str or None, default None
             If provided, saves the plot to this path.
         file_format : str, default 'png'
             File format for saved plots (e.g. 'png', 'pdf', 'svg').
+        dpi : int, default 300
+            Output DPI when saving to file.
 
         Returns
         -------
@@ -1234,7 +1326,7 @@ class Rasch:
                 label="Dropped",
             )
 
-        xseq = np.linspace(x_min, x_max, 100)
+        xseq = np.linspace(xmin, xmax, 100)
         ax.plot(xseq, xseq, color="black", lw=1, label="Identity")
 
         if len(selected) >= 2:
@@ -1243,8 +1335,8 @@ class Rasch:
             )
             ax.plot(xseq, a + b * xseq, color="darkred", lw=1.2, linestyle=":")
 
-        ax.set_xlim(x_min, x_max)
-        ax.set_ylim(y_min, y_max)
+        ax.set_xlim(xmin, xmax)
+        ax.set_ylim(ymin, ymax)
         ax.set_xlabel(
             "Anchor", fontsize=axis_font_size, fontweight="bold", fontname=font
         )
@@ -1254,14 +1346,14 @@ class Rasch:
             fontweight="bold",
             fontname=font,
         )
-        if graph_title:
-            ax.set_title(graph_title, fontsize=title_font_size, fontweight="bold")
+        if title:
+            ax.set_title(title, fontsize=title_font_size, fontweight="bold")
         ax.tick_params(axis="x", labelsize=labelsize)
         ax.tick_params(axis="y", labelsize=labelsize)
         ax.legend()
 
         if filename is not None:
-            fig.savefig(f"{filename}.{file_format}", dpi=plot_density)
+            fig.savefig(f"{filename}.{file_format}", dpi=dpi)
 
         plt.show(block=False)
         plt.pause(0.001)

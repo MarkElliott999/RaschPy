@@ -11,7 +11,7 @@ class MFRM_Sim(Rasch_Sim):
     """
     Simulate polytomous response data for the Many-Facet Rasch Model (MFRM).
 
-    Generates item difficulties, shared Rasch-Andrich thresholds, person
+    Generates item locations, shared Rasch-Andrich thresholds, person
     locations, and facet_element severity parameters under one of four parameterisations,
     then computes category probabilities and samples scores for every
     facet_element-person-item combination. Simulation runs automatically on instantiation;
@@ -34,7 +34,7 @@ class MFRM_Sim(Rasch_Sim):
         'thresholds' — separate severity per (facet_element, threshold);
         'matrix'     — full severity per (facet_element, item, threshold).
     item_range : float, default 2
-        Total spread of item difficulties in logits.
+        Total spread of item locations in logits.
     facet_range : float, default 2
         Total spread of facet_element severities in logits.
     category_base : float, default 1
@@ -54,7 +54,7 @@ class MFRM_Sim(Rasch_Sim):
     manual_persons : array-like or None, default None
         Custom person measures. Length must equal no_of_persons.
     manual_items : array-like or None, default None
-        Custom item difficulties. Length must equal no_of_items.
+        Custom item locations. Length must equal no_of_items.
     manual_thresholds : array-like or None, default None
         Custom threshold vector, length max_score. Must satisfy
         sum(thresholds) == 0.
@@ -83,7 +83,7 @@ class MFRM_Sim(Rasch_Sim):
     persons : pandas.Series
         True person location parameters, indexed by person.
     items : pandas.Series
-        True item difficulty parameters, indexed by item.
+        True item location parameters, indexed by item.
     thresholds : numpy.ndarray
         True Rasch-Andrich threshold vector, length max_score,
         zero-sum.
@@ -217,7 +217,7 @@ class MFRM_Sim(Rasch_Sim):
         if manual_items is not None:
             assert (
                 len(manual_items) == self.no_of_items
-            ), "Length of manual difficulties must match number of items."
+            ), "Length of manual locations must match number of items."
             items = np.array(manual_items)
         else:
             items = self._rng.uniform(0, 1, self.no_of_items)
@@ -829,7 +829,7 @@ class MFRM_Sim_Matrix(MFRM_Sim):
         )
 
 
-class MFRM_Sim_Bivector:
+class MFRM_Sim_Bivector(MFRM_Sim):
     """
     Simulate polytomous response data for the Many-Facet Rasch Model (MFRM)
     under the bivector facet_element parameterisation.
@@ -866,7 +866,7 @@ class MFRM_Sim_Bivector:
     max_score : int
         Maximum possible score per item (number of categories minus 1).
     item_range : float, default 2
-        Total spread of item difficulties in logits.
+        Total spread of item locations in logits.
     item_facet_range : float, default 2
         Total spread of per-(facet_element, item) severity effects across the full
         facet_element x item matrix in logits.
@@ -890,7 +890,7 @@ class MFRM_Sim_Bivector:
     manual_persons : array-like or None, default None
         Custom person measures. Length must equal no_of_persons.
     manual_items : array-like or None, default None
-        Custom item difficulties. Length must equal no_of_items.
+        Custom item locations. Length must equal no_of_items.
     manual_thresholds : array-like or None, default None
         Custom threshold vector, length max_score. Must satisfy
         sum(thresholds) == 0.
@@ -1095,15 +1095,10 @@ class MFRM_Sim_Bivector:
             facet_plural=facet_plural,
         )
 
-        # Copy all MFRM_Sim_Matrix attributes onto self
+        # Copy all MFRM_Sim_Matrix attributes onto self. item_ids/person_ids
+        # are properties inherited from Rasch_Sim, so they resolve correctly
+        # from the copied item_names/person_names without needing to be set.
         self.__dict__.update(sim.__dict__)
-
-        # item_ids/person_ids are properties on Rasch_Sim (not in sim.__dict__,
-        # since MFRM_Sim_Bivector does not itself inherit Rasch_Sim) — set
-        # explicitly. facet_ids/rater_ids are plain attributes on sim, already
-        # copied above.
-        self.item_ids = self.item_names
-        self.person_ids = self.person_names
 
         # Add bivector-specific attributes and correct the model label
         self.item_effects = item_effects

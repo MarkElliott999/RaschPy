@@ -22,6 +22,7 @@ class PCM(Rasch):
         max_score_vector=None,
         extreme_persons=True,
         no_of_classes=5,
+        validate=True,
         exogenous=None,
     ):
         """
@@ -46,6 +47,12 @@ class PCM(Rasch):
         no_of_classes : int, default 5
             Number of class intervals used in observed-data overlays on
             ICC, CRC, and TCC plots.
+        validate : bool, default True
+            If True, checks whether the item response network is fully
+            connected (i.e. all items are linked via common persons).
+            Issues a UserWarning if the data is split into disconnected
+            sub-networks, which makes item locations incomparable
+            across sub-groups.
         exogenous : pandas.DataFrame or None, default None
             Optional person-level covariates (e.g. Gender, L1) for
             differential item functioning analysis, indexed by person
@@ -76,6 +83,10 @@ class PCM(Rasch):
             Person identifiers (index of responses).
         no_of_classes : int
             Number of class intervals (passed through for plot methods).
+        connectivity_status : dict
+            Result of check_data_connectivity(), present only if
+            validate=True. Contains at minimum a 'connected' key (bool)
+            and 'components_count' (int).
         exogenous : pandas.DataFrame or None
             Person-level covariates reindexed onto person_names, or None
             if not supplied.
@@ -207,6 +218,43 @@ class PCM(Rasch):
             self.no_exogenous_persons = pd.Index([])
             self.exogenous_only_persons = pd.Index([])
 
+        # RUN AUTOMATIC CONNECTION CHECK VALIDATION
+        if validate:
+            self.connectivity_status = self.check_data_connectivity()
+
+            # THROW SYSTEM WARNING WITH MATHEMATICAL DETAILS IF DISCONNECTED
+            if not self.connectivity_status["connected"]:
+                warnings.warn(
+                    f"\n"
+                    f"⚠️  CRITICAL DATA INTEGRITY WARNING: The response data is disconnected into "
+                    f"{self.connectivity_status['components_count']} separate sub-networks.\n"
+                    f"Item location estimates will be problematic because there are no empirical "
+                    f"comparisons spanning across these isolated groups, the item parameter "
+                    f"estimates for each independent subset will separately sum to zero. This means items "
+                    f"belonging to different subsets cannot be compared or calibrated onto a single scale.",
+                    category=UserWarning,
+                    stacklevel=2,
+                )
+
+            # THROW SYSTEM WARNING FOR "FAKE CONNECTIVITY" — ITEMS THAT PASS THE
+            # STANDARD CHECK BUT WILL STILL BREAK CALIBRATE()'S DIRECTED MATRIX
+            directionally_isolated = self.connectivity_status.get(
+                "directionally_isolated_items", []
+            )
+            if directionally_isolated:
+                warnings.warn(
+                    f"\n"
+                    f"⚠️  DATA INTEGRITY WARNING: {len(directionally_isolated)} item(s) have a "
+                    f"structurally unresolvable zero in calibrate()'s directed pairwise matrix: "
+                    f"{directionally_isolated}.\n"
+                    f"These items pass the standard connectivity check (they have at least one "
+                    f"empirical comparison in some direction) but can silently produce NaN "
+                    f"or overflow during calibration rather than a clear error. Consider dropping "
+                    f"these items or gathering more responses before calibrating.",
+                    category=UserWarning,
+                    stacklevel=2,
+                )
+
     """
     Partial Credit Model (Masters 1982) formulation of the polytomous Rasch model,
     with associated methods.
@@ -216,21 +264,21 @@ class PCM(Rasch):
     # Core probability / expected-score functions (scalar, used in plots)
     # ------------------------------------------------------------------
 
-    def cat_prob_centred(self, ability, difficulty, category, thresholds):
+    def cat_prob_centred(self, person_location, item_location, category, thresholds):
         """
         Compute the probability of a response category using centred parameterisation.
 
-        Uses the PCM formulation with a central item difficulty and
+        Uses the PCM formulation with a central item location and
         Rasch-Andrich threshold offsets. Vectorised using numpy cumsum for
         performance. P(X=k) = exp(k*(b-d) - cumsum(tau)_k) / sum over all categories,
-        where b is ability, d is difficulty, tau are thresholds (tau[0]=0 by convention).
+        where b is person location, d is item location, tau are thresholds (tau[0]=0 by convention).
 
         Parameters
         ----------
-        ability : float
-            Person ability estimate on the logit scale.
-        difficulty : float
-            Central item difficulty on the logit scale.
+        person_location : float
+            Person location estimate on the logit scale.
+        item_location : float
+            Central item location on the logit scale.
         category : int
             Response category (0 to max_score).
         thresholds : array-like
@@ -245,23 +293,23 @@ class PCM(Rasch):
         max_score = len(thresholds)
         cats = np.arange(max_score + 1)
         cumsum = np.concatenate(([0.0], np.cumsum(thresholds)))
-        log_nums = cats * (ability - difficulty) - cumsum
+        log_nums = cats * (person_location - item_location) - cumsum
         log_nums -= log_nums.max()  # numerical stability
         nums = np.exp(log_nums)
         return nums[category] / nums.sum()
 
-    def cat_prob_uncentred(self, ability, category, thresholds):
+    def cat_prob_uncentred(self, person_location, category, thresholds):
         """
         Compute the probability of a response category using uncentred parameterisation.
 
         Uses the PCM formulation with uncentred (absolute) item-category thresholds.
         Numerically stabilised via log-sum-exp. P(X=k) = exp(k*b - cumsum(tau)_k) /
-        sum over all categories, where b is ability and tau are uncentred thresholds.
+        sum over all categories, where b is person location and tau are uncentred thresholds.
 
         Parameters
         ----------
-        ability : float
-            Person ability estimate on the logit scale.
+        person_location : float
+            Person location estimate on the logit scale.
         category : int
             Response category (0 to max_score).
         thresholds : array-like
@@ -276,22 +324,22 @@ class PCM(Rasch):
         m = len(thresh)
         cats = np.arange(m + 1, dtype=float)
         cumsum = np.concatenate(([0.0], np.cumsum(thresh)))
-        log_nums = cats * ability - cumsum
+        log_nums = cats * person_location - cumsum
         log_nums -= log_nums.max()
         nums = np.exp(log_nums)
         return nums[category] / nums.sum()
 
-    def exp_score_uncentred(self, ability, thresholds):
+    def exp_score_uncentred(self, person_location, thresholds):
         """
         Compute the expected score using uncentred threshold parameterisation.
 
-        Calculates E[X | ability, thresholds] = sum(k * P(X=k)) over all
+        Calculates E[X | person location, thresholds] = sum(k * P(X=k)) over all
         categories, using uncentred threshold parameters.
 
         Parameters
         ----------
-        ability : float
-            Person ability estimate on the logit scale.
+        person_location : float
+            Person location estimate on the logit scale.
         thresholds : array-like
             Uncentred threshold parameters, length equals max_score.
 
@@ -304,25 +352,25 @@ class PCM(Rasch):
         m = len(thresh)
         cats = np.arange(m + 1, dtype=float)
         cumsum = np.concatenate(([0.0], np.cumsum(thresh)))
-        log_nums = cats * ability - cumsum
+        log_nums = cats * person_location - cumsum
         log_nums -= log_nums.max()
         nums = np.exp(log_nums)
         return (cats * nums).sum() / nums.sum()
 
-    def exp_score_centred(self, ability, difficulty, thresholds):
+    def exp_score_centred(self, person_location, item_location, thresholds):
         """
         Compute the expected score using centred parameterisation.
 
-        Calculates E[X | ability, difficulty, thresholds] using the centred
-        PCM formulation with a central item difficulty and Rasch-Andrich offsets.
+        Calculates E[X | person location, item location, thresholds] using the centred
+        PCM formulation with a central item location and Rasch-Andrich offsets.
         Numerically stabilised via log-sum-exp.
 
         Parameters
         ----------
-        ability : float
-            Person ability estimate on the logit scale.
-        difficulty : float
-            Central item difficulty on the logit scale.
+        person_location : float
+            Person location estimate on the logit scale.
+        item_location : float
+            Central item location on the logit scale.
         thresholds : array-like
             Rasch-Andrich threshold offsets, length max_score + 1.
 
@@ -335,23 +383,23 @@ class PCM(Rasch):
         max_score = len(thresh)
         cats = np.arange(max_score + 1, dtype=float)
         cumsum = np.concatenate(([0.0], np.cumsum(thresh)))
-        log_nums = cats * (ability - difficulty) - cumsum
+        log_nums = cats * (person_location - item_location) - cumsum
         log_nums -= log_nums.max()
         nums = np.exp(log_nums)
         return (cats * nums).sum() / nums.sum()
 
-    def variance_uncentred(self, ability, thresholds):
+    def variance_uncentred(self, person_location, thresholds):
         """
         Compute item variance (Fisher information) using uncentred parameterisation.
 
-        Calculates Var[X | ability, thresholds] = sum((k - E[X])^2 * P(X=k)),
-        equal to the Fisher information for the item at the given ability.
+        Calculates Var[X | person location, thresholds] = sum((k - E[X])^2 * P(X=k)),
+        equal to the Fisher information for the item at the given person location.
         Numerically stabilised via log-sum-exp.
 
         Parameters
         ----------
-        ability : float
-            Person ability estimate on the logit scale.
+        person_location : float
+            Person location estimate on the logit scale.
         thresholds : array-like
             Uncentred threshold parameters, length equals max_score.
 
@@ -364,26 +412,26 @@ class PCM(Rasch):
         m = len(thresh)
         cats = np.arange(m + 1, dtype=float)
         cumsum = np.concatenate(([0.0], np.cumsum(thresh)))
-        log_nums = cats * ability - cumsum
+        log_nums = cats * person_location - cumsum
         log_nums -= log_nums.max()
         nums = np.exp(log_nums)
         probs = nums / nums.sum()
         expected = (cats * probs).sum()
         return ((cats - expected) ** 2 * probs).sum()
 
-    def variance_centred(self, ability, difficulty, thresholds):
+    def variance_centred(self, person_location, item_location, thresholds):
         """
         Compute item variance (Fisher information) using centred parameterisation.
 
-        Calculates Var[X | ability, difficulty, thresholds] = sum((k - E[X])^2 * P(X=k)).
+        Calculates Var[X | person location, item location, thresholds] = sum((k - E[X])^2 * P(X=k)).
         Numerically stabilised via log-sum-exp.
 
         Parameters
         ----------
-        ability : float
-            Person ability estimate on the logit scale.
-        difficulty : float
-            Central item difficulty on the logit scale.
+        person_location : float
+            Person location estimate on the logit scale.
+        item_location : float
+            Central item location on the logit scale.
         thresholds : array-like
             Rasch-Andrich threshold offsets, length max_score + 1.
 
@@ -396,14 +444,14 @@ class PCM(Rasch):
         max_score = len(thresh)
         cats = np.arange(max_score + 1, dtype=float)
         cumsum = np.concatenate(([0.0], np.cumsum(thresh)))
-        log_nums = cats * (ability - difficulty) - cumsum
+        log_nums = cats * (person_location - item_location) - cumsum
         log_nums -= log_nums.max()
         nums = np.exp(log_nums)
         probs = nums / nums.sum()
         expected = (cats * probs).sum()
         return ((cats - expected) ** 2 * probs).sum()
 
-    def kurtosis_uncentred(self, ability, thresholds):
+    def kurtosis_uncentred(self, person_location, thresholds):
         """
         Compute the fourth central moment of the response distribution (uncentred).
 
@@ -413,8 +461,8 @@ class PCM(Rasch):
 
         Parameters
         ----------
-        ability : float
-            Person ability estimate on the logit scale.
+        person_location : float
+            Person location estimate on the logit scale.
         thresholds : array-like
             Uncentred threshold parameters, length equals max_score.
 
@@ -427,14 +475,14 @@ class PCM(Rasch):
         m = len(thresh)
         cats = np.arange(m + 1, dtype=float)
         cumsum = np.concatenate(([0.0], np.cumsum(thresh)))
-        log_nums = cats * ability - cumsum
+        log_nums = cats * person_location - cumsum
         log_nums -= log_nums.max()
         nums = np.exp(log_nums)
         probs = nums / nums.sum()
         expected = (cats * probs).sum()
         return ((cats - expected) ** 4 * probs).sum()
 
-    def kurtosis_centred(self, ability, difficulty, thresholds):
+    def kurtosis_centred(self, person_location, item_location, thresholds):
         """
         Compute the fourth central moment of the response distribution (centred).
 
@@ -442,10 +490,10 @@ class PCM(Rasch):
 
         Parameters
         ----------
-        ability : float
-            Person ability estimate on the logit scale.
-        difficulty : float
-            Central item difficulty on the logit scale.
+        person_location : float
+            Person location estimate on the logit scale.
+        item_location : float
+            Central item location on the logit scale.
         thresholds : array-like
             Rasch-Andrich threshold offsets, length max_score + 1.
 
@@ -458,7 +506,7 @@ class PCM(Rasch):
         max_score = len(thresh)
         cats = np.arange(max_score + 1, dtype=float)
         cumsum = np.concatenate(([0.0], np.cumsum(thresh)))
-        log_nums = cats * (ability - difficulty) - cumsum
+        log_nums = cats * (person_location - item_location) - cumsum
         log_nums -= log_nums.max()
         nums = np.exp(log_nums)
         probs = nums / nums.sum()
@@ -469,7 +517,7 @@ class PCM(Rasch):
     # Vectorised cat-probability engine (core internal workhorse)
     # ------------------------------------------------------------------
 
-    def _cat_probs_matrix(self, abilities, items, thresholds=None):
+    def _cat_probs_matrix(self, person_locations, items, thresholds=None):
         """
         Vectorised category probability computation used by person(), warm(),
         fit_statistics(), csem(), and person_lookup_table().
@@ -479,14 +527,14 @@ class PCM(Rasch):
         Returns
         -------
         probs : ndarray, shape (max_max_score+1, N, n_items)
-            probs[cat, person_idx, item_idx] = P(X=cat | ability, item)
+            probs[cat, person_idx, item_idx] = P(X=cat | person location, item)
             Categories beyond an item's max_score are set to 0.
         cats_arr : ndarray, shape (max_max_score+1,)
         """
         if thresholds is None:
             thresholds = self.thresholds_uncentred
 
-        ab = np.asarray(abilities, dtype=float)  # (N,)
+        ab = np.asarray(person_locations, dtype=float)  # (N,)
         n = len(ab)
         n_items = len(items)
         max_max_score = int(max(len(thresholds.loc[it].dropna()) for it in items))
@@ -499,7 +547,7 @@ class PCM(Rasch):
             m = len(thresh)
             # prefix sums: cumsum[k] = sum(thresh[:k])
             cumsum = np.concatenate(([0.0], np.cumsum(thresh)))  # (m+1,)
-            # log numerator for category k: k*ability - cumsum[k]
+            # log numerator for category k: k*person location - cumsum[k]
             # shape: (m+1, N)
             log_num = cats_arr[: m + 1, None] * ab[None, :] - cumsum[:, None]
             log_probs[: m + 1, :, j] = log_num
@@ -517,6 +565,52 @@ class PCM(Rasch):
     # Calibration
     # ------------------------------------------------------------------
 
+    def _build_pairwise_matrix(self):
+        """
+        Raw (unsmoothed) directed pairwise comparison matrix used by
+        calibrate() and check_data_connectivity(). One row/column per
+        item-category (not per item): entry (item_1's category i+1,
+        item_2's category j) counts persons who scored category i+1 on
+        item_1 and category j on item_2.
+
+        Returns
+        -------
+        matrix : numpy.ndarray, shape (D, D), D = sum(max_score_vector)
+        row_items : numpy.ndarray, length D
+            Item name owning each row/column (repeated per category).
+        """
+        df_array = self.responses.to_numpy()
+        cum_scores = np.concatenate(([0], np.cumsum(self.max_score_vector.to_numpy())))
+        total_matrix_dim = cum_scores[-1]
+        matrix = np.zeros((total_matrix_dim, total_matrix_dim), dtype=np.float64)
+        row_items = []
+
+        for item_1 in range(self.no_of_items):
+            max_k1 = self.max_score_vector.iloc[item_1]
+            row_items.extend([self.item_names[item_1]] * max_k1)
+            start_1 = cum_scores[item_1]
+
+            for item_2 in range(self.no_of_items):
+                max_k2 = self.max_score_vector.iloc[item_2]
+                start_2 = cum_scores[item_2]
+
+                s1 = df_array[:, item_1]
+                s2 = df_array[:, item_2]
+                valid_mask = ~np.isnan(s1) & ~np.isnan(s2)
+                if not np.any(valid_mask):
+                    continue
+
+                s1_valid = s1[valid_mask].astype(int)
+                s2_valid = s2[valid_mask].astype(int)
+
+                for i in range(max_k1):
+                    m1 = s1_valid == i + 1
+                    if np.any(m1):
+                        counts = np.bincount(s2_valid[m1], minlength=max_k2)[:max_k2]
+                        matrix[start_1 + i, start_2 : start_2 + max_k2] = counts
+
+        return matrix, np.array(row_items)
+
     def calibrate(
         self, constant=0.1, method="cos", matrix_power=3, log_lik_tol=0.000001
     ):
@@ -527,7 +621,7 @@ class PCM(Rasch):
         pairs and threshold combinations using vectorised operations, then
         raises it to successive powers to resolve structural zeroes (Choppin's
         matrix power property). A priority vector is extracted from the resolved
-        matrix to obtain uncentred threshold estimates. Central item difficulties
+        matrix to obtain uncentred threshold estimates. Central item locations
         are derived as the mean of each item's uncentred thresholds, and centred
         thresholds are computed as deviations from this mean.
 
@@ -552,7 +646,7 @@ class PCM(Rasch):
         thresholds_uncentred : dict
             {item: numpy.ndarray} of uncentred threshold estimates per item.
         items : pandas.Series
-            Central item difficulty (mean of uncentred thresholds) per item.
+            Central item location (mean of uncentred thresholds) per item.
         thresholds_centred : dict
             {item: numpy.ndarray} of centred threshold offsets per item.
         threshold_list : numpy.ndarray
@@ -591,33 +685,8 @@ class PCM(Rasch):
             self.responses = self.responses.loc[~all_null_mask]
         self.no_of_persons = self.responses.shape[0]
 
-        df_array = self.responses.to_numpy()
+        matrix, _ = self._build_pairwise_matrix()
         cum_scores = np.concatenate(([0], np.cumsum(self.max_score_vector.to_numpy())))
-        total_matrix_dim = cum_scores[-1]
-        matrix = np.zeros((total_matrix_dim, total_matrix_dim), dtype=np.float64)
-
-        for item_1 in range(self.no_of_items):
-            max_k1 = self.max_score_vector.iloc[item_1]
-            start_1 = cum_scores[item_1]
-
-            for item_2 in range(self.no_of_items):
-                max_k2 = self.max_score_vector.iloc[item_2]
-                start_2 = cum_scores[item_2]
-
-                s1 = df_array[:, item_1]
-                s2 = df_array[:, item_2]
-                valid_mask = ~np.isnan(s1) & ~np.isnan(s2)
-                if not np.any(valid_mask):
-                    continue
-
-                s1_valid = s1[valid_mask].astype(int)
-                s2_valid = s2[valid_mask].astype(int)
-
-                for i in range(max_k1):
-                    m1 = s1_valid == i + 1
-                    if np.any(m1):
-                        counts = np.bincount(s2_valid[m1], minlength=max_k2)[:max_k2]
-                        matrix[start_1 + i, start_2 : start_2 + max_k2] = counts
 
         constant_matrix = ((matrix + matrix.T) > 0).astype(np.float64) * constant
         matrix += constant_matrix
@@ -699,7 +768,6 @@ class PCM(Rasch):
         plot=True,
         plot_kwargs=None,
         anchor_thresholds=None,
-        check_thresholds=True,
         threshold_check="both",
         alpha=0.05,
         correction="bh",
@@ -714,12 +782,12 @@ class PCM(Rasch):
         seed=None,
     ):
         """
-        Anchor item difficulty estimates onto externally-supplied values.
+        Anchor item location estimates onto externally-supplied values.
 
         Supports item banking: calibrates this dataset's own item
-        difficulties as usual, then shifts the item-difficulty scale by a
+        locations as usual, then shifts the item-location scale by a
         translation constant so that a subset of common ("anchor") items
-        line up with externally-supplied reference difficulties (e.g. from
+        line up with externally-supplied reference locations (e.g. from
         a bank of previously-calibrated items). This is a translation only
         (PCM item discrimination is fixed at 1 across items), exactly as
         in SLM/RSM.
@@ -728,27 +796,27 @@ class PCM(Rasch):
         left untouched by anchoring itself — unlike RSM, PCM has no single
         shared threshold vector to speak of in the first place: every item
         already has its own category structure. Translating item
-        difficulty doesn't need to touch it either way.
+        location doesn't need to touch it either way.
 
-        Optionally (anchor_thresholds=, check_thresholds=True by default),
+        Optionally (anchor_thresholds=, threshold_check='both' by default),
         if you also have externally-supplied reference threshold structures
         for some of the anchor items (e.g. the bank's own per-item category
         structure — not every bank publishes this, so anchor_thresholds
         need not cover every anchor item), this checks whether they're
         actually compatible with this dataset via likelihood-ratio tests:
-        holding that item's difficulty fixed at its anchored value, compare
+        holding that item's location fixed at its anchored value, compare
         the model fit using this dataset's own freely-estimated threshold
         offsets for that item against using the given ones instead
-        (abilities re-estimated over the whole test in each case). Because
+        (person locations re-estimated over the whole test in each case). Because
         PCM thresholds are inherently per-item, this can be run per item
         (threshold_check='per_item', one independent test per supplied
         item, BH/Bonferroni-corrected for multiple comparisons), as a
         single combined test across every supplied item at once
-        (threshold_check='aggregate'), or both (default). (As with RSM,
-        AIC/BIC don't apply here — both candidates are point-values in the
-        same fixed-length model, so there's no real parameter-count
-        difference to penalise for; only LR's fixed-vs-free chi-squared
-        framing is valid.)
+        (threshold_check='aggregate'), both (default), or skipped entirely
+        (threshold_check='none'). (As with RSM, AIC/BIC don't apply here —
+        both candidates are point-values in the same fixed-length model, so
+        there's no real parameter-count difference to penalise for; only
+        LR's fixed-vs-free chi-squared framing is valid.)
 
         By default (selection_method='robust_z'), the translation constant
         is computed via _robust_anchor_selection() (Iglewicz & Hoaglin
@@ -765,7 +833,7 @@ class PCM(Rasch):
         Parameters
         ----------
         anchors : dict or pandas.Series
-            Externally-supplied reference difficulties, keyed/indexed by
+            Externally-supplied reference locations, keyed/indexed by
             item name. Only items also present in this dataset are used.
         calibrate : bool, default False
             If True, (re-)runs calibrate() before anchoring. If False,
@@ -830,7 +898,7 @@ class PCM(Rasch):
             selection_method='none' or adj is supplied directly.
         plot_kwargs : dict or None, default None
             Extra keyword arguments forwarded to plot_anchor_selection()
-            when plot=True (e.g. filename, x_min/x_max, graph_title).
+            when plot=True (e.g. filename, xmin/xmax, title).
         anchor_thresholds : dict or None, default None
             {item_name: array-like} of externally-supplied reference
             threshold offsets (same length/shape as self.thresholds.loc
@@ -838,12 +906,8 @@ class PCM(Rasch):
             structure shape, not an absolute/uncentred value). Only items
             present in this dict are checked; need not cover every anchor
             item. If None, the threshold-structure check is skipped
-            entirely regardless of check_thresholds.
-        check_thresholds : bool, default True
-            If True and anchor_thresholds is supplied, runs the LR
-            comparison(s) described above and warns if any threshold
-            structure is significantly different.
-        threshold_check : {'per_item', 'aggregate', 'both'}, default 'both'
+            entirely regardless of threshold_check.
+        threshold_check : {'per_item', 'aggregate', 'both', 'none'}, default 'both'
             'per_item': one independent LR test per item in anchor_thresholds
             (df = that item's max_score - 1 each), correction-adjusted.
             'aggregate': one combined LR test swapping every supplied item's
@@ -852,6 +916,8 @@ class PCM(Rasch):
             it's a single test.
             'both': runs both (default) — the per-item table for
             localisation, the aggregate test for an overall answer.
+            'none': skips the threshold-structure check entirely, even if
+            anchor_thresholds is supplied.
         alpha : float, default 0.05
             Significance level for all LR tests (compared against the
             corrected p-value for per-item tests, raw p for the aggregate
@@ -861,16 +927,17 @@ class PCM(Rasch):
             (mirrors dif_test's convention elsewhere in the package). None
             uses raw p-values, uncorrected. Ignored for the aggregate test.
         warm_corr, tolerance, max_iters, ext_score_adjustment :
-            Person-estimation kwargs, used only by the check_thresholds
-            comparison (abilities must be re-estimated under each candidate
-            threshold table before the log-likelihoods are comparable).
+            Person-estimation kwargs, used only by the threshold-structure
+            comparison (threshold_check != 'none') (person locations must
+            be re-estimated under each candidate threshold table before
+            the log-likelihoods are comparable).
         constant, method, matrix_power, log_lik_tol : floats
             Calibration kwargs, used only if calibrate is triggered.
 
         Attributes set
         --------------
         anchor_items : pandas.Series
-            Item difficulties shifted onto the anchor scale.
+            Item locations shifted onto the anchor scale.
         anchor_item_names : pandas.Index
             Names of the items supplied as anchors.
         anchor_adj : float
@@ -901,12 +968,12 @@ class PCM(Rasch):
         anchor_threshold_test : pandas.DataFrame or None
             Per-item LR test table (LL_estimated, LL_given, LR, df, p,
             p_corrected, Flagged), indexed by item. None if
-            anchor_thresholds not supplied, check_thresholds=False, or
+            anchor_thresholds not supplied, threshold_check='none', or
             threshold_check='aggregate' only.
         anchor_threshold_test_aggregate : pandas.Series or None
             Combined LR test across every item in anchor_thresholds at
             once (LL_estimated, LL_given, LR, df, p, Flagged). None if
-            anchor_thresholds not supplied, check_thresholds=False, or
+            anchor_thresholds not supplied, threshold_check='none', or
             threshold_check='per_item' only.
         calibrate_anchor_runs : dict
             Every call's results above, keyed by tuple(sorted(anchors.
@@ -916,8 +983,10 @@ class PCM(Rasch):
         """
         if overwrite_anchors not in ("none", "rejected", "all"):
             raise ValueError("overwrite_anchors must be 'none', 'rejected', or 'all'")
-        if threshold_check not in ("per_item", "aggregate", "both"):
-            raise ValueError("threshold_check must be 'per_item', 'aggregate', or 'both'")
+        if threshold_check not in ("per_item", "aggregate", "both", "none"):
+            raise ValueError(
+                "threshold_check must be 'per_item', 'aggregate', 'both', or 'none'"
+            )
         if correction not in ("bh", "bonferroni", None):
             raise ValueError("correction must be 'bh', 'bonferroni', or None")
         if selection_method not in ("robust_z", "wald", "none"):
@@ -1063,7 +1132,7 @@ class PCM(Rasch):
         else:
             self.anchor_plot = None
 
-        if check_thresholds and anchor_thresholds:
+        if threshold_check != "none" and anchor_thresholds:
             for item, offsets in anchor_thresholds.items():
                 expected_len = int(self.max_score_vector[item])
                 if len(offsets) != expected_len:
@@ -1079,7 +1148,7 @@ class PCM(Rasch):
                 max_iters=max_iters,
                 ext_score_adjustment=ext_score_adjustment,
             )
-            # Baseline (H1): every item at its own anchored difficulty +
+            # Baseline (H1): every item at its own anchored location +
             # freely-estimated centred thresholds — identical across every
             # per-item test and the aggregate test, so compute it once.
             anchored_uncentred = self.thresholds.add(self.anchor_items, axis=0)
@@ -1202,11 +1271,11 @@ class PCM(Rasch):
     ):
         """
         Log-likelihood of this dataset's responses using a candidate
-        uncentred (absolute) threshold table, with abilities re-estimated
+        uncentred (absolute) threshold table, with person locations re-estimated
         under that specific parameter set.
 
-        Used by calibrate_anchor's check_thresholds diagnostic to compare
-        candidate threshold structures on a fair footing — abilities can't
+        Used by calibrate_anchor's threshold_check diagnostic to compare
+        candidate threshold structures on a fair footing — person locations can't
         be reused across candidates since they depend on the threshold
         table too. Uses a scratch PCM instance (same convention as
         std_errors' bootstrap and andersen_lr_test's group refits) so
@@ -1241,7 +1310,7 @@ class PCM(Rasch):
 
         Draws no_of_samples bootstrap resamples of person-level response data,
         calibrates each resample, and computes the standard deviation of
-        threshold and central difficulty estimates across samples. Also
+        threshold and central item location estimates across samples. Also
         computes category width SEs (SE of spacing between adjacent thresholds).
 
         Parameters
@@ -1267,13 +1336,13 @@ class PCM(Rasch):
         threshold_se : dict
             {item: numpy.ndarray} bootstrap SEs for each item's uncentred thresholds.
         item_se : pandas.Series
-            Bootstrap SE for each item's central difficulty.
+            Bootstrap SE for each item's central location.
         cat_width_se : dict
             {item: numpy.ndarray} bootstrap SEs for category widths.
         threshold_low / threshold_high : dict or None
             Bootstrap CI bounds for thresholds, or None.
         central_bootstrap : pandas.DataFrame
-            Bootstrap central difficulty estimates, shape (no_of_samples, items).
+            Bootstrap central item location estimates, shape (no_of_samples, items).
         threshold_bootstrap : dict
             {item: DataFrame} of bootstrap threshold estimates.
         """
@@ -1390,7 +1459,7 @@ class PCM(Rasch):
             self.central_high = None
 
     # ------------------------------------------------------------------
-    # Ability estimation
+    # Person location estimation
     # ------------------------------------------------------------------
 
     def person(
@@ -1404,7 +1473,7 @@ class PCM(Rasch):
         missing_as_incorrect=False,
     ):
         """
-        Estimate person abilities using Newton-Raphson maximum likelihood.
+        Estimate person locations using Newton-Raphson maximum likelihood.
 
         For each person, iteratively solves the likelihood equation using
         uncentred threshold parameterisation and vectorised category probability
@@ -1429,7 +1498,7 @@ class PCM(Rasch):
         Returns
         -------
         pandas.Series
-            Ability estimates in logits. Returns numpy.nan on failure.
+            Person location estimates in logits. Returns numpy.nan on failure.
         """
         if isinstance(persons, str):
             persons = self.person_names if persons == "all" else [persons]
@@ -1461,21 +1530,21 @@ class PCM(Rasch):
         # Weighted mean threshold per person (accounting for missing items)
         thresh_sum_df = person_filter.mul(thresh_sums, axis=1)
         max_score_df = person_filter.mul(self.max_score_vector[items], axis=1)
-        mean_diffs = thresh_sum_df.sum(axis=1) / max_score_df.sum(axis=1)
+        mean_item_locations = thresh_sum_df.sum(axis=1) / max_score_df.sum(axis=1)
 
         try:
-            estimates = np.log(scores) - np.log(ext_scores - scores) + mean_diffs
+            estimates = np.log(scores) - np.log(ext_scores - scores) + mean_item_locations
             items_list = list(items)
 
             # Per-person convergence mask. The original code accidentally used
             # nan propagation from exp() overflow to freeze converged persons
             # (abs(nan) > tol = False). Our log-sum-exp implementation gives
-            # valid probabilities for all ability values, so we must track
+            # valid probabilities for all person location values, so we must track
             # convergence explicitly: once a person's change drops below
             # tolerance, exclude them from further updates. Without this,
             # slowly-converging persons keep updating everyone, and persons
             # near extreme scores accumulate drift of +/-1 logit per iteration
-            # over max_iters steps, producing e.g. ability=117 logits.
+            # over max_iters steps, producing e.g. person_location=117 logits.
             active = pd.Series(True, index=persons)
             iters = 0
 
@@ -1554,9 +1623,9 @@ class PCM(Rasch):
         missing_as_incorrect=False,
     ):
         """
-        Estimate abilities for all persons and store as an attribute.
+        Estimate person locations for all persons and store as an attribute.
 
-        Wrapper around person() that estimates abilities for all persons
+        Wrapper around person() that estimates person locations for all persons
         and stores the result as self.persons.
 
         Parameters
@@ -1579,7 +1648,7 @@ class PCM(Rasch):
         Attributes set
         --------------
         persons : pandas.Series
-            Ability estimates for all persons, in logits.
+            Person location estimates for all persons, in logits.
         """
         self.persons = self.person(
             self.person_names,
@@ -1601,7 +1670,7 @@ class PCM(Rasch):
         ext_score_adjustment=0.5,
     ):
         """
-        Convert a raw total score to an ability estimate via Newton-Raphson ML.
+        Convert a raw total score to a person location estimate via Newton-Raphson ML.
 
         Used internally to draw score lines on TCC plots.
 
@@ -1623,7 +1692,7 @@ class PCM(Rasch):
         Returns
         -------
         float
-            Ability estimate in logits.
+            Person location estimate in logits.
         """
         # BUG FIX: original had a string-iteration bug when items was a single string item name.
         if items is None or (isinstance(items, str) and items in ("all", "none")):
@@ -1632,7 +1701,7 @@ class PCM(Rasch):
             items = [items]
 
         thresholds = self.thresholds_uncentred
-        mean_diff = thresholds.stack().mean()
+        mean_item_location = thresholds.stack().mean()
         ext_score = self.max_score_vector[items].sum()
 
         used_score = float(score)
@@ -1641,7 +1710,7 @@ class PCM(Rasch):
         elif used_score == ext_score:
             used_score -= ext_score_adjustment
 
-        estimate = log(used_score) - log(ext_score - used_score) + mean_diff
+        estimate = log(used_score) - log(ext_score - used_score) + mean_item_location
         change = 1.0
         iters = 0
 
@@ -1686,9 +1755,9 @@ class PCM(Rasch):
         ext_score_adjustment=0.5,
     ):
         """
-        Build a score-to-ability lookup table for all possible raw scores.
+        Build a score-to-location lookup table for all possible raw scores.
 
-        Estimates the ability corresponding to every possible raw score on
+        Estimates the person location corresponding to every possible raw score on
         a given item set using vectorised Newton-Raphson, and stores the
         result as self.score_table.
 
@@ -1711,7 +1780,7 @@ class PCM(Rasch):
         Attributes set
         --------------
         score_table : pandas.Series
-            Ability estimate for each possible raw score, indexed by score.
+            Person location estimate for each possible raw score, indexed by score.
 
         Returns
         -------
@@ -1737,9 +1806,9 @@ class PCM(Rasch):
             scores = np.arange(1, total_max)
             used_scores = scores.astype(float)
 
-        mean_diff = thresholds.stack().mean()
+        mean_item_location = thresholds.stack().mean()
         estimates = pd.Series(
-            np.log(used_scores) - np.log(total_max - used_scores) + mean_diff,
+            np.log(used_scores) - np.log(total_max - used_scores) + mean_item_location,
             index=scores,
         )
 
@@ -1770,7 +1839,7 @@ class PCM(Rasch):
 
         self.score_table = estimates
 
-    def warm(self, abilities, items, person_filter):
+    def warm(self, person_locations, items, person_filter):
         """
         Apply Warm's (1989) weighted maximum likelihood bias correction.
 
@@ -1779,8 +1848,8 @@ class PCM(Rasch):
 
         Parameters
         ----------
-        abilities : pandas.Series
-            Current ability estimates.
+        person_locations : pandas.Series
+            Current person location estimates.
         items : list or pandas.Index
             Item subset.
         person_filter : pandas.DataFrame
@@ -1796,7 +1865,7 @@ class PCM(Rasch):
         items = list(items)
         thresholds = self.thresholds_uncentred
 
-        probs, cats_arr = self._cat_probs_matrix(abilities.values, items, thresholds)
+        probs, cats_arr = self._cat_probs_matrix(person_locations.values, items, thresholds)
         # probs: (C, N, I)
 
         pf = person_filter.values if isinstance(person_filter, pd.DataFrame) else None
@@ -1818,7 +1887,7 @@ class PCM(Rasch):
         # ALL items including unobserved ones. With 6 unobserved items out of 12,
         # this inflated part_1 by ~289 units while part_2/part_3 reflected only
         # the 6 observed items, producing Warm corrections of +207 logits instead
-        # of the correct -0.63 -- the source of ability estimates of +269 logits.
+        # of the correct -0.63 -- the source of person location estimates of +269 logits.
         cats3 = (cats_arr**3)[:, None, None]
         masked_probs = probs * pf[None, :, :] if pf is not None else probs  # (C, N, I)
         part_1 = (cats3 * masked_probs).sum(axis=0).sum(axis=1)  # (N,)
@@ -1831,9 +1900,9 @@ class PCM(Rasch):
         den = 2 * info_sum**2
 
         warm_correction = (part_1 - part_2 + part_3) / den
-        return pd.Series(warm_correction, index=abilities.index)
+        return pd.Series(warm_correction, index=person_locations.index)
 
-    def csem(self, persons=None, abilities=None, items=None):
+    def csem(self, persons=None, person_locations=None, items=None):
         """
         Compute the conditional standard error of measurement.
 
@@ -1842,9 +1911,14 @@ class PCM(Rasch):
         Parameters
         ----------
         persons : list, str, or None, default None
-            Person identifiers. Overrides abilities if provided.
-        abilities : pandas.Series, float, list, or None, default None
-            Ability estimates. If None, uses self.persons.
+            Person identifiers. Overrides person_locations if provided.
+        person_locations : pandas.Series, float, list, numpy.ndarray, or None, default None
+            Person location estimates. If None, uses self.persons, calling
+            self.person_estimates() automatically to generate it if not
+            already present. A raw float/list/array of locations (or any
+            locations not indexed by a real person) is treated as
+            hypothetical: since there is no observed response row to
+            consult, all items in items are treated as answered.
         items : str, list, or None, default None
             Item subset. None uses all items.
 
@@ -1853,16 +1927,33 @@ class PCM(Rasch):
         pandas.Series
             CSEM values in logits.
         """
-        if abilities is None:
-            abilities = self.persons
-        if isinstance(abilities, (int, float)):
-            abilities = pd.Series({"Ability": float(abilities)})
-        if isinstance(abilities, list):
-            abilities = pd.Series({f"Ability {a}": a for a in abilities})
-        if persons is not None:
-            abilities = self.persons.loc[persons]
+        # BUG FIX (original): when both persons and a custom person_locations
+        # were supplied, persons always overrode person_locations by looking
+        # itself up in self.persons, silently discarding the caller's table
+        # (e.g. a raw-score lookup via score_table). persons now keys into
+        # whichever table is in play: the supplied person_locations if one
+        # was given, else self.persons — matching SLM's single-argument
+        # person/person_locations behaviour.
+        person_locations_supplied = person_locations is not None
 
-        persons = abilities.index
+        if person_locations is None:
+            if not hasattr(self, "persons"):
+                self.person_estimates()
+
+            person_locations = self.persons
+        if isinstance(person_locations, (int, float)):
+            person_locations = pd.Series({"Location": float(person_locations)})
+        if isinstance(person_locations, (list, np.ndarray)):
+            person_locations = pd.Series({f"Location {a}": a for a in person_locations})
+        if persons is not None:
+            if not isinstance(persons, (list, pd.Index, np.ndarray)):
+                persons = [persons]
+            if person_locations_supplied:
+                person_locations = person_locations.loc[persons]
+            else:
+                person_locations = self.persons.loc[persons]
+
+        persons = person_locations.index
 
         # BUG FIX: original `else` branch set thresholds = self.thresholds_uncentred.loc[items].dropna()
         # which returns a column slice (wrong type) for a list of items.
@@ -1873,10 +1964,16 @@ class PCM(Rasch):
 
         thresholds = self.thresholds_uncentred
 
-        person_data = self.responses.loc[persons, items]
-        person_filter = person_data.notna().astype(float)
+        # BUG FIX (original): unconditionally indexed self.responses by persons,
+        # which failed for hypothetical locations (raw floats/lists, or any
+        # person_locations index not matching self.responses) with no matching
+        # row. Real persons are still filtered by their actual missing-response
+        # pattern; hypothetical locations are treated as fully answered.
+        is_real_person = persons.isin(self.responses.index)
+        person_filter = self.responses.reindex(persons)[items].notna().astype(float)
+        person_filter.loc[~is_real_person] = 1.0
 
-        probs, cats_arr = self._cat_probs_matrix(abilities.values, items, thresholds)
+        probs, cats_arr = self._cat_probs_matrix(person_locations.values, items, thresholds)
         exp_score = (cats_arr[:, None, None] * probs).sum(axis=0)
         exp_score_df = pd.DataFrame(exp_score, index=persons, columns=items)
         exp_score_df *= person_filter
@@ -1892,79 +1989,88 @@ class PCM(Rasch):
     # Descriptive / count methods
     # ------------------------------------------------------------------
 
-    def category_counts_item(self, item):
+    def category_counts_df(self, persons=None, items=None, counts_name=None):
         """
-        Return response frequency counts for a single item.
+        Build a response frequency table for one or more persons, across
+        one or more items.
+
+        Computes per-item response counts for each valid category, total
+        valid responses, and missing responses, over the requested
+        persons. Items with different maximum scores show blank cells
+        (not 0) for categories above their maximum, to avoid implying
+        those categories exist. Appends a 'Total' row.
 
         Parameters
         ----------
-        item : str
-            Item identifier (must be a column in self.responses).
+        persons : str, list, or None, default None
+            Person(s) to include (a single person name or a list of
+            names) -- e.g. to compare a score-split or exogenous-variable
+            group against the rest. None uses all persons.
+        items : str, list, or None, default None
+            Item(s) to include (as elsewhere in the package, a single item
+            name or a list of item names). None uses all items.
+        counts_name : str, int, or None, default None
+            If None, stores the result as self.category_counts_table
+            (overwriting any previous call). If given, stores it instead
+            under that key in self.counts (created if it doesn't already
+            exist) -- e.g. self.counts['group_a'] and
+            self.counts.group_a (dot access works when counts_name is a
+            valid Python identifier) -- so a succession of tables (e.g.
+            one per exogenous-variable group) can be kept side by side
+            for comparison rather than overwriting each other.
 
         Returns
         -------
-        pandas.Series or None
-            Count of each observed response category (0 to max_score_vector[item]),
-            sorted by category value. Returns None and issues a UserWarning
-            if the item name is not found.
-        """
-        if item not in self.responses.columns:
-            warnings.warn(
-                f"Invalid item name: {item!r}. Returning None.",
-                UserWarning,
-                stacklevel=2,
-            )
-            return None
-        counts = (
-            self.responses[item]
-            .value_counts()
-            .reindex(range(self.max_score_vector[item] + 1), fill_value=0)
-            .astype(int)
-        )
-        return counts
-
-    def category_counts_df(self):
-        """
-        Build and store a response frequency table across all items.
-
-        Computes per-item response counts for each valid category, total
-        valid responses, and missing responses. Items with different maximum
-        scores show blank cells (not 0) for categories above their maximum,
-        to avoid implying those categories exist. Appends a 'Total' row.
-
-        Attributes set
-        --------------
-        category_counts : pandas.DataFrame
+        pandas.DataFrame
             DataFrame with items as rows and response categories (0 to
-            max max_score), 'Total', and 'Missing' as columns. Cells above
-            an item's max_score are blank. A 'Total' row is appended.
-
-        Returns
-        -------
-        None
+            max max_score), 'Total', and 'Missing' as columns. Cells
+            above an item's max_score are blank. A 'Total' row is
+            appended.
         """
+        if items is None:
+            items = list(self.responses.columns)
+        elif isinstance(items, str):
+            items = [items]
+
+        if persons is None:
+            persons = list(self.responses.index)
+        elif isinstance(persons, str):
+            persons = [persons]
+
+        subset = self.responses.loc[persons, items]
+
         # Build per-item counts reindexed to that item's valid score range only.
         # Items with different max scores will have NaN for categories above their
         # maximum when combined into a single DataFrame -- these should display as
         # blank cells, not 0, to avoid implying those categories exist for that item.
         cat_counts_dict = {
-            item: self.responses[item]
+            item: subset[item]
             .value_counts()
             .reindex(range(self.max_score_vector[item] + 1), fill_value=0)
             .astype(int)
-            for item in self.responses.columns
+            for item in items
         }
         category_counts_df = pd.DataFrame(cat_counts_dict).T
         category_counts_df.sort_index(axis=1, inplace=True)
 
-        category_counts_df["Total"] = self.responses.count()
-        category_counts_df["Missing"] = self.no_of_persons - category_counts_df["Total"]
+        category_counts_df["Total"] = subset.count()
+        category_counts_df["Missing"] = len(persons) - category_counts_df["Total"]
         category_counts_df.loc["Total"] = category_counts_df.sum()
 
         # Convert valid counts to int, then replace NaN (categories above item
         # max score) with '' so the output table shows a blank rather than 0.
         category_counts_df = category_counts_df.fillna(-1).astype(int).replace(-1, "")
-        self.category_counts = category_counts_df
+
+        if counts_name is None:
+            self.category_counts_table = category_counts_df
+        else:
+            if not hasattr(self, "counts"):
+                from raschpy.base import _Namespace
+
+                self.counts = _Namespace()
+            self.counts[counts_name] = category_counts_df
+
+        return category_counts_df
 
     # ------------------------------------------------------------------
     # Fit statistics
@@ -1999,7 +2105,7 @@ class PCM(Rasch):
     ):
         """
         Log-likelihood maximised over a per-item location shift only, holding
-        ability (theta) and the per-item category step-shape both fixed.
+        person location (theta) and the per-item category step-shape both fixed.
 
         Used by dif_test(omnibus_scope='item') to isolate item-location DIF
         from threshold/category-structure DIF: PCM has a separate threshold
@@ -2012,16 +2118,16 @@ class PCM(Rasch):
         (a much smaller residual than the same issue for SLM/RSM, which have
         far fewer or no per-item threshold parameters). Fixing step_shape
         (the pooled model's own zero-centred per-item category structure)
-        and theta (pooled abilities), then only re-optimising a single
+        and theta (pooled person locations), then only re-optimising a single
         location shift per item via Newton-Raphson, correctly restricts H1
         vs H0's free-parameter difference to exactly items-1, mirroring how
-        pooled abilities alone were sufficient for SLM/RSM/MFRM.
+        pooled person locations alone were sufficient for SLM/RSM/MFRM.
 
-        Newton-Raphson update mirrors person()'s ability-estimation loop
+        Newton-Raphson update mirrors person()'s location-estimation loop
         (same expected-score/information-based step), but the sign is
         flipped and the sum is over persons per item rather than over items
         per person, since increasing an item's location shift decreases
-        expected score (the opposite direction to increasing ability).
+        expected score (the opposite direction to increasing person location).
 
         Parameters
         ----------
@@ -2029,11 +2135,11 @@ class PCM(Rasch):
             This group's own response data (already restricted to its own
             persons).
         theta : pandas.Series
-            Fixed ability estimates (e.g. from the pooled model), indexed by
+            Fixed person location estimates (e.g. from the pooled model), indexed by
             person.
         step_shape : pandas.DataFrame
             Fixed per-item category step-shape (pooled model's
-            thresholds_uncentred minus its own item difficulties), indexed
+            thresholds_uncentred minus its own item locations), indexed
             by item, zero-centred per item.
         item_names : list of str
             Items to include (the common item set between groups).
@@ -2119,7 +2225,7 @@ class PCM(Rasch):
         Parameters
         ----------
         warm_corr : bool, default True
-            If True, applies Warm's (1989) bias correction to ability
+            If True, applies Warm's (1989) bias correction to person location
             estimates used in fit computation.
         se : bool, default True
             If True, computes bootstrap standard errors. If False,
@@ -2131,11 +2237,11 @@ class PCM(Rasch):
             If True, restricts cat_prob_dict to non-extreme persons.
             Reduces memory usage on large datasets.
         tolerance : float, default 0.00001
-            Newton-Raphson convergence tolerance for ability estimation.
+            Newton-Raphson convergence tolerance for person location estimation.
         max_iters : int, default 100
             Maximum Newton-Raphson iterations.
         ext_score_adjustment : float, default 0.5
-            Extreme score adjustment for ability estimation.
+            Extreme score adjustment for person location estimation.
         constant : float, default 0.1
             Additive smoothing constant for calibration.
         method : str, default 'cos'
@@ -2204,7 +2310,7 @@ class PCM(Rasch):
         person_outfit_zstd : pandas.Series
             Person outfit Z statistics.
         isi_central : float
-            Item separation index based on central difficulties (if test_stats).
+            Item separation index based on central item locations (if test_stats).
         isi_thresholds : float
             Item separation index based on thresholds (if test_stats).
         item_strata : float
@@ -2248,32 +2354,32 @@ class PCM(Rasch):
         max_scores = df.notna().mul(self.max_score_vector, axis=1).sum(axis=1)
         df = df[(scores > 0) & (scores < max_scores)]
         missing_mask = df.notna().astype(float)
-        abilities = self.persons.loc[df.index]
+        person_locations = self.persons.loc[df.index]
 
-        # Safety net: exclude persons with extreme ability estimates.
+        # Safety net: exclude persons with extreme person location estimates.
         # Diverged NR iterations (e.g. near-perfect scorers on sparse response
         # patterns) can produce finite but astronomically large estimates such as
         # +117 logits. These are set to NaN in person() when non-convergence is
         # detected, but guard here as well against any that slip through.
-        # |ability| > 20 logits is well beyond any plausible true parameter value
+        # |person location| > 20 logits is well beyond any plausible true parameter value
         # and would produce kurtosis/info^2 ~ 1e+60 in the outfit q-factor.
-        abilities = abilities[abilities.abs() <= 20]
-        df = df.loc[abilities.index]
-        missing_mask = missing_mask.loc[abilities.index]
+        person_locations = person_locations[person_locations.abs() <= 20]
+        df = df.loc[person_locations.index]
+        missing_mask = missing_mask.loc[person_locations.index]
 
         item_count = df.notna().sum(axis=0)
         person_count = df.notna().sum(axis=1)
 
         items_list = list(self.item_names)
         probs, cats_arr = self._cat_probs_matrix(
-            abilities.values, items_list, self.thresholds_uncentred
+            person_locations.values, items_list, self.thresholds_uncentred
         )
         # probs: (C, N, I)
 
         # Store cat_prob_dict for downstream use (e.g. trim_cat_prob_dict)
         self.cat_prob_dict = {
             cat: pd.DataFrame(
-                probs[cat], index=abilities.index, columns=self.item_names
+                probs[cat], index=person_locations.index, columns=self.item_names
             )
             for cat in range(probs.shape[0])
         }
@@ -2290,20 +2396,20 @@ class PCM(Rasch):
 
         exp_score = (cats_arr[:, None, None] * probs).sum(axis=0)  # (N, I)
         self.exp_score_df = pd.DataFrame(
-            exp_score, index=abilities.index, columns=self.item_names
+            exp_score, index=person_locations.index, columns=self.item_names
         )
         self.exp_score_df *= missing_mask
 
         dev = cats_arr[:, None, None] - exp_score[None, :, :]  # (C, N, I)
         info = (dev**2 * probs).sum(axis=0)  # (N, I)
         self.info_df = pd.DataFrame(
-            info, index=abilities.index, columns=self.item_names
+            info, index=person_locations.index, columns=self.item_names
         )
         self.info_df *= missing_mask
 
         kurtosis = ((dev**4) * probs).sum(axis=0)  # (N, I)
         self.kurtosis_df = pd.DataFrame(
-            kurtosis, index=abilities.index, columns=self.item_names
+            kurtosis, index=person_locations.index, columns=self.item_names
         )
         self.kurtosis_df *= missing_mask
 
@@ -2327,7 +2433,7 @@ class PCM(Rasch):
         P_THRESHOLD = 0.9999
         max_cat_prob = pd.DataFrame(
             probs.max(axis=0),  # (N, I): max prob across categories
-            index=abilities.index,
+            index=person_locations.index,
             columns=self.item_names,
         )
         degenerate_mask = max_cat_prob > P_THRESHOLD
@@ -2505,7 +2611,7 @@ class PCM(Rasch):
             3 / threshold_infit_q
         ) + (threshold_infit_q / 3)
 
-        abil_deviation = self.persons - self.persons.mean()
+        person_location_deviation = self.persons - self.persons.mean()
 
         # Threshold point-measure correlations
         pm_num = _concat_series(
@@ -2514,7 +2620,7 @@ class PCM(Rasch):
                     t
                     + 1: (
                         (dich_thresh[item][t + 1] - dich_thresh[item][t + 1].mean())
-                        * abil_deviation
+                        * person_location_deviation
                     ).sum()
                     for t in range(self.max_score_vector[item])
                 }
@@ -2530,7 +2636,7 @@ class PCM(Rasch):
                             (dich_thresh[item][t + 1] - dich_thresh[item][t + 1].mean())
                             ** 2
                         ).sum()
-                        * (abil_deviation**2).sum()
+                        * (person_location_deviation**2).sum()
                     )
                     ** 0.5
                     for t in range(self.max_score_vector[item])
@@ -2555,7 +2661,7 @@ class PCM(Rasch):
         exp_pm_num = _concat_series(
             {
                 item: {
-                    t + 1: (exp_pm_dict[item][t + 1] * abil_deviation).sum()
+                    t + 1: (exp_pm_dict[item][t + 1] * person_location_deviation).sum()
                     for t in range(self.max_score_vector[item])
                 }
                 for item in self.responses.columns
@@ -2573,7 +2679,7 @@ class PCM(Rasch):
                 for item in self.responses.columns
             }
         )
-        exp_pm_den = (exp_pm_den_raw * (abil_deviation**2).sum()) ** 0.5
+        exp_pm_den = (exp_pm_den_raw * (person_location_deviation**2).sum()) ** 0.5
         self.threshold_exp_point_measure = exp_pm_num / exp_pm_den
 
         self.threshold_rmsr = (
@@ -2696,7 +2802,7 @@ class PCM(Rasch):
 
     def andersen_lr_test(
         self,
-        split_by="ability",
+        split_by="person_location",
         covariate=None,
         warm_corr=True,
         tolerance=0.00001,
@@ -2709,21 +2815,21 @@ class PCM(Rasch):
         """
         Andersen (1973) likelihood ratio test of parameter invariance.
 
-        split_by='ability'/'score' (general model-fit / invariance testing)
+        split_by='person_location'/'score' (general model-fit / invariance testing)
         is DISABLED as of 2026-07-06 — see NotImplementedError raised below.
         split_by='exogenous' (DIF testing) is unaffected and remains fully
         supported.
 
         Splits persons into two groups, fits the model separately in each
         group, and tests whether item parameters are invariant across
-        groups. Groups are formed either by a median split on ability or
+        groups. Groups are formed either by a median split on person location or
         raw score, or by an exogenous person covariate (e.g. Gender) for
         differential item functioning.
 
         Parameters
         ----------
-        split_by : str, default 'ability'
-            Split criterion: 'ability' (ML person estimates, median split),
+        split_by : str, default 'person_location'
+            Split criterion: 'person_location' (ML person estimates, median split),
             'score' (raw scores, median split), or 'exogenous' (an
             external person covariate — requires `covariate` and
             self.exogenous to be set). 'exogenous' requires the covariate
@@ -2737,7 +2843,7 @@ class PCM(Rasch):
             from the full-sample comparison fit, so the LR decomposition
             stays valid.
         warm_corr : bool, default True
-            Warm bias correction for ability estimates.
+            Warm bias correction for person location estimates.
         tolerance, max_iters, ext_score_adjustment : floats
             Person estimation kwargs passed to group models.
         constant, method, log_lik_tol : floats
@@ -2747,11 +2853,11 @@ class PCM(Rasch):
         --------------
         andersen_lr : float
             Likelihood ratio statistic. Each group's own log-likelihood
-            (the H1 side) is computed by plugging in ability estimates
+            (the H1 side) is computed by plugging in person location estimates
             from the pooled (combined-group) model rather than the
-            group's own separately-fit abilities, so the comparison
+            group's own separately-fit person locations, so the comparison
             differs from the pooled model only in item parameters —
-            otherwise nuisance ability parameters are re-optimised
+            otherwise nuisance person location parameters are re-optimised
             independently on each side, inflating the statistic beyond
             what df accounts for.
         andersen_df : int
@@ -2760,25 +2866,25 @@ class PCM(Rasch):
             p-value from chi-squared distribution.
         andersen_groups : dict
             {group_name: PCM} — fitted group models for inspection. Group
-            names are 'low'/'high' for split_by='ability'/'score', or the
+            names are 'low'/'high' for split_by='person_location'/'score', or the
             two observed covariate values for split_by='exogenous'.
         andersen_summary : pandas.Series
             LR statistic, df, and p-value.
         """
         from raschpy.pcm import PCM
 
-        if split_by not in ("ability", "score", "exogenous"):
-            raise ValueError("split_by must be 'ability', 'score', or 'exogenous'")
+        if split_by not in ("person_location", "score", "exogenous"):
+            raise ValueError("split_by must be 'person_location', 'score', or 'exogenous'")
 
-        if split_by in ("ability", "score"):
+        if split_by in ("person_location", "score"):
             raise NotImplementedError(
-                "andersen_lr_test(split_by='ability'/'score') is disabled as a "
+                "andersen_lr_test(split_by='person_location'/'score') is disabled as a "
                 "general Rasch model-fit / parameter-invariance test. A 2026-07 "
                 "simulation study (varying N from 100 to 4000) found the LR "
                 "statistic floors to 0 (p=1.0, 'no misfit') in 30-90% of "
                 "replications depending on model and N, and the floor rate does "
                 "NOT improve with more data. A follow-up power study injecting "
-                "genuine item-difficulty differences of up to 3 logits between "
+                "genuine item-location differences of up to 3 logits between "
                 "the compared groups found the rejection rate and mean LR do not "
                 "respond to the true effect size at all — the test has no "
                 "demonstrated power in either direction. Root cause: PAIR/CPAT "
@@ -2925,14 +3031,14 @@ class PCM(Rasch):
            standard errors from std_errors(), computed for both groups
            regardless of selection_method (so selection_method='wald'
            costs nothing extra here). The LR test (per-item and omnibus)
-           needs person abilities instead, which are otherwise never
+           needs person locations instead, which are otherwise never
            estimated by this method — see SLM's dif_test docstring for
            the exact per-item LR mechanics (H1 = each group's own
            natively-calibrated fit, computed once; H0_i = item i's
-           difficulty pooled across groups, precision-weighted, with that
+           location pooled across groups, precision-weighted, with that
            item's row in thresholds_uncentred rebuilt from the pooled
            value plus that group's own centred category shape for the
-           item, then that group's abilities re-estimated). Results in
+           item, then that group's person locations re-estimated). Results in
            self.dif_table and self.dif_omnibus_table.
 
         2. Threshold-structure DIF (DCF, differential category functioning):
@@ -2987,7 +3093,7 @@ class PCM(Rasch):
             Per-item item-location DIF test(s) to compute. 'wald' matches
             prior behaviour exactly (no added cost). 'lr'/'both'
             additionally compute the per-item likelihood-ratio test (extra
-            cost: two ability re-estimations per item per focal group).
+            cost: two person-location re-estimations per item per focal group).
             The existing 'Flagged' column in dif_table always reflects the
             Wald test; 'Flagged_LR' is added when test is 'lr' or 'both'.
             Does not affect threshold_dif_table.
@@ -2997,44 +3103,44 @@ class PCM(Rasch):
             the item-location component, stored in dif_omnibus_table.
             Cheap relative to the per-item LR test — one extra combined-
             group model fit per focal group, not per item. The H1 side
-            (ll_ref + ll_focal) plugs in ability estimates from the pooled
+            (ll_ref + ll_focal) plugs in person location estimates from the pooled
             reference+focal model rather than each group's own separately-
-            fit abilities — otherwise the two sides of the comparison
-            re-optimise nuisance ability parameters independently, which
+            fit person locations — otherwise the two sides of the comparison
+            re-optimise nuisance person location parameters independently, which
             inflates the LR statistic beyond what df=k-1 accounts for. This
             alone is enough for SLM/RSM (confirmed by null-DIF simulation:
-            ~1.3-1.7x nominal Type I error with own-group abilities, ~nominal
-            with pooled abilities) but NOT for PCM — see omnibus_scope.
+            ~1.3-1.7x nominal Type I error with own-group person locations, ~nominal
+            with pooled person locations) but NOT for PCM — see omnibus_scope.
         omnibus_scope : {'item', 'full'}, default 'item'
             Unlike SLM (no thresholds) or RSM (one shared threshold vector
             for the whole test), PCM has a separate threshold/category-
             structure per item. Each group's own thresholds_uncentred still differs
-            freely from the pooled model's even after pooling abilities,
+            freely from the pooled model's even after pooling person locations,
             adding items*(max_score-1) unaccounted-for free parameters to
             the H1 side — confirmed by null-DIF simulation to inflate the
             omnibus test massively (~0.6 rejection rate at nominal 0.05,
-            essentially unrelated to the ability-pooling fix above, which
+            essentially unrelated to the person-location-pooling fix above, which
             barely moves it). Two ways to correctly account for this,
             corresponding to the classic uniform-vs-non-uniform DIF
             distinction:
             'item' (default) — an omnibus test of uniform DIF only.
             Isolates item-location DIF specifically, matching SLM/RSM's
-            df=k-1 scope. Holds both abilities AND each item's category
+            df=k-1 scope. Holds both person locations AND each item's category
             step-shape fixed at the pooled model's values, then re-optimises
             only a single location shift per item via Newton-Raphson
-            (mirroring person()'s ability-estimation loop, see
+            (mirroring person()'s location-estimation loop, see
             _item_location_log_likelihood) — this isolates exactly the
             item-location parameter difference the df already accounts for.
             A constant group difference in log-odds at every category
             transition is the textbook definition of uniform DIF. Confirmed
             by null-DIF simulation: ~nominal rejection rate. Slower than
             'full' (one Newton-Raphson pass per focal group, similar cost to
-            an extra ability re-estimation).
+            an extra person-location re-estimation).
             'full' — a joint omnibus test of uniform DIF *and* differential
             category functioning (DCF), the Rasch/PCM-family analogue of
             non-uniform DIF (Rasch-family models fix discrimination equal
             across groups by construction, so there's no literal
-            group x ability interaction slope to test the way 2PL/logistic-
+            group x person-location interaction slope to test the way 2PL/logistic-
             regression DIF methods do — DCF, i.e. the category/threshold
             structure itself differing by group so the group gap varies
             across categories, is how a non-uniform-like effect manifests
@@ -3068,7 +3174,7 @@ class PCM(Rasch):
             one-sample comparison against a fixed anchor value, not the
             two-independent-samples case Welch's t-test addresses).
         size_adjust : bool, default False
-            If True, rescales each group's own SE (item difficulty AND
+            If True, rescales each group's own SE (item location AND
             threshold-cell — same scope as welch, unlike category below)
             to what it would be at a standard reference sample size
             (Tristán, 2006, Rasch Measurement Transactions 20:3 — the
@@ -3104,7 +3210,7 @@ class PCM(Rasch):
         category : bool, default False
             If True, adds an ETS-style 'Category' column to dif_table
             (item-location component only — the 0.43/0.64 logit defaults
-            are calibrated for item-difficulty DIF specifically, not
+            are calibrated for item-location DIF specifically, not
             threshold DIF, so this doesn't extend to threshold_dif_table):
             'A' (negligible), 'B+'/'B-' (slight to moderate), or 'C+'/'C-'
             (moderate to large), following Zwick, Thayer & Lewis (1999).
@@ -3140,8 +3246,8 @@ class PCM(Rasch):
             the right default.
         plot_kwargs : dict or None, default None
             Extra keyword arguments forwarded to plot_anchor_selection()
-            for every focal group when plot=True (e.g. filename, x_min/
-            x_max, graph_title).
+            for every focal group when plot=True (e.g. filename, xmin/
+            xmax, title).
         warm_corr, tolerance, max_iters, ext_score_adjustment : floats
             Person estimation kwargs, passed through to group models. Only
             actually used when test in ('lr', 'both') or omnibus=True.
@@ -3155,7 +3261,7 @@ class PCM(Rasch):
         dif_table : pandas.DataFrame
             One row per (item, focal group) pair. Columns: 'Group'
             (focal group value), 'Reference' / 'Focal' / 'Focal (purified)'
-            (central difficulty estimates), 'Difference' (purified focal -
+            (central item location estimates), 'Difference' (purified focal -
             reference), 'SE', 'z', 'p', 'p (corrected)', 'Selected' (used
             to define the purified scale), 'Flagged' (Wald p and logit-
             difference thresholds both met). If welch=True, also 'df'
@@ -3670,13 +3776,23 @@ class PCM(Rasch):
             of RSM vs PCM: p = e^(-Δ/2) where Δ = AIC_RSM - AIC_PCM. PCM is
             preferred only if p < alpha; otherwise RSM is retained as default.
         alpha : float, default 0.05
-            Significance level for the AIC relative-likelihood test
-            (used only when test='AIC' and aic_sig_test=True).
-        sampling : None, 'dynamic', or int, default None
-            Controls subsampling of non-extreme persons before fitting. When
-            None, no sampling is applied. 'dynamic' uses T = min(20*(I-1)*
-            (m-1), 1500); an integer fixes T directly. When n <= T, sampling
-            is skipped. Applies to all tests.
+            Significance level used to decide the preferred model for the
+            LR test (RSM is the null; PCM is preferred if p < alpha) and,
+            when aic_sig_test=True, for the AIC relative-likelihood test.
+            Not used by BIC, which has no formal significance test and
+            simply prefers whichever model has the lower BIC.
+        sampling : None, 'dynamic', or int, default 'dynamic'
+            Controls subsampling of non-extreme persons before computing
+            log-likelihoods (parameters are always estimated on the full
+            data; only the LL evaluation is subsampled). Not primarily
+            about speed: at very large N, LR/AIC/BIC all become biased
+            toward the more complex (PCM) model regardless of whether the
+            difference is practically meaningful, since log-likelihood
+            differences scale with N. Capping the effective N keeps the
+            comparison from being dominated by sample size. None disables
+            subsampling. 'dynamic' uses T = min(20*(I-1)*(m-1), 1500); an
+            integer fixes T directly. When n <= T, sampling is skipped.
+            Applies to all three tests.
         warm_corr, tolerance, max_iters, ext_score_adjustment : floats
             Person estimation kwargs.
         constant, method, log_lik_tol : floats
@@ -3688,7 +3804,7 @@ class PCM(Rasch):
 
         Attributes set
         --------------
-        model_comparison_rsm_pcm_lr, _df, _p, _lr_summary : LR test results.
+        model_comparison_rsm_pcm_lr, _df, _p, _lr_preferred, _lr_summary : LR test results.
         model_comparison_rsm_pcm_aic, _aic_preferred, _aic_summary : AIC results.
         model_comparison_rsm_pcm_aic_p : relative likelihood p-value (aic_sig_test only).
         model_comparison_rsm_pcm_bic, _bic_preferred, _bic_summary : BIC results.
@@ -3765,11 +3881,13 @@ class PCM(Rasch):
                 lr = 0.0
             df = (self.no_of_items - 1) * (max_score - 1)
             p = float(chi2.sf(lr, df))
+            preferred = "PCM" if p < alpha else "RSM"
             self.model_comparison_rsm_pcm_lr = lr
             self.model_comparison_rsm_pcm_df = df
             self.model_comparison_rsm_pcm_p = p
+            self.model_comparison_rsm_pcm_lr_preferred = preferred
             self.model_comparison_rsm_pcm_lr_summary = pd.Series(
-                {"LR statistic": lr, "df": df, "p-value": p},
+                {"LR statistic": lr, "df": df, "p-value": p, "Preferred": preferred},
                 name="RSM vs PCM LR test",
             )
 
@@ -3824,6 +3942,7 @@ class PCM(Rasch):
         log_lik_tol=0.000001,
         no_of_samples=500,
         interval=None,
+        se=True,
     ):
         """
         Analyse standardised residual correlations for local item dependence.
@@ -3852,9 +3971,16 @@ class PCM(Rasch):
         log_lik_tol : float, default 0.000001
             Convergence tolerance for calibration.
         no_of_samples : int, default 500
-            Bootstrap samples.
+            Bootstrap samples. Unused if se=False.
         interval : float or None, default None
-            CI width.
+            CI width. Unused if se=False.
+        se : bool, default True
+            Passed through to the internal fit_statistics() call (only
+            used if not already computed). If False, skips the bootstrap
+            entirely — this analysis's own output (residual correlations,
+            PCA) does not depend on it, so se=False is purely a speed-up
+            (e.g. for repeated simulation runs) with no effect on the
+            output.
 
         Attributes set
         --------------
@@ -3867,6 +3993,7 @@ class PCM(Rasch):
         """
         if not hasattr(self, "std_residual_df"):
             self.fit_statistics(
+                se=se,
                 warm_corr=warm_corr,
                 tolerance=tolerance,
                 max_iters=max_iters,
@@ -3929,12 +4056,15 @@ class PCM(Rasch):
         zstd=False,
         point_measure_corr=False,
         dp=3,
+        se=True,
         warm_corr=True,
         tolerance=0.00001,
         max_iters=100,
         ext_score_adjustment=0.5,
         method="cos",
         constant=0.1,
+        matrix_power=3,
+        log_lik_tol=0.000001,
         no_of_samples=500,
         interval=None,
         seed=None,
@@ -3943,8 +4073,9 @@ class PCM(Rasch):
         Build and store the item statistics summary table.
 
         Auto-triggers std_errors() and fit_statistics() if not yet run.
-        Always includes central difficulty estimates, SEs, response counts,
-        facilities, and Infit/Outfit MS. Additional columns are included
+        Always includes central item location estimates, response counts,
+        facilities, and Infit/Outfit MS. Additional columns (SE, Z
+        statistics, point-measure correlations, CI bounds) are included
         based on flags or when full=True.
 
         Parameters
@@ -3959,23 +4090,33 @@ class PCM(Rasch):
             correlation columns.
         dp : int, default 3
             Number of decimal places for rounding numeric output.
+        se : bool, default True
+            If True, computes and includes the SE column (and CI bound
+            columns, if interval is set). If False, skips the bootstrap
+            entirely — useful when only Infit/Outfit MS are needed (e.g.
+            repeated simulation runs), since those do not depend on the
+            bootstrap. Forces interval to None when False.
         warm_corr : bool, default True
-            Warm bias correction for ability estimates.
+            Warm bias correction for person location estimates.
         tolerance : float, default 0.00001
             Newton-Raphson convergence tolerance.
         max_iters : int, default 100
             Maximum Newton-Raphson iterations.
         ext_score_adjustment : float, default 0.5
-            Extreme score adjustment for ability estimation.
+            Extreme score adjustment for person location estimation.
         method : str, default 'cos'
             Priority vector extraction method for calibration.
         constant : float, default 0.1
             Additive smoothing constant for calibration.
+        matrix_power : int, default 3
+            Matrix power for calibration.
+        log_lik_tol : float, default 0.000001
+            Log-likelihood tolerance for calibration.
         no_of_samples : int, default 500
-            Bootstrap samples for SE estimation.
+            Bootstrap samples for SE estimation. Unused if se=False.
         interval : float or None, default None
             Confidence interval width (e.g. 0.95). If provided, lower
-            and upper percentile columns are included.
+            and upper percentile columns are included. Ignored if se=False.
         seed : int or None, default None
             Seed passed through to the internal std_errors()/fit_statistics()
             calls (only used if not already computed). None draws fresh
@@ -3985,9 +4126,9 @@ class PCM(Rasch):
         --------------
         item_stats : pandas.DataFrame
             Item statistics table with items as rows. Always contains
-            'Estimate', 'SE', 'Count', 'Facility', 'Infit MS', 'Outfit MS'.
-            Optional: 'Infit Z', 'Outfit Z', 'PM corr', 'Exp PM corr',
-            CI bound columns.
+            'Estimate', 'Count', 'Facility', 'Infit MS', 'Outfit MS'.
+            Optional: 'SE' and CI bounds (if se=True), 'Infit Z',
+            'Outfit Z', 'PM corr', 'Exp PM corr'.
 
         Returns
         -------
@@ -4000,7 +4141,10 @@ class PCM(Rasch):
             if interval is None:
                 interval = 0.95
 
-        if (
+        if not se:
+            interval = None
+
+        if se and (
             not hasattr(self, "threshold_low")
             or self.threshold_low is None
             and interval is not None
@@ -4010,16 +4154,21 @@ class PCM(Rasch):
                 no_of_samples=no_of_samples,
                 constant=constant,
                 method=method,
+                matrix_power=matrix_power,
+                log_lik_tol=log_lik_tol,
                 seed=seed,
             )
         if not hasattr(self, "item_infit_ms"):
             self.fit_statistics(
+                se=se,
                 warm_corr=warm_corr,
                 tolerance=tolerance,
                 max_iters=max_iters,
                 ext_score_adjustment=ext_score_adjustment,
                 method=method,
                 constant=constant,
+                matrix_power=matrix_power,
+                log_lik_tol=log_lik_tol,
                 no_of_samples=no_of_samples,
                 interval=interval,
                 seed=seed,
@@ -4027,10 +4176,11 @@ class PCM(Rasch):
 
         stats = pd.DataFrame(index=self.item_names)
         stats["Estimate"] = self.items.round(dp)
-        stats["SE"] = self.item_se.round(dp)
-        if interval is not None:
-            stats[f"{round((1 - interval) * 50, 1)}%"] = self.central_low.round(dp)
-            stats[f"{round((1 + interval) * 50, 1)}%"] = self.central_high.round(dp)
+        if se:
+            stats["SE"] = self.item_se.round(dp)
+            if interval is not None:
+                stats[f"{round((1 - interval) * 50, 1)}%"] = self.central_low.round(dp)
+                stats[f"{round((1 + interval) * 50, 1)}%"] = self.central_high.round(dp)
         stats["Count"] = self.response_counts.astype(int)
         stats["Facility"] = self.item_facilities.round(dp)
         stats["Infit MS"] = self.item_infit_ms.round(dp)
@@ -4065,7 +4215,7 @@ class PCM(Rasch):
 
         Auto-triggers fit_statistics() if not yet run. Produces two tables:
         uncentred thresholds (absolute logit values) and centred thresholds
-        (offsets from the central item difficulty). Both always include
+        (offsets from the central item location). Both always include
         estimates, SEs, and Infit/Outfit MS. Additional columns are included
         based on flags or when full=True.
 
@@ -4084,13 +4234,13 @@ class PCM(Rasch):
         dp : int, default 3
             Number of decimal places for rounding numeric output.
         warm_corr : bool, default True
-            Warm bias correction for ability estimates.
+            Warm bias correction for person location estimates.
         tolerance : float, default 0.00001
             Newton-Raphson convergence tolerance.
         max_iters : int, default 100
             Maximum Newton-Raphson iterations.
         ext_score_adjustment : float, default 0.5
-            Extreme score adjustment for ability estimation.
+            Extreme score adjustment for person location estimation.
         method : str, default 'cos'
             Priority vector extraction method for calibration.
         constant : float, default 0.1
@@ -4108,7 +4258,7 @@ class PCM(Rasch):
             MultiIndex rows (item, threshold number).
         threshold_stats : pandas.DataFrame
             Threshold statistics using centred threshold offsets (uncentred
-            estimate minus central item difficulty). See also
+            estimate minus central item location). See also
             category_stats_df() for category-*width* statistics — the
             physically meaningful, full-rank quantity for step-structure
             questions (each item's zero-summed threshold vector only has
@@ -4243,7 +4393,7 @@ class PCM(Rasch):
 
         Widths can be negative — a negative width at category k means
         thresholds k and k+1 are disordered for that item (category k is
-        never the most likely response at any ability level). Prop
+        never the most likely response at any person location level). Prop
         disordered makes this a continuous diagnostic rather than a
         single point-estimate yes/no: the proportion of bootstrap
         resamples in which that item's category width was negative —
@@ -4342,6 +4492,7 @@ class PCM(Rasch):
         full=False,
         rsem=False,
         dp=3,
+        se=True,
         warm_corr=True,
         tolerance=0.00001,
         max_iters=100,
@@ -4353,7 +4504,7 @@ class PCM(Rasch):
         Build and store the person statistics summary table.
 
         Auto-triggers fit_statistics() if not yet run. One row per person
-        with ability estimate, CSEM, raw score, max score, proportion correct,
+        with person location estimate, CSEM, raw score, max score, proportion correct,
         and Infit/Outfit MS and Z statistics.
 
         Parameters
@@ -4364,6 +4515,12 @@ class PCM(Rasch):
             If True, includes Residual SEM (RSEM) column.
         dp : int, default 3
             Decimal places.
+        se : bool, default True
+            Passed through to the internal fit_statistics() call (only
+            used if not already computed). If False, skips the bootstrap
+            entirely — this table's own columns (CSEM, RSEM, Infit/Outfit)
+            do not depend on it, so se=False is purely a speed-up (e.g.
+            for repeated simulation runs) with no effect on the output.
         warm_corr : bool, default True
             Warm bias correction.
         tolerance : float, default 0.00001
@@ -4386,6 +4543,7 @@ class PCM(Rasch):
         """
         if not hasattr(self, "person_infit_ms"):
             self.fit_statistics(
+                se=se,
                 warm_corr=warm_corr,
                 tolerance=tolerance,
                 max_iters=max_iters,
@@ -4449,13 +4607,13 @@ class PCM(Rasch):
         dp : int, default 3
             Number of decimal places for rounding numeric output.
         warm_corr : bool, default True
-            Warm bias correction for ability estimates.
+            Warm bias correction for person location estimates.
         tolerance : float, default 0.00001
             Newton-Raphson convergence tolerance.
         max_iters : int, default 100
             Maximum Newton-Raphson iterations.
         ext_score_adjustment : float, default 0.5
-            Extreme score adjustment for ability estimation.
+            Extreme score adjustment for person location estimation.
         method : str, default 'cos'
             Priority vector extraction method for calibration.
         constant : float, default 0.1
@@ -4670,7 +4828,7 @@ class PCM(Rasch):
         dp : int, default 3
             Decimal places for rounding.
         warm_corr : bool, default True
-            Warm bias correction for ability estimates.
+            Warm bias correction for person location estimates.
         tolerance : float, default 0.00001
             Newton-Raphson convergence tolerance.
         max_iters : int, default 100
@@ -4755,18 +4913,18 @@ class PCM(Rasch):
     # Class intervals (for ICC/CRC observed data overlay)
     # ------------------------------------------------------------------
 
-    def class_intervals(self, abilities, items=None, no_of_classes=5):
+    def class_intervals(self, person_locations, items=None, no_of_classes=5):
         """
-        Compute class interval mean abilities and observed mean scores.
+        Compute class interval mean person locations and observed mean scores.
 
-        Divides persons into quantile-based ability groups and computes
-        the mean ability and mean total score for each group. Used
+        Divides persons into quantile-based person-location groups and computes
+        the mean person location and mean total score for each group. Used
         internally by ICC and TCC plot methods to overlay observed data.
 
         Parameters
         ----------
-        abilities : pandas.Series
-            Person ability estimates, indexed by person name.
+        person_locations : pandas.Series
+            Person location estimates, indexed by person name.
         items : list of str or None, default None
             Item subset to use. None uses all items.
         no_of_classes : int, default 5
@@ -4774,8 +4932,8 @@ class PCM(Rasch):
 
         Returns
         -------
-        mean_abilities : pandas.Series
-            Mean ability estimate within each class interval.
+        mean_person_locations : pandas.Series
+            Mean person location estimate within each class interval.
         obs : pandas.Series
             Mean total observed score within each class interval.
         """
@@ -4783,7 +4941,7 @@ class PCM(Rasch):
         if items is None:
             items = self.responses.columns.tolist()
         df = self.responses[items].dropna(how="all")
-        estimates = abilities.loc[df.index]
+        estimates = person_locations.loc[df.index]
 
         quantiles = estimates.quantile(
             [(i + 1) / no_of_classes for i in range(no_of_classes - 1)]
@@ -4799,20 +4957,20 @@ class PCM(Rasch):
                 for i in range(no_of_classes - 2)
             },
         }
-        mean_abilities = pd.Series(
+        mean_person_locations = pd.Series(
             {cg: estimates[mask_dict[cg]].mean() for cg in class_groups}
         )
         obs = pd.concat(
             {cg: pd.Series(df[mask_dict[cg]].mean().sum()) for cg in class_groups}
         )
-        return mean_abilities, obs
+        return mean_person_locations, obs
 
     def class_intervals_cats(self, item, no_of_classes=5):
         """
-        Compute class interval mean abilities and observed category proportions.
+        Compute class interval mean person locations and observed category proportions.
 
-        Divides persons into quantile-based ability groups for a single item
-        and computes the mean ability and the proportion of responses in each
+        Divides persons into quantile-based person-location groups for a single item
+        and computes the mean person location and the proportion of responses in each
         response category for each group. Used internally by CRC plot methods.
 
         Parameters
@@ -4824,8 +4982,8 @@ class PCM(Rasch):
 
         Returns
         -------
-        mean_abilities : pandas.Series
-            Mean ability estimate within each class interval.
+        mean_person_locations : pandas.Series
+            Mean person location estimate within each class interval.
         obs_props : numpy.ndarray
             Shape (no_of_classes, max_score_vector[item] + 1). Proportion
             of responses in each category for each class interval.
@@ -4847,7 +5005,7 @@ class PCM(Rasch):
                 for i in range(no_of_classes - 2)
             },
         }
-        mean_abilities = pd.Series(
+        mean_person_locations = pd.Series(
             {cg: estimates[mask_dict[cg]].mean() for cg in class_groups}
         )
         obs_props = np.array(
@@ -4861,15 +5019,15 @@ class PCM(Rasch):
             dtype=float,
         )
         obs_props /= obs_props.sum(axis=1, keepdims=True)
-        return mean_abilities, obs_props
+        return mean_person_locations, obs_props
 
     def class_intervals_thresholds(self, item, no_of_classes=5):
         """
-        Compute class interval mean abilities and observed threshold proportions.
+        Compute class interval mean person locations and observed threshold proportions.
 
         For each threshold of an item, conditions on persons scoring in the
-        two adjacent categories, divides them into quantile-based ability
-        groups, and computes mean ability and observed proportion of the
+        two adjacent categories, divides them into quantile-based person-location
+        groups, and computes mean person location and observed proportion of the
         higher category in each group. Used internally by threshold CCS plots.
 
         Parameters
@@ -4881,8 +5039,8 @@ class PCM(Rasch):
 
         Returns
         -------
-        mean_abilities : numpy.ndarray
-            Shape (no_of_classes, max_score_vector[item]). Mean ability
+        mean_person_locations : numpy.ndarray
+            Shape (no_of_classes, max_score_vector[item]). Mean person location
             within each class interval for each threshold.
         obs_props : numpy.ndarray
             Shape (no_of_classes, max_score_vector[item]). Observed proportion
@@ -4895,36 +5053,36 @@ class PCM(Rasch):
         df = self.responses[item]
         estimates = self.persons
 
-        def make_masks(abils_subset):
-            q = abils_subset.quantile(
+        def make_masks(person_locations_subset):
+            q = person_locations_subset.quantile(
                 [(i + 1) / no_of_classes for i in range(no_of_classes - 1)]
             )
             return {
-                "class_1": abils_subset < q.values[0],
-                f"class_{no_of_classes}": abils_subset >= q.values[-1],
+                "class_1": person_locations_subset < q.values[0],
+                f"class_{no_of_classes}": person_locations_subset >= q.values[-1],
                 **{
                     f"class_{i + 2}": (
-                        (abils_subset >= q.values[i]) & (abils_subset < q.values[i + 1])
+                        (person_locations_subset >= q.values[i]) & (person_locations_subset < q.values[i + 1])
                     )
                     for i in range(no_of_classes - 2)
                 },
             }
 
-        mean_abilities, obs_props = [], []
+        mean_person_locations, obs_props = [], []
         for t in range(self.max_score_vector[item]):
             mask = df.isin([t, t + 1])
             cond_df = df[mask]
             adj_estimates = estimates[mask]
             masks = make_masks(adj_estimates)
             combined = pd.DataFrame({"estimate": adj_estimates, "score": cond_df})
-            mean_abilities.append(
+            mean_person_locations.append(
                 [combined["estimate"][masks[cg]].mean() for cg in class_groups]
             )
             obs_props.append(
                 [(combined["score"][masks[cg]] - t).mean() for cg in class_groups]
             )
 
-        return np.array(mean_abilities).T, np.array(obs_props).T
+        return np.array(mean_person_locations).T, np.array(obs_props).T
 
     # ------------------------------------------------------------------
     # Plots
@@ -4942,7 +5100,7 @@ class PCM(Rasch):
         x_obs_data=np.array([]),
         y_obs_data=np.array([]),
         thresh_lines=False,
-        central_diff=False,
+        central_location=False,
         score_lines_item=[None, None],
         score_lines_test=None,
         point_info_lines_item=[None, None],
@@ -4969,7 +5127,7 @@ class PCM(Rasch):
         """
         Core plotting engine for all PCM item and test characteristic curves.
 
-        Renders one or more curves against an ability x-axis with optional
+        Renders one or more curves against a person-location x-axis with optional
         observed-data overlays, threshold lines, central difference lines,
         score lines, information lines, and CSEM lines. Called internally
         by icc(), crcs(), threshold_ccs(), iic(), tcc(), test_info(), and
@@ -4978,7 +5136,7 @@ class PCM(Rasch):
         Parameters
         ----------
         x_data : array-like
-            X-axis values (typically ability grid from -20 to 20).
+            X-axis values (typically person-location grid from -20 to 20).
         y_data : numpy.ndarray
             2-D array shape (len(x_data), n_curves).
         x_min : float, default -5
@@ -4995,18 +5153,18 @@ class PCM(Rasch):
             Observed data point coordinates.
         thresh_lines : bool, default False
             Draw vertical lines at each uncentred threshold.
-        central_diff : bool, default False
-            Draw a vertical line at the item's central difficulty.
+        central_location : bool, default False
+            Draw a vertical line at the item's central location.
         score_lines_item : list, default [None, None]
             [item_name, list_of_scores] for item-level score lines.
         score_lines_test : list or None
             Raw total scores for test-level score reference lines.
         point_info_lines_item : list, default [None, None]
-            [item_name, list_of_abilities] for item-level information lines.
+            [item_name, list_of_person_locations] for item-level information lines.
         point_info_lines_test : list or None
-            Abilities for test-level information reference lines.
+            Person locations for test-level information reference lines.
         point_csem_lines : list or None
-            Abilities for CSEM reference lines.
+            Person locations for CSEM reference lines.
         score_labels : bool, default False
             Annotate score/CSEM line intersections with values.
         warm : bool, default True
@@ -5142,7 +5300,7 @@ class PCM(Rasch):
                 for thr in self.thresholds_uncentred.loc[items].dropna():
                     ax.axvline(x=thr, color="black", linestyle="--")
 
-            if items is not None and central_diff:
+            if items is not None and central_location:
                 item_key = items if isinstance(items, str) else None
                 if item_key and item_key not in ("all", "none"):
                     ax.axvline(
@@ -5377,7 +5535,7 @@ class PCM(Rasch):
             ax.set_xlim(x_min, x_max)
             ax.set_ylim(0, y_max)
             ax.set_xlabel(
-                "Person estimate", fontsize=axis_font_size, fontweight="bold", wrap=True
+                "Person location", fontsize=axis_font_size, fontweight="bold", wrap=True
             )
             ax.set_ylabel(
                 y_label, fontsize=axis_font_size, fontweight="bold", wrap=True
@@ -5408,7 +5566,7 @@ class PCM(Rasch):
         no_of_classes=5,
         title=None,
         thresh_lines=False,
-        central_diff=False,
+        central_location=False,
         score_lines=None,
         score_labels=False,
         cat_highlight=None,
@@ -5428,7 +5586,7 @@ class PCM(Rasch):
         """
         Plot the Item Characteristic Curve (ICC) for a single item.
 
-        Displays modelled expected score as a function of person ability.
+        Displays modelled expected score as a function of person location.
         Optionally overlays observed class-interval mean scores.
 
         Parameters
@@ -5443,8 +5601,8 @@ class PCM(Rasch):
             Plot title.
         thresh_lines : bool, default False
             Draw vertical lines at each threshold.
-        central_diff : bool, default False
-            Draw a line at the central item difficulty.
+        central_location : bool, default False
+            Draw a line at the central item location.
         score_lines : list or None, default None
             Raw scores at which to draw reference lines.
         score_labels : bool, default False
@@ -5452,7 +5610,7 @@ class PCM(Rasch):
         cat_highlight : int or None, default None
             Category to shade.
         xmin, xmax : float
-            Ability axis limits.
+            Person-location axis limits.
         plot_style : str, default 'white'
             Background style.
         palette : str, default 'dark blue'
@@ -5474,16 +5632,16 @@ class PCM(Rasch):
         -------
         matplotlib.figure.Figure
         """
-        # BUG FIX: 'person_abiliites' -> 'person_abilities' (typo in original; now self.persons)
+        # BUG FIX: variable name typo in original; now self.persons
         if obs and not hasattr(self, "persons"):
             self.person_estimates(warm_corr=False)
 
         xobsdata = yobsdata = np.array(np.nan)
         if obs:
-            mean_abilities, obs_means = self.class_intervals(
-                items=item, abilities=self.persons, no_of_classes=no_of_classes
+            mean_person_locations, obs_means = self.class_intervals(
+                items=item, person_locations=self.persons, no_of_classes=no_of_classes
             )
-            xobsdata = pd.Series(mean_abilities)
+            xobsdata = pd.Series(mean_person_locations)
             yobsdata = np.array(obs_means).reshape(-1, 1)
 
         estimates = np.arange(-20, 20, 0.1)
@@ -5509,7 +5667,7 @@ class PCM(Rasch):
             y_label="Expected score",
             obs=obs,
             thresh_lines=thresh_lines,
-            central_diff=central_diff,
+            central_location=central_location,
             score_lines_item=[item, score_lines],
             score_labels=score_labels,
             plot_style=plot_style,
@@ -5532,7 +5690,7 @@ class PCM(Rasch):
         no_of_classes=5,
         title=None,
         thresh_lines=False,
-        central_diff=False,
+        central_location=False,
         cat_highlight=None,
         xmin=-5,
         xmax=5,
@@ -5551,7 +5709,7 @@ class PCM(Rasch):
         Plot Category Response Curves (CRCs) for a single item.
 
         Displays the probability of each response category as a function of
-        ability using uncentred PCM parameterisation. Optionally overlays
+        person location using uncentred PCM parameterisation. Optionally overlays
         observed class-interval category proportions.
 
         Parameters
@@ -5567,12 +5725,12 @@ class PCM(Rasch):
             Plot title.
         thresh_lines : bool, default False
             Draw vertical lines at each threshold.
-        central_diff : bool, default False
-            Draw a line at the central difficulty.
+        central_location : bool, default False
+            Draw a line at the central location.
         cat_highlight : int or None, default None
             Category to shade.
         xmin, xmax : float
-            Ability axis limits.
+            Person-location axis limits.
         plot_style, palette, black, font : see plot_data().
         title_font_size, axis_font_size, labelsize : int
             Font sizes.
@@ -5587,7 +5745,7 @@ class PCM(Rasch):
         -------
         matplotlib.figure.Figure
         """
-        # BUG FIX: typo 'person_abiliites' -> 'person_abilities' (now self.persons)
+        # BUG FIX: variable name typo in original (now self.persons)
         if obs is not None and not hasattr(self, "persons"):
             self.person_estimates(warm_corr=False)
         if item == "none":
@@ -5595,10 +5753,10 @@ class PCM(Rasch):
 
         xobsdata = yobsdata = np.array(np.nan)
         if obs is not None:
-            mean_abilities, obs_props = self.class_intervals_cats(
+            mean_person_locations, obs_props = self.class_intervals_cats(
                 item=item, no_of_classes=no_of_classes
             )
-            xobsdata, yobsdata = mean_abilities, obs_props
+            xobsdata, yobsdata = mean_person_locations, obs_props
             if obs != "all":
                 if not all(
                     c in np.arange(self.max_score_vector[item] + 1) for c in obs
@@ -5638,7 +5796,7 @@ class PCM(Rasch):
             y_label="Probability",
             obs=obs,
             thresh_lines=thresh_lines,
-            central_diff=central_diff,
+            central_location=central_location,
             cat_highlight=cat_highlight,
             plot_style=plot_style,
             palette=palette,
@@ -5659,7 +5817,7 @@ class PCM(Rasch):
         no_of_classes=5,
         title=None,
         thresh_lines=False,
-        central_diff=False,
+        central_location=False,
         cat_highlight=None,
         xmin=-5,
         xmax=5,
@@ -5678,7 +5836,7 @@ class PCM(Rasch):
         Plot Threshold Characteristic Curves (TCCs) for a single item.
 
         Displays the probability of scoring in the higher of two adjacent
-        categories at each threshold, as a function of person ability.
+        categories at each threshold, as a function of person location.
 
         Parameters
         ----------
@@ -5693,12 +5851,12 @@ class PCM(Rasch):
             Plot title.
         thresh_lines : bool, default False
             Draw vertical lines at threshold locations.
-        central_diff : bool, default False
-            Draw a line at the central difficulty.
+        central_location : bool, default False
+            Draw a line at the central location.
         cat_highlight : int or None, default None
             Threshold category to shade.
         xmin, xmax : float
-            Ability axis limits.
+            Person-location axis limits.
         plot_style, palette, black, font : see plot_data().
         title_font_size, axis_font_size, labelsize : int
             Font sizes.
@@ -5718,10 +5876,10 @@ class PCM(Rasch):
 
         xobsdata = yobsdata = np.array(np.nan)
         if obs is not None:
-            mean_abilities, obs_props = self.class_intervals_thresholds(
+            mean_person_locations, obs_props = self.class_intervals_thresholds(
                 item, no_of_classes=no_of_classes
             )
-            xobsdata, yobsdata = mean_abilities, obs_props
+            xobsdata, yobsdata = mean_person_locations, obs_props
             if obs != "all":
                 if not all(
                     c in np.arange(self.max_score_vector[item]) + 1 for c in obs
@@ -5761,7 +5919,7 @@ class PCM(Rasch):
             y_label="Probability",
             obs=obs,
             thresh_lines=thresh_lines,
-            central_diff=central_diff,
+            central_location=central_location,
             cat_highlight=cat_highlight,
             plot_style=plot_style,
             palette=palette,
@@ -5780,7 +5938,7 @@ class PCM(Rasch):
         item,
         ymax=None,
         thresh_lines=False,
-        central_diff=False,
+        central_location=False,
         point_info_lines=None,
         point_info_labels=False,
         cat_highlight=None,
@@ -5801,7 +5959,7 @@ class PCM(Rasch):
         """
         Plot the Item Information Curve (IIC) for a single item.
 
-        Displays Fisher information (item variance) as a function of ability
+        Displays Fisher information (item variance) as a function of person location
         using uncentred threshold parameterisation.
 
         Parameters
@@ -5812,10 +5970,10 @@ class PCM(Rasch):
             Upper y-axis limit. Auto-scaled if None.
         thresh_lines : bool, default False
             Draw vertical lines at each threshold.
-        central_diff : bool, default False
-            Draw a line at the central difficulty.
+        central_location : bool, default False
+            Draw a line at the central location.
         point_info_lines : list or None, default None
-            Ability values at which to draw information reference lines.
+            Person location values at which to draw information reference lines.
         point_info_labels : bool, default False
             Annotate information line intersections.
         cat_highlight : int or None, default None
@@ -5823,7 +5981,7 @@ class PCM(Rasch):
         title : str or None, default None
             Plot title.
         xmin, xmax : float
-            Ability axis limits.
+            Person-location axis limits.
         plot_style, palette, black, font : see plot_data().
         title_font_size, axis_font_size, labelsize : int
             Font sizes.
@@ -5856,7 +6014,7 @@ class PCM(Rasch):
             y_max=ymax,
             thresh_lines=thresh_lines,
             items=item,
-            central_diff=central_diff,
+            central_location=central_location,
             point_info_lines_item=[item, point_info_lines],
             score_labels=point_info_labels,
             cat_highlight=cat_highlight,
@@ -5899,7 +6057,7 @@ class PCM(Rasch):
         """
         Plot the Test Characteristic Curve (TCC).
 
-        Displays expected total score as a function of ability. Optionally
+        Displays expected total score as a function of person location. Optionally
         overlays observed class-interval mean total scores.
 
         Parameters
@@ -5909,7 +6067,7 @@ class PCM(Rasch):
         obs : bool, default False
             If True, overlays observed mean total scores.
         xmin, xmax : float
-            Ability axis limits.
+            Person-location axis limits.
         no_of_classes : int, default 5
             Number of class intervals for observed overlay.
         title : str or None, default None
@@ -5939,16 +6097,16 @@ class PCM(Rasch):
         elif isinstance(items, str):
             items = [items]
 
-        # BUG FIX: typo 'person_abiliites' -> 'person_abilities' (now self.persons)
+        # BUG FIX: variable name typo in original (now self.persons)
         if obs and not hasattr(self, "persons"):
             self.person_estimates(warm_corr=False)
 
         xobsdata = yobsdata = np.array(np.nan)
         if obs:
-            mean_abilities, obs_means = self.class_intervals(
-                items=items, abilities=self.persons, no_of_classes=no_of_classes
+            mean_person_locations, obs_means = self.class_intervals(
+                items=items, person_locations=self.persons, no_of_classes=no_of_classes
             )
-            xobsdata = mean_abilities
+            xobsdata = mean_person_locations
             yobsdata = np.array(obs_means).reshape(no_of_classes, 1)
 
         estimates = np.arange(-20, 20, 0.1)
@@ -6016,18 +6174,18 @@ class PCM(Rasch):
         """
         Plot the Test Information Curve.
 
-        Displays sum of item Fisher information values as a function of ability.
+        Displays sum of item Fisher information values as a function of person location.
 
         Parameters
         ----------
         items : str, list, or None, default None
             Item subset. None uses all items.
         point_info_lines : list or None, default None
-            Ability values at which to draw reference lines.
+            Person location values at which to draw reference lines.
         point_info_labels : bool, default False
             Annotate information line intersections.
         xmin, xmax : float
-            Ability axis limits.
+            Person-location axis limits.
         ymax : float or None, default None
             Upper y-axis limit. Auto-scaled if None.
         title : str or None, default None
@@ -6112,7 +6270,7 @@ class PCM(Rasch):
         """
         Plot the Test Conditional Standard Error of Measurement (CSEM) Curve.
 
-        Displays 1 / sqrt(I(theta)) as a function of ability, where I(theta)
+        Displays 1 / sqrt(I(theta)) as a function of person location, where I(theta)
         is total test information.
 
         Parameters
@@ -6120,11 +6278,11 @@ class PCM(Rasch):
         items : str, list, or None, default None
             Item subset. None uses all items.
         point_csem_lines : list or None, default None
-            Ability values at which to draw CSEM reference lines.
+            Person location values at which to draw CSEM reference lines.
         point_csem_labels : bool, default False
             Annotate CSEM line intersections.
         xmin, xmax : float
-            Ability axis limits.
+            Person-location axis limits.
         ymax : float, default 5
             Upper y-axis limit.
         title : str or None, default None

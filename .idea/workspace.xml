@@ -5,11 +5,197 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="7f1f9cfd-b3cb-402c-8aca-0efbcf2bca73" name="Changes" comment="">
+      <change beforePath="$PROJECT_DIR$/.idea/misc.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Examples READ ME.txt" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Examples READ ME.txt" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by item/Items MFRM example.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM by item/Items MFRM example.ipynb" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by item/mfrm_items_generating_abilities.csv" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by item/mfrm_items_generating_diffs.csv" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by item/mfrm_items_generating_severities.csv" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by item/mfrm_items_generating_thresholds.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM by item/mfrm_items_generating_thresholds.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by item/mfrm_items_scores.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM by item/mfrm_items_scores.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by item/output files/mfrm_items_item_loadings.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM by item/output files/mfrm_items_item_loadings.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by item/output files/mfrm_items_item_residual_correlations.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM by item/output files/mfrm_items_item_residual_correlations.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by item/output files/mfrm_items_item_stats.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM by item/output files/mfrm_items_item_stats.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by item/output files/mfrm_items_person_stats.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM by item/output files/mfrm_items_person_stats.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by item/output files/mfrm_items_rater_loadings.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM by item/output files/mfrm_items_rater_loadings.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by item/output files/mfrm_items_rater_residual_correlations.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM by item/output files/mfrm_items_rater_residual_correlations.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by item/output files/mfrm_items_rater_stats.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM by item/output files/mfrm_items_rater_stats.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by item/output files/mfrm_items_test_stats.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM by item/output files/mfrm_items_test_stats.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by item/output files/mfrm_items_threshold_stats.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM by item/output files/mfrm_items_threshold_stats.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by item/output files/my_items_mfrm_crcs.png" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by item/output files/my_items_mfrm_csem_curve.png" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by item/output files/my_items_mfrm_icc.png" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by item/output files/my_items_mfrm_iic.png" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by item/output files/my_items_mfrm_std_residuals_plot.png" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by item/output files/my_items_mfrm_tcc.png" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by item/output files/my_items_mfrm_test_info_curve.png" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by item/output files/my_items_mfrm_threshold_ccs.png" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by threshold/Thresholds MFRM example.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM by threshold/Thresholds MFRM example.ipynb" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by threshold/mfrm_thresholds_generating_abilities.csv" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by threshold/mfrm_thresholds_generating_diffs.csv" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by threshold/mfrm_thresholds_generating_severities.csv" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by threshold/mfrm_thresholds_generating_thresholds.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM by threshold/mfrm_thresholds_generating_thresholds.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by threshold/mfrm_thresholds_scores.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM by threshold/mfrm_thresholds_scores.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by threshold/output files/mfrm_thresholds_item_loadings.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM by threshold/output files/mfrm_thresholds_item_loadings.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by threshold/output files/mfrm_thresholds_item_residual_correlations.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM by threshold/output files/mfrm_thresholds_item_residual_correlations.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by threshold/output files/mfrm_thresholds_item_stats.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM by threshold/output files/mfrm_thresholds_item_stats.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by threshold/output files/mfrm_thresholds_person_stats.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM by threshold/output files/mfrm_thresholds_person_stats.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by threshold/output files/mfrm_thresholds_rater_loadings.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM by threshold/output files/mfrm_thresholds_rater_loadings.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by threshold/output files/mfrm_thresholds_rater_residual_correlations.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM by threshold/output files/mfrm_thresholds_rater_residual_correlations.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by threshold/output files/mfrm_thresholds_rater_stats.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM by threshold/output files/mfrm_thresholds_rater_stats.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by threshold/output files/mfrm_thresholds_test_stats - Copy.csv" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by threshold/output files/mfrm_thresholds_test_stats.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM by threshold/output files/mfrm_thresholds_test_stats.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by threshold/output files/mfrm_thresholds_threshold_stats - Copy.csv" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by threshold/output files/mfrm_thresholds_threshold_stats.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM by threshold/output files/mfrm_thresholds_threshold_stats.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by threshold/output files/my_thresholds_mfrm_crcs.png" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by threshold/output files/my_thresholds_mfrm_csem_curve.png" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by threshold/output files/my_thresholds_mfrm_icc.png" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by threshold/output files/my_thresholds_mfrm_iic.png" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by threshold/output files/my_thresholds_mfrm_std_residuals_plot.png" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by threshold/output files/my_thresholds_mfrm_tcc.png" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by threshold/output files/my_thresholds_mfrm_test_info_curve.png" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM by threshold/output files/my_thresholds_mfrm_threshold_ccs.png" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM matrix/Matrix MFRM example.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM matrix/Matrix MFRM example.ipynb" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM matrix/mfrm_matrix_generating_abilities.csv" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM matrix/mfrm_matrix_generating_diffs.csv" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM matrix/mfrm_matrix_generating_severities.csv" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM matrix/mfrm_matrix_generating_thresholds.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM matrix/mfrm_matrix_generating_thresholds.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM matrix/mfrm_matrix_scores.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM matrix/mfrm_matrix_scores.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM matrix/output files/mfrm_matrix_item_loadings.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM matrix/output files/mfrm_matrix_item_loadings.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM matrix/output files/mfrm_matrix_item_residual_correlations.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM matrix/output files/mfrm_matrix_item_residual_correlations.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM matrix/output files/mfrm_matrix_item_stats.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM matrix/output files/mfrm_matrix_item_stats.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM matrix/output files/mfrm_matrix_person_stats.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM matrix/output files/mfrm_matrix_person_stats.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM matrix/output files/mfrm_matrix_rater_loadings.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM matrix/output files/mfrm_matrix_rater_loadings.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM matrix/output files/mfrm_matrix_rater_residual_correlations.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM matrix/output files/mfrm_matrix_rater_residual_correlations.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM matrix/output files/mfrm_matrix_rater_stats.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM matrix/output files/mfrm_matrix_rater_stats.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM matrix/output files/mfrm_matrix_test_stats.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM matrix/output files/mfrm_matrix_test_stats.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM matrix/output files/mfrm_matrix_threshold_stats.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM matrix/output files/mfrm_matrix_threshold_stats.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM matrix/output files/my_matrix_mfrm_crcs.png" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM matrix/output files/my_matrix_mfrm_csem_curve.png" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM matrix/output files/my_matrix_mfrm_icc.png" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM matrix/output files/my_matrix_mfrm_iic.png" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM matrix/output files/my_matrix_mfrm_std_residuals_plot.png" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM matrix/output files/my_matrix_mfrm_tcc.png" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM matrix/output files/my_matrix_mfrm_test_info_curve.png" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM matrix/output files/my_matrix_mfrm_threshold_ccs.png" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM matrix/output files/my_mfrm_matrix_csem_curve.png" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM matrix/output files/my_mfrm_matrix_csem_curve.png" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM matrix/output files/my_mfrm_matrix_icc.png" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM matrix/output files/my_mfrm_matrix_icc.png" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM matrix/output files/my_mfrm_matrix_iic.png" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM matrix/output files/my_mfrm_matrix_iic.png" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM matrix/output files/my_mfrm_matrix_std_residuals_plot.png" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM matrix/output files/my_mfrm_matrix_std_residuals_plot.png" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM matrix/output files/my_mfrm_matrix_tcc.png" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM matrix/output files/my_mfrm_matrix_tcc.png" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Extended MFRM matrix/output files/my_mfrm_matrix_test_info_curve.png" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Extended MFRM matrix/output files/my_mfrm_matrix_test_info_curve.png" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Global MFRM/Global MFRM example.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Global MFRM/Global MFRM example.ipynb" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Global MFRM/mfrm_global_generating_diffs.csv" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Global MFRM/mfrm_global_generating_severities.csv" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Global MFRM/mfrm_global_generating_thresholds.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Global MFRM/mfrm_global_generating_thresholds.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Global MFRM/mfrm_global_item_loadings.csv" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Global MFRM/mfrm_global_scores.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Global MFRM/mfrm_global_scores.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Global MFRM/output files/mfrm_global_generating_abilities.csv" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Global MFRM/output files/mfrm_global_item_residual_correlations.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Global MFRM/output files/mfrm_global_item_residual_correlations.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Global MFRM/output files/mfrm_global_item_stats.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Global MFRM/output files/mfrm_global_item_stats.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Global MFRM/output files/mfrm_global_person_stats.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Global MFRM/output files/mfrm_global_person_stats.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Global MFRM/output files/mfrm_global_rater_loadings.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Global MFRM/output files/mfrm_global_rater_loadings.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Global MFRM/output files/mfrm_global_rater_residual_correlations.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Global MFRM/output files/mfrm_global_rater_residual_correlations.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Global MFRM/output files/mfrm_global_rater_stats.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Global MFRM/output files/mfrm_global_rater_stats.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Global MFRM/output files/mfrm_global_residual_correlations.csv" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Global MFRM/output files/mfrm_global_test_stats.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Global MFRM/output files/mfrm_global_test_stats.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Global MFRM/output files/mfrm_global_threshold_stats.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Global MFRM/output files/mfrm_global_threshold_stats.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Global MFRM/output files/my_global_mfrm_crcs.png" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Global MFRM/output files/my_global_mfrm_threshold_ccs.png" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Global MFRM/output files/my_mfrm_global_csem_curve.png" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Global MFRM/output files/my_mfrm_global_csem_curve.png" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Global MFRM/output files/my_mfrm_global_icc.png" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Global MFRM/output files/my_mfrm_global_icc.png" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Global MFRM/output files/my_mfrm_global_iic.png" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Global MFRM/output files/my_mfrm_global_iic.png" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Global MFRM/output files/my_mfrm_global_std_residuals_plot.png" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Global MFRM/output files/my_mfrm_global_std_residuals_plot.png" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Global MFRM/output files/my_mfrm_global_tcc.png" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Global MFRM/output files/my_mfrm_global_tcc.png" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Global MFRM/output files/my_mfrm_global_test_info_curve.png" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Global MFRM/output files/my_mfrm_global_test_info_curve.png" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Global MFRM/output files/my_rsm_icc.png" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Global MFRM/output files/my_rsm_iic.png" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/PCM/PCM example.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/PCM/PCM example.ipynb" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/PCM/output files/my_pcm_csem_curve.png" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/PCM/output files/my_pcm_csem_curve.png" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/PCM/output files/my_pcm_icc.png" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/PCM/output files/my_pcm_icc.png" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/PCM/output files/my_pcm_iic.png" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/PCM/output files/my_pcm_iic.png" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/PCM/output files/my_pcm_std_residuals_plot.png" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/PCM/output files/my_pcm_std_residuals_plot.png" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/PCM/output files/my_pcm_tcc.png" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/PCM/output files/my_pcm_tcc.png" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/PCM/output files/my_pcm_test_info_curve.png" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/PCM/output files/my_pcm_test_info_curve.png" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/PCM/output files/pcm_item_stats.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/PCM/output files/pcm_item_stats.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/PCM/output files/pcm_loadings.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/PCM/output files/pcm_loadings.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/PCM/output files/pcm_person_stats.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/PCM/output files/pcm_person_stats.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/PCM/output files/pcm_residual_correlations.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/PCM/output files/pcm_residual_correlations.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/PCM/output files/pcm_test_stats.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/PCM/output files/pcm_test_stats.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/PCM/output files/pcm_threshold_stats_centred.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/PCM/output files/pcm_threshold_stats_centred.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/PCM/output files/pcm_threshold_stats_uncentred.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/PCM/output files/pcm_threshold_stats_uncentred.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/PCM/pcm_generating_abilities.csv" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/PCM/pcm_generating_uncentred_thresholds.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/PCM/pcm_generating_uncentred_thresholds.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/PCM/pcm_scores.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/PCM/pcm_scores.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Papers and PhD thesis studies/CPAT simulation study.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Papers and PhD thesis studies/CPAT simulation study.ipynb" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Papers and PhD thesis studies/Extended MFRM case study.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Papers and PhD thesis studies/Extended MFRM case study.ipynb" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Papers and PhD thesis studies/Extended MFRM evaluation study.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Papers and PhD thesis studies/Extended MFRM evaluation study.ipynb" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/RSM/RSM example.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/RSM/RSM example.ipynb" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/RSM/output files/my_rsm_crcs.png" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/RSM/output files/my_rsm_crcs.png" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/RSM/output files/my_rsm_csem_curve.png" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/RSM/output files/my_rsm_csem_curve.png" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/RSM/output files/my_rsm_icc.png" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/RSM/output files/my_rsm_icc.png" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/RSM/output files/my_rsm_iic.png" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/RSM/output files/my_rsm_iic.png" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/RSM/output files/my_rsm_std_residuals_plot.png" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/RSM/output files/my_rsm_std_residuals_plot.png" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/RSM/output files/my_rsm_tcc.png" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/RSM/output files/my_rsm_tcc.png" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/RSM/output files/my_rsm_test_info_curve.png" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/RSM/output files/my_rsm_test_info_curve.png" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/RSM/output files/my_rsm_threshold_ccs.png" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/RSM/output files/my_rsm_threshold_ccs.png" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/RSM/output files/rsm_item_stats.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/RSM/output files/rsm_item_stats.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/RSM/output files/rsm_loadings.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/RSM/output files/rsm_loadings.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/RSM/output files/rsm_person_stats.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/RSM/output files/rsm_person_stats.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/RSM/output files/rsm_residual_correlations.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/RSM/output files/rsm_residual_correlations.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/RSM/output files/rsm_test_stats.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/RSM/output files/rsm_test_stats.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/RSM/output files/rsm_threshold_stats.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/RSM/output files/rsm_threshold_stats.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/RSM/rsm_generating_abilities.csv" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/RSM/rsm_generating_diffs.csv" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/RSM/rsm_generating_thresholds.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/RSM/rsm_generating_thresholds.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/RSM/rsm_scores.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/RSM/rsm_scores.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/SLM/SLM example.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/SLM/SLM example.ipynb" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/SLM/output files/my_slm_csem_curve.png" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/SLM/output files/my_slm_csem_curve.png" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/SLM/output files/my_slm_icc.png" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/SLM/output files/my_slm_icc.png" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/SLM/output files/my_slm_iic.png" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/SLM/output files/my_slm_iic.png" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/SLM/output files/my_slm_std_residuals_plot.png" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/SLM/output files/my_slm_std_residuals_plot.png" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/SLM/output files/my_slm_tcc.png" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/SLM/output files/my_slm_tcc.png" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/SLM/output files/my_slm_test_info_curve.png" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/SLM/output files/my_slm_test_info_curve.png" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/SLM/output files/slm_item_stats.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/SLM/output files/slm_item_stats.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/SLM/output files/slm_loadings.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/SLM/output files/slm_loadings.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/SLM/output files/slm_person_stats.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/SLM/output files/slm_person_stats.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/SLM/output files/slm_residual_correlations.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/SLM/output files/slm_residual_correlations.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/SLM/output files/slm_test_stats.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/SLM/output files/slm_test_stats.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/SLM/slm_generating_abilities.csv" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/SLM/slm_generating_diffs.csv" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/SLM/slm_scores.csv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/SLM/slm_scores.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Simulations/MFRM_Sim_Global.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Simulations/MFRM_Sim_Global.ipynb" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Simulations/MFRM_Sim_Items.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Simulations/MFRM_Sim_Items.ipynb" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Simulations/MFRM_Sim_Matrix.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Simulations/MFRM_Sim_Matrix.ipynb" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Simulations/MFRM_Sim_Thresholds.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Simulations/MFRM_Sim_Thresholds.ipynb" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Simulations/PCM_Sim.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Simulations/PCM_Sim.ipynb" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Simulations/RSM_Sim.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Simulations/RSM_Sim.ipynb" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Simulations/SLM_Sim.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Simulations/SLM_Sim.ipynb" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/RaschPy/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/raschpy/__init__.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/__init__.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/dist/raschpy-1.0.1-py3-none-any.whl" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/dist/raschpy-1.0.1.tar.gz" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/dist/raschpy-1.0.2-py3-none-any.whl" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/dist/raschpy-1.0.2.tar.gz" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/meta.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/meta.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/pyproject.toml" beforeDir="false" afterPath="$PROJECT_DIR$/pyproject.toml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/raschpy.egg-info/PKG-INFO" beforeDir="false" afterPath="$PROJECT_DIR$/raschpy.egg-info/PKG-INFO" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/raschpy/base.py" beforeDir="false" afterPath="$PROJECT_DIR$/raschpy/base.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/raschpy/docs/RaschPy_manual.pdf" beforeDir="false" afterPath="$PROJECT_DIR$/raschpy/docs/RaschPy_manual.pdf" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/raschpy/loaders.py" beforeDir="false" afterPath="$PROJECT_DIR$/raschpy/loaders.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/raschpy/mfrm.py" beforeDir="false" afterPath="$PROJECT_DIR$/raschpy/mfrm.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/raschpy/old stable files with old names/mfrm.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/raschpy/old stable files with old names/mfrm_sim.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/raschpy/old stable files with old names/pcm.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/raschpy/old stable files with old names/pcm_sim.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/raschpy/old stable files with old names/rsm.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/raschpy/old stable files with old names/rsm_sim.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/raschpy/old stable files with old names/slm.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/raschpy/old stable files with old names/slm_sim.py" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/raschpy/pcm.py" beforeDir="false" afterPath="$PROJECT_DIR$/raschpy/pcm.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/raschpy/rsm.py" beforeDir="false" afterPath="$PROJECT_DIR$/raschpy/rsm.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/raschpy/simulation/mfrm_sim.py" beforeDir="false" afterPath="$PROJECT_DIR$/raschpy/simulation/mfrm_sim.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/raschpy/slm.py" beforeDir="false" afterPath="$PROJECT_DIR$/raschpy/slm.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -28,15 +214,15 @@
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent"><![CDATA[{
-  "keyToString": {
-    "ModuleVcsDetector.initialDetectionPerformed": "true",
-    "RunOnceActivity.ShowReadmeOnStart": "true",
-    "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager": "true",
-    "RunOnceActivity.git.unshallow": "true",
-    "git-widget-placeholder": "main"
+  <component name="PropertiesComponent">{
+  &quot;keyToString&quot;: {
+    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
+    &quot;git-widget-placeholder&quot;: &quot;main&quot;
   }
-}]]></component>
+}</component>
   <component name="SharedIndexes">
     <attachedChunks>
       <set>

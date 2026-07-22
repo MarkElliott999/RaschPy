@@ -33,8 +33,6 @@ def _split_valid_invalid(responses):
     """
     Split responses into valid (at least one non-NaN) and invalid (all-NaN) rows.
     Returns (valid, invalid) DataFrames.
-    The np.where(isna, nan, x) loops in the original were pure no-ops after
-    .astype(float) — NaN is already float NaN. Removed entirely.
     """
     all_nan = responses.isnull().all(axis=1)
     return responses[~all_nan].copy(), responses[all_nan].copy()
@@ -44,9 +42,6 @@ def _mfrm_reindex_and_stack(responses_dict, item_ids, scores):
     """
     Shared MFRM finalisation: reindex to full (Rater x Person) grid,
     validate scores, then stack back to (Rater, Person) MultiIndex.
-
-    Replaces the manual O(raters*persons) loop in the original with a single
-    pd.reindex() call, then uses unstack/stack to produce the correct shape.
     """
     rater_names = list(responses_dict.keys())
     all_persons = np.unique(
@@ -80,48 +75,11 @@ def _mfrm_reindex_and_stack(responses_dict, item_ids, scores):
 # Public loaders
 # ---------------------------------------------------------------------------
 
-
-def loadup_exogenous(filename, person_names=True):
-    """
-    Load person-level exogenous covariates (e.g. Gender, L1) for DIF analysis.
-
-    Reads a person-indexed covariate table from CSV, Excel (.xlsx), or JSON.
-    Unlike the response loaders, values are not coerced to numeric or
-    validated against a score range — exogenous covariates are typically
-    categorical labels (e.g. 'Female', 'Chinese') and are kept as supplied.
-    Loaded independently of the response file rather than as extra columns
-    in it, so a covariate never risks being parsed as an item score.
-
-    Parameters
-    ----------
-    filename : str
-        Path to the data file. Format inferred from extension:
-        '.xlsx' -> Excel; '.json' -> JSON; anything else -> CSV.
-    person_names : bool, default True
-        If True, first column is used as person identifiers (the index).
-        If False, persons are labelled 'Person_1', 'Person_2', etc., in
-        file row order.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Person-indexed covariate table. Pass directly as the `exogenous`
-        argument to the SLM/PCM/RSM/MFRM constructors.
-    """
-    index_col = 0 if person_names else None
-    exogenous = _read_file(filename, header=0, index_col=index_col)
-
-    if not person_names:
-        exogenous.index = [f"Person_{i + 1}" for i in range(exogenous.shape[0])]
-
-    return exogenous
-
-
 def loadup_slm(filename, item_names=True, person_names=True, long=False):
     """
     Load and validate response data for the Simple Logistic Model (SLM).
 
-    Reads a response matrix from CSV, Excel (.xlsx), or JSON, coerces values
+    Reads a response matrix from CSV, Excel (.xlsx) or JSON, coerces values
     to numeric, and replaces any value that is not 0 or 1 with NaN. Splits
     the result into valid rows (at least one non-NaN) and invalid rows (all NaN).
 
@@ -177,16 +135,15 @@ def loadup_pcm(
     Load and validate response data for the Partial Credit Model (PCM).
 
     Reads a response matrix, coerces values to numeric, and replaces any value
-    that is not a non-negative integer at or below each item's maximum score
-    with NaN. Splits into valid and invalid (all-NaN) rows.
+    outside [0, item max score] with NaN. Splits into valid and invalid (all-NaN) rows.
 
     Parameters
     ----------
     filename : str
         Path to the data file (.xlsx, .json, or CSV).
-    max_score_vector : list, pandas.Series, or None, default None
+    max_score_vector : list, numpy.array, pandas.Series, or None, default None
         Maximum possible score for each item, in column order. If None,
-        the maximum observed value per column is used. Supply explicitly
+        inferred from the data. Supply explicitly
         if any item's maximum is never observed in the data.
     item_names : bool, default True
         If True, first row is used as item names.
@@ -301,7 +258,8 @@ def loadup_rsm(
 
 def loadup_mfrm_single(filename, max_score=None, item_names=True, long=False):
     """
-    Load MFRM data from a single file with a (Rater, Person) MultiIndex.
+    Load MFRM data from a single file with a (Rater, Person) MultiIndex, where
+    Rater represents the additional facet.
 
     The file must have two index columns: Rater (level 0) and Person (level 1).
     Reindexes to a full Rater x Person grid (filling absent combinations with
@@ -375,9 +333,9 @@ def loadup_mfrm_xlsx_tabs(
     """
     Load MFRM data from multiple sheets of a single Excel workbook.
 
-    Each sheet corresponds to one rater; sheet names become rater identifiers.
-    Merges all sheets into a (Rater, Person) MultiIndex DataFrame, validates
-    scores, and splits into valid and invalid rows.
+    Each sheet corresponds to one rater (additional facet); sheet names become
+    rater identifiers. Merges all sheets into a (Rater, Person) MultiIndex
+    DataFrame, validates scores, and splits into valid and invalid rows.
 
     Parameters
     ----------
@@ -520,3 +478,40 @@ def loadup_mfrm_multiple(
         sheets[rater] = np.floor(df.apply(pd.to_numeric, errors="coerce"))
 
     return _mfrm_reindex_and_stack(sheets, None, scores)
+
+def loadup_exogenous(filename, person_names=True):
+    """
+    Load person-level exogenous covariates (e.g. Gender, Nationality or Age)
+    for DIF analysis.
+
+    Reads a person-indexed covariate table from CSV, Excel (.xlsx), or JSON.
+    Unlike the response loaders, values are not coerced to numeric or
+    validated against a score range — exogenous covariates are typically
+    categorical labels (e.g. 'Female', 'Chinese'), although they may be
+    numerical (e.g. for Age) and are kept as supplied. Loaded independently
+    of the response file rather than as extra columns in it, so a covariate
+    never risks being parsed as an item score.
+
+    Parameters
+    ----------
+    filename : str
+        Path to the data file. Format inferred from extension:
+        '.xlsx' -> Excel; '.json' -> JSON; anything else -> CSV.
+    person_names : bool, default True
+        If True, first column is used as person identifiers (the index).
+        If False, persons are labelled 'Person_1', 'Person_2', etc., in
+        file row order.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Person-indexed covariate table. Pass directly as the `exogenous`
+        argument to the SLM/PCM/RSM/MFRM constructors.
+    """
+    index_col = 0 if person_names else None
+    exogenous = _read_file(filename, header=0, index_col=index_col)
+
+    if not person_names:
+        exogenous.index = [f"Person_{i + 1}" for i in range(exogenous.shape[0])]
+
+    return exogenous

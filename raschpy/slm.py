@@ -25,7 +25,7 @@ class SLM(Rasch):
         exogenous=None,
     ):
         """
-        Initialise a Simple Logistic Model (Rasch model) object.
+        Initialise a Simple Logistic Model (dichotomous Rasch model) object.
 
         Parameters
         ----------
@@ -37,26 +37,27 @@ class SLM(Rasch):
         extreme_persons : bool, default True
             If True, removes only persons with entirely missing data.
             If False, additionally removes persons with all-zero or
-            perfect scores (extreme scores), which cannot be handled
-            by maximum likelihood estimation without adjustment.
+            perfect scores (extreme scores), estimation for whom cannot
+            be handled by maximum likelihood estimation without adjustment.
         no_of_classes : int, default 5
             Number of class intervals used in observed-data overlays on
-            ICC and TCC plots.
+            ICC, CRCs and TCC plots.
         validate : bool, default True
             If True, checks whether the item response network is fully
             connected (i.e. all items are linked via common persons).
             Issues a UserWarning if the data is split into disconnected
-            sub-networks, which makes item difficulties incomparable
+            sub-networks, which makes item locations incomparable
             across sub-groups.
         exogenous : pandas.DataFrame or None, default None
-            Optional person-level covariates (e.g. Gender, L1) for
-            differential item functioning analysis, indexed by person
-            identifier. Values are kept as raw category labels. Persons
-            in responses without a matching exogenous record (and vice
-            versa) are allowed — such gaps are common when exogenous
-            data is optional (e.g. for GDPR reasons) — and are reported
-            via UserWarning plus the exogenous_only_persons /
-            no_exogenous_persons attributes, rather than raising.
+            Optional person-level covariates (e.g. Gender, Nationality
+            or Age) for differential item functioning (DIF) analysis,
+            indexed by person identifier. Values are kept as raw category
+            labels. Persons in responses without a matching exogenous
+            record (and vice versa) are allowed — such gaps are common
+            when exogenous data is optional (e.g. for GDPR reasons) —
+            and are reported via UserWarning plus the attributes
+            exogenous_only_persons and no_exogenous_persons, rather than
+            raising.
 
         Attributes set
         --------------
@@ -128,7 +129,7 @@ class SLM(Rasch):
         self.no_of_classes = no_of_classes
         self.max_score = 1
 
-        # Optional person-level covariates for DIF (e.g. Gender, L1)
+        # Optional person-level covariates for DIF (e.g. Gender, Nationality, Age)
         if exogenous is not None:
             self.no_exogenous_persons = self.person_names[
                 ~self.person_names.isin(exogenous.index)
@@ -172,8 +173,8 @@ class SLM(Rasch):
                     f"\n"
                     f"⚠️  CRITICAL DATA INTEGRITY WARNING: The response data is disconnected into "
                     f"{self.connectivity_status['components_count']} separate sub-networks.\n"
-                    f"Difficulty estimates will be problematic because there are no "
-                    f"empirical comparisons spanning across these isolated groups, the item parameter "
+                    f"Item location estimates will be problematic because there are no empirical "
+                    f"comparisons spanning across these isolated groups, the item parameter "
                     f"estimates for each independent subset will separately sum to zero. This means items "
                     f"belonging to different subsets cannot be compared or calibrated onto a single scale.",
                     category=UserWarning,
@@ -199,43 +200,43 @@ class SLM(Rasch):
                     stacklevel=2,
                 )
 
-    def exp_score(self, ability, difficulty):
+    def exp_score(self, person_location, item_location):
         """
         Compute the expected score (probability of correct response).
 
         Implements the SLM response function P(X=1) = 1 / (1 + exp(d - b)),
-        where b is person ability and d is item difficulty. Fully vectorised:
+        where b is person location and d is item location. Fully vectorised:
         accepts scalars, 1-D arrays, or 2-D arrays in any combination that
         NumPy can broadcast.
 
         Parameters
         ----------
-        ability : float or array-like
-            Person ability estimate(s) on the logit scale.
-        difficulty : float or array-like
-            Item difficulty estimate(s) on the logit scale.
+        person_location : float or array-like
+            Person location(s) on the logit scale.
+        item_location : float or array-like
+            Item location(s) on the logit scale.
 
         Returns
         -------
         float or numpy.ndarray
             Expected score (probability of correct response), in [0, 1].
         """
-        return 1.0 / (1.0 + np.exp(difficulty - ability))
+        return 1.0 / (1.0 + np.exp(item_location - person_location))
 
-    def cat_prob(self, ability, difficulty, category):
+    def cat_prob(self, person_location, item_location, category):
         """
         Compute the probability of a given response category (0 or 1).
 
-        Returns P(X=category | ability, difficulty) using the SLM
+        Returns P(X=category | person location, item location) using the SLM
         response function. For category=1 this is identical to exp_score;
         for category=0 it is 1 minus that probability.
 
         Parameters
         ----------
-        ability : float or array-like
-            Person ability estimate(s) on the logit scale.
-        difficulty : float or array-like
-            Item difficulty estimate(s) on the logit scale.
+        person_location : float or array-like
+            Person location estimate(s) on the logit scale.
+        item_location : float or array-like
+            Item location estimate(s) on the logit scale.
         category : int
             Response category: 0 (incorrect) or 1 (correct).
 
@@ -244,55 +245,56 @@ class SLM(Rasch):
         float or numpy.ndarray
             Probability of the specified response category, in [0, 1].
         """
-        p = self.exp_score(ability, difficulty)
+        p = self.exp_score(person_location, item_location)
         # For category 1: returns p. For category 0: returns (1 - p).
         return p if category == 1 else (1.0 - p)
 
-    def variance(self, ability, difficulty):
+    def variance(self, person_location, item_location):
         """
-        Compute the item response variance (Fisher information) at given ability.
+        Compute the item response variance (Fisher information) for a given
+        person location.
 
         For the SLM, variance equals P(X=1) * P(X=0) = p * (1 - p), which
         is simultaneously the Fisher information, the variance of the response
         distribution, and the first derivative of the expected score function
-        with respect to ability.
+        with respect to person location.
 
         Parameters
         ----------
-        ability : float or array-like
-            Person ability estimate(s) on the logit scale.
-        difficulty : float or array-like
-            Item difficulty estimate(s) on the logit scale.
+        person_location : float or array-like
+            Person location estimate(s) on the logit scale.
+        item_location : float or array-like
+            Item location estimate(s) on the logit scale.
 
         Returns
         -------
         float or numpy.ndarray
             Response variance / Fisher information, in [0, 0.25].
         """
-        expected = self.exp_score(ability, difficulty)
+        expected = self.exp_score(person_location, item_location)
         return expected * (1.0 - expected)
 
-    def kurtosis(self, ability, difficulty):
+    def kurtosis(self, person_location, item_location):
         """
         Compute the fourth central moment (kurtosis) of the response distribution.
 
         Used in the Wilson-Hilferty approximation for the standardised fit
         statistics (Infit Z, Outfit Z). For the SLM:
-        kurtosis = p^4 * (1-p) + (1-p)^4 * p, where p = exp_score(ability, difficulty).
+        kurtosis = p^4 * (1-p) + (1-p)^4 * p, where p = exp_score(person_location, item_location).
 
         Parameters
         ----------
-        ability : float or array-like
-            Person ability estimate(s) on the logit scale.
-        difficulty : float or array-like
-            Item difficulty estimate(s) on the logit scale.
+        person_location : float or array-like
+            Person location estimate(s) on the logit scale.
+        item_location : float or array-like
+            Item location estimate(s) on the logit scale.
 
         Returns
         -------
         float or numpy.ndarray
             Fourth central moment of the response distribution.
         """
-        expected = self.exp_score(ability, difficulty)
+        expected = self.exp_score(person_location, item_location)
 
         # Category 0 term: ((0 - expected)**4) * (1 - expected)
         term_1 = (expected**4) * (1.0 - expected)
@@ -302,17 +304,35 @@ class SLM(Rasch):
 
         return term_1 + term_2
 
+    def _build_pairwise_matrix(self):
+        """
+        Raw (unsmoothed) directed pairwise comparison matrix used by
+        calibrate() and check_data_connectivity(). Entry (i, j) counts
+        persons who scored 1 on item i and 0 on item j.
+
+        Returns
+        -------
+        matrix : numpy.ndarray, shape (no_of_items, no_of_items)
+        row_items : numpy.ndarray
+            Item name for each row/column (identity mapping for SLM).
+        """
+        df_array = np.array(self.responses, dtype=np.float64)
+        is_one = ((df_array == 1) & (~np.isnan(df_array))).astype(np.float64)
+        is_zero = ((df_array == 0) & (~np.isnan(df_array))).astype(np.float64)
+        matrix = np.dot(is_one.T, is_zero)
+        return matrix, np.array(self.item_names)
+
     def calibrate(
         self, constant=0.1, method="cos", matrix_power=3, log_lik_tol=0.000001
     ):
         """
-        Estimate item difficulties using Choppin's pairwise matrix method.
+        Estimate item locations using Choppin's pairwise matrix method.
 
         Constructs a pairwise comparison matrix from the response data and
         raises it to successive powers until all off-diagonal elements are
         non-zero (resolving structural zeroes that arise from items never
         administered together). A priority vector is then extracted from
-        the resolved matrix to obtain item difficulty estimates on the logit
+        the resolved matrix to obtain item location estimates on the logit
         scale, zero-centred across all items.
 
         Issues a UserWarning if only one item is present (reduces to RSM)
@@ -341,7 +361,7 @@ class SLM(Rasch):
         Attributes set
         --------------
         diffs : pandas.Series
-            Item difficulty estimates indexed by item name, in logits,
+            Item location estimates indexed by item name, in logits,
             zero-centred across all items.
         null_persons : pandas.Index
             Persons dropped prior to calibration due to entirely missing
@@ -376,16 +396,8 @@ class SLM(Rasch):
         self.null_persons = self.responses.index[self.responses.isnull().all(axis=1)]
         self.responses = self.responses.drop(self.null_persons)
 
-        # Extract structural array and dimensions locally as guaranteed integers
-        df_array = np.array(self.responses, dtype=np.float64)
-
-        # 2. VECTORISED PAIRWISE COMPARISON MATRIX (With proper float casting)
-        # CRITICAL FIX: Casting boolean arrays to float64 forces numerical summation
-        is_one = ((df_array == 1) & (~np.isnan(df_array))).astype(np.float64)
-        is_zero = ((df_array == 0) & (~np.isnan(df_array))).astype(np.float64)
-
-        # Fast BLAS/LAPACK matrix dot product for true joint frequencies
-        matrix = np.dot(is_one.T, is_zero)
+        # 2. VECTORISED PAIRWISE COMPARISON MATRIX
+        matrix, _ = self._build_pairwise_matrix()
 
         # 3. Compute matrix powers (Keep the diagonal as 0 so Choppin's math stays pure)
         # Sparse/disconnected resamples can blow this up to inf/nan before the zero-check
@@ -433,12 +445,12 @@ class SLM(Rasch):
         seed=None,
     ):
         """
-        Anchor item difficulty estimates onto externally-supplied values.
+        Anchor item location estimates onto externally-supplied values.
 
         Supports item banking: calibrates this dataset's own item
-        difficulties as usual, then shifts the whole scale by a translation
+        locations as usual, then shifts the whole scale by a translation
         constant so that a subset of common ("anchor") items line up with
-        externally-supplied reference difficulties (e.g. from a bank of
+        externally-supplied reference locations (e.g. from a bank of
         previously-calibrated items). Since SLM item discrimination is
         fixed at 1, this is a simple mean-shift, not full linear equating.
 
@@ -457,7 +469,7 @@ class SLM(Rasch):
         Parameters
         ----------
         anchors : dict or pandas.Series
-            Externally-supplied reference difficulties, keyed/indexed by
+            Externally-supplied reference locations, keyed/indexed by
             item name. Only items also present in this dataset are used.
         calibrate : bool, default False
             If True, (re-)runs calibrate() before anchoring. If False,
@@ -529,7 +541,7 @@ class SLM(Rasch):
             selection table is produced in those cases.
         plot_kwargs : dict or None, default None
             Extra keyword arguments forwarded to plot_anchor_selection()
-            when plot=True (e.g. filename, x_min/x_max, graph_title).
+            when plot=True (e.g. filename, xmin/xmax, title).
         constant, method, matrix_power, log_lik_tol : floats
             Calibration/bootstrap kwargs, used only if calibrate or
             std_errors (selection_method='wald') is triggered.
@@ -537,7 +549,7 @@ class SLM(Rasch):
         Attributes set
         --------------
         anchor_items : pandas.Series
-            Item difficulties shifted onto the anchor scale.
+            Item locations shifted onto the anchor scale.
         anchor_item_names : pandas.Index
             Names of the items supplied as anchors.
         anchor_adj : float
@@ -750,11 +762,11 @@ class SLM(Rasch):
         seed=None,
     ):
         """
-        Estimate bootstrap standard errors for item difficulty estimates.
+        Estimate bootstrap standard errors for item location estimates.
 
         Draws no_of_samples bootstrap resamples (with replacement) of the
         person-level response data, calibrates each resample, and computes
-        the standard deviation of item difficulty estimates across samples
+        the standard deviation of item location estimates across samples
         as the standard error. Optionally computes bootstrap confidence
         intervals.
 
@@ -783,7 +795,7 @@ class SLM(Rasch):
         Attributes set
         --------------
         item_se : pandas.Series
-            Bootstrap standard error for each item difficulty, indexed
+            Bootstrap standard error for each item location, indexed
             by item name.
         item_low : pandas.Series or None
             Lower percentile bound of the bootstrap CI for each item,
@@ -792,11 +804,11 @@ class SLM(Rasch):
             Upper percentile bound of the bootstrap CI for each item,
             or None if interval is None.
         item_bootstrap : pandas.DataFrame
-            Full matrix of bootstrap item difficulty estimates, shape
+            Full matrix of bootstrap item location estimates, shape
             (no_of_samples, no_of_items), with items as columns and
             sample labels as index.
         bootstrap_sample_diffs : dict
-            Dictionary of difficulty Series from each bootstrap resample,
+            Dictionary of item location Series from each bootstrap resample,
             keyed by 'Sample_1', 'Sample_2', etc.
         """
 
@@ -865,10 +877,10 @@ class SLM(Rasch):
         missing_as_incorrect=False,
     ):
         """
-        Estimate person abilities using Newton-Raphson maximum likelihood.
+        Estimate person locations using Newton-Raphson maximum likelihood.
 
         For each person, iteratively solves the likelihood equation
-        sum(P_i) = score for the ability estimate, where P_i is the
+        sum(P_i) = score for the person location estimate, where P_i is the
         probability of a correct response on item i. Extreme scores
         (all-zero or perfect) are adjusted by ext_score_adjustment before
         estimation. Optionally applies Warm's (1989) bias correction.
@@ -876,7 +888,7 @@ class SLM(Rasch):
         Parameters
         ----------
         persons : str or list
-            Person identifier(s) to estimate abilities for. Pass 'all'
+            Person identifier(s) to estimate person locations for. Pass 'all'
             to estimate for all persons in the responses.
         items : str or list or None, default None
             Item subset to use for estimation. None uses all items.
@@ -886,18 +898,18 @@ class SLM(Rasch):
             bias correction after Newton-Raphson convergence.
         tolerance : float, default 0.00001
             Convergence criterion: iteration stops when the maximum
-            absolute change in ability estimates falls below this value.
+            absolute change in person location estimates falls below this value.
         max_iters : int, default 100
             Maximum number of Newton-Raphson iterations. A UserWarning is
             raised if this limit is reached before convergence.
         ext_score_adjustment : float, default 0.5
             Amount added to (or subtracted from) extreme scores of 0 or
-            maximum before estimation, to allow finite ability estimates.
+            maximum before estimation, to allow finite person location estimates.
 
         Returns
         -------
         pandas.Series
-            Ability estimates indexed by person identifier, in logits.
+            Person location estimates indexed by person identifier, in logits.
             Returns numpy.nan for persons where estimation fails.
         """
 
@@ -917,11 +929,11 @@ class SLM(Rasch):
 
         if items is None:
             items = self.item_names
-            difficulties = self.items
+            item_locations = self.items
             person_data = self.responses.loc[persons]
 
         else:
-            difficulties = self.items.loc[items]
+            item_locations = self.items.loc[items]
             person_data = self.responses.loc[persons, items]
 
         if missing_as_incorrect:
@@ -934,16 +946,16 @@ class SLM(Rasch):
         scores[scores == 0] += ext_score_adjustment
         scores[scores == ext_scores] -= ext_score_adjustment
 
-        diff_df = pd.DataFrame(
-            np.tile(difficulties.values[None, :], (len(persons), 1)),
+        item_location_df = pd.DataFrame(
+            np.tile(item_locations.values[None, :], (len(persons), 1)),
             index=persons,
-            columns=difficulties.index,
+            columns=item_locations.index,
         )
-        diff_df *= person_filter
+        item_location_df *= person_filter
 
         try:
             estimates = (
-                np.log(scores) - np.log(ext_scores - scores) + diff_df.mean(axis=1)
+                np.log(scores) - np.log(ext_scores - scores) + item_location_df.mean(axis=1)
             )
             changes = pd.Series({person: 1 for person in persons})
             iters = 0
@@ -954,11 +966,11 @@ class SLM(Rasch):
                     / (
                         1
                         + np.exp(
-                            difficulties.values[None, :] - estimates.values[:, None]
+                            item_locations.values[None, :] - estimates.values[:, None]
                         )
                     ),
                     index=persons,
-                    columns=difficulties.index,
+                    columns=item_locations.index,
                 )
 
                 info_df = exp_score_df * (1 - exp_score_df)
@@ -975,7 +987,7 @@ class SLM(Rasch):
                 iters += 1
 
             if warm_corr:
-                estimates += self.warm(estimates, difficulties, person_filter)
+                estimates += self.warm(estimates, item_locations, person_filter)
 
             if iters >= max_iters:
                 warnings.warn(
@@ -1000,9 +1012,9 @@ class SLM(Rasch):
         missing_as_incorrect=False,
     ):
         """
-        Estimate abilities for all persons and store as an attribute.
+        Estimate person locations for all persons and store as an attribute.
 
-        Convenience wrapper around person() that estimates abilities for every
+        Convenience wrapper around person() that estimates person locations for every
         person in the responses and stores the result as self.persons.
 
         Parameters
@@ -1025,8 +1037,8 @@ class SLM(Rasch):
 
         Attributes set
         --------------
-        person_abilities : pandas.Series
-            Ability estimates for all persons, indexed by person identifier,
+        person_locations : pandas.Series
+            Person location estimates for all persons, indexed by person identifier,
             in logits.
         """
 
@@ -1050,9 +1062,9 @@ class SLM(Rasch):
         ext_score_adjustment=0.5,
     ):
         """
-        Convert a raw score to an ability estimate via Newton-Raphson ML.
+        Convert a raw score to a person location estimate via Newton-Raphson ML.
 
-        Estimates the ability corresponding to a given integer raw score
+        Estimates the person location corresponding to a given integer raw score
         on a specified item set. Unlike person(), which operates on observed
         person response patterns, this method works from a scalar score
         and is used to draw score lines on TCC plots.
@@ -1060,7 +1072,7 @@ class SLM(Rasch):
         Parameters
         ----------
         score : int or float
-            Raw score to convert to an ability estimate. Extreme scores
+            Raw score to convert to a person location estimate. Extreme scores
             of 0 or maximum are adjusted by ext_score_adjustment.
         items : str or list or None, default None
             Item subset defining the score scale. None uses all items.
@@ -1076,7 +1088,7 @@ class SLM(Rasch):
         Returns
         -------
         float
-            Ability estimate in logits corresponding to the given score.
+            Person location estimate in logits corresponding to the given score.
         """
 
         if items is None:
@@ -1086,10 +1098,10 @@ class SLM(Rasch):
             if items == "all":
                 items = self.item_names
 
-        difficulties = self.items.loc[items]
+        item_locations = self.items.loc[items]
 
         person_filter = np.ones(len(items))
-        max_score = len(difficulties)
+        max_score = len(item_locations)
 
         if score == 0:
             score = ext_score_adjustment
@@ -1097,11 +1109,11 @@ class SLM(Rasch):
         elif score == max_score:
             score -= ext_score_adjustment
 
-        estimate = log(score) - log(max_score - score) + difficulties.mean()
+        estimate = log(score) - log(max_score - score) + item_locations.mean()
         change = 1
         iters = 0
 
-        diffs_arr = difficulties.values
+        diffs_arr = item_locations.values
 
         while (abs(change) > tolerance) & (iters <= max_iters):
 
@@ -1114,7 +1126,7 @@ class SLM(Rasch):
             iters += 1
 
         if warm_corr:
-            estimate += self.warm(estimate, difficulties, person_filter)
+            estimate += self.warm(estimate, item_locations, person_filter)
 
         if iters >= max_iters:
             warnings.warn(
@@ -1136,11 +1148,11 @@ class SLM(Rasch):
         ext_score_adjustment=0.5,
     ):
         """
-        Build a score-to-ability lookup table for all possible raw scores.
+        Build a score-to-location lookup table for all possible raw scores.
 
-        Estimates the ability corresponding to every possible raw score on a
+        Estimates the person location corresponding to every possible raw score on a
         given item set using vectorised Newton-Raphson, and stores the result
-        as self.score_table. Useful for converting raw scores to ability
+        as self.score_table. Useful for converting raw scores to person location
         estimates in batch without per-person response patterns.
 
         Parameters
@@ -1164,7 +1176,7 @@ class SLM(Rasch):
         Attributes set
         --------------
         person_table : pandas.Series
-            Ability estimate for each possible raw score, indexed by score.
+            Person location estimate for each possible raw score, indexed by score.
         """
 
         if isinstance(items, str):
@@ -1178,7 +1190,7 @@ class SLM(Rasch):
             items = self.item_names
 
         no_of_items = len(items)
-        difficulties = self.items.loc[items]
+        item_locations = self.items.loc[items]
 
         if ext_scores:
             scores = np.arange(no_of_items + 1)
@@ -1194,7 +1206,7 @@ class SLM(Rasch):
         estimates = {
             score: np.log(used_score)
             - np.log(no_of_items - used_score)
-            + difficulties.mean()
+            + item_locations.mean()
             for score, used_score in zip(scores, used_scores)
         }
         estimates = pd.Series(estimates, index=scores)
@@ -1206,10 +1218,10 @@ class SLM(Rasch):
             exp_score_df = pd.DataFrame(
                 1
                 / (
-                    1 + np.exp(difficulties.values[None, :] - estimates.values[:, None])
+                    1 + np.exp(item_locations.values[None, :] - estimates.values[:, None])
                 ),
                 index=scores,
-                columns=difficulties.index,
+                columns=item_locations.index,
             )
 
             info_df = exp_score_df * (1 - exp_score_df)
@@ -1224,11 +1236,11 @@ class SLM(Rasch):
 
         if warm_corr:
             person_filter = pd.DataFrame(1, columns=items, index=scores)
-            estimates += self.warm(estimates, difficulties, person_filter)
+            estimates += self.warm(estimates, item_locations, person_filter)
 
         self.score_table = estimates
 
-    def warm(self, abilities, difficulties, person_filter):
+    def warm(self, person_locations, item_locations, person_filter):
         """
         Apply Warm's (1989) weighted maximum likelihood bias correction.
 
@@ -1240,33 +1252,33 @@ class SLM(Rasch):
 
         Parameters
         ----------
-        abilities : float or pandas.Series
-            Current ability estimate(s). If a Series, index must match persons.
-        difficulties : pandas.Series
-            Item difficulty estimates, indexed by item name.
+        person_locations : float or pandas.Series
+            Current person location estimate(s). If a Series, index must match persons.
+        item_locations : pandas.Series
+            Item location estimates, indexed by item name.
         person_filter : numpy.ndarray or pandas.DataFrame
             Binary mask indicating which items each person responded to
             (1 = responded, NaN = missing). Shape must be compatible with
-            broadcasting against abilities and difficulties.
+            broadcasting against person_locations and item_locations.
 
         Returns
         -------
         float or pandas.Series
-            Warm bias correction term(s) to be added to the ML ability
-            estimate(s). Same type and shape as the abilities input.
+            Warm bias correction term(s) to be added to the ML person location
+            estimate(s). Same type and shape as the person_locations input.
         """
 
-        if np.isscalar(abilities):
-            p = 1.0 / (1.0 + np.exp(difficulties.values - abilities))
+        if np.isscalar(person_locations):
+            p = 1.0 / (1.0 + np.exp(item_locations.values - person_locations))
             info = p * (1.0 - p)
             i = (info * person_filter).sum()
             j = (info * (1 - 2 * p) * person_filter).sum()
             return j / (2 * i**2)
 
         exp_score_df = pd.DataFrame(
-            1 / (1 + np.exp(difficulties.values[None, :] - abilities.values[:, None])),
-            index=abilities.index,
-            columns=difficulties.index,
+            1 / (1 + np.exp(item_locations.values[None, :] - person_locations.values[:, None])),
+            index=person_locations.index,
+            columns=item_locations.index,
         )
 
         info_df = exp_score_df * (1 - exp_score_df)
@@ -1282,117 +1294,155 @@ class SLM(Rasch):
 
         return j / (2 * i**2)
 
-    def csem(self, person, abilities=None, items=None):
+    def csem(self, persons=None, person_locations=None, items=None):
         """
-        Compute the conditional standard error of measurement for a person.
+        Compute the conditional standard error of measurement.
 
         Calculates CSEM = 1 / sqrt(I), where I is the total Fisher
-        information for the person given their item responses and ability
-        estimate. Missing responses are excluded via the person filter.
+        information per person given their item responses and person
+        location estimate. A hypothetical location with no matching row in
+        self.responses (e.g. a raw score used as a key into a custom
+        person_locations lookup such as self.score_table) has no observed
+        responses to consult, so all items in items are treated as answered.
 
         Parameters
         ----------
-        person : str or int
-            Person identifier (index label in self.responses).
-        abilities : pandas.Series or None, default None
-            Ability estimates for all persons. If None, self.person_estimates()
-            is called automatically to generate them.
+        persons : list, str, or None, default None
+            Person identifiers. Overrides person_locations if provided.
+        person_locations : pandas.Series, float, list, numpy.ndarray, or None, default None
+            Person location estimates. If None, uses self.persons, calling
+            self.person_estimates() automatically to generate it if not
+            already present.
         items : list or None, default None
             Item subset to use. None uses all items.
 
         Returns
         -------
-        float
-            Conditional standard error of measurement in logits for the
-            specified person.
+        pandas.Series
+            Conditional standard error of measurement in logits, indexed by
+            person (or by location label, for hypothetical locations).
         """
+        person_locations_supplied = person_locations is not None
 
-        if items is None:
-            items = self.responses.columns
-
-        difficulties = self.items.loc[items]
-
-        if abilities is None:
+        if person_locations is None:
             if not hasattr(self, "persons"):
                 self.person_estimates()
 
-            abilities = self.persons
+            person_locations = self.persons
+        if isinstance(person_locations, (int, float)):
+            person_locations = pd.Series({"Location": float(person_locations)})
+        if isinstance(person_locations, (list, np.ndarray)):
+            person_locations = pd.Series({f"Location {a}": a for a in person_locations})
+        if persons is not None:
+            if not isinstance(persons, (list, pd.Index, np.ndarray)):
+                persons = [persons]
+            if person_locations_supplied:
+                person_locations = person_locations.loc[persons]
+            else:
+                person_locations = self.persons.loc[persons]
 
-        person_data = self.responses.loc[person, items]
-        person_filter = (person_data + 1) / (person_data + 1)
+        persons = person_locations.index
 
-        diffs_arr = difficulties.values
-        mask = person_filter.values
-        p = 1.0 / (1.0 + np.exp(diffs_arr - abilities[person]))
-        total_info = np.nansum(p * (1.0 - p) * mask)
+        if items is None:
+            items = list(self.item_names)
+        elif isinstance(items, str):
+            items = [items]
 
-        return 1 / sqrt(total_info)
+        item_locations = self.items.loc[items]
 
-    def category_counts_item(self, item):
+        # Hypothetical locations (no matching row in self.responses) are
+        # treated as fully answered; real persons are filtered by their
+        # actual missing-response pattern.
+        is_real_person = persons.isin(self.responses.index)
+        person_filter = self.responses.reindex(persons)[items].notna().astype(float)
+        person_filter.loc[~is_real_person] = 1.0
+
+        diffs_arr = item_locations.values
+        locs = person_locations.values
+        p = 1.0 / (1.0 + np.exp(diffs_arr[None, :] - locs[:, None]))
+        total_info = (p * (1.0 - p) * person_filter.values).sum(axis=1)
+
+        return pd.Series(1.0 / np.sqrt(total_info), index=persons)
+
+    def category_counts_df(self, persons=None, items=None, counts_name=None):
         """
-        Return response frequency counts for a single item.
+        Build a response frequency table for one or more persons, across
+        one or more items.
+
+        Computes the number of 0 and 1 responses, total valid responses,
+        and missing responses for each requested item, over the requested
+        persons. Appends a 'Total' row summing across them.
+
+        Note (breaking change from earlier versions): the valid-response-
+        count column was renamed from 'Responses' to 'Total', matching
+        PCM/RSM/MFRM's category_counts_df.
 
         Parameters
         ----------
-        item : str
-            Item identifier (must be a column in self.responses).
+        persons : str, list, or None, default None
+            Person(s) to include (a single person name or a list of
+            names) -- e.g. to compare a score-split or exogenous-variable
+            group against the rest. None uses all persons.
+        items : str, list, or None, default None
+            Item(s) to include (as elsewhere in the package, a single item
+            name or a list of item names). None uses all items.
+        counts_name : str, int, or None, default None
+            If None, stores the result as self.category_counts_table
+            (overwriting any previous call). If given, stores it instead
+            under that key in self.counts (created if it doesn't already
+            exist) -- e.g. self.counts['group_a'] and
+            self.counts.group_a (dot access works when counts_name is a
+            valid Python identifier) -- so a succession of tables (e.g.
+            one per exogenous-variable group) can be kept side by side
+            for comparison rather than overwriting each other.
 
         Returns
         -------
-        pandas.Series
-            Count of each observed response category (0 and 1) for the
-            item, sorted by category value. Returns None and prints a
-            message if the item name is not found.
-        """
-
-        if item in self.responses.columns:
-            counts = self.responses[item].value_counts().fillna(0).astype(int)
-            counts.sort_index(inplace=True)
-
-            return counts
-
-        else:
-            warnings.warn(
-                f"Invalid item name: {item!r}. Returning None.",
-                UserWarning,
-                stacklevel=2,
-            )
-
-    def category_counts_df(self):
-        """
-        Build and store a response frequency table across all items.
-
-        Computes the number of 0 and 1 responses, total valid responses,
-        and missing responses for each item. Appends a 'Total' row summing
-        across all items.
-
-        Attributes set
-        --------------
-        category_counts : pandas.DataFrame
+        pandas.DataFrame
             DataFrame with items as rows and response categories (0, 1),
-            'Responses', and 'Missing' as columns. All values are integers.
-            A 'Total' row is appended at the bottom.
+            'Total', and 'Missing' as columns. All values are
+            integers. A 'Total' row is appended at the bottom.
         """
+        if items is None:
+            items = list(self.responses.columns)
+        elif isinstance(items, str):
+            items = [items]
+
+        if persons is None:
+            persons = list(self.responses.index)
+        elif isinstance(persons, str):
+            persons = [persons]
+
+        subset = self.responses.loc[persons, items]
 
         cat_counts_dict = {
-            item: {
-                int(score): count if count == count else 0
-                for score, count in self.category_counts_item(item).items()
-            }
-            for item in self.responses.columns
+            item: subset[item]
+            .value_counts()
+            .reindex([0, 1], fill_value=0)
+            .astype(int)
+            for item in items
         }
         category_counts_df = pd.DataFrame(cat_counts_dict).T
 
-        category_counts_df["Responses"] = self.responses.count()
+        category_counts_df["Total"] = subset.count()
         category_counts_df["Missing"] = (
-            self.no_of_persons - category_counts_df["Responses"]
+            len(persons) - category_counts_df["Total"]
         )
 
         category_counts_df = category_counts_df.astype(int)
 
         category_counts_df.loc["Total"] = category_counts_df.sum()
 
-        self.category_counts = category_counts_df
+        if counts_name is None:
+            self.category_counts_table = category_counts_df
+        else:
+            if not hasattr(self, "counts"):
+                from raschpy.base import _Namespace
+
+                self.counts = _Namespace()
+            self.counts[counts_name] = category_counts_df
+
+        return category_counts_df
 
     def _log_likelihood(self, responses=None, persons=None):
         if responses is None:
@@ -1442,7 +1492,7 @@ class SLM(Rasch):
         Parameters
         ----------
         warm_corr : bool, default True
-            If True, applies Warm's (1989) bias correction to ability
+            If True, applies Warm's (1989) bias correction to person location
             estimates used in fit computation.
         se : bool, default True
             If True, computes bootstrap standard errors (required for
@@ -1454,11 +1504,11 @@ class SLM(Rasch):
             If True, restricts cat_prob_dict to persons with non-extreme
             scores. Reduces memory usage on large datasets.
         tolerance : float, default 0.00001
-            Newton-Raphson convergence tolerance for ability estimation.
+            Newton-Raphson convergence tolerance for person location estimation.
         max_iters : int, default 100
-            Maximum Newton-Raphson iterations for ability estimation.
+            Maximum Newton-Raphson iterations for person location estimation.
         ext_score_adjustment : float, default 0.5
-            Extreme score adjustment for ability estimation.
+            Extreme score adjustment for person location estimation.
         constant : float, default 0.1
             Additive smoothing constant for calibration.
         method : str, default 'cos'
@@ -1534,9 +1584,9 @@ class SLM(Rasch):
         person_reliability : float
             Person reliability coefficient (if test_stats=True).
         item_residual_corr : pandas.Series
-            Correlation of standardised residuals with item difficulties.
+            Correlation of standardised residuals with item locations.
         person_residual_corr : pandas.Series
-            Correlation of standardised residuals with person abilities.
+            Correlation of standardised residuals with person locations.
         """
 
         if not hasattr(self, "items"):
@@ -1732,7 +1782,7 @@ class SLM(Rasch):
 
     def andersen_lr_test(
         self,
-        split_by="ability",
+        split_by="person_location",
         covariate=None,
         warm_corr=True,
         tolerance=0.00001,
@@ -1746,21 +1796,21 @@ class SLM(Rasch):
         """
         Andersen (1973) likelihood ratio test of parameter invariance.
 
-        split_by='ability'/'score' (general model-fit / invariance testing)
+        split_by='person_location'/'score' (general model-fit / invariance testing)
         is DISABLED as of 2026-07-06 — see NotImplementedError raised below.
         split_by='exogenous' (DIF testing) is unaffected and remains fully
         supported.
 
         Splits persons into two groups, fits the model separately in each
         group, and tests whether item parameters are invariant across
-        groups. Groups are formed either by a median split on ability or
+        groups. Groups are formed either by a median split on person location or
         raw score, or by an exogenous person covariate (e.g. Gender) for
         differential item functioning.
 
         Parameters
         ----------
-        split_by : str, default 'ability'
-            Split criterion: 'ability' (ML person estimates, median split),
+        split_by : str, default 'person_location'
+            Split criterion: 'person_location' (ML person estimates, median split),
             'score' (raw scores, median split), or 'exogenous' (an
             external person covariate — requires `covariate` and
             self.exogenous to be set). 'exogenous' requires the covariate
@@ -1774,7 +1824,7 @@ class SLM(Rasch):
             from the full-sample comparison fit, so the LR decomposition
             stays valid.
         warm_corr : bool, default True
-            Warm bias correction for ability estimates.
+            Warm bias correction for person location estimates.
         tolerance, max_iters, ext_score_adjustment : floats
             Person estimation kwargs passed to group models.
         constant, method, matrix_power, log_lik_tol : floats
@@ -1784,11 +1834,11 @@ class SLM(Rasch):
         --------------
         andersen_lr : float
             Likelihood ratio statistic. Each group's own log-likelihood
-            (the H1 side) is computed by plugging in ability estimates
+            (the H1 side) is computed by plugging in person location estimates
             from the pooled (combined-group) model rather than the
-            group's own separately-fit abilities, so the comparison
+            group's own separately-fit person locations, so the comparison
             differs from the pooled model only in item parameters —
-            otherwise nuisance ability parameters are re-optimised
+            otherwise nuisance person location parameters are re-optimised
             independently on each side, inflating the statistic beyond
             what df accounts for.
         andersen_df : int
@@ -1797,23 +1847,23 @@ class SLM(Rasch):
             p-value from chi-squared distribution.
         andersen_groups : dict
             {group_name: SLM} — fitted group models for inspection. Group
-            names are 'low'/'high' for split_by='ability'/'score', or the
+            names are 'low'/'high' for split_by='person_location'/'score', or the
             two observed covariate values for split_by='exogenous'.
         """
         from raschpy.slm import SLM
 
-        if split_by not in ("ability", "score", "exogenous"):
-            raise ValueError("split_by must be 'ability', 'score', or 'exogenous'")
+        if split_by not in ("person_location", "score", "exogenous"):
+            raise ValueError("split_by must be 'person_location', 'score', or 'exogenous'")
 
-        if split_by in ("ability", "score"):
+        if split_by in ("person_location", "score"):
             raise NotImplementedError(
-                "andersen_lr_test(split_by='ability'/'score') is disabled as a "
+                "andersen_lr_test(split_by='person_location'/'score') is disabled as a "
                 "general Rasch model-fit / parameter-invariance test. A 2026-07 "
                 "simulation study (varying N from 100 to 4000) found the LR "
                 "statistic floors to 0 (p=1.0, 'no misfit') in 30-90% of "
                 "replications depending on model and N, and the floor rate does "
                 "NOT improve with more data. A follow-up power study injecting "
-                "genuine item-difficulty differences of up to 3 logits between "
+                "genuine item-location differences of up to 3 logits between "
                 "the compared groups found the rejection rate and mean LR do not "
                 "respond to the true effect size at all — the test has no "
                 "demonstrated power in either direction. Root cause: PAIR/CPAT "
@@ -1979,7 +2029,7 @@ class SLM(Rasch):
         selection_method='wald' costs nothing extra here, unlike
         calibrate_anchor where it triggers an otherwise-unneeded
         bootstrap). The LR test (per-item and omnibus) instead needs
-        person abilities, which this method does NOT otherwise estimate —
+        person locations, which this method does NOT otherwise estimate —
         so test='lr'/'both' or omnibus=True adds person_estimates() calls
         that test='wald' with omnibus=False skips entirely.
 
@@ -1989,13 +2039,13 @@ class SLM(Rasch):
         calibrated fit, computed once and reused for every item's test
         (translating one group's scale by a constant doesn't change its
         own internal fit, so no combined-dataset object is needed for
-        this). For H0 on item i: replace item i's difficulty in each
+        this). For H0 on item i: replace item i's location in each
         group with a single value pooled across both groups (precision-
         weighted, on the reference/common scale, converted back to each
         group's own scale for the focal side), re-estimate that group's
-        abilities under the modified item set, and recompute its log-
+        person locations under the modified item set, and recompute its log-
         likelihood. LR_i = 2*(LL_H1 - LL_H0_i), df=1. This is quite a bit
-        more expensive than the Wald test (two ability re-estimations per
+        more expensive than the Wald test (two person location re-estimations per
         item per focal-group comparison, versus none for Wald), though
         each individual re-estimation is typically fast.
 
@@ -2030,7 +2080,7 @@ class SLM(Rasch):
             Per-item DIF test(s) to compute. 'wald' matches prior
             behaviour exactly (no added cost). 'lr'/'both' additionally
             compute the per-item likelihood-ratio test described above
-            (extra cost: two ability re-estimations per item per focal
+            (extra cost: two person location re-estimations per item per focal
             group). The existing 'Flagged' column always reflects the
             Wald test (backward compatible); a separate 'Flagged_LR'
             column is added when test is 'lr' or 'both'.
@@ -2039,14 +2089,14 @@ class SLM(Rasch):
             (reference vs. focal, every item jointly) per focal group,
             stored in dif_omnibus_table. Cheap relative to the per-item LR
             test — one extra combined-group model fit per focal group, not
-            per item. The H1 side (ll_ref + ll_focal) plugs in ability
+            per item. The H1 side (ll_ref + ll_focal) plugs in person location
             estimates from the pooled reference+focal model rather than
-            each group's own separately-fit abilities — otherwise the two
-            sides of the comparison re-optimise nuisance ability parameters
+            each group's own separately-fit person locations — otherwise the two
+            sides of the comparison re-optimise nuisance person location parameters
             independently, which inflates the LR statistic beyond what
             df=k-1 accounts for (confirmed by null-DIF simulation: ~1.3-1.7x
-            nominal Type I error with own-group abilities, ~nominal with
-            pooled abilities).
+            nominal Type I error with own-group person locations, ~nominal with
+            pooled person locations).
         welch : bool, default False
             If True, the Wald test (test='wald' or 'both') becomes a
             Welch's t-test: the statistic is unchanged (diff / combined
@@ -2121,7 +2171,7 @@ class SLM(Rasch):
             logit_threshold=/Flagged — this reproduces the ETS scheme
             exactly, not a repackaging of the existing Wald flag. Scoped
             to dif_table only (item-location DIF) — the 0.43/0.64 logit
-            defaults are specifically calibrated for item-difficulty DIF
+            defaults are specifically calibrated for item-location DIF
             in the literature, not threshold/step DIF.
         category_thresholds : (float, float), default (0.43, 0.64)
             (B boundary, C boundary) in logits, per Zwick et al. (1999).
@@ -2147,12 +2197,12 @@ class SLM(Rasch):
             at once isn't the right default.
         plot_kwargs : dict or None, default None
             Extra keyword arguments forwarded to plot_anchor_selection()
-            for every focal group when plot=True (e.g. filename, x_min/
-            x_max, graph_title).
+            for every focal group when plot=True (e.g. filename, xmin/
+            xmax, title).
         warm_corr, tolerance, max_iters, ext_score_adjustment : floats
             Person estimation kwargs, passed through to group models. Only
             actually used when test in ('lr', 'both') or omnibus=True —
-            with test='wald' and omnibus=False, no abilities are estimated
+            with test='wald' and omnibus=False, no person locations are estimated
             at all and these are unused, but kept for signature
             consistency with other group-fitting methods such as
             andersen_lr_test.
@@ -2164,7 +2214,7 @@ class SLM(Rasch):
         dif_table : pandas.DataFrame
             One row per (item, focal group) pair. Columns: 'Group'
             (focal group value), 'Reference' / 'Focal' / 'Focal (purified)'
-            (item difficulty estimates), 'Difference' (purified focal -
+            (item location estimates), 'Difference' (purified focal -
             reference), 'SE', 'z', 'p', 'p (corrected)', 'Selected' (used
             to define the purified scale), 'Flagged' (Wald p and logit-
             difference thresholds both met). If welch=True, also 'df'
@@ -2510,6 +2560,7 @@ class SLM(Rasch):
         method="cos",
         matrix_power=3,
         log_lik_tol=0.000001,
+        se=True,
     ):
         """
         Analyse standardised residual correlations for local item dependence.
@@ -2523,13 +2574,13 @@ class SLM(Rasch):
         Parameters
         ----------
         warm_corr : bool, default True
-            Warm bias correction for ability estimates used in residuals.
+            Warm bias correction for person location estimates used in residuals.
         tolerance : float, default 0.00001
             Newton-Raphson convergence tolerance.
         max_iters : int, default 100
             Maximum Newton-Raphson iterations.
         ext_score_adjustment : float, default 0.5
-            Extreme score adjustment for ability estimation.
+            Extreme score adjustment for person location estimation.
         constant : float, default 0.1
             Additive smoothing constant for calibration.
         method : str, default 'cos'
@@ -2538,6 +2589,13 @@ class SLM(Rasch):
             Matrix power for calibration.
         log_lik_tol : float, default 0.000001
             Log-likelihood tolerance for calibration.
+        se : bool, default True
+            Passed through to the internal fit_statistics() call (only
+            used if not already computed). If False, skips the bootstrap
+            entirely — this analysis's own output (residual correlations,
+            PCA) does not depend on it, so se=False is purely a speed-up
+            (e.g. for repeated simulation runs) with no effect on the
+            output.
 
         Attributes set
         --------------
@@ -2566,6 +2624,7 @@ class SLM(Rasch):
 
         if not hasattr(self, "std_residual_df"):
             self.fit_statistics(
+                se=se,
                 warm_corr=warm_corr,
                 tolerance=tolerance,
                 max_iters=max_iters,
@@ -2628,12 +2687,15 @@ class SLM(Rasch):
         disc=False,
         point_measure_corr=False,
         dp=3,
+        se=True,
         warm_corr=True,
         tolerance=0.00001,
         max_iters=100,
         ext_score_adjustment=0.5,
         method="cos",
         constant=0.1,
+        matrix_power=3,
+        log_lik_tol=0.000001,
         no_of_samples=500,
         interval=None,
         seed=None,
@@ -2642,10 +2704,10 @@ class SLM(Rasch):
         Build and store the item statistics summary table.
 
         Auto-triggers std_errors() and fit_statistics() if not yet run.
-        Always includes item difficulty estimates, SEs, response counts,
-        facilities, and Infit/Outfit MS. Additional columns (Z statistics,
-        discrimination, point-measure correlations, CI bounds) are
-        included based on flags or when full=True.
+        Always includes item location estimates, response counts,
+        facilities, and Infit/Outfit MS. Additional columns (SE, Z
+        statistics, discrimination, point-measure correlations, CI bounds)
+        are included based on flags or when full=True.
 
         Parameters
         ----------
@@ -2661,23 +2723,34 @@ class SLM(Rasch):
             correlation columns (PM corr, Exp PM corr).
         dp : int, default 3
             Number of decimal places for rounding numeric output.
+        se : bool, default True
+            If True, computes and includes the SE column (and CI bound
+            columns, if interval is set). If False, skips the bootstrap
+            entirely — useful when only Infit/Outfit MS are needed (e.g.
+            repeated simulation runs), since those do not depend on the
+            bootstrap. Forces interval to None when False.
         warm_corr : bool, default True
-            Warm bias correction for ability estimates.
+            Warm bias correction for person location estimates.
         tolerance : float, default 0.00001
             Newton-Raphson convergence tolerance.
         max_iters : int, default 100
             Maximum Newton-Raphson iterations.
         ext_score_adjustment : float, default 0.5
-            Extreme score adjustment for ability estimation.
+            Extreme score adjustment for person location estimation.
         method : str, default 'cos'
             Priority vector extraction method for calibration.
         constant : float, default 0.1
             Additive smoothing constant for calibration.
+        matrix_power : int, default 3
+            Matrix power for calibration.
+        log_lik_tol : float, default 0.000001
+            Log-likelihood tolerance for calibration.
         no_of_samples : int, default 500
-            Bootstrap samples for SE estimation.
+            Bootstrap samples for SE estimation. Unused if se=False.
         interval : float or None, default None
             Confidence interval width for bootstrap CIs (e.g. 0.95).
             If provided, lower and upper percentile columns are included.
+            Ignored if se=False.
         seed : int or None, default None
             Seed passed through to the internal std_errors()/fit_statistics()
             calls (only used if not already computed). None draws fresh
@@ -2687,9 +2760,9 @@ class SLM(Rasch):
         --------------
         item_stats : pandas.DataFrame
             Item statistics table with items as rows. Always contains
-            'Estimate', 'SE', 'Count', 'Facility', 'Infit MS', 'Outfit MS'.
-            Optional columns: 'Infit Z', 'Outfit Z', 'Discrim',
-            'PM corr', 'Exp PM corr', CI bound columns.
+            'Estimate', 'Count', 'Facility', 'Infit MS', 'Outfit MS'.
+            Optional columns: 'SE' and CI bounds (if se=True), 'Infit Z',
+            'Outfit Z', 'Discrim', 'PM corr', 'Exp PM corr'.
         """
 
         if full:
@@ -2700,25 +2773,34 @@ class SLM(Rasch):
             if interval is None:
                 interval = 0.95
 
-        if not hasattr(self, "item_se") or (
-            interval is not None and not hasattr(self, "item_low")
+        if not se:
+            interval = None
+
+        if se and (
+            not hasattr(self, "item_se")
+            or (interval is not None and not hasattr(self, "item_low"))
         ):
             self.std_errors(
                 interval=interval,
                 no_of_samples=no_of_samples,
                 constant=constant,
                 method=method,
+                matrix_power=matrix_power,
+                log_lik_tol=log_lik_tol,
                 seed=seed,
             )
 
         if not hasattr(self, "item_infit_ms"):
             self.fit_statistics(
+                se=se,
                 warm_corr=warm_corr,
                 tolerance=tolerance,
                 max_iters=max_iters,
                 ext_score_adjustment=ext_score_adjustment,
                 method=method,
                 constant=constant,
+                matrix_power=matrix_power,
+                log_lik_tol=log_lik_tol,
                 no_of_samples=no_of_samples,
                 interval=interval,
                 seed=seed,
@@ -2727,15 +2809,17 @@ class SLM(Rasch):
         self.item_stats = pd.DataFrame()
 
         self.item_stats["Estimate"] = self.items.astype(float).round(dp)
-        self.item_stats["SE"] = self.item_se.astype(float).round(dp)
 
-        if interval is not None:
-            self.item_stats[f"{round((1 - interval) * 50, 1)}%"] = self.item_low.astype(
-                float
-            ).round(dp)
-            self.item_stats[f"{round((1 + interval) * 50, 1)}%"] = (
-                self.item_high.astype(float).round(dp)
-            )
+        if se:
+            self.item_stats["SE"] = self.item_se.astype(float).round(dp)
+
+            if interval is not None:
+                self.item_stats[f"{round((1 - interval) * 50, 1)}%"] = self.item_low.astype(
+                    float
+                ).round(dp)
+                self.item_stats[f"{round((1 + interval) * 50, 1)}%"] = (
+                    self.item_high.astype(float).round(dp)
+                )
 
         self.item_stats["Count"] = self.response_counts.astype(int)
         self.item_stats["Facility"] = self.item_facilities.astype(float).round(dp)
@@ -2764,6 +2848,7 @@ class SLM(Rasch):
         full=False,
         rsem=False,
         dp=3,
+        se=True,
         warm_corr=True,
         tolerance=0.00001,
         max_iters=100,
@@ -2775,7 +2860,7 @@ class SLM(Rasch):
         Build and store the person statistics summary table.
 
         Auto-triggers fit_statistics() if not yet run. Produces one row
-        per person with ability estimate, CSEM, raw score, maximum possible
+        per person with person location estimate, CSEM, raw score, maximum possible
         score, proportion correct, and Infit/Outfit MS and Z statistics.
         Persons with extreme scores are included with NaN fit statistics.
 
@@ -2787,14 +2872,20 @@ class SLM(Rasch):
             If True, includes the Residual SEM (RSEM) column.
         dp : int, default 3
             Number of decimal places for rounding numeric output.
+        se : bool, default True
+            Passed through to the internal fit_statistics() call (only
+            used if not already computed). If False, skips the bootstrap
+            entirely — this table's own columns (CSEM, RSEM, Infit/Outfit)
+            do not depend on it, so se=False is purely a speed-up (e.g.
+            for repeated simulation runs) with no effect on the output.
         warm_corr : bool, default True
-            Warm bias correction for ability estimates.
+            Warm bias correction for person location estimates.
         tolerance : float, default 0.00001
             Newton-Raphson convergence tolerance.
         max_iters : int, default 100
             Maximum Newton-Raphson iterations.
         ext_score_adjustment : float, default 0.5
-            Extreme score adjustment for ability estimation.
+            Extreme score adjustment for person location estimation.
         method : str, default 'cos'
             Priority vector extraction method for calibration.
         constant : float, default 0.1
@@ -2810,6 +2901,7 @@ class SLM(Rasch):
 
         if not hasattr(self, "person_infit_ms"):
             self.fit_statistics(
+                se=se,
                 warm_corr=warm_corr,
                 tolerance=tolerance,
                 max_iters=max_iters,
@@ -2872,13 +2964,13 @@ class SLM(Rasch):
         dp : int, default 3
             Number of decimal places for rounding numeric output.
         warm_corr : bool, default True
-            Warm bias correction for ability estimates.
+            Warm bias correction for person location estimates.
         tolerance : float, default 0.00001
             Newton-Raphson convergence tolerance.
         max_iters : int, default 100
             Maximum Newton-Raphson iterations.
         ext_score_adjustment : float, default 0.5
-            Extreme score adjustment for ability estimation.
+            Extreme score adjustment for person location estimation.
         method : str, default 'cos'
             Priority vector extraction method for calibration.
         constant : float, default 0.1
@@ -2979,7 +3071,7 @@ class SLM(Rasch):
         max_iters : int, default 100
             Maximum Newton-Raphson iterations.
         ext_score_adjustment : float, default 0.5
-            Extreme score adjustment for ability estimation.
+            Extreme score adjustment for person location estimation.
         method : str, default 'cos'
             Priority vector extraction method for calibration.
         constant : float, default 0.1
@@ -3085,7 +3177,7 @@ class SLM(Rasch):
         dp : int, default 3
             Decimal places for rounding.
         warm_corr : bool, default True
-            Warm bias correction for ability estimates.
+            Warm bias correction for person location estimates.
         tolerance : float, default 0.00001
             Newton-Raphson convergence tolerance.
         max_iters : int, default 100
@@ -3199,10 +3291,10 @@ class SLM(Rasch):
 
     def class_intervals(self, items=None, no_of_classes=5):
         """
-        Compute class interval mean abilities and mean observed scores.
+        Compute class interval mean person locations and mean observed scores.
 
-        Partitions persons into quantile-based ability groups and computes
-        the mean ability and mean observed score within each group. Used to
+        Partitions persons into quantile-based person location groups and computes
+        the mean person location and mean observed score within each group. Used to
         generate observed-data overlays on TCC and ICC plots.
 
         Requires person_estimates() to have been run first (self.persons
@@ -3219,8 +3311,8 @@ class SLM(Rasch):
 
         Returns
         -------
-        mean_abilities : pandas.Series
-            Mean ability estimate within each class interval, indexed by
+        mean_person_locations : pandas.Series
+            Mean person location estimate within each class interval, indexed by
             class label ('class_1', 'class_2', ...).
         obs : pandas.Series
             Mean observed total score within each class interval, indexed
@@ -3251,11 +3343,11 @@ class SLM(Rasch):
                 estimates >= quantiles.values[class_no]
             ) & (estimates < quantiles.values[class_no + 1])
 
-        mean_abilities = {
+        mean_person_locations = {
             class_group: estimates[mask_dict[class_group]].mean()
             for class_group in class_groups
         }
-        mean_abilities = pd.Series(mean_abilities)
+        mean_person_locations = pd.Series(mean_person_locations)
 
         obs = {
             class_group: df[mask_dict[class_group]].mean().sum()
@@ -3267,13 +3359,13 @@ class SLM(Rasch):
 
         obs = pd.concat(obs, keys=obs.keys())
 
-        return mean_abilities, obs
+        return mean_person_locations, obs
 
     def class_intervals_cats(self, item, no_of_classes=5):
         """
-        Compute class interval mean abilities and observed category proportions.
+        Compute class interval mean person locations and observed category proportions.
 
-        Partitions persons into quantile-based ability groups using all items,
+        Partitions persons into quantile-based person location groups using all items,
         then computes the proportion of 0 and 1 responses within each group
         for a specified item. Used to generate observed-data overlays on ICC
         plots for the SLM.
@@ -3289,8 +3381,8 @@ class SLM(Rasch):
 
         Returns
         -------
-        mean_abilities : pandas.Series
-            Mean ability within each class interval.
+        mean_person_locations : pandas.Series
+            Mean person location within each class interval.
         obs_props : numpy.ndarray
             Array of shape (no_of_classes, 2) where column 0 is the
             proportion of 0 responses and column 1 is the proportion of
@@ -3299,7 +3391,7 @@ class SLM(Rasch):
 
         class_groups = [f"class_{class_no + 1}" for class_no in range(no_of_classes)]
 
-        mean_abilities, obs_means = self.class_intervals(
+        mean_person_locations, obs_means = self.class_intervals(
             items=[item], no_of_classes=no_of_classes
         )
 
@@ -3312,7 +3404,7 @@ class SLM(Rasch):
 
         obs_props = pd.DataFrame(obs_props).to_numpy().T
 
-        return mean_abilities, obs_props
+        return mean_person_locations, obs_props
 
     """
     Plots
@@ -3358,7 +3450,7 @@ class SLM(Rasch):
         Core plotting engine for all SLM item and test characteristic curves.
 
         Renders one or more curves (y_data columns) against an x-axis
-        (typically ability), with optional observed-data overlays, score
+        (typically person location), with optional observed-data overlays, score
         lines, information lines, and CSEM lines. Called internally by
         icc(), tcc(), test_info(), and test_csem(); not normally called
         directly by users.
@@ -3366,7 +3458,7 @@ class SLM(Rasch):
         Parameters
         ----------
         x_data : array-like
-            X-axis values (typically a fine ability grid from -20 to 20).
+            X-axis values (typically a fine person location grid from -20 to 20).
         y_data : numpy.ndarray
             2-D array of shape (len(x_data), n_curves) containing the
             curve values to plot. Each column is rendered as a separate line.
@@ -3377,7 +3469,7 @@ class SLM(Rasch):
         y_max : float, default 0
             Upper limit of the y-axis. If 0, matplotlib auto-scales.
         items : list or None, default None
-            Item subset, used to look up item difficulties for score lines
+            Item subset, used to look up item locations for score lines
             and threshold lines.
         obs : bool, default False
             If True, plots observed data overlays using x_obs_data and
@@ -3387,7 +3479,7 @@ class SLM(Rasch):
         y_obs_data : numpy.ndarray, default empty
             Y coordinates of observed data points, shape (n_points, n_curves).
         thresh_line : bool, default False
-            If True, draws a vertical dashed line at the item difficulty.
+            If True, draws a vertical dashed line at the item location.
         score_lines_item : list, default [None, None]
             [item_name, list_of_proportions] for item-level score lines.
             Draws vertical and horizontal dashed lines at each proportion.
@@ -3529,10 +3621,10 @@ class SLM(Rasch):
                     )
 
         if items is not None:
-            difficulties = self.items.loc[items]
+            item_locations = self.items.loc[items]
 
         else:
-            difficulties = self.items
+            item_locations = self.items
 
         if thresh_line:
             plt.axvline(x=self.items.loc[items], color="darkred", linestyle="--")
@@ -3655,8 +3747,8 @@ class SLM(Rasch):
             item = point_info_lines_item[0]
 
             info_set = [
-                self.variance(ability, self.items[item])
-                for ability in point_info_lines_item[1]
+                self.variance(person_location, self.items[item])
+                for person_location in point_info_lines_item[1]
             ]
 
             for estimate, info in zip(point_info_lines_item[1], info_set):
@@ -3681,7 +3773,7 @@ class SLM(Rasch):
 
         if point_info_lines_test is not None:
 
-            diffs_arr = difficulties.values
+            diffs_arr = item_locations.values
             p = self.exp_score(
                 np.array(point_info_lines_test)[:, None], diffs_arr[None, :]
             )
@@ -3709,7 +3801,7 @@ class SLM(Rasch):
 
         if point_csem_lines is not None:
 
-            diffs_arr = difficulties.values
+            diffs_arr = item_locations.values
             p = self.exp_score(np.array(point_csem_lines)[:, None], diffs_arr[None, :])
             info_set = (p * (1 - p)).sum(axis=1)
 
@@ -3749,7 +3841,7 @@ class SLM(Rasch):
         plt.ylim(0, y_max)
 
         plt.xlabel(
-            "Person estimate", fontname=font, fontsize=axis_font_size, fontweight="bold"
+            "Person location", fontname=font, fontsize=axis_font_size, fontweight="bold"
         )
         plt.ylabel(y_label, fontname=font, fontsize=axis_font_size, fontweight="bold")
         plt.title(
@@ -3795,7 +3887,7 @@ class SLM(Rasch):
         Plot the Item Characteristic Curve (ICC) for a single item.
 
         Displays the modelled probability of a correct response as a function
-        of person ability (logistic curve). Optionally overlays observed
+        of person location (logistic curve). Optionally overlays observed
         class-interval proportions and reference lines.
 
         Parameters
@@ -3810,7 +3902,7 @@ class SLM(Rasch):
         title : str or None, default None
             Plot title. If None, no title is shown.
         thresh_line : bool, default False
-            If True, draws a vertical dashed line at the item difficulty.
+            If True, draws a vertical dashed line at the item location.
         score_lines : list or None, default None
             List of proportions (between 0 and 1) at which to draw
             horizontal and vertical reference lines on the ICC.
@@ -3819,9 +3911,9 @@ class SLM(Rasch):
         cat_highlight : int or None, default None
             Response category (0 or 1) to shade on the plot.
         xmin : float, default -5
-            Left limit of the displayed ability axis.
+            Left limit of the displayed person location axis.
         xmax : float, default 5
-            Right limit of the displayed ability axis.
+            Right limit of the displayed person location axis.
         plot_style : str, default 'white'
             Plot background style: 'white' or 'dark'.
         palette : str, default 'dark blue'
@@ -3930,14 +4022,14 @@ class SLM(Rasch):
         Plot Category Response Curves (CRCs) for a single item.
 
         Displays the probability of each response category (0 and 1) as a
-        function of person ability. For the SLM these are simply P(X=0)
+        function of person location. For the SLM these are simply P(X=0)
         and P(X=1) = 1 - P(X=0). Optionally overlays observed class-interval
         proportions.
 
         Parameters
         ----------
         item : str or None, default None
-            Item identifier to plot. Pass None to use mean difficulty 0.
+            Item identifier to plot. Pass None to use a mean item location of 0.
         obs : bool, list, or None, default None
             If True or 'all', overlays observed proportions for all categories.
             If a list of category indices (e.g. [0, 1]), overlays only those.
@@ -3947,13 +4039,13 @@ class SLM(Rasch):
         title : str or None, default None
             Plot title. If None, no title is shown.
         thresh_line : bool, default False
-            If True, draws a vertical dashed line at the item difficulty.
+            If True, draws a vertical dashed line at the item location.
         cat_highlight : int or None, default None
             Category (0 or 1) to shade on the plot.
         xmin : float, default -5
-            Left limit of the displayed ability axis.
+            Left limit of the displayed person location axis.
         xmax : float, default 5
-            Right limit of the displayed ability axis.
+            Right limit of the displayed person location axis.
         plot_style : str, default 'white'
             Plot background style: 'white' or 'dark'.
         palette : str, default 'dark blue'
@@ -4076,26 +4168,26 @@ class SLM(Rasch):
         Plot the Item Information Curve (IIC) for a single item.
 
         Displays Fisher information P(X=1) * P(X=0) as a function of
-        person ability. The peak information occurs at the item difficulty
-        where ability equals difficulty and equals 0.25.
+        person location. The peak information occurs at the point where
+        person location equals item location, where the value is exactly 0.25.
 
         Parameters
         ----------
         item : str
             Item identifier to plot.
         thresh_line : bool, default False
-            If True, draws a vertical dashed line at the item difficulty.
+            If True, draws a vertical dashed line at the item location.
         point_info_lines : list or None, default None
-            List of ability values at which to draw vertical and horizontal
-            reference lines showing the information at those abilities.
+            List of person location values at which to draw vertical and horizontal
+            reference lines showing the information at those person locations.
         point_info_labels : bool, default False
             If True, annotates point information line intersections.
         cat_highlight : int or None, default None
             Category to shade (not typically used for IIC).
         xmin : float, default -5
-            Left limit of the displayed ability axis.
+            Left limit of the displayed person location axis.
         xmax : float, default 5
-            Right limit of the displayed ability axis.
+            Right limit of the displayed person location axis.
         ymax : float or None, default None
             Upper limit of the y-axis. If None, auto-scaled to 110% of peak.
         plot_style : str, default 'white'
@@ -4195,7 +4287,7 @@ class SLM(Rasch):
         Plot the Test Characteristic Curve (TCC).
 
         Displays the expected total score across all (or a subset of) items
-        as a function of person ability. Optionally overlays observed
+        as a function of person location. Optionally overlays observed
         class-interval mean total scores and draws reference lines at
         specified raw scores.
 
@@ -4216,9 +4308,9 @@ class SLM(Rasch):
         score_labels : bool, default False
             If True, annotates score line intersections with numeric values.
         xmin : float, default -5
-            Left limit of the displayed ability axis.
+            Left limit of the displayed person location axis.
         xmax : float, default 5
-            Right limit of the displayed ability axis.
+            Right limit of the displayed person location axis.
         plot_style : str, default 'white'
             Plot background style: 'white' or 'dark'.
         palette : str, default 'dark blue'
@@ -4349,22 +4441,22 @@ class SLM(Rasch):
         Plot the Test Information Curve.
 
         Displays the sum of item Fisher information values across all (or a
-        subset of) items as a function of person ability. Higher information
-        indicates greater measurement precision at that ability level.
+        subset of) items as a function of person location. Higher information
+        indicates greater measurement precision at that person location level.
 
         Parameters
         ----------
         items : str, list, or None, default None
             Item subset to include. None or 'all' uses all items.
         point_info_lines : list or None, default None
-            List of ability values at which to draw vertical and horizontal
-            reference lines showing the total information at those abilities.
+            List of person location values at which to draw vertical and horizontal
+            reference lines showing the total information at those person locations.
         point_info_labels : bool, default False
             If True, annotates point information line intersections.
         xmin : float, default -5
-            Left limit of the displayed ability axis.
+            Left limit of the displayed person location axis.
         xmax : float, default 5
-            Right limit of the displayed ability axis.
+            Right limit of the displayed person location axis.
         ymax : float or None, default None
             Upper limit of the y-axis. If None, auto-scaled to 110% of peak.
         title : str or None, default None
@@ -4480,23 +4572,23 @@ class SLM(Rasch):
         Plot the Test Conditional Standard Error of Measurement (CSEM) Curve.
 
         Displays 1 / sqrt(I(theta)) — the conditional standard error of
-        measurement as a function of person ability — where I(theta) is the
+        measurement as a function of person location — where I(theta) is the
         total test information. Lower CSEM indicates greater measurement
-        precision. Optionally draws reference lines at specified ability values.
+        precision. Optionally draws reference lines at specified person location values.
 
         Parameters
         ----------
         items : str, list, or None, default None
             Item subset to include. None or 'all' uses all items.
         point_csem_lines : list or None, default None
-            List of ability values at which to draw vertical and horizontal
-            reference lines showing the CSEM at those abilities.
+            List of person location values at which to draw vertical and horizontal
+            reference lines showing the CSEM at those person locations.
         point_csem_labels : bool, default False
             If True, annotates CSEM line intersections with numeric values.
         xmin : float, default -5
-            Left limit of the displayed ability axis.
+            Left limit of the displayed person location axis.
         xmax : float, default 5
-            Right limit of the displayed ability axis.
+            Right limit of the displayed person location axis.
         ymax : float, default 5
             Upper limit of the y-axis.
         title : str or None, default None
