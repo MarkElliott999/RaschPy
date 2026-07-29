@@ -3,13 +3,19 @@
 In this folder, there are the following examples:
 
 - Worked examples for SLM, PCM, RSM, and all five MFRM rater parameterisations
-  (global, items, thresholds, bivector, matrix)
-- Worked examples for cross-cutting functionality that applies across several models:
-  Differential Item Functioning (DIF) testing, anchor calibration (item-bank anchoring
-  for SLM/RSM/PCM, and rater anchoring for MFRM), and model selection (RSM vs PCM,
-  MFRM rater-parameterisation selection, and the MFRM "mixed" per-rater model)
+  (global, items, thresholds, bivector, matrix), in the "Model classes" subfolder
+- Worked examples for cross-cutting functionality that applies across several models,
+  each in its own subfolder: Differential Item Functioning ("DIF testing" - DIF testing
+  for SLM/RSM/PCM), anchor calibration ("Anchor calibration" - item-bank anchoring for
+  SLM/RSM/PCM, and rater anchoring for MFRM), and model selection ("Model selection" -
+  RSM vs PCM, MFRM rater-parameterisation selection, and the MFRM "mixed" per-rater
+  model)
+- Worked examples of the standalone simulation functionality (SLM_Sim, PCM_Sim,
+  RSM_Sim, and all five MFRM_Sim rater parameterisations), in the "Simulations"
+  subfolder
 - Code to run the RaschPy anaysis for the simulation studies in Elliott & Buttery
-  (2022a) and Elliott & Buttery (2022b)
+  (2022a) and Elliott & Buttery (2022b), in the "Papers and PhD thesis studies"
+  subfolder
 - An Excel spreadsheet working through the PAIR algoritm for dichotomous data
   to illustrate how it works
 
@@ -25,6 +31,17 @@ statistical output and .png files of graphical output.
 The cross-cutting notebooks (DIF testing, Anchor calibration, Model selection) follow
 the same style but are organised by topic rather than by model, since each topic
 applies identically across several model classes.
+
+*** Simulation functionality ***
+
+The "Simulations" subfolder contains a Jupyter notebook per model (SLM_Sim, PCM_Sim,
+RSM_Sim, MFRM_Sim_Global, MFRM_Sim_Items, MFRM_Sim_Thresholds, MFRM_Sim_Matrix,
+MFRM_Sim_Bivector) demonstrating how to generate simulated data sets with known
+generating parameters directly, for experimental use - for example, when comparing
+the efficacy of different estimation algorithms, or exploring the effect of fitting
+different Rasch models to the same data set. Each notebook shows both a fully
+randomised example and an example built from specified, known parameters via the
+`manual_*` arguments.
 
 *** Code to run the simulation studies analysis ***
 

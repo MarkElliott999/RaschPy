@@ -12,7 +12,7 @@ class MFRM_Sim(Rasch_Sim):
     Simulate polytomous response data for the Many-Facet Rasch Model (MFRM).
 
     Generates item locations, shared Rasch-Andrich thresholds, person
-    locations, and facet_element severity parameters under one of four parameterisations,
+    locations, and facet_element effect parameters under one of five parameterisations,
     then computes category probabilities and samples scores for every
     facet_element-person-item combination. Simulation runs automatically on instantiation;
     access results via self.responses.
@@ -28,15 +28,24 @@ class MFRM_Sim(Rasch_Sim):
     max_score : int
         Maximum possible score per item (number of categories minus 1).
     model : str, default 'global'
-        Rater severity parameterisation. One of:
-        'global'     — single scalar severity per facet_element;
-        'items'      — separate severity per (facet_element, item);
-        'thresholds' — separate severity per (facet_element, threshold);
-        'matrix'     — full severity per (facet_element, item, threshold).
+        Rater facet_effect parameterisation. One of:
+        'global'     — single scalar facet_effect per facet_element;
+        'items'      — separate facet_effect per (facet_element, item);
+        'thresholds' — separate facet_effect per (facet_element, threshold);
+        'matrix'     — full facet_effect per (facet_element, item, threshold);
+        'bivector'   — additive (item effect + threshold effect) facet_effect
+                       per (facet_element, item, threshold).
     item_range : float, default 2
         Total spread of item locations in logits.
     facet_range : float, default 2
-        Total spread of facet_element severities in logits.
+        Total spread of facet_element effects in logits. Not used when
+        model='bivector' — see item_facet_range/threshold_facet_range.
+    item_facet_range : float, default 2
+        model='bivector' only. Total spread of per-(facet_element, item)
+        facet_effect effects across the full facet_element x item matrix in logits.
+    threshold_facet_range : float, default 1
+        model='bivector' only. Total spread of per-(facet_element, threshold)
+        facet_effect effects across the full facet_element x threshold matrix in logits.
     category_base : float, default 1
         Base width of each rating category. Larger values produce wider,
         more ordered categories.
@@ -59,11 +68,19 @@ class MFRM_Sim(Rasch_Sim):
         Custom threshold vector, length max_score. Must satisfy
         sum(thresholds) == 0.
     manual_raters : dict or array-like or None, default None
-        Custom facet_element severity parameters. Structure must match the chosen model:
+        Custom facet_element effect parameters. Structure must match the chosen model:
         global — array-like of length no_of_raters;
         items  — {facet_element: {item: float}};
         thresholds — {facet_element: array of length max_score};
         matrix — {facet_element: {item: array of length max_score}}.
+        Not supported for model='bivector' — use manual_item_effects/
+        manual_threshold_effects instead.
+    manual_item_effects : dict or None, default None
+        model='bivector' only. Custom per-(facet_element, item) facet_effect
+        effects. Structure: {facet_element: {item: float}}.
+    manual_threshold_effects : dict or None, default None
+        model='bivector' only. Custom per-(facet_element, threshold) facet_effect
+        effects. Structure: {facet_element: array of length max_score}.
     manual_person_names : list of str or None, default None
         Custom person labels. If None, labels are 'Person_1', 'Person_2', etc.
     manual_item_names : list of str or None, default None
@@ -87,8 +104,13 @@ class MFRM_Sim(Rasch_Sim):
     thresholds : numpy.ndarray
         True Rasch-Andrich threshold vector, length max_score,
         zero-sum.
-    severities : pandas.Series or dict
-        True facet_element severity parameters. Structure depends on model.
+    facet_effects : pandas.Series or dict
+        True facet_element effect parameters. Structure depends on model.
+    item_effects : pandas.DataFrame
+        model='bivector' only. True per-(facet_element, item) facet_effect effects.
+    threshold_effects : pandas.DataFrame
+        model='bivector' only. True per-(facet_element, threshold) facet_effect
+        effects, zero-mean per threshold across facet_elements.
     cat_probs : dict
         {cat: DataFrame} of category probabilities used for simulation.
     person_names : list of str
@@ -111,6 +133,8 @@ class MFRM_Sim(Rasch_Sim):
         model="global",
         item_range=2,
         facet_range=2,
+        item_facet_range=2,
+        threshold_facet_range=1,
         category_base=1,
         person_sd=1.5,
         max_disorder=0,
@@ -122,6 +146,8 @@ class MFRM_Sim(Rasch_Sim):
         manual_thresholds=None,
         manual_facet_effects=None,
         manual_raters=None,
+        manual_item_effects=None,
+        manual_threshold_effects=None,
         manual_person_names=None,
         manual_item_names=None,
         manual_facet_names=None,
@@ -139,20 +165,26 @@ class MFRM_Sim(Rasch_Sim):
 
         self._rng = np.random.default_rng(seed)
 
-        if model not in ("global", "items", "thresholds", "matrix"):
+        if model not in ("global", "items", "thresholds", "matrix", "bivector"):
             raise ValueError(
-                "model must be one of 'global', 'items', 'thresholds', 'matrix'. "
-                "For bivector simulation use MFRM_Sim_Bivector directly."
+                "model must be one of 'global', 'items', 'thresholds', 'matrix', 'bivector'."
+            )
+        if model == "bivector" and manual_raters is not None:
+            raise ValueError(
+                "manual_raters is not supported for model='bivector'; "
+                "use manual_item_effects/manual_threshold_effects instead."
             )
 
         self.model = model
+        self.item_facet_range = item_facet_range
+        self.threshold_facet_range = threshold_facet_range
         self.no_of_items = int(no_of_items)
         self.no_of_persons = int(no_of_persons)
-        # manual_raters is a convenience alias: dict {name: severity_array} → manual_facet_effects
+        # manual_raters is a convenience alias: dict {name: facet_effect_array} → manual_facet_effects
         if manual_raters is not None:
             if manual_facet_effects is not None:
                 raise ValueError("Pass manual_raters or manual_facet_effects, not both.")
-            if manual_facet_names is None:
+            if manual_facet_names is None and hasattr(manual_raters, "keys"):
                 manual_facet_names = list(manual_raters.keys())
             if no_of_raters is None and no_of_facet_elements is None:
                 no_of_facet_elements = len(manual_raters)
@@ -263,16 +295,28 @@ class MFRM_Sim(Rasch_Sim):
         self.rater_ids = self.facet_names  # alias for default facet
 
         # ------------------------------------------------------------------
-        # Severities (model-specific)
+        # Facet effects (model-specific)
         # ------------------------------------------------------------------
         if manual_raters is not None:
             if self.model == "global":
-                manual_facet_effects = pd.Series(
-                    {r: float(v) for r, v in manual_raters.items()}
-                )
+                if hasattr(manual_raters, "items"):
+                    manual_facet_effects = pd.Series(
+                        {r: float(v) for r, v in manual_raters.items()}
+                    )
+                else:
+                    manual_facet_effects = pd.Series(
+                        np.asarray(manual_raters, dtype=float)
+                    )
             elif self.model == "items":
                 manual_facet_effects = pd.DataFrame(
-                    {r: np.asarray(v) for r, v in manual_raters.items()},
+                    {
+                        r: (
+                            np.array([v[item] for item in self.item_names], dtype=float)
+                            if isinstance(v, dict)
+                            else np.asarray(v, dtype=float)
+                        )
+                        for r, v in manual_raters.items()
+                    },
                     index=self.item_names,
                 ).T
             elif self.model == "thresholds":
@@ -326,7 +370,9 @@ class MFRM_Sim(Rasch_Sim):
                     index=mi,
                     columns=range(1, K + 1),
                 )
-        self.facet_effects = self._generate_severities(manual_facet_effects)
+        self.facet_effects = self._generate_facet_effects(
+            manual_facet_effects, manual_item_effects, manual_threshold_effects
+        )
         setattr(self, f"{self.facets}_effects", self.facet_effects)
 
         # ------------------------------------------------------------------
@@ -375,17 +421,19 @@ class MFRM_Sim(Rasch_Sim):
         self.responses[missing_randoms < self.missing] = np.nan
 
     # ------------------------------------------------------------------
-    # Severity generation
+    # Facet effect generation
     # ------------------------------------------------------------------
 
-    def _generate_severities(self, manual_facet_effects):
-        """Generate or validate facet_element severity parameters for the given model."""
+    def _generate_facet_effects(
+        self, manual_facet_effects, manual_item_effects=None, manual_threshold_effects=None
+    ):
+        """Generate or validate facet_element effect parameters for the given model."""
 
         if self.model == "global":
             if manual_facet_effects is not None:
                 assert (
                     len(manual_facet_effects) == self.no_of_facet_elements
-                ), "Length of manual severities must match number of facet_elements."
+                ), "Length of manual facet_effects must match number of facet_elements."
                 sev = np.array(manual_facet_effects)
             else:
                 sev = truncnorm.rvs(-1.96, 1.96, size=self.no_of_facet_elements, random_state=self._rng)
@@ -399,7 +447,7 @@ class MFRM_Sim(Rasch_Sim):
             if manual_facet_effects is not None:
                 assert (
                     len(manual_facet_effects) == self.no_of_facet_elements
-                ), "Length of manual severities must match number of facet_elements."
+                ), "Length of manual facet_effects must match number of facet_elements."
                 return manual_facet_effects
             else:
                 sev = np.array(
@@ -420,7 +468,7 @@ class MFRM_Sim(Rasch_Sim):
             if manual_facet_effects is not None:
                 assert (
                     len(manual_facet_effects) == self.no_of_facet_elements
-                ), "Length of manual severities must match number of facet_elements."
+                ), "Length of manual facet_effects must match number of facet_elements."
                 return manual_facet_effects
             else:
                 sev = np.array(
@@ -443,7 +491,7 @@ class MFRM_Sim(Rasch_Sim):
                 assert (
                     len(manual_facet_effects.index.get_level_values(0).unique())
                     == self.no_of_facet_elements
-                ), "Length of manual severities must match number of facet_elements."
+                ), "Length of manual facet_effects must match number of facet_elements."
                 return manual_facet_effects
             else:
                 sev = np.array(
@@ -468,6 +516,71 @@ class MFRM_Sim(Rasch_Sim):
                     [self.facet_names, self.item_names], names=["facet_element", "item"]
                 )
                 return pd.DataFrame(sev.reshape(-1, self.max_score), index=mi, columns=range(1, self.max_score + 1))
+
+        elif self.model == "bivector":
+            # Item effects — (R, I): free mean per facet_element, centred per item.
+            if manual_item_effects is not None:
+                assert (
+                    len(manual_item_effects) == self.no_of_facet_elements
+                ), "Length of manual item effects must match number of facet_elements."
+                item_effects = manual_item_effects
+            else:
+                raw = np.array(
+                    [
+                        truncnorm.rvs(-1.96, 1.96, size=self.no_of_items, random_state=self._rng)
+                        for _ in range(self.no_of_facet_elements)
+                    ]
+                )  # (R, I)
+                raw *= self.item_facet_range / (raw.max() - raw.min())
+                raw -= raw.mean(axis=0, keepdims=True)
+                item_effects = pd.DataFrame(raw, index=self.facet_names, columns=self.item_names)
+
+            # Threshold effects — (R, K): zero-sum per facet_element, centred per threshold
+            # across facet_elements — matching the "matrix" branch's per-cell centring
+            # above, otherwise a nonzero true per-threshold mean shows up as a constant
+            # bias against the (correctly zero-centred) estimates.
+            if manual_threshold_effects is not None:
+                assert (
+                    len(manual_threshold_effects) == self.no_of_facet_elements
+                ), "Length of manual threshold effects must match number of facet_elements."
+                threshold_effects = manual_threshold_effects
+            else:
+                raw = np.array(
+                    [
+                        truncnorm.rvs(-1.96, 1.96, size=self.max_score, random_state=self._rng)
+                        for _ in range(self.no_of_facet_elements)
+                    ]
+                )  # (R, K)
+                raw *= self.threshold_facet_range / (raw.max() - raw.min())
+                raw -= raw.mean(axis=0, keepdims=True)
+                threshold_effects = pd.DataFrame(
+                    raw, index=self.facet_names, columns=range(1, self.max_score + 1)
+                )
+
+            self.item_effects = item_effects
+            self.threshold_effects = threshold_effects
+
+            # Reconstruct full facet_effect matrix, same (facet_element, item) x
+            # threshold format as the "matrix" model, so cat_prob/exp_score/etc.
+            # can treat bivector and matrix identically downstream.
+            mi = pd.MultiIndex.from_product(
+                [self.facet_names, self.item_names], names=["facet_element", "item"]
+            )
+            rows = []
+            for facet_element in self.facet_names:
+                for item in self.item_names:
+                    ie = (
+                        item_effects.loc[facet_element, item]
+                        if isinstance(item_effects, pd.DataFrame)
+                        else item_effects[facet_element][item]
+                    )
+                    te = (
+                        threshold_effects.loc[facet_element].values
+                        if isinstance(threshold_effects, pd.DataFrame)
+                        else threshold_effects[facet_element]
+                    )
+                    rows.append(np.asarray(te, dtype=float) + ie)
+            return pd.DataFrame(rows, index=mi, columns=range(1, self.max_score + 1))
 
     # ------------------------------------------------------------------
     # Category probability computation
@@ -529,7 +642,7 @@ class MFRM_Sim(Rasch_Sim):
                 for cat in range(self.max_score + 1)
             }
 
-        elif self.model == "matrix":
+        elif self.model in ("matrix", "bivector"):
             c_p_df = pd.DataFrame(
                 {item: self.persons - self.items[item] for item in self.item_names}
             )
@@ -540,7 +653,7 @@ class MFRM_Sim(Rasch_Sim):
                 }
                 for cat in range(self.max_score + 1)
             }
-            # Apply per-(facet_element, item, threshold) severity
+            # Apply per-(facet_element, item, threshold) facet_effect
             for cat in range(self.max_score + 1):
                 for facet_element in self.facet_names:
                     for item in self.item_names:
@@ -711,10 +824,10 @@ class MFRM_Sim(Rasch_Sim):
 
 class MFRM_Sim_Global(MFRM_Sim):
     """
-    MFRM simulation — global (scalar) facet_element severity parameterisation.
+    MFRM simulation — global (scalar) facet_element effect parameterisation.
 
     Convenience subclass of MFRM_Sim with model='global' fixed.
-    Each facet_element has a single scalar severity estimate applied equally
+    Each facet_element has a single scalar facet_effect estimate applied equally
     across all items and thresholds. See MFRM_Sim for full parameter docs.
     """
 
@@ -741,10 +854,10 @@ class MFRM_Sim_Global(MFRM_Sim):
 
 class MFRM_Sim_Items(MFRM_Sim):
     """
-    MFRM simulation — items (per facet_element×item) severity parameterisation.
+    MFRM simulation — items (per facet_element×item) facet_effect parameterisation.
 
     Convenience subclass of MFRM_Sim with model='items' fixed.
-    Each facet_element has a separate severity for each item, constant across
+    Each facet_element has a separate facet_effect for each item, constant across
     thresholds. See MFRM_Sim for full parameter docs.
     """
 
@@ -771,10 +884,10 @@ class MFRM_Sim_Items(MFRM_Sim):
 
 class MFRM_Sim_Thresholds(MFRM_Sim):
     """
-    MFRM simulation — thresholds (per facet_element×threshold) severity parameterisation.
+    MFRM simulation — thresholds (per facet_element×threshold) facet_effect parameterisation.
 
     Convenience subclass of MFRM_Sim with model='thresholds' fixed.
-    Each facet_element has a separate severity for each threshold, constant across
+    Each facet_element has a separate facet_effect for each threshold, constant across
     items. See MFRM_Sim for full parameter docs.
     """
 
@@ -804,7 +917,7 @@ class MFRM_Sim_Matrix(MFRM_Sim):
     MFRM simulation — matrix (full facet_element×item×threshold tensor) parameterisation.
 
     Convenience subclass of MFRM_Sim with model='matrix' fixed.
-    Each facet_element has a separate severity for every (item, threshold) combination.
+    Each facet_element has a separate facet_effect for every (item, threshold) combination.
     See MFRM_Sim for full parameter docs.
     """
 
@@ -831,109 +944,30 @@ class MFRM_Sim_Matrix(MFRM_Sim):
 
 class MFRM_Sim_Bivector(MFRM_Sim):
     """
-    Simulate polytomous response data for the Many-Facet Rasch Model (MFRM)
-    under the bivector facet_element parameterisation.
+    MFRM simulation — bivector (additive item + threshold facet_element effects)
+    parameterisation.
 
-    The bivector model treats facet_element severity as the sum of two additive
-    components: a per-(facet_element, item) item effect and a per-(facet_element, threshold)
+    Convenience subclass of MFRM_Sim with model='bivector' fixed. The bivector
+    model treats facet_element effect as the sum of two additive components: a
+    per-(facet_element, item) item effect and a per-(facet_element, threshold)
     threshold effect. This is analogous to treating the facet_element as an RSM
     (rather than a PCM as in the matrix model) — each facet_element has a location
     profile across items and a shape profile across thresholds, but the two
     are independent and additive.
 
-    True severity for facet_element r, item i, threshold k is:
+    True facet_effect for facet_element r, item i, threshold k is:
 
-        severity[r, i, k] = item_effect[r, i] + threshold_effect[r, k]
+        facet_effect[r, i, k] = item_effect[r, i] + threshold_effect[r, k]
 
     Identification constraints:
-    - item_effect: free mean per facet_element (overall facet_element severity lives here).
+    - item_effect: free mean per facet_element (overall facet_element effect lives here).
     - threshold_effect: zero-sum per facet_element across thresholds (shape only,
       no net location contribution).
 
-    Score sampling, missing data, category probabilities, and all rename
-    utilities are delegated to MFRM_Sim_Matrix via the reconstructed full
-    severity matrix. All attributes of MFRM_Sim_Matrix are available on
-    this object, plus item_effects and threshold_effects.
-
-    Parameters
-    ----------
-    no_of_items : int
-        Number of items to simulate.
-    no_of_persons : int
-        Number of persons to simulate.
-    no_of_raters : int
-        Number of facet_elements to simulate.
-    max_score : int
-        Maximum possible score per item (number of categories minus 1).
-    item_range : float, default 2
-        Total spread of item locations in logits.
-    item_facet_range : float, default 2
-        Total spread of per-(facet_element, item) severity effects across the full
-        facet_element x item matrix in logits.
-    threshold_facet_range : float, default 1
-        Total spread of per-(facet_element, threshold) severity effects across the
-        full facet_element x threshold matrix in logits.
-    category_base : float, default 1
-        Base width of each rating category. Larger values produce wider,
-        more ordered categories.
-    person_sd : float, default 1.5
-        Standard deviation of the person location distribution (normal).
-    max_disorder : float, default 0
-        Maximum threshold disorder. 0 produces perfectly ordered thresholds.
-    offset : float, default 0
-        Mean shift applied to person locations after centring.
-    missing : float, default 0
-        Proportion of responses to set as missing at random, in [0, 1).
-    shared_missing : bool, default True
-        If True, the same persons are missing across all facet_elements (correlated
-        missingness). If False, missingness is independent across facet_elements.
-    manual_persons : array-like or None, default None
-        Custom person measures. Length must equal no_of_persons.
-    manual_items : array-like or None, default None
-        Custom item locations. Length must equal no_of_items.
-    manual_thresholds : array-like or None, default None
-        Custom threshold vector, length max_score. Must satisfy
-        sum(thresholds) == 0.
-    manual_item_effects : dict or None, default None
-        Custom per-(facet_element, item) severity effects.
-        Structure: {facet_element: {item: float}}.
-    manual_threshold_effects : dict or None, default None
-        Custom per-(facet_element, threshold) severity effects.
-        Structure: {facet_element: array of length max_score}. For each
-        threshold, the mean across facet_elements should be 0 (matches what
-        _estimate_raters_matrix/facet_effects_bivector_thresholds can identify —
-        a per-facet_element zero-sum-across-thresholds convention instead will
-        show up as a recovery bias, not passed through unchanged).
-    manual_person_names : list of str or None, default None
-        Custom person labels.
-    manual_item_names : list of str or None, default None
-        Custom item labels.
-    manual_facet_names : list of str or None, default None
-        Custom facet_element labels.
-    seed : int or None, default None
-        Seed for the random number generator. Pass an int for a fully
-        reproducible simulation; None (default) draws fresh entropy each run.
-
-    Attributes set
-    --------------
-    All attributes of MFRM_Sim_Matrix, plus:
-
-    item_effects : dict
-        True per-(facet_element, item) severity effects.
-        Structure: {facet_element: {item: float}}.
-    threshold_effects : dict
-        True per-(facet_element, threshold) severity effects, zero-mean per
-        threshold across facet_elements (matches what the matrix/bivector
-        estimators can identify; individual facet_elements are not themselves
-        zero-sum across thresholds).
-        Structure: {facet_element: numpy.ndarray of length max_score}.
-    model : str
-        Always 'bivector'.
-
-    Note: self.facet_effects contains the reconstructed full severity matrix
-    in {facet_element: {item: array}} format (item_effect + threshold_effect per
-    cell), which is the format used internally by MFRM's probability
-    machinery.
+    See MFRM_Sim for full parameter docs, including item_facet_range/
+    threshold_facet_range and manual_item_effects/manual_threshold_effects
+    (the bivector-specific parameters in place of MFRM_Sim's generic
+    facet_range/manual_raters).
     """
 
     def __init__(
@@ -943,164 +977,16 @@ class MFRM_Sim_Bivector(MFRM_Sim):
         no_of_facet_elements=None,
         max_score=None,
         no_of_raters=None,
-        item_range=2,
-        item_facet_range=2,
-        threshold_facet_range=1,
-        category_base=1,
-        person_sd=1.5,
-        max_disorder=0,
-        offset=0,
-        missing=0,
-        shared_missing=True,
-        manual_persons=None,
-        manual_items=None,
-        manual_thresholds=None,
-        manual_item_effects=None,
-        manual_threshold_effects=None,
-        manual_person_names=None,
-        manual_item_names=None,
-        manual_facet_names=None,
-        facet="rater",
-        facet_plural=None,
-        seed=None,
+        **kw,
     ):
-        """
-        Instantiate and run an MFRM bivector simulation.
-
-        See class docstring for full parameter and attribute documentation.
-        All simulation output is generated on instantiation and stored as
-        instance attributes; see self.responses for the primary output.
-        """
-
-        self._rng = np.random.default_rng(seed)
-
-        # ------------------------------------------------------------------
-        # Resolve no_of_facet_elements / no_of_raters alias
-        # ------------------------------------------------------------------
-        if no_of_raters is not None and no_of_facet_elements is None:
-            no_of_facet_elements = no_of_raters
-        elif no_of_raters is not None and no_of_facet_elements is not None:
-            raise ValueError("Pass no_of_facet_elements or no_of_raters, not both.")
-        # ------------------------------------------------------------------
-        # Resolve names early so severity generation can use them
-        # ------------------------------------------------------------------
-        facet_elements = (
-            manual_facet_names
-            if manual_facet_names is not None
-            else [f"{facet.capitalize()}_{r + 1}" for r in range(no_of_facet_elements)]
-        )
-        items = (
-            manual_item_names
-            if manual_item_names is not None
-            else [f"Item_{i + 1}" for i in range(no_of_items)]
-        )
-
-        # ------------------------------------------------------------------
-        # Item effects — (R, I) DataFrame
-        # Free mean per facet_element; centred per item across facet_elements.
-        # ------------------------------------------------------------------
-        if manual_item_effects is not None:
-            assert (
-                len(manual_item_effects) == no_of_facet_elements
-            ), "Length of manual item effects must match number of facet_elements."
-            item_effects = manual_item_effects
-        else:
-            raw = np.array(
-                [
-                    truncnorm.rvs(-1.96, 1.96, size=no_of_items, random_state=self._rng)
-                    for _ in range(no_of_facet_elements)
-                ]
-            )  # (R, I)
-            raw *= item_facet_range / (raw.max() - raw.min())
-            raw -= raw.mean(axis=0, keepdims=True)
-            item_effects = pd.DataFrame(raw, index=facet_elements, columns=items)
-
-        # ------------------------------------------------------------------
-        # Threshold effects — (R, K+1) DataFrame, zero-sum per facet_element
-        # ------------------------------------------------------------------
-        if manual_threshold_effects is not None:
-            assert (
-                len(manual_threshold_effects) == no_of_facet_elements
-            ), "Length of manual threshold effects must match number of facet_elements."
-            threshold_effects = manual_threshold_effects
-        else:
-            raw = np.array(
-                [
-                    truncnorm.rvs(-1.96, 1.96, size=max_score, random_state=self._rng)
-                    for _ in range(no_of_facet_elements)
-                ]
-            )  # (R, K)
-            raw *= threshold_facet_range / (raw.max() - raw.min())
-            # Centre per threshold (column) across facet_elements, matching what
-            # facet_effects_bivector_thresholds inherits from _estimate_raters_matrix's
-            # per-(item, threshold) cell zero-centring (see the "matrix" branch of
-            # _generate_severities above for the same fix and rationale) — otherwise a
-            # nonzero true per-threshold mean shows up as a constant bias against the
-            # (correctly zero-centred) estimates.
-            raw -= raw.mean(axis=0, keepdims=True)
-            threshold_effects = pd.DataFrame(raw, index=facet_elements, columns=range(1, max_score + 1))
-
-        # ------------------------------------------------------------------
-        # Reconstruct full severity matrix as MultiIndex DataFrame
-        # ------------------------------------------------------------------
-        mi = pd.MultiIndex.from_product(
-            [facet_elements, items], names=["facet_element", "item"]
-        )
-        rows = []
-        for facet_element in facet_elements:
-            for item in items:
-                ie = (
-                    item_effects.loc[facet_element, item]
-                    if isinstance(item_effects, pd.DataFrame)
-                    else item_effects[facet_element][item]
-                )
-                te = (
-                    threshold_effects.loc[facet_element].values
-                    if isinstance(threshold_effects, pd.DataFrame)
-                    else threshold_effects[facet_element]
-                )
-                row = np.array([ie + te[k] for k in range(max_score)])
-                rows.append(row)
-        manual_facet_effects = pd.DataFrame(rows, index=mi, columns=range(1, max_score + 1))
-
-        # ------------------------------------------------------------------
-        # Delegate all score sampling to MFRM_Sim_Matrix
-        # ------------------------------------------------------------------
-        sim = MFRM_Sim_Matrix(
-            no_of_items=no_of_items,
-            no_of_persons=no_of_persons,
+        """Convenience wrapper: MFRM_Sim with model='bivector' fixed. See MFRM_Sim for full documentation."""
+        super().__init__(
+            no_of_items,
+            no_of_persons,
             no_of_facet_elements=no_of_facet_elements,
             max_score=max_score,
-            item_range=item_range,
-            category_base=category_base,
-            person_sd=person_sd,
-            max_disorder=max_disorder,
-            offset=offset,
-            missing=missing,
-            shared_missing=shared_missing,
-            manual_persons=manual_persons,
-            manual_items=manual_items,
-            manual_thresholds=manual_thresholds,
-            manual_facet_effects=manual_facet_effects,
-            manual_person_names=manual_person_names,
-            manual_item_names=manual_item_names,
-            # Shares this instance's rng so the whole bivector simulation
-            # (item/threshold effects + delegated persons/items/missingness)
-            # draws from a single reproducible stream given one seed.
-            seed=self._rng,
-            # Use the resolved facet_elements as facet names so they match
-            # the keys in manual_facet_effects
-            manual_facet_names=manual_facet_names or facet_elements,
-            facet=facet,
-            facet_plural=facet_plural,
+            no_of_raters=no_of_raters,
+            model="bivector",
+            **kw,
         )
-
-        # Copy all MFRM_Sim_Matrix attributes onto self. item_ids/person_ids
-        # are properties inherited from Rasch_Sim, so they resolve correctly
-        # from the copied item_names/person_names without needing to be set.
-        self.__dict__.update(sim.__dict__)
-
-        # Add bivector-specific attributes and correct the model label
-        self.item_effects = item_effects
-        self.threshold_effects = threshold_effects
         self.model = "bivector"

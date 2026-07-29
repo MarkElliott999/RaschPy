@@ -636,8 +636,8 @@ class RSM(Rasch):
         plot=True,
         plot_kwargs=None,
         anchor_thresholds=None,
-        check_thresholds=True,
         alpha=0.05,
+        correction="bh",
         warm_corr=True,
         tolerance=0.00001,
         max_iters=100,
@@ -670,22 +670,42 @@ class RSM(Rasch):
         anchor_thresholds attribute holding a *shifted* version of
         self.thresholds.
 
-        Optionally (anchor_thresholds=, check_thresholds=True by default),
-        if you also have an externally-supplied reference threshold
-        structure (e.g. the bank's own category structure), this checks
-        whether it's actually compatible with this dataset: holding item
+        Optionally (anchor_thresholds=), if you also have an externally-supplied reference threshold
+        structure (e.g. the bank's own category structure), this runs two
+        checks of whether it's actually compatible with this dataset.
+
+        The first is an omnibus likelihood-ratio test: holding item
         locations fixed at anchor_items, it compares the model fit (log-
         likelihood, person locations re-estimated in each case) using this
         dataset's own freely-estimated thresholds (self.thresholds) against
-        using the given anchor_thresholds instead, via a likelihood-ratio
-        test. (AIC/BIC don't apply here: both candidates are point-values
-        plugged into the exact same threshold-vector-length model, so
-        there's no genuine difference in the number of model parameters to
-        penalise for — only the LR test's fixed-vs-free chi-squared
-        framing is actually appropriate.) A significantly worse fit under
-        anchor_thresholds warns that the rating-scale structures may not
-        actually be shared, which would undermine a translation-only
-        equating assumption.
+        using the given anchor_thresholds instead. (AIC/BIC don't apply
+        here: both candidates are point-values plugged into the exact same
+        threshold-vector-length model, so there's no genuine difference in
+        the number of model parameters to penalise for — only the LR
+        test's fixed-vs-free chi-squared framing is actually appropriate.)
+        Because person locations are re-estimated freely under each
+        candidate, this comparison is already invariant to any overall
+        shift in the threshold vector's level (a uniform shift is absorbed
+        exactly by the re-estimated person locations, the standard
+        Rasch θ/δ indeterminacy) — so despite operating on the raw
+        threshold vectors, it only ever detects genuine differences in
+        category *shape* (widths), never a harmless difference in
+        centring convention between this dataset and the anchor source.
+        A significantly worse fit under anchor_thresholds warns that the
+        rating-scale structures may not actually be shared, which would
+        undermine a translation-only equating assumption.
+
+        The second is a per-category test, run alongside the omnibus one:
+        this dataset's own bootstrap category widths (self.thresholds.diff(),
+        with SEs from cat_width_se — auto-triggers std_errors() if not
+        already computed) are compared directly against anchor_thresholds'
+        own widths via a Wald z-test, one per category. Unlike the omnibus
+        test, this localises *which* category's shape differs, the same
+        way dif_test's category-width (DCF) test does across groups —
+        comparing raw threshold locations here would be the wrong quantity,
+        since a genuine difference in one category's width cascades
+        additively into every threshold location after it, smearing one
+        true effect across several per-category tests.
 
         By default (selection_method='robust_z'), the translation constant
         is computed via _robust_anchor_selection() (Iglewicz & Hoaglin
@@ -778,24 +798,30 @@ class RSM(Rasch):
         anchor_thresholds : array-like or None, default None
             Externally-supplied reference threshold vector (length
             max_score), e.g. from the same bank the item anchors came from.
+            If supplied, runs the LR comparison described above and warns
+            if the two threshold structures are significantly different.
             If None, the threshold-structure check is skipped entirely
-            (self.anchor_threshold_test is set to None) regardless of
-            check_thresholds.
-        check_thresholds : bool, default True
-            If True and anchor_thresholds is supplied, runs the LR
-            comparison described above and warns if the two threshold
-            structures are significantly different.
+            (self.anchor_threshold_test is set to None).
         alpha : float, default 0.05
-            Significance level for the likelihood-ratio test (compared to
-            the p-value): self.thresholds (freely estimated, df=max_score-1)
-            vs anchor_thresholds (fixed, df=0), chi-squared with
-            df=max_score-1. Flags if p < alpha.
+            Significance level for both the omnibus likelihood-ratio test
+            (self.thresholds, freely estimated, df=max_score-1, vs
+            anchor_thresholds, fixed, df=0, chi-squared with
+            df=max_score-1) and the per-category Wald z-tests (compared
+            against the corrected p-value if correction is set, else the
+            raw p-value).
+        correction : {'bh', 'bonferroni', None}, default 'bh'
+            Multiple-comparison correction across the per-category width
+            tests only (mirrors dif_test's convention elsewhere in the
+            package). None uses raw p-values, uncorrected. Not applied to
+            the omnibus test, which is already a single test.
         warm_corr, tolerance, max_iters, ext_score_adjustment :
-            Person-estimation kwargs, used only by the check_thresholds
-            comparison (person locations must be re-estimated under each candidate
-            threshold vector before the log-likelihoods are comparable).
+            Person-estimation kwargs, used only by the omnibus
+            anchor_thresholds comparison (person locations must be
+            re-estimated under each candidate threshold vector before the
+            log-likelihoods are comparable).
         constant, method, matrix_power, log_lik_tol : floats
-            Calibration kwargs, used only if calibrate is triggered.
+            Calibration kwargs, used only if calibrate is triggered, or if
+            cat_width_se needs to be computed for the per-category test.
 
         Attributes set
         --------------
@@ -829,8 +855,14 @@ class RSM(Rasch):
             call. None if plot=False, selection_method='none', or adj was
             supplied directly (no selection table to plot in those cases).
         anchor_threshold_test : pandas.Series or None
-            LL_estimated, LL_given, LR, df, p, and a Flagged bool. None if
-            anchor_thresholds was not supplied or check_thresholds=False.
+            Omnibus LR test: LL_estimated, LL_given, LR, df, p, and a
+            Flagged bool. None if anchor_thresholds was not supplied.
+        anchor_category_width_test : pandas.DataFrame or None
+            Per-category Wald test, indexed by category: Estimate (this
+            dataset's own bootstrap category width), Given (anchor_thresholds'
+            width at that category), Difference, SE (from cat_width_se), z,
+            p, p_corrected (if correction is set), and a Flagged bool. None
+            if anchor_thresholds was not supplied.
         calibrate_anchor_runs : dict
             Every call's anchor_items/anchor_adj/anchor_summary/etc.,
             keyed by tuple(sorted(anchors.items())), so results from an
@@ -983,7 +1015,7 @@ class RSM(Rasch):
         else:
             self.anchor_plot = None
 
-        if check_thresholds and anchor_thresholds is not None:
+        if anchor_thresholds is not None:
             if not isinstance(anchor_thresholds, pd.Series):
                 anchor_thresholds = pd.Series(
                     anchor_thresholds, index=range(1, self.max_score + 1)
@@ -1033,8 +1065,67 @@ class RSM(Rasch):
                     UserWarning,
                     stacklevel=2,
                 )
+
+            # Per-category test, alongside the omnibus one: compares category
+            # WIDTHS (consecutive threshold differences), not raw threshold
+            # locations, so a genuine difference in one category's shape
+            # doesn't cascade into a false signal at every category after it
+            # (the same reasoning as dif_test's category-width/DCF test).
+            if not hasattr(self, "cat_width_se"):
+                self.std_errors(
+                    no_of_samples=no_of_samples,
+                    constant=constant,
+                    method=method,
+                    matrix_power=matrix_power,
+                    log_lik_tol=log_lik_tol,
+                    seed=seed,
+                )
+
+            widths_estimated = self.thresholds.diff().dropna()
+            widths_estimated.index = range(1, self.max_score)
+            widths_given = anchor_thresholds.diff().dropna()
+            widths_given.index = range(1, self.max_score)
+
+            width_diff = widths_estimated - widths_given
+            z = width_diff / self.cat_width_se
+            p_width = 2 * (1 - norm.cdf(np.abs(z)))
+
+            table = pd.DataFrame(
+                {
+                    "Estimate": widths_estimated,
+                    "Given": widths_given,
+                    "Difference": width_diff,
+                    "SE": self.cat_width_se,
+                    "z": z,
+                    "p": p_width,
+                }
+            )
+            table.index.name = "Category"
+
+            if correction == "bh":
+                table["p_corrected"] = self._bh_correction(table["p"])
+            elif correction == "bonferroni":
+                table["p_corrected"] = (table["p"] * len(table)).clip(upper=1)
+            p_col = "p_corrected" if correction else "p"
+            table["Flagged"] = table[p_col] < alpha
+            self.anchor_category_width_test = table
+
+            if table["Flagged"].any():
+                warnings.warn(
+                    "anchor_thresholds differs substantially from this "
+                    "dataset's own estimated category widths at "
+                    f"{list(table.index[table['Flagged']])} (per-category "
+                    "Wald test; see anchor_category_width_test). The "
+                    "rating-scale category structure may not actually be "
+                    "shared with the anchor source at these categories — "
+                    "translation-only equating via anchor_items assumes "
+                    "it is.",
+                    UserWarning,
+                    stacklevel=2,
+                )
         else:
             self.anchor_threshold_test = None
+            self.anchor_category_width_test = None
 
         # Snapshot this run keyed by the anchors supplied, so results from an
         # earlier calibrate_anchor() call survive a later call with a
@@ -1057,6 +1148,7 @@ class RSM(Rasch):
             anchor_summary=self.anchor_summary,
             anchor_plot=self.anchor_plot,
             anchor_threshold_test=self.anchor_threshold_test,
+            anchor_category_width_test=self.anchor_category_width_test,
         )
 
     def _threshold_structure_ll(
@@ -1068,7 +1160,7 @@ class RSM(Rasch):
         (held fixed) combined with a candidate threshold vector, with
         person locations re-estimated under that specific (items, thresholds) pair.
 
-        Used by calibrate_anchor's check_thresholds diagnostic to compare
+        Used by calibrate_anchor's anchor_thresholds diagnostic to compare
         two candidate threshold structures on a fair footing — person locations
         can't be reused across candidates since they depend on the
         threshold vector too. Uses a scratch RSM instance (same convention
@@ -4260,6 +4352,7 @@ class RSM(Rasch):
             mask_person_locations = person_location_df.unstack()
         else:
             mask_scores = df[item].dropna()
+            mask_person_locations = (person_locations - self.items[item]).reindex(mask_scores.index)
         q = mask_person_locations.quantile(
             [(i + 1) / no_of_classes for i in range(no_of_classes - 1)]
         )

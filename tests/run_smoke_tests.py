@@ -681,7 +681,7 @@ def _run_mfrm_anchor(base_model, data, model_name, tag, verbose):
 
     Flow:
       1. calibrate() has already been run on base_model.
-      2. calibrate_anchor(model, anchor_raters) anchors mean severity of the
+      2. calibrate_anchor(model, anchor_raters) anchors mean facet_effect of the
          anchor raters to zero and adjusts diffs/thresholds accordingly.
       3. person_abils(model, anchor=True) produces anchor_persons_{model}.
 

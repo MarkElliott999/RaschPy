@@ -738,6 +738,7 @@ class PCM(Rasch):
                 for item in self.responses.columns
             }
         ).T
+        self.thresholds_uncentred.columns = range(1, self.thresholds_uncentred.shape[1] + 1)
 
         max_len = max(len(thresholds_dict[item]) for item in self.responses.columns)
         thr_rows = {}
