@@ -7,7 +7,7 @@ package:
 
 source:
   url: https://pypi.org/packages/source/r/raschpy/raschpy-{{ version }}.tar.gz
-  sha256: REPLACE_ME  # 1.1.1 isn't on PyPI yet — regenerate after upload, e.g. `pip download --no-deps --no-binary :all: raschpy==1.1.1 && sha256sum raschpy-1.1.1.tar.gz`
+  sha256: f0414f3db4c24dd34911c096951aca007575fee458b125305aa81c007be61b75
 
 build:
   noarch: python
