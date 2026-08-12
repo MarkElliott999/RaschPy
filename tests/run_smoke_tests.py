@@ -42,6 +42,9 @@ from raschpy.simulation import (
     MFRM_Sim_Thresholds,
     MFRM_Sim_Matrix,
     MFRM_Sim_Bivector,
+    MFRM_Sim_Centrality,
+    MFRM_Sim_PseudoHalo,
+    MFRM_Sim_Bistretch,
 )
 
 warnings.filterwarnings('ignore')
@@ -60,6 +63,9 @@ MFRM_MODELS = [
     ('Items',      'items',      MFRM_Sim_Items),
     ('Thresholds', 'thresholds', MFRM_Sim_Thresholds),
     ('Matrix',     'matrix',     MFRM_Sim_Matrix),
+    ('Centrality', 'centrality', MFRM_Sim_Centrality),
+    ('PseudoHalo', 'pseudo_halo', MFRM_Sim_PseudoHalo),
+    ('Bistretch',  'bistretch',  MFRM_Sim_Bistretch),
 ]
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -496,11 +502,13 @@ def run_mfrm_model(label, model_name, sim_cls, verbose=False):
     import matplotlib.pyplot as plt
 
     # 1. Simulate → instantiate → calibrate
+    # centrality/pseudo_halo/bistretch renamed facet_range -> global_range
+    range_kw = {'global_range': RATER_RANGE} if model_name in ('centrality', 'pseudo_halo', 'bistretch') else {'facet_range': RATER_RANGE}
     try:
         np.random.seed(SIM_SEED)
         sim = sim_cls(no_of_items=N_ITEMS, no_of_persons=N_PERSONS,
-                      no_of_raters=N_RATERS, max_score=MAX_SCORE,
-                      facet_range=RATER_RANGE)
+                      no_of_facet_elements=N_RATERS, max_score=MAX_SCORE,
+                      **range_kw)
         data = sim.responses
         check(f'{tag} simulate', True, verbose=verbose)
     except Exception:
@@ -805,7 +813,7 @@ def run_bivector(verbose=False):
     try:
         np.random.seed(SIM_SEED)
         sim = MFRM_Sim_Bivector(no_of_items=N_ITEMS, no_of_persons=N_PERSONS,
-                                no_of_raters=N_RATERS, max_score=MAX_SCORE)
+                                no_of_facet_elements=N_RATERS, max_score=MAX_SCORE)
         data = sim.responses
         check(f'{tag} simulate', True, verbose=verbose)
     except Exception:

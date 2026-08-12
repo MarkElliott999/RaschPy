@@ -178,7 +178,7 @@ section('MFRM — setup: calibrate then anchor')
 
 np.random.seed(SEED)
 mfrm_sim = MFRM_Sim_Global(no_of_items=6, no_of_persons=NO_PERSONS,
-                            no_of_raters=NO_RATERS, max_score=MAX_SCORE)
+                            no_of_facet_elements=NO_RATERS, max_score=MAX_SCORE)
 mfrm_data = mfrm_sim.scores
 
 with warnings.catch_warnings():

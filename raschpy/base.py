@@ -30,7 +30,34 @@ class _SimParams:
     due to invalid/extreme response removal.
     """
 
-    pass
+    def __getattr__(self, name):
+        """
+        Alternate spellings for lambda_/omega (and, for bistretch,
+        omega_items/omega_thresholds), matching the same aliases the
+        originating sim object itself supports (e.g.
+        MFRM_Sim_Centrality.__getattr__) -- 'global_' for 'lambda_',
+        'stretch'/'stretch_items'/'stretch_thresholds' for
+        'omega'/'omega_items'/'omega_thresholds'. setattr-based copying
+        (see MFRM.__init__'s sim-aware instantiation) only transfers the
+        sim's real instance attributes, not its own __getattr__-resolved
+        aliases, so this namespace needs the same alias resolution
+        applied again here -- generically, so it works regardless of
+        which sim type populated it. Raises AttributeError (rather than
+        a wrong/misleading value) if the underlying attribute was never
+        copied over. Only triggers when normal attribute lookup fails,
+        so it never shadows a real attribute.
+        """
+        aliases = {
+            "global_": "lambda_",
+            "stretch": "omega",
+            "stretch_items": "omega_items",
+            "stretch_thresholds": "omega_thresholds",
+        }
+        if name in aliases and aliases[name] in vars(self):
+            return getattr(self, aliases[name])
+        raise AttributeError(
+            f"{type(self).__name__!r} object has no attribute {name!r}"
+        )
 
 
 class _Namespace:

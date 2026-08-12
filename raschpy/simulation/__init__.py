@@ -17,6 +17,9 @@ from raschpy.simulation.mfrm_sim import (
     MFRM_Sim_Thresholds,
     MFRM_Sim_Bivector,
     MFRM_Sim_Matrix,
+    MFRM_Sim_Centrality,
+    MFRM_Sim_PseudoHalo,
+    MFRM_Sim_Bistretch,
 )
 from raschpy.simulation.base_sim import Rasch_Sim
 
@@ -30,5 +33,8 @@ __all__ = [
     "MFRM_Sim_Thresholds",
     "MFRM_Sim_Bivector",
     "MFRM_Sim_Matrix",
+    "MFRM_Sim_Centrality",
+    "MFRM_Sim_PseudoHalo",
+    "MFRM_Sim_Bistretch",
     "Rasch_Sim",
 ]

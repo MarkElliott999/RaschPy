@@ -31,6 +31,9 @@ Simulation
     MFRM_Sim_Thresholds  — MFRM simulation, per-threshold facet effects
     MFRM_Sim_Bivector    — MFRM simulation, additive (item + threshold) facet effects
     MFRM_Sim_Matrix      — MFRM simulation, full rater × item × facet effects
+    MFRM_Sim_Centrality  — MFRM simulation, Jin & Wang (2018) rater centrality/extremity
+    MFRM_Sim_PseudoHalo  — MFRM simulation, (pseudo-)halo-effect item-difficulty stretch
+    MFRM_Sim_Bistretch   — MFRM simulation, combined threshold + item stretch (bivector restriction)
 """
 
 from raschpy.slm import SLM
@@ -58,9 +61,12 @@ from raschpy.simulation.mfrm_sim import (
     MFRM_Sim_Thresholds,
     MFRM_Sim_Bivector,
     MFRM_Sim_Matrix,
+    MFRM_Sim_Centrality,
+    MFRM_Sim_PseudoHalo,
+    MFRM_Sim_Bistretch,
 )
 
-__version__ = "1.1.1"
+__version__ = "1.2.0"
 __author__ = "Mark Elliott"
 
 __all__ = [
@@ -87,4 +93,7 @@ __all__ = [
     "MFRM_Sim_Thresholds",
     "MFRM_Sim_Bivector",
     "MFRM_Sim_Matrix",
+    "MFRM_Sim_Centrality",
+    "MFRM_Sim_PseudoHalo",
+    "MFRM_Sim_Bistretch",
 ]

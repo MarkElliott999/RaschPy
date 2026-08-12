@@ -116,7 +116,7 @@ sim_classes = {
 for model, SimClass in sim_classes.items():
     np.random.seed(SEED)
     mfrm_data[model] = SimClass(no_of_items=NO_ITEMS, no_of_persons=NO_PERSONS,
-                                no_of_raters=NO_RATERS, max_score=MAX_SCORE).scores
+                                no_of_facet_elements=NO_RATERS, max_score=MAX_SCORE).scores
     check(isinstance(mfrm_data[model], pd.DataFrame), f'MFRM {model} data generated')
 
 # ── Use one temp dir for all output files ────────────────────────────────

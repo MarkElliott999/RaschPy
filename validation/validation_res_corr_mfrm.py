@@ -119,7 +119,7 @@ for model, SimClass in SIM_CLASSES.items():
     sim = SimClass(
         no_of_items=NO_ITEMS,
         no_of_persons=NO_PERSONS,
-        no_of_raters=NO_RATERS,
+        no_of_facet_elements=NO_RATERS,
         max_score=MAX_SCORE,
     )
     datasets[model] = sim.scores
@@ -272,7 +272,7 @@ from raschpy.simulation.mfrm_sim import MFRM_Sim_Global
 from raschpy.mfrm import MFRM
 import numpy as np
 np.random.seed(42)
-sim = MFRM_Sim_Global(no_of_items=6, no_of_persons=200, no_of_raters=4, max_score=3)
+sim = MFRM_Sim_Global(no_of_items=6, no_of_persons=200, no_of_facet_elements=4, max_score=3)
 m = MFRM(sim.scores)
 with warnings.catch_warnings():
     warnings.simplefilter('ignore')

@@ -23,7 +23,7 @@ class MFRM_Sim(Rasch_Sim):
         Number of items to simulate.
     no_of_persons : int
         Number of persons to simulate.
-    no_of_raters : int
+    no_of_facet_elements : int
         Number of facet_elements to simulate.
     max_score : int
         Maximum possible score per item (number of categories minus 1).
@@ -69,7 +69,7 @@ class MFRM_Sim(Rasch_Sim):
         sum(thresholds) == 0.
     manual_raters : dict or array-like or None, default None
         Custom facet_element effect parameters. Structure must match the chosen model:
-        global — array-like of length no_of_raters;
+        global — array-like of length no_of_facet_elements;
         items  — {facet_element: {item: float}};
         thresholds — {facet_element: array of length max_score};
         matrix — {facet_element: {item: array of length max_score}}.
@@ -129,7 +129,6 @@ class MFRM_Sim(Rasch_Sim):
         no_of_persons,
         no_of_facet_elements,
         max_score,
-        no_of_raters=None,
         model="global",
         item_range=2,
         facet_range=2,
@@ -186,17 +185,11 @@ class MFRM_Sim(Rasch_Sim):
                 raise ValueError("Pass manual_raters or manual_facet_effects, not both.")
             if manual_facet_names is None and hasattr(manual_raters, "keys"):
                 manual_facet_names = list(manual_raters.keys())
-            if no_of_raters is None and no_of_facet_elements is None:
+            if no_of_facet_elements is None:
                 no_of_facet_elements = len(manual_raters)
             # Conversion to manual_facet_effects is deferred until after item_names are set.
 
-        # Resolve no_of_facet_elements / no_of_raters alias
-        if no_of_raters is not None and no_of_facet_elements is None:
-            no_of_facet_elements = no_of_raters
-        elif no_of_raters is not None and no_of_facet_elements is not None:
-            raise ValueError("Pass no_of_facet_elements or no_of_raters, not both.")
         self.no_of_facet_elements = int(no_of_facet_elements)
-        self.no_of_raters = self.no_of_facet_elements  # alias
         self.facet = facet
         self.facets = facet_plural if facet_plural is not None else facet + "s"
         setattr(self, f"no_of_{self.facets}", self.no_of_facet_elements)
@@ -265,7 +258,7 @@ class MFRM_Sim(Rasch_Sim):
             assert (
                 len(manual_thresholds) == self.max_score
             ), "Number of manual thresholds must equal max_score."
-            assert sum(manual_thresholds) == 0, "Manual thresholds must sum to zero."
+            assert np.isclose(sum(manual_thresholds), 0), "Manual thresholds must sum to zero."
             self.thresholds = pd.Series(np.array(manual_thresholds), index=range(1, self.max_score + 1))
         else:
             cat_widths = self._rng.uniform(
@@ -835,9 +828,8 @@ class MFRM_Sim_Global(MFRM_Sim):
         self,
         no_of_items,
         no_of_persons,
-        no_of_facet_elements=None,
-        max_score=None,
-        no_of_raters=None,
+        max_score,
+        no_of_facet_elements,
         **kw,
     ):
         """Convenience wrapper: MFRM_Sim with model='global' fixed. See MFRM_Sim for full documentation."""
@@ -846,7 +838,6 @@ class MFRM_Sim_Global(MFRM_Sim):
             no_of_persons,
             no_of_facet_elements=no_of_facet_elements,
             max_score=max_score,
-            no_of_raters=no_of_raters,
             model="global",
             **kw,
         )
@@ -865,9 +856,8 @@ class MFRM_Sim_Items(MFRM_Sim):
         self,
         no_of_items,
         no_of_persons,
-        no_of_facet_elements=None,
-        max_score=None,
-        no_of_raters=None,
+        max_score,
+        no_of_facet_elements,
         **kw,
     ):
         """Convenience wrapper: MFRM_Sim with model='items' fixed. See MFRM_Sim for full documentation."""
@@ -876,7 +866,6 @@ class MFRM_Sim_Items(MFRM_Sim):
             no_of_persons,
             no_of_facet_elements=no_of_facet_elements,
             max_score=max_score,
-            no_of_raters=no_of_raters,
             model="items",
             **kw,
         )
@@ -895,9 +884,8 @@ class MFRM_Sim_Thresholds(MFRM_Sim):
         self,
         no_of_items,
         no_of_persons,
-        no_of_facet_elements=None,
-        max_score=None,
-        no_of_raters=None,
+        max_score,
+        no_of_facet_elements,
         **kw,
     ):
         """Convenience wrapper: MFRM_Sim with model='thresholds' fixed. See MFRM_Sim for full documentation."""
@@ -906,7 +894,6 @@ class MFRM_Sim_Thresholds(MFRM_Sim):
             no_of_persons,
             no_of_facet_elements=no_of_facet_elements,
             max_score=max_score,
-            no_of_raters=no_of_raters,
             model="thresholds",
             **kw,
         )
@@ -925,9 +912,8 @@ class MFRM_Sim_Matrix(MFRM_Sim):
         self,
         no_of_items,
         no_of_persons,
-        no_of_facet_elements=None,
-        max_score=None,
-        no_of_raters=None,
+        max_score,
+        no_of_facet_elements,
         **kw,
     ):
         """Convenience wrapper: MFRM_Sim with model='matrix' fixed. See MFRM_Sim for full documentation."""
@@ -936,7 +922,6 @@ class MFRM_Sim_Matrix(MFRM_Sim):
             no_of_persons,
             no_of_facet_elements=no_of_facet_elements,
             max_score=max_score,
-            no_of_raters=no_of_raters,
             model="matrix",
             **kw,
         )
@@ -974,9 +959,8 @@ class MFRM_Sim_Bivector(MFRM_Sim):
         self,
         no_of_items,
         no_of_persons,
-        no_of_facet_elements=None,
-        max_score=None,
-        no_of_raters=None,
+        max_score,
+        no_of_facet_elements,
         **kw,
     ):
         """Convenience wrapper: MFRM_Sim with model='bivector' fixed. See MFRM_Sim for full documentation."""
@@ -985,8 +969,562 @@ class MFRM_Sim_Bivector(MFRM_Sim):
             no_of_persons,
             no_of_facet_elements=no_of_facet_elements,
             max_score=max_score,
-            no_of_raters=no_of_raters,
             model="bivector",
             **kw,
         )
         self.model = "bivector"
+
+
+class MFRM_Sim_Centrality(MFRM_Sim):
+    """
+    MFRM simulation -- Jin & Wang (2018)-style rater centrality/extremity
+    parameterisation (2 true parameters per rater: severity shift lambda_r,
+    threshold-stretch omega_r), restricting the fully-free 'thresholds'
+    parameterisation. omega_r is Jin & Wang's own notation for this
+    threshold-stretch coefficient.
+
+    Thin wrapper: generates a preliminary MFRM_Sim(model='thresholds') to
+    get realistic item locations/thresholds/persons, draws true
+    lambda_r/omega_r per rater, computes the implied full (rater x threshold)
+    severity table via lambda_rk = lambda_r + (omega_r - 1) * tau_k, then
+    delegates to the full MFRM_Sim(model='thresholds', manual_raters=...)
+    machinery (fixed to the same item/threshold/person values as the
+    preliminary sim) for everything else -- category probabilities and
+    response sampling. All the actual generative machinery is reused
+    unchanged; only lambda_r/omega_r and their implied severity table are new.
+
+    omega_r > 1 spreads reference thresholds apart for that rater
+    ("central"); 0 < omega_r < 1 compresses them ("extreme"); omega_r == 1
+    is neutral. See MFRM._derive_stretch_model / MFRM.calibrate_centrality
+    for the corresponding closed-form estimation side.
+
+    Parameters
+    ----------
+    global_range : float, default 2
+        Total spread (maximum - minimum) of true lambda_r (severity
+        shift) values across raters. Renamed from MFRM_Sim's own
+        facet_range for this and the other two stretch models -- lambda_r
+        is the parameter that collapses this representation to 'global'
+        when every rater's omega_r == 1, and 'global_range' pairs
+        directly with 'stretch_range' below, matching the global_/stretch
+        attribute alias naming (see MFRM._PARAM_ALIASES).
+    stretch_range : float, default 1
+        Total spread of true omega_r values around 1 (analogous to
+        global_range for lambda_r). E.g. stretch_range=1 typically gives
+        omega_r roughly in [0.5, 1.5].
+    manual_lambda : array-like or None, default None
+        Custom true lambda_r values, length no_of_facet_elements. If None,
+        drawn the same way MFRM_Sim's own facet_range scales severities.
+    manual_omega : array-like or None, default None
+        Custom true omega_r values, length no_of_facet_elements. If None,
+        drawn as 1 + a stretch_range-scaled, zero-mean deviation.
+    seed : int or None, default None
+        Seed for both lambda_r/omega_r generation and everything else
+        (persons/items/thresholds/response sampling, via the preliminary
+        and final MFRM_Sim calls). Pass an int for full reproducibility.
+
+    See MFRM_Sim for all other parameter docs (item_range, person_sd,
+    missing, manual_items, manual_thresholds, manual_persons, etc. --
+    all forwarded unchanged to both the preliminary and final sims, so
+    supplying e.g. manual_items yourself works exactly as it would for
+    MFRM_Sim_Thresholds).
+
+    Attributes set (in addition to the usual MFRM_Sim attributes)
+    ---------------------------------------------------------------
+    lambda_ : pandas.Series
+        True generating lambda_r (severity shift) per rater.
+    omega : pandas.Series
+        True generating omega_r (threshold stretch) per rater.
+    """
+
+    def __init__(
+        self,
+        no_of_items,
+        no_of_persons,
+        max_score,
+        no_of_facet_elements,
+        global_range=2,
+        stretch_range=1,
+        manual_lambda=None,
+        manual_omega=None,
+        seed=None,
+        **kw,
+    ):
+        if "facet_range" in kw:
+            raise TypeError(
+                "MFRM_Sim_Centrality.__init__() got an unexpected keyword "
+                "argument 'facet_range' -- renamed to 'global_range' (it "
+                "controls the spread of true lambda_r values, not "
+                "MFRM_Sim's own facet_range, which would otherwise silently "
+                "absorb this into the discarded preliminary simulation)."
+            )
+        prelim = MFRM_Sim(
+            no_of_items,
+            no_of_persons,
+            no_of_facet_elements=no_of_facet_elements,
+            max_score=max_score,
+            model="thresholds",
+            seed=seed,
+            **kw,
+        )
+
+        rng = np.random.default_rng(seed)
+        R = prelim.no_of_facet_elements
+
+        if manual_lambda is not None:
+            assert (
+                len(manual_lambda) == R
+            ), "Length of manual_lambda must match number of facet_elements."
+            lam = np.array(manual_lambda, dtype=float)
+        else:
+            lam = truncnorm.rvs(-1.96, 1.96, size=R, random_state=rng)
+            lam *= global_range / (lam.max() - lam.min())
+            lam -= lam.mean()
+
+        if manual_omega is not None:
+            assert (
+                len(manual_omega) == R
+            ), "Length of manual_omega must match number of facet_elements."
+            omega = np.array(manual_omega, dtype=float)
+        else:
+            dev = truncnorm.rvs(-1.96, 1.96, size=R, random_state=rng)
+            dev *= stretch_range / (dev.max() - dev.min())
+            dev -= dev.mean()
+            omega = 1.0 + dev
+
+        tau = prelim.thresholds.values
+        implied_raters = {
+            r: lam[i] + (omega[i] - 1.0) * tau
+            for i, r in enumerate(prelim.facet_names)
+        }
+
+        # Already captured into prelim (and re-supplied explicitly below) --
+        # drop from kw so a caller who passed these directly doesn't hit a
+        # "got multiple values for keyword argument" TypeError.
+        for key in ("manual_items", "manual_thresholds", "manual_persons",
+                    "manual_item_names", "manual_person_names",
+                    "manual_facet_names", "manual_raters"):
+            kw.pop(key, None)
+
+        super().__init__(
+            no_of_items,
+            no_of_persons,
+            no_of_facet_elements=prelim.no_of_facet_elements,
+            max_score=prelim.max_score,
+            model="thresholds",
+            manual_items=prelim.items.values,
+            manual_thresholds=prelim.thresholds.values,
+            manual_persons=prelim.persons.values,
+            manual_person_names=list(prelim.person_names),
+            manual_item_names=list(prelim.item_names),
+            manual_facet_names=list(prelim.facet_names),
+            manual_raters=implied_raters,
+            seed=seed,
+            **kw,
+        )
+        self.model = "centrality"
+        self.lambda_ = pd.Series(lam, index=self.facet_names)
+        self.omega = pd.Series(omega, index=self.facet_names)
+
+    def __getattr__(self, name):
+        """
+        Alternate spellings for lambda_/omega, matching MFRM's own
+        global_{model}/stretch_{model} attribute aliases (see
+        MFRM._PARAM_ALIASES) -- 'global_' for 'lambda_' (no model suffix
+        needed here, since this sim class is already model-specific;
+        trailing underscore because 'global', like 'lambda', is also a
+        Python keyword), 'stretch' for 'omega'. Only triggers when normal
+        attribute lookup fails, so it never shadows a real attribute.
+        """
+        if name == "global_":
+            return self.lambda_
+        if name == "stretch":
+            return self.omega
+        raise AttributeError(
+            f"{type(self).__name__!r} object has no attribute {name!r}"
+        )
+
+
+class MFRM_Sim_PseudoHalo(MFRM_Sim):
+    """
+    MFRM simulation -- (pseudo-)halo-effect parameterisation, the
+    item-facet analogue of MFRM_Sim_Centrality (2 true parameters per
+    rater: severity shift lambda_r, item-difficulty stretch omega_r),
+    restricting the fully-free 'items' parameterisation.
+
+    Thin wrapper: generates a preliminary MFRM_Sim(model='items') to get
+    realistic item locations/thresholds/persons, draws true
+    lambda_r/omega_r per rater, computes the implied full (rater x item)
+    severity table via mu_ri = lambda_r + (omega_r - 1) * delta_i, then
+    delegates to the full MFRM_Sim(model='items', manual_raters=...)
+    machinery (fixed to the same item/threshold/person values as the
+    preliminary sim) for everything else. All the actual generative
+    machinery is reused unchanged; only lambda_r/omega_r and their implied
+    severity table are new.
+
+    omega_r < 1 compresses the spread of reference item locations toward
+    zero for that rater (the pseudo-halo signature -- items look more
+    similar in difficulty to that rater than they really are); omega_r > 1
+    exaggerates real item-difficulty differences; omega_r == 1 is neutral.
+    See MFRM._derive_stretch_model / MFRM.calibrate_pseudo_halo for the
+    corresponding closed-form estimation side.
+
+    Parameters
+    ----------
+    global_range : float, default 2
+        Total spread (maximum - minimum) of true lambda_r (severity
+        shift) values across raters. Renamed from MFRM_Sim's own
+        facet_range for this and the other two stretch models -- lambda_r
+        is the parameter that collapses this representation to 'global'
+        when every rater's omega_r == 1, and 'global_range' pairs
+        directly with 'stretch_range' below, matching the global_/stretch
+        attribute alias naming (see MFRM._PARAM_ALIASES).
+    stretch_range : float, default 1
+        Total spread of true omega_r values around 1 (analogous to
+        global_range for lambda_r).
+    manual_lambda : array-like or None, default None
+        Custom true lambda_r values, length no_of_facet_elements. If None,
+        drawn the same way MFRM_Sim's own facet_range scales severities.
+    manual_omega : array-like or None, default None
+        Custom true omega_r values, length no_of_facet_elements. If None,
+        drawn as 1 + a stretch_range-scaled, zero-mean deviation.
+    seed : int or None, default None
+        Seed for both lambda_r/omega_r generation and everything else, via
+        the preliminary and final MFRM_Sim calls. Pass an int for full
+        reproducibility.
+
+    See MFRM_Sim for all other parameter docs -- all forwarded unchanged
+    to both the preliminary and final sims.
+
+    Attributes set (in addition to the usual MFRM_Sim attributes)
+    ---------------------------------------------------------------
+    lambda_ : pandas.Series
+        True generating lambda_r (severity shift) per rater.
+    omega : pandas.Series
+        True generating omega_r (item-difficulty stretch) per rater.
+    """
+
+    def __init__(
+        self,
+        no_of_items,
+        no_of_persons,
+        max_score,
+        no_of_facet_elements,
+        global_range=2,
+        stretch_range=1,
+        manual_lambda=None,
+        manual_omega=None,
+        seed=None,
+        **kw,
+    ):
+        if "facet_range" in kw:
+            raise TypeError(
+                "MFRM_Sim_PseudoHalo.__init__() got an unexpected keyword "
+                "argument 'facet_range' -- renamed to 'global_range' (it "
+                "controls the spread of true lambda_r values, not "
+                "MFRM_Sim's own facet_range, which would otherwise silently "
+                "absorb this into the discarded preliminary simulation)."
+            )
+        prelim = MFRM_Sim(
+            no_of_items,
+            no_of_persons,
+            no_of_facet_elements=no_of_facet_elements,
+            max_score=max_score,
+            model="items",
+            seed=seed,
+            **kw,
+        )
+
+        rng = np.random.default_rng(seed)
+        R = prelim.no_of_facet_elements
+
+        if manual_lambda is not None:
+            assert (
+                len(manual_lambda) == R
+            ), "Length of manual_lambda must match number of facet_elements."
+            lam = np.array(manual_lambda, dtype=float)
+        else:
+            lam = truncnorm.rvs(-1.96, 1.96, size=R, random_state=rng)
+            lam *= global_range / (lam.max() - lam.min())
+            lam -= lam.mean()
+
+        if manual_omega is not None:
+            assert (
+                len(manual_omega) == R
+            ), "Length of manual_omega must match number of facet_elements."
+            omega = np.array(manual_omega, dtype=float)
+        else:
+            dev = truncnorm.rvs(-1.96, 1.96, size=R, random_state=rng)
+            dev *= stretch_range / (dev.max() - dev.min())
+            dev -= dev.mean()
+            omega = 1.0 + dev
+
+        delta = prelim.items.values
+        implied_raters = {
+            r: {
+                item: float(lam[i] + (omega[i] - 1.0) * delta[j])
+                for j, item in enumerate(prelim.item_names)
+            }
+            for i, r in enumerate(prelim.facet_names)
+        }
+
+        # Already captured into prelim (and re-supplied explicitly below) --
+        # drop from kw so a caller who passed these directly doesn't hit a
+        # "got multiple values for keyword argument" TypeError.
+        for key in ("manual_items", "manual_thresholds", "manual_persons",
+                    "manual_item_names", "manual_person_names",
+                    "manual_facet_names", "manual_raters"):
+            kw.pop(key, None)
+
+        super().__init__(
+            no_of_items,
+            no_of_persons,
+            no_of_facet_elements=prelim.no_of_facet_elements,
+            max_score=prelim.max_score,
+            model="items",
+            manual_items=prelim.items.values,
+            manual_thresholds=prelim.thresholds.values,
+            manual_persons=prelim.persons.values,
+            manual_person_names=list(prelim.person_names),
+            manual_item_names=list(prelim.item_names),
+            manual_facet_names=list(prelim.facet_names),
+            manual_raters=implied_raters,
+            seed=seed,
+            **kw,
+        )
+        self.model = "pseudo_halo"
+        self.lambda_ = pd.Series(lam, index=self.facet_names)
+        self.omega = pd.Series(omega, index=self.facet_names)
+
+    def __getattr__(self, name):
+        """
+        Alternate spellings for lambda_/omega, matching MFRM's own
+        global_{model}/stretch_{model} attribute aliases (see
+        MFRM._PARAM_ALIASES) -- 'global_' for 'lambda_' (no model suffix
+        needed here, since this sim class is already model-specific;
+        trailing underscore because 'global', like 'lambda', is also a
+        Python keyword), 'stretch' for 'omega'. Only triggers when normal
+        attribute lookup fails, so it never shadows a real attribute.
+        """
+        if name == "global_":
+            return self.lambda_
+        if name == "stretch":
+            return self.omega
+        raise AttributeError(
+            f"{type(self).__name__!r} object has no attribute {name!r}"
+        )
+
+
+class MFRM_Sim_Bistretch(MFRM_Sim):
+    """
+    MFRM simulation -- "bistretch" parameterisation, a 3-parameter
+    (severity shift lambda_r, item-stretch omega_items_r, threshold-stretch
+    omega_thresholds_r) restriction of the fully-free 'bivector'
+    parameterisation -- combines MFRM_Sim_PseudoHalo's item-stretch axis
+    and MFRM_Sim_Centrality's threshold-stretch axis into a single
+    facet_element effect.
+
+    Thin wrapper: generates a preliminary MFRM_Sim(model='bivector') to
+    get realistic item locations/thresholds/persons, draws true
+    lambda_r/omega_items_r/omega_thresholds_r per rater, computes the
+    implied item_effects table via mu_ri = lambda_r + (omega_items_r - 1)
+    * delta_i (bivector's item axis carries the facet_element's overall
+    level, exactly as in MFRM_Sim_PseudoHalo) and the implied
+    threshold_effects table via lambda_rk = (omega_thresholds_r - 1) *
+    tau_k (bivector's threshold axis is already zero-sum shape-only, so
+    no lambda_r term here -- unlike MFRM_Sim_Centrality, where lambda_r
+    carries the level because 'thresholds' has no separate item axis to
+    carry it instead), then delegates to the full
+    MFRM_Sim(model='bivector', manual_item_effects=...,
+    manual_threshold_effects=...) machinery (fixed to the same
+    item/threshold/person values as the preliminary sim) for everything
+    else. All the actual generative machinery is reused unchanged; only
+    lambda_r/omega_items_r/omega_thresholds_r and their implied effect
+    tables are new.
+
+    See MFRM._derive_stretch_model / MFRM.calibrate_bistretch for the
+    corresponding closed-form estimation side.
+
+    Parameters
+    ----------
+    global_range : float, default 2
+        Total spread (maximum - minimum) of true lambda_r (severity
+        shift) values across raters. Renamed from MFRM_Sim's own
+        facet_range for this and the other two stretch models -- lambda_r
+        is the parameter that collapses this representation to 'global'
+        when every rater's omega_items_r == omega_thresholds_r == 1, and
+        'global_range' pairs directly with 'stretch_range' below,
+        matching the global_/stretch_items/stretch_thresholds attribute
+        alias naming (see MFRM._PARAM_ALIASES).
+    stretch_range : float, default 1
+        Total spread of true omega_items_r and omega_thresholds_r values
+        around 1 (analogous to global_range for lambda_r); used for both
+        axes unless overridden individually.
+    manual_lambda : array-like or None, default None
+        Custom true lambda_r values, length no_of_facet_elements. If None,
+        drawn the same way MFRM_Sim's own facet_range scales severities.
+    manual_omega_items : array-like or None, default None
+        Custom true omega_items_r values, length no_of_facet_elements. If
+        None, drawn as 1 + a stretch_range-scaled, zero-mean deviation.
+    manual_omega_thresholds : array-like or None, default None
+        Custom true omega_thresholds_r values, length no_of_facet_elements.
+        If None, drawn as 1 + a stretch_range-scaled, zero-mean deviation
+        (independently of omega_items_r).
+    seed : int or None, default None
+        Seed for lambda_r/omega_items_r/omega_thresholds_r generation and
+        everything else, via the preliminary and final MFRM_Sim calls.
+        Pass an int for full reproducibility.
+
+    See MFRM_Sim for all other parameter docs (item_range, person_sd,
+    missing, manual_items, manual_thresholds, manual_persons, etc. --
+    all forwarded unchanged to both the preliminary and final sims).
+
+    Attributes set (in addition to the usual MFRM_Sim attributes)
+    ---------------------------------------------------------------
+    lambda_ : pandas.Series
+        True generating lambda_r (severity shift) per rater.
+    omega_items : pandas.Series
+        True generating omega_items_r (item-difficulty stretch) per rater.
+    omega_thresholds : pandas.Series
+        True generating omega_thresholds_r (threshold stretch) per rater.
+    """
+
+    def __init__(
+        self,
+        no_of_items,
+        no_of_persons,
+        max_score,
+        no_of_facet_elements,
+        global_range=2,
+        stretch_range=1,
+        manual_lambda=None,
+        manual_omega_items=None,
+        manual_omega_thresholds=None,
+        seed=None,
+        **kw,
+    ):
+        if "facet_range" in kw:
+            raise TypeError(
+                "MFRM_Sim_Bistretch.__init__() got an unexpected keyword "
+                "argument 'facet_range' -- renamed to 'global_range' (it "
+                "controls the spread of true lambda_r values, not "
+                "MFRM_Sim's own facet_range, which would otherwise silently "
+                "absorb this into the discarded preliminary simulation)."
+            )
+        prelim = MFRM_Sim(
+            no_of_items,
+            no_of_persons,
+            no_of_facet_elements=no_of_facet_elements,
+            max_score=max_score,
+            model="bivector",
+            seed=seed,
+            **kw,
+        )
+
+        rng = np.random.default_rng(seed)
+        R = prelim.no_of_facet_elements
+
+        if manual_lambda is not None:
+            assert (
+                len(manual_lambda) == R
+            ), "Length of manual_lambda must match number of facet_elements."
+            lam = np.array(manual_lambda, dtype=float)
+        else:
+            lam = truncnorm.rvs(-1.96, 1.96, size=R, random_state=rng)
+            lam *= global_range / (lam.max() - lam.min())
+            lam -= lam.mean()
+
+        if manual_omega_items is not None:
+            assert (
+                len(manual_omega_items) == R
+            ), "Length of manual_omega_items must match number of facet_elements."
+            omega_items = np.array(manual_omega_items, dtype=float)
+        else:
+            dev = truncnorm.rvs(-1.96, 1.96, size=R, random_state=rng)
+            dev *= stretch_range / (dev.max() - dev.min())
+            dev -= dev.mean()
+            omega_items = 1.0 + dev
+
+        if manual_omega_thresholds is not None:
+            assert (
+                len(manual_omega_thresholds) == R
+            ), "Length of manual_omega_thresholds must match number of facet_elements."
+            omega_thresholds = np.array(manual_omega_thresholds, dtype=float)
+        else:
+            dev = truncnorm.rvs(-1.96, 1.96, size=R, random_state=rng)
+            dev *= stretch_range / (dev.max() - dev.min())
+            dev -= dev.mean()
+            omega_thresholds = 1.0 + dev
+
+        delta = prelim.items.values
+        tau = prelim.thresholds.values
+
+        implied_item_effects = pd.DataFrame(
+            [
+                lam[i] + (omega_items[i] - 1.0) * delta
+                for i in range(R)
+            ],
+            index=prelim.facet_names,
+            columns=prelim.item_names,
+        )
+        implied_threshold_effects = pd.DataFrame(
+            [
+                (omega_thresholds[i] - 1.0) * tau
+                for i in range(R)
+            ],
+            index=prelim.facet_names,
+            columns=range(1, prelim.max_score + 1),
+        )
+
+        # Already captured into prelim (and re-supplied explicitly below) --
+        # drop from kw so a caller who passed these directly doesn't hit a
+        # "got multiple values for keyword argument" TypeError.
+        for key in ("manual_items", "manual_thresholds", "manual_persons",
+                    "manual_item_names", "manual_person_names",
+                    "manual_facet_names", "manual_item_effects",
+                    "manual_threshold_effects"):
+            kw.pop(key, None)
+
+        super().__init__(
+            no_of_items,
+            no_of_persons,
+            no_of_facet_elements=prelim.no_of_facet_elements,
+            max_score=prelim.max_score,
+            model="bivector",
+            manual_items=prelim.items.values,
+            manual_thresholds=prelim.thresholds.values,
+            manual_persons=prelim.persons.values,
+            manual_person_names=list(prelim.person_names),
+            manual_item_names=list(prelim.item_names),
+            manual_facet_names=list(prelim.facet_names),
+            manual_item_effects=implied_item_effects,
+            manual_threshold_effects=implied_threshold_effects,
+            seed=seed,
+            **kw,
+        )
+        self.model = "bistretch"
+        self.lambda_ = pd.Series(lam, index=self.facet_names)
+        self.omega_items = pd.Series(omega_items, index=self.facet_names)
+        self.omega_thresholds = pd.Series(omega_thresholds, index=self.facet_names)
+
+    def __getattr__(self, name):
+        """
+        Alternate spellings for lambda_/omega_items/omega_thresholds,
+        matching MFRM's own global_{model}/stretch_items_{model}/
+        stretch_thresholds_{model} attribute aliases (see
+        MFRM._PARAM_ALIASES) -- 'global_' for 'lambda_' (no model suffix
+        needed here, since this sim class is already model-specific;
+        trailing underscore because 'global', like 'lambda', is also a
+        Python keyword), 'stretch_items'/'stretch_thresholds' for
+        'omega_items'/'omega_thresholds'. Only triggers when normal
+        attribute lookup fails, so it never shadows a real attribute.
+        """
+        if name == "global_":
+            return self.lambda_
+        if name == "stretch_items":
+            return self.omega_items
+        if name == "stretch_thresholds":
+            return self.omega_thresholds
+        raise AttributeError(
+            f"{type(self).__name__!r} object has no attribute {name!r}"
+        )

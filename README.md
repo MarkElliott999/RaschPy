@@ -6,7 +6,7 @@ _RaschPy_ has a parent class `Rasch` for analysis, with the following child clas
 - `SLM` for the simple logistic model (dichotomous Rasch model) (Rasch 1960)
 - `PCM` for the partial credit model (Masters 1982)
 - `RSM` for the rating scale model (Andrich 1978)
-- `MFRM` for the many-facet Rasch model (rating scale model formulation) (Linacre 1994), including extended rater representations (Elliott and Buttery 2022a, Elliott 2025), with five rater parameterisations (global, items, thresholds, bivector and matrix formulations)
+- `MFRM` for the many-facet Rasch model (rating scale model formulation) (Linacre 1994), including extended rater representations (Elliott and Buttery 2022a, Elliott 2025), with eight rater parameterisations (global, items, thresholds, bivector, matrix, centrality, pseudo_halo and bistretch formulations) — centrality and pseudo_halo are closed-form 2-parameter restrictions of thresholds/items respectively (Jin & Wang 2018-style rater centrality/extremity, and an item-difficulty-compression model), and bistretch is a closed-form 3-parameter restriction of bivector combining both stretch axes at once, all recovered without any new estimation machinery
 
 ## Analysis
 To analyse data, create an object in the appropriate class, passing a pandas DataFrame of response data as an argument along with other arguments relevant to the chosen Rasch model, such as the maximum score for `RSM` or `MFRM`, or a vector of maximum scores for `PCM`. At the time of writing, the `RSM` and `MFRM` classes only support a single response group (i.e. all items must have the same threshold structure), and the `MFRM` class only supports one additional facet for rater severity. Parameter estimation uses variants of PAIR (Choppin 1968, 1985), the eigenvector method (Garner & Engelhard 2002, 2009) and CPAT (Elliott & Buttery 2022a, 2022b).
@@ -170,7 +170,7 @@ rsm.save_stats('rsm_results', format='xlsx')
 
 ### Many-Facet Rasch Model (MFRM)
 
-Polytomous data with multiple raters. Data must be a DataFrame with a `(Rater, Person)` MultiIndex and items as columns. Five rater parameterisations are available, selected at calibration time:
+Polytomous data with multiple raters. Data must be a DataFrame with a `(Rater, Person)` MultiIndex and items as columns. Eight rater parameterisations are available, selected at calibration time:
 
 | `model=` | Rater severity structure |
 |---|---|
@@ -179,6 +179,11 @@ Polytomous data with multiple raters. Data must be a DataFrame with a `(Rater, P
 | `'thresholds'` | Separate severity per rater × threshold |
 | `'bivector'` | Separate severities per rater × item and per rater × threshold |
 | `'matrix'` | Full severity matrix per rater × item × threshold |
+| `'centrality'` (alias `'threshold_stretch'`) | 2 parameters per rater (shift + threshold-stretch), a closed-form restriction of `'thresholds'` |
+| `'pseudo_halo'` (alias `'item_stretch'`) | 2 parameters per rater (shift + item-difficulty-stretch), a closed-form restriction of `'items'` |
+| `'bistretch'` | 3 parameters per rater (shift + item-stretch + threshold-stretch), a closed-form restriction of `'bivector'` |
+
+`'threshold_stretch'`/`'item_stretch'` are exact synonyms for `'centrality'`/`'pseudo_halo'` — same model, same estimation, just an axis-based name matching `'items'`/`'thresholds'` and `'bistretch'`'s own naming. They work everywhere a model name is accepted: as the `model=`/`models=` value (e.g. `mfrm.calibrate(model='threshold_stretch')`, `mfrm.model_selection(models=['global', 'item_stretch'])`), and as the method-name suffix (e.g. `mfrm.calibrate_threshold_stretch()`, `mfrm.item_stats_df_item_stretch()`) for every method family that has a `_centrality`/`_pseudo_halo` variant. Attributes are still stored under the canonical `_centrality`/`_pseudo_halo` names (e.g. `mfrm.lambda_centrality`) regardless of which spelling was used to calibrate.
 
 ```python
 from raschpy import MFRM
@@ -223,7 +228,7 @@ Persons with entirely missing data are always removed at instantiation and store
 
 ### Many-Facet Rasch Model — Bivector formulation
 
-The bivector formulation represents rater severity as an additive combination of per-item leniency effects and per-threshold consistency effects, allowing rater behaviour to vary systematically across the latent continuum. It functions as rater-as-RSM, as opposed to the matrix formulation, which functions as rater-as-PCM
+The bivector formulation represents rater severity as an additive combination of per-item leniency effects and per-threshold consistency effects, allowing rater behaviour to vary systematically across the latent continuum. It functions as rater-as-RSM, as opposed to the matrix formulation, which functions as rater-as-PCM.
 
 ```python
 mfrm.calibrate(model='bivector')
@@ -239,6 +244,147 @@ mfrm.icc(item='Item_1', model='bivector', obs=True)
 mfrm.tcc(model='bivector', obs=True)
 
 mfrm.save_stats(model='bivector', filename='mfrm_bivector_results', format='xlsx')
+```
+
+---
+
+### Many-Facet Rasch Model — centrality and pseudo_halo formulations
+
+`'centrality'` and `'pseudo_halo'` are restricted forms of `'thresholds'` and `'items'` respectively, defined by two parameters: a severity shift `lambda_r` plus a stretch parameter `omega_r` (the same name for both models — `omega` is Jin & Wang's (2018) notation for a stretch coefficient for their centrality/extremity model, whish is `centrality` here); they sit between `'global'` (1 free parameter per rater) and their parent model on the `model_selection()` df ladder. `'threshold_stretch'`/`'item_stretch'` are exact aliases for `'centrality'`/`'pseudo_halo'` — e.g. `mfrm.calibrate(model='threshold_stretch')` or `mfrm.calibrate_item_stretch()` behave identically to the calls below. `lambda_{model}`/`omega_{model}` also have `global_{model}`/`stretch_{model}` as aliases (e.g. `mfrm.global_centrality` and `mfrm.stretch_centrality` are aliases for `mfrm.lambda_centrality` and `mfrm.omega_centrality`).
+
+For `centrality`, `omega_r > 1` spreads the reference thresholds apart for that rater ("central" — a larger person-location gap is needed to traverse to a more extreme category); conversely, `0 < omega_r < 1` compresses thresholds ("extreme"); `omega_r == 1` is neutral (Jin & Wang 2018). For `pseudo_halo`, `omega_r < 1` compresses the spread of reference item locations toward zero (the pseudo-halo signature — the rater effectively ignores/reduces differences in items locations, increasing the likelihood of a flat score profile as in the halo effect but without requiring local item dependence, hence the name `pseudo_halo`); `omega_r > 1` exaggerates real item-difficulty differences instead. Both stretch parameters can in principle take zero or negative values, representing a disordered situation for the reference facet – this is flagged via `UserWarning` but not clipped).
+
+`lambda_r`/`omega_r` are recovered per rater via a robust regression of the rater's full operational vector model values against the reference item/threshold values, controlled by `calibrate(..., regression='huber')` (default) or `regression='theil-sen'`. `'huber'` is an M-estimator that downweights, rather than discards, points with large residuals by switching from a loss function of squared error to one of MAE beyond a threshold; `'theil-sen'` is the median of pairwise slopes. If `'huber'`'s underlying M-estimator fit fails to converge for a given rater — not observed in testing — that rater automatically falls back to `'theil-sen'` with a `UserWarning` naming it; the rest of the raters are unaffected.
+
+```python
+mfrm.calibrate(model='centrality')
+mfrm.fit_statistics(model='centrality')
+
+print(mfrm.lambda_centrality)             # severity shift per rater
+print(mfrm.omega_centrality)            # threshold-stretch per rater
+print(mfrm.raters_centrality)           # reconstructed full (rater x threshold) severity table
+
+mfrm.calibrate(model='pseudo_halo')
+mfrm.fit_statistics(model='pseudo_halo')
+
+print(mfrm.lambda_pseudo_halo)            # severity shift per rater
+print(mfrm.omega_pseudo_halo)           # item-difficulty-stretch per rater
+print(mfrm.raters_pseudo_halo)          # reconstructed full (rater x item) severity table
+```
+
+`rater_stats_df()` for these two models returns the two model parameters (with bootstrap SEs and, if `full=True`, 95% CIs) as the primary `rater_stats_{model}` table, rather than the full reconstructed vector. A single call also stores that reconstructed vector separately, as `rater_stats_{model}_full_vector`:
+
+```python
+mfrm.rater_stats_df(model='centrality', full=True)
+print(mfrm.rater_stats_centrality)              # lambda/omega per rater, with SEs, 95% CIs, and fit stats
+print(mfrm.rater_stats_centrality_full_vector)  # the reconstructed full (rater x threshold) table instead
+
+mfrm.rater_stats_df(model='pseudo_halo', full=True)
+print(mfrm.rater_stats_pseudo_halo)              # lambda/omega per rater, with SEs, 95% CIs, and fit stats
+print(mfrm.rater_stats_pseudo_halo_full_vector)  # the reconstructed full (rater x item) table instead
+```
+
+Pass `alias=True` to relabel the primary table's parameter columns with a descriptive name consistent with the rest of the model family instead of `lambda`/`omega` — `'Global'` for `lambda` and `'Item stretch'`/`'Threshold stretch'` for `omega`, depending on which axis the model's stretch parameter operates on (`'Threshold stretch'` for `centrality`, `'Item stretch'` for `pseudo_halo`). This is purely cosmetic and does not affect values. `save_stats()` accepts the same `alias=` argument, forwarded straight through to its own internal `rater_stats_df()` call:
+
+```python
+mfrm.rater_stats_df(model='pseudo_halo', full=True, alias=True)
+print(mfrm.rater_stats_pseudo_halo.columns.get_level_values(0).unique())  # ['Global', 'Item stretch', 'Overall statistics']
+
+mfrm.save_stats(model='centrality', filename='mfrm_centrality_results', format='xlsx', alias=True)
+```
+
+Pass `divergence_test='wald'` or `'t'` to run an item-by-item (or threshold-by-threshold) divergence test comparing the free vector model's own per-element estimates (`'items'` for `pseudo_halo`, `'thresholds'` for `centrality`) against the reconstructed vector from the stretch model , flagging elements where the stretch representation diverges significantly from what the vector model estimates – a graded, localised complement to the aggregate `lambda`/`omega` summary and to the discrete `model_selection()`/`per_rater_model_selection()` ladder. The SE is derived from a single, paired bootstrap: each bootstrap resample produces estimates for both the stretch model and its corresponding vector model, so for a given resample, the free and stretch estimates are produced from the same resampled dataset. The difference is calculated directly per resample before taking the SD, rather than combining two independently-bootstrapped SEs via `sqrt(se1**2+se2**2)`; this correctly accounts for the correlation between the two sets of estimates. Off by default (`divergence_test=None`) since it requires `store_bootstrap=True`, a larger bootstrap-object footprint:
+
+```python
+mfrm.rater_stats_df(model='pseudo_halo', divergence_test='wald', correction='bh')
+print(mfrm.rater_stats_pseudo_halo['Flagged items'])  # per-rater count of significantly divergent items
+
+mfrm.rater_stats_df(model='centrality', full=True, divergence_test='wald')
+print(mfrm.rater_stats_centrality_full_vector['Threshold 1'])  # now has a 'Flagged' column too
+```
+
+`'wald'` references the test statistic against the standard normal distribution. `'t'` instead uses a plain Student's t-distribution with `no_of_samples - 1` degrees of freedom for small numbers of bootstraps run for speed; this is not a paired t-test since this would require nested bootstrapping at high cost; since the t-test converges to the Wald result once `no_of_samples` is a few hundred (at `n=300`, p-values near `alpha=0.05` differ by ~2%), if speed is less important, run `'wald'` with a larger `no_of_samples` instead, which improves the SE estimate itself rather than just widening the reference distribution around it.
+
+`full=True` gives two more ways to see which elements were flagged, alongside the `'Flagged items'`/`'Flagged categories'` count still shown in the primary table: one plain True/False column per item and/or threshold is added to the primary table itself, directly after that count, for scanning flagged status across all elements at a glance – and `rater_stats_{model}_full_vector` separately gets a per-element `'Flagged'` column added to each item/threshold's own `Estimate`/`SE`/CI block, for the same information alongside that element's own detail:
+
+```python
+mfrm.rater_stats_df(model='pseudo_halo', full=True, divergence_test='wald')
+print(mfrm.rater_stats_pseudo_halo['Item_1'])  # 'Flagged' column, True/False per rater
+```
+
+Pass `correction='bh'` to apply Benjamini-Hochberg FDR correction within each rater's own family of tests (the rater's items thresholds, not pooled across raters); default `correction=None` compares raw p-values against `alpha` (default `0.05`) directly. Pass `plot=True` to also build and store `self.fit_plot_{model}` (e.g. `self.fit_plot_pseudo_halo`) – a scatter of the free vector model's estimates against the stretch model's reconstruction, flagged elements in a different colour, in the style of `self.anchor_plot`.
+
+Since, as described above, `pseudo_halo` tests compression of item locations under an otherwise locally-independent response process, rather that classic halo effect's usual mechanism (elevated local item interdependence), pair `omega_pseudo_halo` with a per-rater residual-correlation to check for full halo effect:
+
+```python
+mfrm.item_res_corr_analysis_pseudo_halo()
+print(mfrm.item_residual_correlations_pseudo_halo)
+```
+
+A rater near the group's typical residual-correlation level with `omega_r < 1` more plausibly reflects genuine compressed-perception pseudo_halo; a rater whose residual correlation is a clear outlier above the group more plausibly reflects true local-dependence halo effect, fairly independently of that rater's own `omega_r`. Note that since there is often LID due to rating scale interdependence, as opposed to rater behaviour, and it is not possible to disentangle these two effects, this is a comparative diagnostic across raters rather than an absolute one.
+
+Both models also have dedicated simulation classes for genuine parameter recovery checks:
+
+```python
+from raschpy.simulation import MFRM_Sim_Centrality, MFRM_Sim_PseudoHalo
+
+sim = MFRM_Sim_Centrality(no_of_items=10, no_of_persons=200, no_of_raters=8, max_score=4, seed=42)
+print(sim.lambda_, sim.omega)   # true generating values
+
+mfrm = MFRM(sim)
+mfrm.calibrate(model='centrality')
+print(mfrm.lambda_centrality, mfrm.omega_centrality)  # compare against sim.lambda_/sim.omega
+```
+
+---
+
+### Many-Facet Rasch Model — bistretch formulation
+
+`'bistretch'` combines both stretch axes at once: a restricted of `'bivector'` with three parameters. Each rater is defined by a severity shift `lambda_r`, an item-difficulty-stretch `omega_items_r`, and a threshold-stretch `omega_thresholds_r`, instead of `'bivector'`'s full `I+K-1` free parameters. `omega_items_{model}` and `omega_thresholds_{model}` also have `stretch_items_{model}`/`stretch_thresholds_{model}` as aliases, matching the `stretch_{model}` aliases for `centrality`/`pseudo_halo`:
+
+```python
+mfrm.calibrate(model='bistretch')
+mfrm.fit_statistics(model='bistretch')
+
+print(mfrm.lambda_bistretch)              # severity shift per rater
+print(mfrm.omega_items_bistretch)       # item-difficulty-stretch per rater
+print(mfrm.omega_thresholds_bistretch)  # threshold-stretch per rater
+print(mfrm.raters_bistretch)            # reconstructed full (rater x item) x threshold severity table
+```
+
+As with `centrality`/`pseudo_halo`, `rater_stats_df()`'s primary `rater_stats_bistretch` table shows the 3 parameters (with SEs and, if `full=True`, 95% CIs); the reconstructed full (rater x item) x threshold vector is stored separately as `rater_stats_bistretch_full_vector`:
+
+```python
+mfrm.rater_stats_df(model='bistretch', full=True)
+print(mfrm.rater_stats_bistretch)              # lambda/omega_items/omega_thresholds per rater, with SEs, 95% CIs, and fit stats
+print(mfrm.rater_stats_bistretch_full_vector)  # the reconstructed full (rater x item) x threshold table instead
+```
+
+`alias=True` relabels all 3 columns — `'Global'`/`'Item stretch'`/`'Threshold stretch'` for `lambda`/`omega_items`/`omega_thresholds` respectively:
+
+```python
+mfrm.rater_stats_df(model='bistretch', full=True, alias=True)
+print(mfrm.rater_stats_bistretch.columns.get_level_values(0).unique())  # ['Global', 'Item stretch', 'Threshold stretch', 'Overall statistics']
+```
+
+Since `bistretch` restricts both axes at once, `divergence_test` runs against `bivector`'s item vector, and against its threshold vector, producing separate `'Flagged items'` and `'Flagged categories'` columns:
+
+```python
+mfrm.rater_stats_df(model='bistretch', divergence_test='t', correction='bh')
+print(mfrm.rater_stats_bistretch[['Flagged items', 'Flagged categories']])
+```
+
+As with `centrality`/`pseudo_halo`, a dedicated simulation class generates data with true `lambda_`/`omega_items`/`omega_thresholds` structure for genuine parameter recovery checks:
+
+```python
+from raschpy.simulation import MFRM_Sim_Bistretch
+
+sim = MFRM_Sim_Bistretch(no_of_items=10, no_of_persons=200, no_of_raters=8, max_score=4, seed=42)
+print(sim.lambda_, sim.omega_items, sim.omega_thresholds)   # true generating values
+
+mfrm = MFRM(sim)
+mfrm.calibrate(model='bistretch')
+print(mfrm.lambda_bistretch, mfrm.omega_items_bistretch, mfrm.omega_thresholds_bistretch)  # compare against sim values
 ```
 
 ---
@@ -261,17 +407,27 @@ print(pcm.model_comparison_rsm_pcm_lr_summary)
 
 ### MFRM rater-parameterisation model selection
 
-`model_selection()` calibrates all five rater parameterisations (global, items, thresholds, bivector, matrix) and ranks them by the chosen criterion:
+`model_selection()` calibrates all eight rater parameterisations (global, items, thresholds, bivector, matrix, centrality, pseudo_halo, bistretch) and ranks them by the chosen criterion — or pass `models=` to restrict the comparison to a subset (e.g. a direct two-model test) without paying the cost of calibrating the rest:
 
 ```python
 mfrm.model_selection(test='AIC')
-print(mfrm.model_comparison_mfrm_aic_summary)    # ranked comparison across all five models
+print(mfrm.model_comparison_mfrm_aic_summary)    # ranked comparison across all eight models
 print(mfrm.model_comparison_mfrm_aic_preferred)  # e.g. 'items'
+
+# LR degrees of freedom fall straight out of the parameter-count difference,
+# e.g. for centrality: (K-2)*(R-1) against thresholds, (R-1) against global;
+# for bistretch: (I+K-4)*(R-1) against bivector, (R-1) against centrality
+# or pseudo_halo, 2*(R-1) against global
+mfrm.model_selection(test='LR')
+print(mfrm.model_comparison_mfrm_lr_summary)
+
+# Restrict to a nested pair — only these two are calibrated
+mfrm.model_selection(test='LR', models=['bivector', 'bistretch'])
 ```
 
 **Mixed model: per-rater parameterisation assignment**
 
-Rather than forcing every rater into the same parameterisation, `per_rater_model_selection()` assigns each rater the simplest adequate structure individually, top-down (matrix → bivector → items/thresholds → global):
+Rather than forcing every rater into the same parameterisation, `per_rater_model_selection()` assigns each rater the simplest adequate structure according to the chosen criterion individually. By default (`test='AIC'`) it picks the minimum-AIC representation directly per rater, guarded by a significance test against the simplest active baseline (`aic_sig_test`) and an optional absolute effect gate (`min_effect`). Under `test='LR'`, it instead runs a top-down ladder (matrix → bivector → items/thresholds → global), then one extra targeted stretch test depending on which of those five wins: `bivector` winner → tested against `bistretch`; `thresholds` winner → tested against `centrality`; `items` winner → tested against `pseudo_halo`; `global` winner → tested against both `centrality` and `pseudo_halo`, resolved via a further `bistretch` test if both beat `global`. Either way, the assigned model can be any of all eight parameterisations, not just the original five. Pass a list to `models=` to restrict which parameterisations are considered — for AIC/BIC this may be any subset; for LR, `{'global', 'items', 'thresholds', 'bivector'}` must be included since LR is strictly a test for nested models, while `'matrix'` and each stretch model are independently toggleable:
 
 ```python
 mfrm.per_rater_model_selection(test='AIC')
@@ -282,6 +438,9 @@ print(mfrm.per_rater_model_selection_counts)  # how many raters landed on each p
 mfrm.fit_statistics(model='mixed')            # fit statistics using each rater's assigned model
 mfrm.rater_stats_df(model='mixed', full=True)
 print(mfrm.rater_stats_mixed)
+
+# Exclude matrix and all three stretch models – back to the original 5-model ladder
+mfrm.per_rater_model_selection(test='LR', models=['global', 'items', 'thresholds', 'bivector'])
 ```
 
 ---
@@ -351,6 +510,7 @@ _RaschPy_ includes simulation classes for generating synthetic data under each m
 ```python
 from raschpy.simulation import SLM_Sim, RSM_Sim, PCM_Sim
 from raschpy.simulation import MFRM_Sim_Global, MFRM_Sim_Items, MFRM_Sim_Thresholds, MFRM_Sim_Bivector, MFRM_Sim_Matrix
+from raschpy.simulation import MFRM_Sim_Centrality, MFRM_Sim_PseudoHalo, MFRM_Sim_Bistretch
 
 sim = SLM_Sim(no_of_items=10, no_of_persons=300, item_range=3, person_sd=1.5)
 data = sim.responses   # pandas DataFrame
@@ -437,6 +597,8 @@ Elliott, M., & Buttery, P. J. (2022b). Non-iterative conditional pairwise estima
 Garner, M., & Engelhard, G. (2002). An eigenvector method for estimating item parameters of the dichotomous and polytomous Rasch models. _Journal of Applied Measurement_, _3_(2), 107–128.
 
 Garner, M., & Engelhard, G. (2009). Using paired comparison matrices to estimate parameters of the partial credit Rasch measurement model for rater-mediated assessments. _Journal of Applied Measurement_, _10_(1), 30–41.
+
+Jin, K.-Y., & Wang, W.-C. (2018). A new facets model for rater's centrality/extremity response style. _Journal of Educational Measurement_, _55_(4), 543–563.
 
 Linacre, J. M. (1994). _Many-Facet Rasch Measurement_. MESA Press.
 

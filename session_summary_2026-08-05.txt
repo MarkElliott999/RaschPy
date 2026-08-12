@@ -1,0 +1,114 @@
+RaschPy — session summary
+Date: 2026-08-04 / 2026-08-05
+Scope: MFRM "bistretch" model — build completion, bug fix, sim class, audit
+
+------------------------------------------------------------------------
+WHAT THIS SESSION DID
+------------------------------------------------------------------------
+
+Picked up mid-build on "bistretch", a new 3-parameter (beta_r severity
+shift, alpha_r threshold-stretch, gamma_r item-stretch) MFRM rater
+representation — a restriction of the existing "bivector" model, derived
+closed-form from bivector's own item/threshold marginal vectors. This is
+the 8th MFRM rater-severity parameterisation, and completes the
+2-axis lattice's third built corner (item-axis x threshold-axis, each in
+{flat, stretch, full}): stretch x stretch, alongside the existing
+pseudo_halo (stretch x flat) and centrality (flat x stretch).
+
+1. Fixed a bug carried over from the previous session's batch alias
+   generation script. The script that cloned "_bivector"-suffixed
+   methods into "_bistretch" versions used a regex whose lookahead
+   boundary failed when "_centrality"/"_pseudo_halo" variants
+   immediately followed with no blank line in between — this silently
+   duplicated 12 method families, leaving unrenamed duplicate
+   "_centrality"/"_pseudo_halo" blocks appended after the correctly
+   named new "_bistretch" method. 11 of 12 were fixed in the prior
+   session via a line-based deletion script; the 12th ("test_stats_df")
+   had a non-uniform comment-block structure that broke the simple
+   line-count assumption and was fixed manually this session with a
+   direct Edit.
+
+2. Verified zero duplicates remain: an AST-based whole-class scan of
+   MFRM found 476 total methods, 0 duplicate names.
+
+3. Re-ran the full smoke and edge-case test suites to confirm the fix
+   caused no regressions elsewhere: 435/435 smoke checks passed,
+   86/86 edge-case checks passed (both suites predate bistretch's
+   addition to MFRM_MODELS, so they exercise the other 7 models only —
+   still a valid regression check for the duplicate-method fix itself).
+
+4. Ran a family-set-diff audit confirming bistretch has full alias
+   parity: exactly 46/46 method families present, matching bivector/
+   centrality/pseudo_halo exactly in both directions (nothing missing,
+   nothing extra).
+
+5. Functionally exercised ~39 bistretch-suffixed methods directly.
+   28 succeeded outright; the other 11 were traced to the test script
+   calling the wrong low-level signature (not real bugs) plus one
+   correctly-disabled method (andersen_lr_test, disabled globally for
+   all MFRM models since 2026-07-06 due to PAIR not being a genuine
+   likelihood estimator). Confirmed via direct signature comparison
+   that 4 of these (cat_prob, exp_score, kurtosis, variance) were
+   deliberately templated off "_items" rather than "_bivector" during
+   the batch generation, because facet_effects_bistretch uses the same
+   combined (facet_element, item) x threshold table structure as
+   items/matrix/bivector's shared dispatch — this is correct by design,
+   not a leftover bug.
+
+6. Built MFRM_Sim_Bistretch in raschpy/simulation/mfrm_sim.py, matching
+   the MFRM_Sim_Centrality/MFRM_Sim_PseudoHalo thin-wrapper pattern:
+   generates a preliminary MFRM_Sim(model='bivector'), draws true
+   beta_r/alpha_r/gamma_r per rater, computes the implied item_effects
+   table (mu_ri = beta_r + (gamma_r-1)*delta_i) and threshold_effects
+   table (lambda_rk = (alpha_r-1)*tau_k, no beta_r term since bivector's
+   threshold axis is zero-sum shape-only), then delegates to
+   MFRM_Sim(model='bivector', manual_item_effects=..., manual_
+   threshold_effects=...) for everything else. Exported from both
+   raschpy/__init__.py and raschpy/simulation/__init__.py.
+
+7. Verified genuine parameter recovery (not just "it runs"): simulated
+   N=300 persons, I=20 items, R=10 raters, K=4 max score, seed=42,
+   calibrated with MFRM(...).calibrate(model='bistretch'), correlated
+   true vs. estimated parameters: beta 0.997, alpha 0.983, gamma 0.768.
+   Gamma's weaker recovery matches the same pattern already seen for
+   pseudo_halo's gamma — expected, not a red flag.
+
+8. Wrote up the full build status, the batch-script bug post-mortem,
+   and the signature-design note to persistent memory
+   (raschpy_pseudo_extended_mfrm_method.md) for the future paper/
+   write-up.
+
+9. Created TODO_v1.1.2.md in the repo root listing everything still
+   open for v1.1.2.
+
+------------------------------------------------------------------------
+STATE AT END OF SESSION
+------------------------------------------------------------------------
+
+DONE:
+- bistretch core estimation (_estimate_raters_bistretch) + all dispatch
+  wiring (calibrate, cat_prob, _cat_probs_mfrm, anchor calibration,
+  _store_rater_se).
+- Full alias parity (46/46 families), zero duplicate methods.
+- MFRM_Sim_Bistretch, exported, genuine parameter recovery verified.
+- Full smoke + edge-case suites re-verified clean.
+
+NOT DONE — see TODO_v1.1.2.md for full detail:
+- model_selection() wiring for bistretch (rater_k, LR nested-pairs/df
+  entries vs bivector/centrality/pseudo_halo/global).
+- per_rater_model_selection()'s ladder rework (the agreed simplified
+  design: existing ladder unchanged, then one targeted stretch test
+  per branch).
+- Test suite coverage: MFRM_MODELS list extension in run_smoke_tests.py/
+  run_regression_tests.py/run_edge_case_tests.py, plus
+  tests/regression_data/bistretch/ fixtures.
+- Bistretch worked-example Jupyter notebook (matching the centrality/
+  pseudo_halo notebooks' depth and structure).
+- README.md bistretch section.
+- Manual (LaTeX) update — the big remaining job, full per-section
+  content per the user's repetition preference, not cross-references.
+
+Working tree still has uncommitted changes across mfrm.py, mfrm_sim.py,
+the __init__.py files, plus the earlier centrality/pseudo_halo work
+(notebooks, README, tests, regression fixtures) — nothing has been
+committed yet this session or last.

@@ -37,6 +37,9 @@ from raschpy.simulation import (
     MFRM_Sim_Thresholds,
     MFRM_Sim_Matrix,
     MFRM_Sim_Bivector,
+    MFRM_Sim_Centrality,
+    MFRM_Sim_PseudoHalo,
+    MFRM_Sim_Bistretch,
 )
 from scipy.stats import pearsonr
 
@@ -62,6 +65,9 @@ MFRM_MODELS = [
     ('Items',      'items',      MFRM_Sim_Items),
     ('Thresholds', 'thresholds', MFRM_Sim_Thresholds),
     ('Matrix',     'matrix',     MFRM_Sim_Matrix),
+    ('Centrality', 'centrality', MFRM_Sim_Centrality),
+    ('PseudoHalo', 'pseudo_halo', MFRM_Sim_PseudoHalo),
+    ('Bistretch',  'bistretch',  MFRM_Sim_Bistretch),
 ]
 
 # ── Reporting helpers ─────────────────────────────────────────────────────────
@@ -604,9 +610,11 @@ def assert_rsm_dif(m, verbose):
 # ── MFRM ─────────────────────────────────────────────────────────────────────
 
 def build_mfrm(sim_cls, model_name):
+    # centrality/pseudo_halo/bistretch renamed facet_range -> global_range
+    range_kw = {'global_range': RATER_RANGE} if model_name in ('centrality', 'pseudo_halo', 'bistretch') else {'facet_range': RATER_RANGE}
     sim = sim_cls(no_of_items=N_ITEMS, no_of_persons=N_PERSONS,
-                  no_of_raters=N_RATERS, max_score=MAX_SCORE,
-                  facet_range=RATER_RANGE, seed=SIM_SEED)
+                  no_of_facet_elements=N_RATERS, max_score=MAX_SCORE,
+                  seed=SIM_SEED, **range_kw)
     m = rp.MFRM(sim.responses, max_score=MAX_SCORE)
     m.calibrate(model=model_name)
     m.item_stats_df(model=model_name, seed=SIM_SEED)
@@ -869,7 +877,7 @@ def run_mfrm(generate=False, verbose=False):
 def build_bivector():
     sim = MFRM_Sim_Bivector(
         no_of_items=N_ITEMS, no_of_persons=N_PERSONS,
-        no_of_raters=N_RATERS, max_score=MAX_SCORE, seed=SIM_SEED,
+        no_of_facet_elements=N_RATERS, max_score=MAX_SCORE, seed=SIM_SEED,
     )
     m = rp.MFRM(sim.responses, max_score=MAX_SCORE)
     m.calibrate(model='bivector')
@@ -904,7 +912,7 @@ def generate_bivector(sim, m):
     # Consistency vs matrix
     sim2 = MFRM_Sim_Bivector(
         no_of_items=N_ITEMS, no_of_persons=N_PERSONS,
-        no_of_raters=N_RATERS, max_score=MAX_SCORE, seed=SIM_SEED,
+        no_of_facet_elements=N_RATERS, max_score=MAX_SCORE, seed=SIM_SEED,
     )
     m_mat = rp.MFRM(sim2.responses, max_score=MAX_SCORE)
     m_mat.calibrate(model='matrix')
@@ -952,7 +960,7 @@ def assert_bivector(sim, m, verbose=False):
     # Consistency vs matrix
     sim2 = MFRM_Sim_Bivector(
         no_of_items=N_ITEMS, no_of_persons=N_PERSONS,
-        no_of_raters=N_RATERS, max_score=MAX_SCORE, seed=SIM_SEED,
+        no_of_facet_elements=N_RATERS, max_score=MAX_SCORE, seed=SIM_SEED,
     )
     m_mat = rp.MFRM(sim2.responses, max_score=MAX_SCORE)
     m_mat.calibrate(model='matrix')
