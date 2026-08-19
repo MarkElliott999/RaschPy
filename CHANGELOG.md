@@ -2,6 +2,11 @@
 
 All notable changes to RaschPy are documented in this file.
 
+## [1.2.1] - 2026-08-19
+
+### Changed
+- **Performance: vectorized PAIR/CPAT pairwise-matrix construction** across RSM, PCM, and MFRM. All routines vectorised as far as possible, replaced (often nested) raw Python for-loops with matrix multiplication, following the approach already in place for SLM. Applies to PAIR estimation for items and raters in `_build_pairwise_matrix()` (RSM/PCM/MFRM item calibration) and `_estimate_raters_global()`/`_pair_matrix()` (MFRM rater estimation), and also to CPAT threshold estimation `_threshold_distance()`. Also eliminated redundant dataframe build calls. No API or behaviour change — verified numerically identical to the prior implementation. Performance improvement on small-scale testing showed speeding up of ~1.2x (global, larger designs) to ~2.6x (bivector); benefits `std_errors()` bootstrap loops most, since this involves repeated calibration calls, so may be second or even minutes rather than milliseconds there.
+
 ## [1.2.0] - 2026-08-06
 
 ### Added

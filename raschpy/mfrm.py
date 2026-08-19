@@ -186,6 +186,73 @@ class MFRM(Rasch):
             getattr(self, sev_attr),
         )
 
+    def _severity_grid(self, model):
+        """
+        Full (rater, item, category) severity grid for `model`'s ACTUAL
+        fitted facet_effects, broadcasting each model's natural
+        representation (scalar/per-item/per-threshold/per-cell) up to a
+        common shape. Used only for model_selection's min_effect gate.
+
+        Every model's facet_effects (via _get_params/_sev_attr) are
+        already stored in the same "raw per-category-step increment"
+        convention that facet_effects_matrix uses -- see _cat_probs_mfrm,
+        where a 'global' item_offset applied uniformly at every category
+        k is mathematically identical to a constant per-step increment of
+        that same size, cumsum'd; likewise 'items'/'thresholds' offsets.
+        So a plain broadcast (no reconstruction) gives a directly
+        comparable grid across every model pairing.
+        """
+        facet_effects = self._get_params(model)[2]
+        R, I, m = self.no_of_facet_elements, self.no_of_items, self.max_score
+        if model == "global":
+            vals = facet_effects.reindex(self.facet_names).to_numpy()
+            return np.broadcast_to(vals[:, None, None], (R, I, m))
+        if model in ("items", "pseudo_halo"):
+            vals = facet_effects.reindex(index=self.facet_names, columns=self.item_names).to_numpy()
+            return np.broadcast_to(vals[:, :, None], (R, I, m))
+        if model in ("thresholds", "centrality"):
+            vals = facet_effects.reindex(index=self.facet_names, columns=range(1, m + 1)).to_numpy()
+            return np.broadcast_to(vals[:, None, :], (R, I, m))
+        # bivector, matrix, bistretch: MultiIndex (rater, item) x category
+        mi = pd.MultiIndex.from_product([self.facet_names, self.item_names])
+        return facet_effects.reindex(mi).to_numpy().reshape(R, I, m)
+
+    def _model_effect(self, simple, complex_):
+        """max|severity grid difference| between two nested models -- see _severity_grid."""
+        return float(np.max(np.abs(self._severity_grid(complex_) - self._severity_grid(simple))))
+
+    def _walk_back_effect(self, selected, active_set, min_effect):
+        """
+        Post-hoc min_effect walk-back for model_selection's AIC/BIC branches,
+        restricted to the original five-model ladder (matrix -> bivector ->
+        {items, thresholds} -> global) -- mirrors per_rater_model_selection's
+        own AIC/BIC walk-back exactly, but only downgrades between two
+        models that are both in active_set (models= may have excluded one
+        side). centrality/pseudo_halo/bistretch selections are left
+        untouched, matching per_rater_model_selection's documented scope.
+        """
+        if min_effect <= 0 or selected not in ("matrix", "bivector", "items", "thresholds"):
+            return selected
+        if selected == "matrix" and "bivector" in active_set:
+            if self._model_effect("bivector", "matrix") < min_effect:
+                selected = "bivector"
+        if selected == "bivector" and "items" in active_set and "thresholds" in active_set:
+            thresh_shape_ok = self._model_effect("items", "bivector") >= min_effect
+            item_dev_ok = self._model_effect("thresholds", "bivector") >= min_effect
+            if not thresh_shape_ok and not item_dev_ok:
+                selected = "global"
+            elif not thresh_shape_ok:
+                selected = "items"
+            elif not item_dev_ok:
+                selected = "thresholds"
+        if selected == "items" and "global" in active_set:
+            if self._model_effect("global", "items") < min_effect:
+                selected = "global"
+        if selected == "thresholds" and "global" in active_set:
+            if self._model_effect("global", "thresholds") < min_effect:
+                selected = "global"
+        return selected
+
     def _get_abils(self, model, anchor=False):
         """Return person_location estimates for the requested model. Auto-triggers if needed."""
         attr = f"anchor_persons_{model}" if anchor else f"persons_{model}"
@@ -1291,19 +1358,14 @@ class MFRM(Rasch):
             .transpose((1, 0, 2))
         )  # (I, R, P)
 
-        matrix = np.array(
-            [
-                [
-                    sum(
-                        np.count_nonzero(data[i, r, :] == data[j, r, :] + 1)
-                        for r in range(self.no_of_facet_elements)
-                    )
-                    for j in range(self.no_of_items)
-                ]
-                for i in range(self.no_of_items)
-            ],
-            dtype=np.float64,
-        )
+        # Fold (R, P) into one axis so the sum over facet_elements and
+        # persons collapses into a single matmul per category.
+        flat = data.reshape(self.no_of_items, -1)
+        matrix = np.zeros((self.no_of_items, self.no_of_items), dtype=np.float64)
+        for category in range(self.max_score):
+            higher = (flat == category + 1).astype(np.float64)
+            lower = (flat == category).astype(np.float64)
+            matrix += higher @ lower.T
         return matrix, np.array(self.item_names)
 
     def item_diffs(
@@ -1340,15 +1402,14 @@ class MFRM(Rasch):
             .transpose((1, 0, 2))
         )  # (I, R, P)
 
-        # Sum count matrices across facet_elements
-        num_matrix = np.zeros((self.no_of_items, self.no_of_items))
-        den_matrix = np.zeros((self.no_of_items, self.no_of_items))
-        for r in range(self.no_of_facet_elements):
-            at_k = (data[:, r, :] == threshold).astype(np.float64)
-            at_km1 = (data[:, r, :] == threshold - 1).astype(np.float64)
-            at_kp1 = (data[:, r, :] == threshold + 1).astype(np.float64)
-            num_matrix += at_k @ at_k.T
-            den_matrix += at_km1 @ at_kp1.T
+        # Sum count matrices across facet_elements: fold (R, P) into one axis
+        # so the sum over raters and persons collapses into a single matmul.
+        flat = data.reshape(self.no_of_items, -1)
+        at_k = (flat == threshold).astype(np.float64)
+        at_km1 = (flat == threshold - 1).astype(np.float64)
+        at_kp1 = (flat == threshold + 1).astype(np.float64)
+        num_matrix = at_k @ at_k.T
+        den_matrix = at_km1 @ at_kp1.T
 
         valid = (num_matrix + den_matrix) > 0
         num_s = np.where(valid, num_matrix + constant, 0.0)
@@ -1385,16 +1446,11 @@ class MFRM(Rasch):
     def _pair_matrix(self, data_2d, constant):
         """Build a PAIR pairwise matrix from (R, P) data and apply smoothing."""
         R = data_2d.shape[0]
-        matrix = np.array(
-            [
-                [
-                    np.count_nonzero(data_2d[r1, :] == data_2d[r2, :] + 1)
-                    for r2 in range(R)
-                ]
-                for r1 in range(R)
-            ],
-            dtype=np.float64,
-        )
+        matrix = np.zeros((R, R), dtype=np.float64)
+        for category in range(self.max_score):
+            higher = (data_2d == category + 1).astype(np.float64)
+            lower = (data_2d == category).astype(np.float64)
+            matrix += higher @ lower.T
         constant_matrix = ((matrix + matrix.T) > 0).astype(np.float64) * constant
         matrix += constant_matrix
         np.fill_diagonal(matrix, matrix.diagonal() + constant)
@@ -1444,19 +1500,16 @@ class MFRM(Rasch):
             .transpose((1, 0, 2))
         )  # (I, R, P)
 
-        matrix = np.array(
-            [
-                [
-                    sum(
-                        np.count_nonzero(data[item, r1, :] == data[item, r2, :] + 1)
-                        for item in range(self.no_of_items)
-                    )
-                    for r2 in range(self.no_of_facet_elements)
-                ]
-                for r1 in range(self.no_of_facet_elements)
-            ],
-            dtype=np.float64,
+        # Fold (I, P) into one axis so the sum over items and persons
+        # collapses into a single matmul per category.
+        flat = data.transpose(1, 0, 2).reshape(self.no_of_facet_elements, -1)
+        matrix = np.zeros(
+            (self.no_of_facet_elements, self.no_of_facet_elements), dtype=np.float64
         )
+        for category in range(self.max_score):
+            higher = (flat == category + 1).astype(np.float64)
+            lower = (flat == category).astype(np.float64)
+            matrix += higher @ lower.T
         constant_matrix = ((matrix + matrix.T) > 0).astype(np.float64) * constant
         matrix += constant_matrix
         np.fill_diagonal(matrix, matrix.diagonal() + constant)
@@ -1467,16 +1520,9 @@ class MFRM(Rasch):
         )
 
     def _item_rater_element(
-        self, item, constant=0.1, method="cos", matrix_power=3, log_lik_tol=0.000001
+        self, item, data, constant=0.1, method="cos", matrix_power=3, log_lik_tol=0.000001
     ):
         """PAIR facet_element effect for a single item (items parameterisation)."""
-        data = (
-            self.responses.values.reshape(
-                self.no_of_facet_elements, self.no_of_persons, -1
-            )
-            .swapaxes(1, 2)
-            .transpose((1, 0, 2))
-        )  # (I, R, P)
         matrix = self._pair_matrix(data[item, :, :], constant)
         mat = self._raise_matrix_power(matrix, matrix_power, constant)
         return self.priority_vector(
@@ -1487,10 +1533,18 @@ class MFRM(Rasch):
         self, constant=0.1, method="cos", matrix_power=3, log_lik_tol=0.000001
     ):
         """PAIR facet_element effect estimation — vector per (facet_element, item)."""
+        data = (
+            self.responses.values.reshape(
+                self.no_of_facet_elements, self.no_of_persons, -1
+            )
+            .swapaxes(1, 2)
+            .transpose((1, 0, 2))
+        )  # (I, R, P)
         facet_elements = np.zeros((self.no_of_facet_elements, self.no_of_items))
         for i in range(self.no_of_items):
             facet_elements[:, i] = self._item_rater_element(
                 i,
+                data,
                 constant=constant,
                 method=method,
                 matrix_power=matrix_power,
@@ -1501,17 +1555,9 @@ class MFRM(Rasch):
         )
 
     def _threshold_rater_element(
-        self, category, constant=0.1, method="cos", matrix_power=3, log_lik_tol=0.000001
+        self, category, data, constant=0.1, method="cos", matrix_power=3, log_lik_tol=0.000001
     ):
         """PAIR facet_element effect for a single threshold (thresholds parameterisation)."""
-        data = (
-            self.responses.values.reshape(
-                self.no_of_facet_elements, self.no_of_persons, -1
-            )
-            .swapaxes(1, 2)
-            .transpose((1, 0, 2))
-        )  # (I, R, P)
-
         # Sum across items: count(X_{i,r1}==k+1 AND X_{i,r2}==k)
         matrix = np.zeros((self.no_of_facet_elements, self.no_of_facet_elements))
         for i in range(self.no_of_items):
@@ -1533,10 +1579,18 @@ class MFRM(Rasch):
         self, constant=0.1, method="cos", matrix_power=3, log_lik_tol=0.000001
     ):
         """PAIR facet_element effect estimation — vector per (facet_element, threshold)."""
+        data = (
+            self.responses.values.reshape(
+                self.no_of_facet_elements, self.no_of_persons, -1
+            )
+            .swapaxes(1, 2)
+            .transpose((1, 0, 2))
+        )  # (I, R, P)
         facet_elements = np.zeros((self.no_of_facet_elements, self.max_score))
         for k in range(self.max_score):
             facet_elements[:, k] = self._threshold_rater_element(
                 k,
+                data,
                 constant=constant,
                 method=method,
                 matrix_power=matrix_power,
@@ -2103,20 +2157,13 @@ class MFRM(Rasch):
         self,
         item,
         category,
+        data,
         constant=0.1,
         method="cos",
         matrix_power=3,
         log_lik_tol=0.000001,
     ):
         """PAIR facet_element effect for a single (item, category) cell (matrix param)."""
-        data = (
-            self.responses.values.reshape(
-                self.no_of_facet_elements, self.no_of_persons, -1
-            )
-            .swapaxes(1, 2)
-            .transpose((1, 0, 2))
-        )  # (I, R, P)
-
         at_k = (data[item, :, :] == category + 1).astype(np.float64)  # (R, P)
         at_km1 = (data[item, :, :] == category).astype(np.float64)
         matrix = at_k @ at_km1.T
@@ -2135,6 +2182,13 @@ class MFRM(Rasch):
         self, constant=0.1, method="cos", matrix_power=3, log_lik_tol=0.000001
     ):
         """PAIR facet_element effect estimation — full (facet_element, item, threshold) matrix."""
+        data = (
+            self.responses.values.reshape(
+                self.no_of_facet_elements, self.no_of_persons, -1
+            )
+            .swapaxes(1, 2)
+            .transpose((1, 0, 2))
+        )  # (I, R, P)
         facet_elements = np.zeros(
             (self.no_of_facet_elements, self.no_of_items, self.max_score)
         )
@@ -2143,6 +2197,7 @@ class MFRM(Rasch):
                 facet_elements[:, i, k] = self._matrix_rater_element(
                     i,
                     k,
+                    data,
                     constant=constant,
                     method=method,
                     matrix_power=matrix_power,
@@ -2230,18 +2285,16 @@ class MFRM(Rasch):
         mi = pd.MultiIndex.from_product(
             [self.facet_names, self.item_names], names=[self.facet, "item"]
         )
-        rows = []
-        for facet_element in self.facet_names:
-            for item in self.item_names:
-                row = np.array(
-                    [
-                        self.facet_effects_bivector_items.loc[facet_element, item]
-                        + self.facet_effects_bivector_thresholds.loc[facet_element, k]
-                        for k in range(1, self.max_score + 1)
-                    ]
-                )
-                rows.append(row)
-        self.facet_effects_bivector = pd.DataFrame(rows, index=mi, columns=range(1, self.max_score + 1))
+        items_arr = self.facet_effects_bivector_items.reindex(
+            index=self.facet_names, columns=self.item_names
+        ).to_numpy()  # (R, I)
+        thresh_arr = self.facet_effects_bivector_thresholds.reindex(
+            index=self.facet_names, columns=range(1, self.max_score + 1)
+        ).to_numpy()  # (R, K)
+        full = items_arr[:, :, None] + thresh_arr[:, None, :]  # (R, I, K)
+        self.facet_effects_bivector = pd.DataFrame(
+            full.reshape(-1, self.max_score), index=mi, columns=range(1, self.max_score + 1)
+        )
 
     def _estimate_raters_bistretch(self, regression="huber", **kw):
         """
@@ -2292,18 +2345,16 @@ class MFRM(Rasch):
         mi = pd.MultiIndex.from_product(
             [self.facet_names, self.item_names], names=[self.facet, "item"]
         )
-        rows = []
-        for facet_element in self.facet_names:
-            for item in self.item_names:
-                row = np.array(
-                    [
-                        item_recon.loc[facet_element, item]
-                        + thresh_recon.loc[facet_element, k]
-                        for k in range(1, self.max_score + 1)
-                    ]
-                )
-                rows.append(row)
-        self.facet_effects_bistretch_full_vector = pd.DataFrame(rows, index=mi, columns=range(1, self.max_score + 1))
+        items_arr = item_recon.reindex(
+            index=self.facet_names, columns=self.item_names
+        ).to_numpy()  # (R, I)
+        thresh_arr = thresh_recon.reindex(
+            index=self.facet_names, columns=range(1, self.max_score + 1)
+        ).to_numpy()  # (R, K)
+        full = items_arr[:, :, None] + thresh_arr[:, None, :]  # (R, I, K)
+        self.facet_effects_bistretch_full_vector = pd.DataFrame(
+            full.reshape(-1, self.max_score), index=mi, columns=range(1, self.max_score + 1)
+        )
         self.facet_effects_bistretch = pd.DataFrame(
             {"lambda": lam, "omega_items": omega_items, "omega_thresholds": omega_thresholds}
         )
@@ -6093,6 +6144,7 @@ class MFRM(Rasch):
         models=None,
         aic_sig_test=True,
         alpha=0.05,
+        min_effect=0,
         sampling="dynamic",
         warm_corr=True,
         tolerance=0.00001,
@@ -6152,6 +6204,23 @@ class MFRM(Rasch):
         alpha : float, default 0.05
             Significance level for the AIC relative-likelihood test
             (used only when test='AIC' and aic_sig_test=True).
+        min_effect : float, default 0
+            Minimum effect size (logits) required to prefer a more complex
+            model over a simpler one. The effect between two models is the
+            max absolute difference between their fitted severity surfaces
+            (each model's facet_effects broadcast to a common (rater, item,
+            category) grid -- see _severity_grid -- same units as
+            facet_effects_matrix for every model). For test='LR', an
+            additional condition alongside the p-value for every reported
+            pair: the summary table's 'Preferred' column names the complex
+            model only if p < alpha AND effect >= min_effect, otherwise the
+            simpler one. For AIC/BIC, applied as a post-hoc walk-back from
+            the selected model toward 'global', restricted to the original
+            five-model ladder (matrix -> bivector -> {items, thresholds} ->
+            global) -- if AIC/BIC selects centrality/pseudo_halo/bistretch
+            directly, min_effect does not walk it back further (same scope
+            as per_rater_model_selection's own min_effect). Default 0
+            disables (never gates).
         sampling : None, 'dynamic', or int, default 'dynamic'
             Subsamples non-extreme persons before LL computation (parameters
             estimated on full data; only the LL evaluation is subsampled).
@@ -6183,8 +6252,10 @@ class MFRM(Rasch):
 
         Attributes set (LR)
         -------------------
-        model_comparison_mfrm_lr : dict  {pair_label: (LR, df, p)}
-        model_comparison_mfrm_lr_summary : pd.DataFrame
+        model_comparison_mfrm_lr : dict  {pair_label: {LR, df, p-value, Effect, Preferred}}
+        model_comparison_mfrm_lr_summary : pd.DataFrame  Effect and Preferred columns
+            reflect min_effect (see above); Preferred is per-pair, not an
+            overall selected model.
         """
         models = None if models is None else [self._MODEL_ALIASES.get(m, m) for m in models]
         if test not in ("LR", "AIC", "BIC"):
@@ -6281,26 +6352,29 @@ class MFRM(Rasch):
                 .rename_axis("Model")
             )
 
+            active_set = set(active_models)
             if aic_sig_test:
                 baseline = min(active_models, key=lambda mod: (k_model[mod], aic[mod]))
                 delta = aic[baseline] - aic[best_mod]
                 aic_p = float(np.exp(-abs(delta) / 2))
                 preferred = best_mod if (delta > 0 and aic_p < alpha) else baseline
+                preferred = self._walk_back_effect(preferred, active_set, min_effect)
                 self.model_comparison_mfrm_aic_baseline = baseline
                 self.model_comparison_mfrm_aic_p = aic_p
                 self.model_comparison_mfrm_aic_preferred = preferred
                 summary_df["ΔAIC"] = summary_df["AIC"] - aic[baseline]
                 self.model_comparison_mfrm_aic_summary = summary_df
             else:
-                preferred = best_mod
+                preferred = self._walk_back_effect(best_mod, active_set, min_effect)
                 self.model_comparison_mfrm_aic_preferred = preferred
                 self.model_comparison_mfrm_aic_summary = summary_df
 
         elif test == "BIC":
             bic = {mod: k_model[mod] * np.log(n_ll) - 2 * ll[mod] for mod in active_models}
             best_mod = min(bic, key=bic.__getitem__)
+            preferred = self._walk_back_effect(best_mod, set(active_models), min_effect)
             self.model_comparison_mfrm_bic = bic
-            self.model_comparison_mfrm_bic_preferred = best_mod
+            self.model_comparison_mfrm_bic_preferred = preferred
             self.model_comparison_mfrm_bic_summary = (
                 pd.DataFrame(
                     {mod: {"LL": ll[mod], "k": k_model[mod], "BIC": bic[mod]}
@@ -6368,8 +6442,13 @@ class MFRM(Rasch):
                     lr_stat = 0.0
                 df_val = df_map[(null_mod, alt_mod)]
                 p_val = float(chi2.sf(lr_stat, df_val))
+                effect = self._model_effect(null_mod, alt_mod)
+                preferred = alt_mod if (p_val < alpha and effect >= min_effect) else null_mod
                 label = f"{null_mod} vs {alt_mod}"
-                lr_results[label] = {"LR": lr_stat, "df": df_val, "p-value": p_val}
+                lr_results[label] = {
+                    "LR": lr_stat, "df": df_val, "p-value": p_val,
+                    "Effect": effect, "Preferred": preferred,
+                }
 
             self.model_comparison_mfrm_lr = lr_results
             self.model_comparison_mfrm_lr_summary = (
@@ -6844,21 +6923,21 @@ class MFRM(Rasch):
                 # beat). A more complex model is retained only if it's both
                 # significant AND clears min_effect.
                 if selected == "bivector" and bistretch_allowed:
-                    lr_bis = max(0.0, -2.0 * (ll_biv - ll_bis))
+                    lr_bis = max(0.0, -2.0 * (ll_bis - ll_biv))
                     df_bis = (n_items + m - 1) - 3
                     p_bis = float(chi2.sf(lr_bis, df_bis))
                     rec.update({"LR_biv_vs_bis": lr_bis, "p_biv_vs_bis": p_bis})
                     if not (p_bis < alpha and eff_biv_bis >= min_effect):
                         selected = "bistretch"
                 elif selected == "thresholds" and centrality_allowed:
-                    lr_cen = max(0.0, -2.0 * (ll_thr - ll_cen))
+                    lr_cen = max(0.0, -2.0 * (ll_cen - ll_thr))
                     df_cen = m - 2
                     p_cen = float(chi2.sf(lr_cen, df_cen))
                     rec.update({"LR_thr_vs_cen": lr_cen, "p_thr_vs_cen": p_cen})
                     if not (p_cen < alpha and eff_thr_cen >= min_effect):
                         selected = "centrality"
                 elif selected == "items" and pseudo_halo_allowed:
-                    lr_pha = max(0.0, -2.0 * (ll_itm - ll_pha))
+                    lr_pha = max(0.0, -2.0 * (ll_pha - ll_itm))
                     df_pha = n_items - 2
                     p_pha = float(chi2.sf(lr_pha, df_pha))
                     rec.update({"LR_itm_vs_pha": lr_pha, "p_itm_vs_pha": p_pha})

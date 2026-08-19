@@ -580,34 +580,24 @@ class PCM(Rasch):
             Item name owning each row/column (repeated per category).
         """
         df_array = self.responses.to_numpy()
-        cum_scores = np.concatenate(([0], np.cumsum(self.max_score_vector.to_numpy())))
-        total_matrix_dim = cum_scores[-1]
-        matrix = np.zeros((total_matrix_dim, total_matrix_dim), dtype=np.float64)
+        row_blocks = []
+        col_blocks = []
         row_items = []
 
-        for item_1 in range(self.no_of_items):
-            max_k1 = self.max_score_vector.iloc[item_1]
-            row_items.extend([self.item_names[item_1]] * max_k1)
-            start_1 = cum_scores[item_1]
+        for item in range(self.no_of_items):
+            max_k = self.max_score_vector.iloc[item]
+            row_items.extend([self.item_names[item]] * max_k)
 
-            for item_2 in range(self.no_of_items):
-                max_k2 = self.max_score_vector.iloc[item_2]
-                start_2 = cum_scores[item_2]
+            scores = df_array[:, item]
+            onehot = np.zeros((df_array.shape[0], max_k + 1), dtype=np.float64)
+            valid = ~np.isnan(scores)
+            onehot[valid, scores[valid].astype(int)] = 1.0
+            row_blocks.append(onehot[:, 1:])  # categories 1..max_k
+            col_blocks.append(onehot[:, :max_k])  # categories 0..max_k-1
 
-                s1 = df_array[:, item_1]
-                s2 = df_array[:, item_2]
-                valid_mask = ~np.isnan(s1) & ~np.isnan(s2)
-                if not np.any(valid_mask):
-                    continue
-
-                s1_valid = s1[valid_mask].astype(int)
-                s2_valid = s2[valid_mask].astype(int)
-
-                for i in range(max_k1):
-                    m1 = s1_valid == i + 1
-                    if np.any(m1):
-                        counts = np.bincount(s2_valid[m1], minlength=max_k2)[:max_k2]
-                        matrix[start_1 + i, start_2 : start_2 + max_k2] = counts
+        row_matrix = np.concatenate(row_blocks, axis=1)
+        col_matrix = np.concatenate(col_blocks, axis=1)
+        matrix = row_matrix.T @ col_matrix
 
         return matrix, np.array(row_items)
 
@@ -3751,6 +3741,7 @@ class PCM(Rasch):
         test="AIC",
         aic_sig_test=True,
         alpha=0.05,
+        min_effect=0,
         sampling="dynamic",
         warm_corr=True,
         tolerance=0.00001,
@@ -3782,6 +3773,15 @@ class PCM(Rasch):
             when aic_sig_test=True, for the AIC relative-likelihood test.
             Not used by BIC, which has no formal significance test and
             simply prefers whichever model has the lower BIC.
+        min_effect : float, default 0
+            Minimum effect size (logits) required to prefer PCM over RSM,
+            in addition to the significance/IC test for each test type.
+            The effect is max|PCM.thresholds - RSM.thresholds| -- the
+            largest absolute deviation of any single item's own
+            (item-difficulty-centred) threshold shape from RSM's single
+            shared threshold vector. Applied as PCM preferred only if the
+            test's own condition holds AND effect >= min_effect; RSM is
+            retained otherwise. Default 0 disables (never gates).
         sampling : None, 'dynamic', or int, default 'dynamic'
             Controls subsampling of non-extreme persons before computing
             log-likelihoods (parameters are always estimated on the full
@@ -3805,6 +3805,7 @@ class PCM(Rasch):
 
         Attributes set
         --------------
+        model_comparison_rsm_pcm_effect : max|PCM.thresholds - RSM.thresholds| (see min_effect).
         model_comparison_rsm_pcm_lr, _df, _p, _lr_preferred, _lr_summary : LR test results.
         model_comparison_rsm_pcm_aic, _aic_preferred, _aic_summary : AIC results.
         model_comparison_rsm_pcm_aic_p : relative likelihood p-value (aic_sig_test only).
@@ -3870,6 +3871,9 @@ class PCM(Rasch):
         k_pcm = int(self.thresholds_uncentred.notna().sum().sum()) - 1
         k_rsm = (self.no_of_items - 1) + (max_score - 1)
 
+        effect = float(self.thresholds.sub(rsm.thresholds, axis=1).abs().to_numpy().max())
+        self.model_comparison_rsm_pcm_effect = effect
+
         if test == "LR":
             lr = -2 * (ll_rsm - ll_pcm)
             if lr < 0:
@@ -3882,13 +3886,13 @@ class PCM(Rasch):
                 lr = 0.0
             df = (self.no_of_items - 1) * (max_score - 1)
             p = float(chi2.sf(lr, df))
-            preferred = "PCM" if p < alpha else "RSM"
+            preferred = "PCM" if (p < alpha and effect >= min_effect) else "RSM"
             self.model_comparison_rsm_pcm_lr = lr
             self.model_comparison_rsm_pcm_df = df
             self.model_comparison_rsm_pcm_p = p
             self.model_comparison_rsm_pcm_lr_preferred = preferred
             self.model_comparison_rsm_pcm_lr_summary = pd.Series(
-                {"LR statistic": lr, "df": df, "p-value": p, "Preferred": preferred},
+                {"LR statistic": lr, "df": df, "p-value": p, "Effect": effect, "Preferred": preferred},
                 name="RSM vs PCM LR test",
             )
 
@@ -3900,7 +3904,7 @@ class PCM(Rasch):
             if aic_sig_test:
                 delta = aic_rsm - aic_pcm
                 aic_p = float(np.exp(-abs(delta) / 2))
-                preferred = "PCM" if (delta > 0 and aic_p < alpha) else "RSM"
+                preferred = "PCM" if (delta > 0 and aic_p < alpha and effect >= min_effect) else "RSM"
                 self.model_comparison_rsm_pcm_aic_p = aic_p
                 self.model_comparison_rsm_pcm_aic_preferred = preferred
                 self.model_comparison_rsm_pcm_aic_summary = pd.Series(
@@ -3908,26 +3912,27 @@ class PCM(Rasch):
                         "PCM AIC": aic_pcm,
                         "RSM AIC": aic_rsm,
                         "p-value": aic_p,
+                        "Effect": effect,
                         "Preferred": preferred,
                     },
                     name="RSM vs PCM AIC comparison",
                 )
             else:
-                preferred = "PCM" if aic_pcm < aic_rsm else "RSM"
+                preferred = "PCM" if (aic_pcm < aic_rsm and effect >= min_effect) else "RSM"
                 self.model_comparison_rsm_pcm_aic_preferred = preferred
                 self.model_comparison_rsm_pcm_aic_summary = pd.Series(
-                    {"PCM AIC": aic_pcm, "RSM AIC": aic_rsm, "Preferred": preferred},
+                    {"PCM AIC": aic_pcm, "RSM AIC": aic_rsm, "Effect": effect, "Preferred": preferred},
                     name="RSM vs PCM AIC comparison",
                 )
 
         elif test == "BIC":
             bic_pcm = k_pcm * np.log(n_ll) - 2 * ll_pcm
             bic_rsm = k_rsm * np.log(n_ll) - 2 * ll_rsm
-            preferred = "PCM" if bic_pcm < bic_rsm else "RSM"
+            preferred = "PCM" if (bic_pcm < bic_rsm and effect >= min_effect) else "RSM"
             self.model_comparison_rsm_pcm_bic = {"PCM": bic_pcm, "RSM": bic_rsm}
             self.model_comparison_rsm_pcm_bic_preferred = preferred
             self.model_comparison_rsm_pcm_bic_summary = pd.Series(
-                {"PCM BIC": bic_pcm, "RSM BIC": bic_rsm, "Preferred": preferred},
+                {"PCM BIC": bic_pcm, "RSM BIC": bic_rsm, "Effect": effect, "Preferred": preferred},
                 name="RSM vs PCM BIC comparison",
             )
 

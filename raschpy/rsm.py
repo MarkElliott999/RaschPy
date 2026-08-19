@@ -515,16 +515,11 @@ class RSM(Rasch):
             Item name for each row/column (identity mapping for RSM).
         """
         df_array = self.responses.to_numpy(dtype=np.float64)
-        matrix = np.array(
-            [
-                [
-                    np.count_nonzero(df_array[:, i] == df_array[:, j] + 1)
-                    for j in range(self.no_of_items)
-                ]
-                for i in range(self.no_of_items)
-            ],
-            dtype=np.float64,
-        )
+        matrix = np.zeros((self.no_of_items, self.no_of_items), dtype=np.float64)
+        for category in range(self.max_score):
+            higher = (df_array == category + 1).astype(np.float64)
+            lower = (df_array == category).astype(np.float64)
+            matrix += higher.T @ lower
         return matrix, np.array(self.item_names)
 
     def calibrate(
@@ -3232,6 +3227,7 @@ class RSM(Rasch):
         test="AIC",
         aic_sig_test=True,
         alpha=0.05,
+        min_effect=0,
         sampling="dynamic",
         warm_corr=True,
         tolerance=0.00001,
@@ -3262,6 +3258,15 @@ class RSM(Rasch):
             when aic_sig_test=True, for the AIC relative-likelihood test.
             Not used by BIC, which has no formal significance test and
             simply prefers whichever model has the lower BIC.
+        min_effect : float, default 0
+            Minimum effect size (logits) required to prefer PCM over RSM,
+            in addition to the significance/IC test for each test type.
+            The effect is max|PCM.thresholds - RSM.thresholds| -- the
+            largest absolute deviation of any single item's own
+            (item-difficulty-centred) threshold shape from RSM's single
+            shared threshold vector. Applied as PCM preferred only if the
+            test's own condition holds AND effect >= min_effect; RSM is
+            retained otherwise. Default 0 disables (never gates).
         sampling : None, 'dynamic', or int, default 'dynamic'
             Controls subsampling of non-extreme persons before computing
             log-likelihoods (parameters are always estimated on the full
@@ -3285,6 +3290,7 @@ class RSM(Rasch):
 
         Attributes set
         --------------
+        model_comparison_rsm_pcm_effect : max|PCM.thresholds - RSM.thresholds| (see min_effect).
         model_comparison_rsm_pcm_lr, _df, _p, _lr_preferred, _lr_summary : LR test results.
         model_comparison_rsm_pcm_aic, _aic_preferred, _aic_summary : AIC results.
         model_comparison_rsm_pcm_aic_p : relative likelihood p-value (aic_sig_test only).
@@ -3344,6 +3350,9 @@ class RSM(Rasch):
         k_rsm = (self.no_of_items - 1) + (self.max_score - 1)
         k_pcm = int(pcm.thresholds_uncentred.notna().sum().sum()) - 1
 
+        effect = float(pcm.thresholds.sub(self.thresholds, axis=1).abs().to_numpy().max())
+        self.model_comparison_rsm_pcm_effect = effect
+
         if test == "LR":
             lr = -2 * (ll_rsm - ll_pcm)
             if lr < 0:
@@ -3356,13 +3365,13 @@ class RSM(Rasch):
                 lr = 0.0
             df = (self.no_of_items - 1) * (self.max_score - 1)
             p = float(chi2.sf(lr, df))
-            preferred = "PCM" if p < alpha else "RSM"
+            preferred = "PCM" if (p < alpha and effect >= min_effect) else "RSM"
             self.model_comparison_rsm_pcm_lr = lr
             self.model_comparison_rsm_pcm_df = df
             self.model_comparison_rsm_pcm_p = p
             self.model_comparison_rsm_pcm_lr_preferred = preferred
             self.model_comparison_rsm_pcm_lr_summary = pd.Series(
-                {"LR statistic": lr, "df": df, "p-value": p, "Preferred": preferred},
+                {"LR statistic": lr, "df": df, "p-value": p, "Effect": effect, "Preferred": preferred},
                 name="RSM vs PCM LR test",
             )
 
@@ -3374,7 +3383,7 @@ class RSM(Rasch):
             if aic_sig_test:
                 delta = aic_rsm - aic_pcm
                 aic_p = float(np.exp(-abs(delta) / 2))
-                preferred = "PCM" if (delta > 0 and aic_p < alpha) else "RSM"
+                preferred = "PCM" if (delta > 0 and aic_p < alpha and effect >= min_effect) else "RSM"
                 self.model_comparison_rsm_pcm_aic_p = aic_p
                 self.model_comparison_rsm_pcm_aic_preferred = preferred
                 self.model_comparison_rsm_pcm_aic_summary = pd.Series(
@@ -3382,26 +3391,27 @@ class RSM(Rasch):
                         "PCM AIC": aic_pcm,
                         "RSM AIC": aic_rsm,
                         "p-value": aic_p,
+                        "Effect": effect,
                         "Preferred": preferred,
                     },
                     name="RSM vs PCM AIC comparison",
                 )
             else:
-                preferred = "PCM" if aic_pcm < aic_rsm else "RSM"
+                preferred = "PCM" if (aic_pcm < aic_rsm and effect >= min_effect) else "RSM"
                 self.model_comparison_rsm_pcm_aic_preferred = preferred
                 self.model_comparison_rsm_pcm_aic_summary = pd.Series(
-                    {"PCM AIC": aic_pcm, "RSM AIC": aic_rsm, "Preferred": preferred},
+                    {"PCM AIC": aic_pcm, "RSM AIC": aic_rsm, "Effect": effect, "Preferred": preferred},
                     name="RSM vs PCM AIC comparison",
                 )
 
         elif test == "BIC":
             bic_pcm = k_pcm * np.log(n_ll) - 2 * ll_pcm
             bic_rsm = k_rsm * np.log(n_ll) - 2 * ll_rsm
-            preferred = "PCM" if bic_pcm < bic_rsm else "RSM"
+            preferred = "PCM" if (bic_pcm < bic_rsm and effect >= min_effect) else "RSM"
             self.model_comparison_rsm_pcm_bic = {"PCM": bic_pcm, "RSM": bic_rsm}
             self.model_comparison_rsm_pcm_bic_preferred = preferred
             self.model_comparison_rsm_pcm_bic_summary = pd.Series(
-                {"PCM BIC": bic_pcm, "RSM BIC": bic_rsm, "Preferred": preferred},
+                {"PCM BIC": bic_pcm, "RSM BIC": bic_rsm, "Effect": effect, "Preferred": preferred},
                 name="RSM vs PCM BIC comparison",
             )
 
