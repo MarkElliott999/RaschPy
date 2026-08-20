@@ -179,9 +179,9 @@ Polytomous data with multiple raters. Data must be a DataFrame with a `(Rater, P
 | `'thresholds'` | Separate severity per rater × threshold |
 | `'bivector'` | Separate severities per rater × item and per rater × threshold |
 | `'matrix'` | Full severity matrix per rater × item × threshold |
-| `'centrality'` (alias `'threshold_stretch'`) | 2 parameters per rater (shift + threshold-stretch), a closed-form restriction of `'thresholds'` |
-| `'pseudo_halo'` (alias `'item_stretch'`) | 2 parameters per rater (shift + item-difficulty-stretch), a closed-form restriction of `'items'` |
-| `'bistretch'` | 3 parameters per rater (shift + item-stretch + threshold-stretch), a closed-form restriction of `'bivector'` |
+| `'centrality'` (alias `'threshold_stretch'`) | 2 parameters per rater (shift + threshold-stretch), a restricted form of `'thresholds'` |
+| `'pseudo_halo'` (alias `'item_stretch'`) | 2 parameters per rater (shift + item-difficulty-stretch), a restricted form of `'items'` |
+| `'bistretch'` | 3 parameters per rater (shift + item-stretch + threshold-stretch), a restricted form of `'bivector'` |
 
 `'threshold_stretch'`/`'item_stretch'` are exact synonyms for `'centrality'`/`'pseudo_halo'` — same model, same estimation, just an axis-based name matching `'items'`/`'thresholds'` and `'bistretch'`'s own naming. They work everywhere a model name is accepted: as the `model=`/`models=` value (e.g. `mfrm.calibrate(model='threshold_stretch')`, `mfrm.model_selection(models=['global', 'item_stretch'])`), and as the method-name suffix (e.g. `mfrm.calibrate_threshold_stretch()`, `mfrm.item_stats_df_item_stretch()`) for every method family that has a `_centrality`/`_pseudo_halo` variant. Attributes are still stored under the canonical `_centrality`/`_pseudo_halo` names (e.g. `mfrm.lambda_centrality`) regardless of which spelling was used to calibrate.
 
