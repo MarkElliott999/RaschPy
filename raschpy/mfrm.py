@@ -2214,11 +2214,19 @@ class MFRM(Rasch):
 
         # Marginal facet_effects
         sev_arr = facet_elements  # (R, I, K) — no sentinel to skip
+        item_marg = sev_arr.mean(axis=2)
+        thr_marg_raw = sev_arr.mean(axis=1)
+        # Recentre to zero-sum per facet_element, matching
+        # _calibrate_anchor_matrix's identical correction and the
+        # zero-sum property _estimate_raters_bivector's docstring claims
+        # for this vector (item_marg needs no adjustment -- see there).
+        thr_marg = thr_marg_raw - thr_marg_raw.mean(axis=1, keepdims=True)
+
         self.marginal_facet_effects_items = pd.DataFrame(
-            sev_arr.mean(axis=2), index=self.facet_names, columns=self.responses.columns
+            item_marg, index=self.facet_names, columns=self.responses.columns
         )
         self.marginal_facet_effects_thresholds = pd.DataFrame(
-            sev_arr.mean(axis=1), index=self.facet_names, columns=range(1, self.max_score + 1)
+            thr_marg, index=self.facet_names, columns=range(1, self.max_score + 1)
         )
 
     def _estimate_raters_bivector(self, matrix_marginals=True, **kw):
@@ -2373,7 +2381,7 @@ class MFRM(Rasch):
         method="cos",
         matrix_power=3,
         log_lik_tol=0.000001,
-        matrix_marginals=False,
+        matrix_marginals=True,
         regression="huber",
     ):
         """
@@ -2388,11 +2396,14 @@ class MFRM(Rasch):
         ----------
         model : one of 'global', 'items', 'thresholds', 'matrix', 'bivector',
             'centrality', 'pseudo_halo'
-        matrix_marginals : bool, default False
-            Bivector model only. If True (default), estimate item and threshold
-            vectors as marginal means of the full matrix PAIR estimates. If
-            False, estimate each vector directly using its own pooled PAIR
-            (items PAIR summed across thresholds; thresholds PAIR summed across
+        matrix_marginals : bool, default True
+            Bivector/bistretch only. If True (default), estimate item and
+            threshold vectors as marginal means of the full matrix PAIR
+            estimates -- Elliott & Buttery (2022a) find this recovers the
+            true parameters more accurately than direct estimation in almost
+            all conditions (see _estimate_raters_bivector). If False,
+            estimate each vector directly using its own pooled PAIR (items
+            PAIR summed across thresholds; thresholds PAIR summed across
             items, corrected for per-facet_element mean item effect).
         regression : {'huber', 'theil-sen'}, default 'huber'
             centrality/pseudo_halo/bistretch only. Robust regression method

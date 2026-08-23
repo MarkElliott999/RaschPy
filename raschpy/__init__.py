@@ -66,7 +66,7 @@ from raschpy.simulation.mfrm_sim import (
     MFRM_Sim_Bistretch,
 )
 
-__version__ = "1.2.1"
+__version__ = "1.2.2"
 __author__ = "Mark Elliott"
 
 __all__ = [

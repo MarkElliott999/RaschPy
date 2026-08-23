@@ -2,6 +2,14 @@
 
 All notable changes to RaschPy are documented in this file.
 
+## [1.2.2] - 2026-08-23
+
+### Fixed
+- **`MFRM` matrix-marginal bivector option bug fix** `_estimate_raters_matrix()`'s `marginal_facet_effects_thresholds` (used by `calibrate(model='bivector', matrix_marginals=True)` and `'bistretch'`) omitted per-facet-element recentring as anchoring (`_calibrate_anchor_matrix`) already applied — threshold estimates carried the mean item effect. Present since v1.0.0. Fixed by applying the same recentring in the plain (non-anchor) path. Previous default behaviour (False) was working correctly. Since performance with corrected `matrix_marginals=True` now outperforms direct estimation, as per Elliott & Buttery (2022a), default flipped to `matrix_marginals=True` (see below).
+
+### Changed
+- **`calibrate()`'s `matrix_marginals` default flipped from `False` to `True`** for `bivector`/`bistretch`, matching the `_estimate_raters_bivector()` default and the findings of Elliott & Buttery (2022a) that taking matrix marginal means outperforms direct bivector estimation in almost all conditions. Confirmed by simulation (RMSE 0.39 vs 0.43 for threshold recovery under a true `'thresholds'`-model rater). This changes numeric output when `calibrate(model='bivector')`/`'bistretch'` is called without passing `matrix_marginals=` explicitly. Also impacts `model_selection()`, `std_errors()`, and bootstrapping, none of which passed `matrix_marginals=` explicitly.
+
 ## [1.2.1] - 2026-08-19
 
 ### Changed
