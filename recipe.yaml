@@ -9,7 +9,7 @@ package:
 
 source:
   url: https://pypi.org/packages/source/r/raschpy/raschpy-${{ version }}.tar.gz
-  sha256: 9bcb287a5e9fbe6afb5db8787c4c6b4285656757378c5e670d13a5423667f15a
+  sha256: b78b6769296f74d610c038e4dbd3eb569f4f9fa771f6cb851cb6383014cdc641
 
 build:
   number: 0
