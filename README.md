@@ -13,6 +13,8 @@ To analyse data, create an object in the appropriate class, passing a pandas Dat
 
 Each model follows the same workflow: instantiate → calibrate → fit statistics → output tables → plots. All major results are stored as attributes on the model object after each step.
 
+`calibrate()` uses simulation-tuned additive-smoothing constants by default; for sparse or heavily-missing data, pass `robust=True` (`SLM`, `PCM`, `MFRM`) for a data-adaptive smoothing rule, or set `constant=` (and, for `RSM`/`MFRM`, `threshold_constant=`) to override directly.
+
 ## Examples
 
 ### Loading data
@@ -77,6 +79,7 @@ slm.icc(item='Item_1', obs=True)     # Item Characteristic Curve
 slm.tcc(obs=True)                    # Test Characteristic Curve
 slm.test_info()                      # Test Information Curve
 slm.std_residuals_plot(normal=True)  # Standardised residuals histogram
+slm.wright_map(item_labels=True, distribution_markers=True)  # Person-item map
 
 slm.save_stats('slm_results', format='xlsx')
 ```
@@ -123,6 +126,7 @@ pcm.icc(item='Item_1', obs=True)             # Expected score curve
 pcm.crcs(item='Item_1', obs='all')           # Category Response Curves
 pcm.threshold_ccs(item='Item_1', obs='all')  # Threshold Characteristic Curves
 pcm.tcc(obs=True)
+pcm.wright_map(item_strip=True, distribution_markers=True)  # Person-item map, with item category strips
 
 pcm.score_lookup_table()
 print(pcm.score_lookup)   # pandas Series indexed by raw score
@@ -159,6 +163,7 @@ rsm.icc(item='Item_1', obs=True)
 rsm.crcs(obs='all')         # Pooled across all items
 rsm.threshold_ccs(obs='all')
 rsm.tcc(obs=True)
+rsm.wright_map(item_strip=True, distribution_markers=True)  # Person-item map, with item category strips
 
 rsm.score_lookup_table()
 print(rsm.score_lookup)   # pandas Series indexed by raw score
@@ -207,6 +212,7 @@ mfrm.test_stats_df(model='global')
 mfrm.icc(item='Item_1', model='global', obs=True)
 mfrm.crcs(item='Item_1', model='global')
 mfrm.tcc(model='global', obs=True)
+mfrm.wright_map_global(item_strip=True, facet_labels=True, distribution_markers=True)  # Person-item-rater map
 
 mfrm.save_stats(model='global', filename='mfrm_results', format='xlsx')
 ```
@@ -242,6 +248,7 @@ print(mfrm.rater_stats_bivector)
 
 mfrm.icc(item='Item_1', model='bivector', obs=True)
 mfrm.tcc(model='bivector', obs=True)
+mfrm.wright_map_bivector(item_strip=True, facet_labels=True)  # Person-item-rater map
 
 mfrm.save_stats(model='bivector', filename='mfrm_bivector_results', format='xlsx')
 ```
@@ -250,7 +257,7 @@ mfrm.save_stats(model='bivector', filename='mfrm_bivector_results', format='xlsx
 
 ### Many-Facet Rasch Model — centrality and pseudo_halo formulations
 
-`'centrality'` and `'pseudo_halo'` are restricted forms of `'thresholds'` and `'items'` respectively, defined by two parameters: a severity shift `lambda_r` plus a stretch parameter `omega_r` (the same name for both models — `omega` is Jin & Wang's (2018) notation for a stretch coefficient for their centrality/extremity model, whish is `centrality` here); they sit between `'global'` (1 free parameter per rater) and their parent model on the `model_selection()` df ladder. `'threshold_stretch'`/`'item_stretch'` are exact aliases for `'centrality'`/`'pseudo_halo'` — e.g. `mfrm.calibrate(model='threshold_stretch')` or `mfrm.calibrate_item_stretch()` behave identically to the calls below. `lambda_{model}`/`omega_{model}` also have `global_{model}`/`stretch_{model}` as aliases (e.g. `mfrm.global_centrality` and `mfrm.stretch_centrality` are aliases for `mfrm.lambda_centrality` and `mfrm.omega_centrality`).
+`'centrality'` and `'pseudo_halo'` are restricted forms of `'thresholds'` and `'items'` respectively, defined by two parameters: a severity shift `lambda_r` plus a stretch parameter `omega_r` (the same name for both models — `omega` is Jin & Wang's (2018) notation for a stretch coefficient for their centrality/extremity model, which is `centrality` here); they sit between `'global'` (1 free parameter per rater) and their parent model on the `model_selection()` df ladder. `'threshold_stretch'`/`'item_stretch'` are exact aliases for `'centrality'`/`'pseudo_halo'` — e.g. `mfrm.calibrate(model='threshold_stretch')` or `mfrm.calibrate_item_stretch()` behave identically to the calls below. `lambda_{model}`/`omega_{model}` also have `global_{model}`/`stretch_{model}` as aliases (e.g. `mfrm.global_centrality` and `mfrm.stretch_centrality` are aliases for `mfrm.lambda_centrality` and `mfrm.omega_centrality`).
 
 For `centrality`, `omega_r > 1` spreads the reference thresholds apart for that rater ("central" — a larger person-location gap is needed to traverse to a more extreme category); conversely, `0 < omega_r < 1` compresses thresholds ("extreme"); `omega_r == 1` is neutral (Jin & Wang 2018). For `pseudo_halo`, `omega_r < 1` compresses the spread of reference item locations toward zero (the pseudo-halo signature — the rater effectively ignores/reduces differences in items locations, increasing the likelihood of a flat score profile as in the halo effect but without requiring local item dependence, hence the name `pseudo_halo`); `omega_r > 1` exaggerates real item-difficulty differences instead. Both stretch parameters can in principle take zero or negative values, representing a disordered situation for the reference facet – this is flagged via `UserWarning` but not clipped).
 
@@ -270,6 +277,9 @@ mfrm.fit_statistics(model='pseudo_halo')
 print(mfrm.lambda_pseudo_halo)            # severity shift per rater
 print(mfrm.omega_pseudo_halo)           # item-difficulty-stretch per rater
 print(mfrm.raters_pseudo_halo)          # reconstructed full (rater x item) severity table
+
+mfrm.wright_map_centrality(facet_labels=True, show_stretch=True)   # + omega (threshold-stretch) panel
+mfrm.wright_map_pseudo_halo(facet_labels=True, show_stretch=True)  # + omega (item-stretch) panel
 ```
 
 `rater_stats_df()` for these two models returns the two model parameters (with bootstrap SEs and, if `full=True`, 95% CIs) as the primary `rater_stats_{model}` table, rather than the full reconstructed vector. A single call also stores that reconstructed vector separately, as `rater_stats_{model}_full_vector`:
@@ -328,7 +338,7 @@ Both models also have dedicated simulation classes for genuine parameter recover
 ```python
 from raschpy.simulation import MFRM_Sim_Centrality, MFRM_Sim_PseudoHalo
 
-sim = MFRM_Sim_Centrality(no_of_items=10, no_of_persons=200, no_of_raters=8, max_score=4, seed=42)
+sim = MFRM_Sim_Centrality(no_of_items=10, no_of_persons=200, no_of_facet_elements=8, max_score=4, seed=42)
 print(sim.lambda_, sim.omega)   # true generating values
 
 mfrm = MFRM(sim)
@@ -340,7 +350,7 @@ print(mfrm.lambda_centrality, mfrm.omega_centrality)  # compare against sim.lamb
 
 ### Many-Facet Rasch Model — bistretch formulation
 
-`'bistretch'` combines both stretch axes at once: a restricted of `'bivector'` with three parameters. Each rater is defined by a severity shift `lambda_r`, an item-difficulty-stretch `omega_items_r`, and a threshold-stretch `omega_thresholds_r`, instead of `'bivector'`'s full `I+K-1` free parameters. `omega_items_{model}` and `omega_thresholds_{model}` also have `stretch_items_{model}`/`stretch_thresholds_{model}` as aliases, matching the `stretch_{model}` aliases for `centrality`/`pseudo_halo`:
+`'bistretch'` combines both stretch axes at once: a restricted form of `'bivector'` with three parameters. Each rater is defined by a severity shift `lambda_r`, an item-difficulty-stretch `omega_items_r`, and a threshold-stretch `omega_thresholds_r`, instead of `'bivector'`'s full `I+K-1` free parameters. `omega_items_{model}` and `omega_thresholds_{model}` also have `stretch_items_{model}`/`stretch_thresholds_{model}` as aliases, matching the `stretch_{model}` aliases for `centrality`/`pseudo_halo`:
 
 ```python
 mfrm.calibrate(model='bistretch')
@@ -350,6 +360,8 @@ print(mfrm.lambda_bistretch)              # severity shift per rater
 print(mfrm.omega_items_bistretch)       # item-difficulty-stretch per rater
 print(mfrm.omega_thresholds_bistretch)  # threshold-stretch per rater
 print(mfrm.raters_bistretch)            # reconstructed full (rater x item) x threshold severity table
+
+mfrm.wright_map_bistretch(facet_labels=True, show_stretch=True)  # + two stacked omega panels
 ```
 
 As with `centrality`/`pseudo_halo`, `rater_stats_df()`'s primary `rater_stats_bistretch` table shows the 3 parameters (with SEs and, if `full=True`, 95% CIs); the reconstructed full (rater x item) x threshold vector is stored separately as `rater_stats_bistretch_full_vector`:
@@ -379,7 +391,7 @@ As with `centrality`/`pseudo_halo`, a dedicated simulation class generates data 
 ```python
 from raschpy.simulation import MFRM_Sim_Bistretch
 
-sim = MFRM_Sim_Bistretch(no_of_items=10, no_of_persons=200, no_of_raters=8, max_score=4, seed=42)
+sim = MFRM_Sim_Bistretch(no_of_items=10, no_of_persons=200, no_of_facet_elements=8, max_score=4, seed=42)
 print(sim.lambda_, sim.omega_items, sim.omega_thresholds)   # true generating values
 
 mfrm = MFRM(sim)
@@ -521,7 +533,7 @@ data = sim.responses   # pandas DataFrame
 sim = PCM_Sim(no_of_items=6, no_of_persons=300, max_score_vector=[3, 3, 3, 4, 4, 4])
 data = sim.responses   # pandas DataFrame
 
-sim = MFRM_Sim_Global(no_of_items=6, no_of_persons=200, no_of_raters=4, max_score=3)
+sim = MFRM_Sim_Global(no_of_items=6, no_of_persons=200, no_of_facet_elements=4, max_score=3)
 data = sim.responses   # (Rater, Person) MultiIndex DataFrame
 
 # Pass the sim object directly to the model constructor to attach generating parameters

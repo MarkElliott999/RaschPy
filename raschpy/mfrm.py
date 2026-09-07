@@ -3,14 +3,16 @@ import warnings
 
 import numpy as np
 import pandas as pd
-from scipy.stats import chi2, norm
+from scipy.stats import chi2, gaussian_kde, norm
 from scipy.stats import t as t_dist
 from sklearn.decomposition import PCA
 from sklearn.linear_model import HuberRegressor
 from matplotlib import pyplot as plt
 from matplotlib import colors as colors
 from matplotlib import cm as cmx
+from matplotlib.patches import Rectangle
 import seaborn as sns
+import matplotlib.patheffects as path_effects
 
 from raschpy.base import Rasch
 
@@ -171,6 +173,14 @@ class MFRM(Rasch):
             diff_attr = f"anchor_items_{model}"
             thr_attr = f"anchor_thresholds_{model}"
             if not hasattr(self, diff_attr):
+                if model == "mixed":
+                    raise AttributeError(
+                        "No anchor_facet_effects_mixed yet -- 'mixed' has "
+                        "no calibrate_anchor() of its own (it's always "
+                        "derived by restricting a 'matrix' fit per rater). "
+                        "Run self.per_rater_model_selection(anchors=...) "
+                        "first."
+                    )
                 raise AttributeError(
                     f"Anchor calibration required. "
                     f"Run self.calibrate_{model}_anchor()."
@@ -179,6 +189,13 @@ class MFRM(Rasch):
             diff_attr = "items"
             thr_attr = "thresholds"
             if not hasattr(self, f"facet_effects_{model}"):
+                if model == "mixed":
+                    raise AttributeError(
+                        "No facet_effects_mixed yet -- 'mixed' has no "
+                        "calibration of its own (it's always derived by "
+                        "restricting a 'matrix' fit per rater). Run "
+                        "self.per_rater_model_selection() first."
+                    )
                 self.calibrate(model=model)
         return (
             getattr(self, diff_attr),
@@ -1369,23 +1386,33 @@ class MFRM(Rasch):
         return matrix, np.array(self.item_names)
 
     def item_diffs(
-        self, constant=0.1, method="cos", matrix_power=3, log_lik_tol=0.000001
+        self, constant=0.1, method="log-lik", matrix_power=None, log_lik_tol=0.000001
     ):
         """PAIR item item_location estimation summing across facet_elements."""
         matrix, _ = self._build_pairwise_matrix()
+        matrix_power = self._resolve_matrix_power(method, matrix_power)
 
         constant_matrix = ((matrix + matrix.T) > 0).astype(np.float64) * constant
         matrix += constant_matrix
         np.fill_diagonal(matrix, matrix.diagonal() + constant)
 
-        mat = np.linalg.matrix_power(matrix, matrix_power)
-        mat_pow = matrix_power
-        while 0 in mat:
-            mat = mat @ matrix
-            mat_pow += 1
-            if mat_pow == matrix_power + 5:
-                mat += constant
-                break
+        if matrix_power == 0:
+            # No powering: 'log-lik' (Bradley-Terry) consumes structural
+            # zeroes directly. Fill remaining off-diagonal zeroes with
+            # `constant`.
+            mat = np.array(matrix, dtype=np.float64)
+            if constant:
+                off_diagonal_mask = ~np.eye(matrix.shape[0], dtype=bool)
+                mat[off_diagonal_mask & (mat == 0)] = constant
+        else:
+            mat = np.linalg.matrix_power(matrix, matrix_power)
+            mat_pow = matrix_power
+            while 0 in mat:
+                mat = mat @ matrix
+                mat_pow += 1
+                if mat_pow == matrix_power + 5:
+                    mat += constant
+                    break
 
         self.items = self.priority_vector(mat, method=method, log_lik_tol=log_lik_tol)
 
@@ -1393,6 +1420,24 @@ class MFRM(Rasch):
         """
         CPAT threshold distance estimate for MFRM — sums counts across facet_elements.
         Vectorised via indicator matrix multiplication.
+
+        A cell (pair of items) with no adjacent-category co-occurrence at all
+        (num == den == 0) carries no information and is dropped — same as
+        always. At ``constant=0`` a cell where only ONE side was observed
+        (num == 0 xor den == 0) must ALSO be dropped: its log-ratio is
+        undefined without smoothing, and leaving that in would let
+        ``log(0) = -inf`` survive multiplication by its own (correctly) zero
+        weight (0 * -inf = nan in IEEE754), silently poisoning the whole
+        weighted average even though the offending cell was meant to
+        contribute nothing. For ``constant > 0`` this is a no-op: `num_s`/
+        `den_s` are always > 0 wherever the pair is otherwise valid, so
+        nothing is dropped that wasn't already.
+
+        If every cell for this threshold ends up dropped — no item pair
+        anywhere has any adjacent-category co-occurrence — there is no
+        information in the data to estimate it, and this raises rather than
+        returning a silent NaN that would otherwise propagate into
+        ``self.thresholds`` and every downstream calibration.
         """
         data = (
             self.responses.values.reshape(
@@ -1414,19 +1459,25 @@ class MFRM(Rasch):
         valid = (num_matrix + den_matrix) > 0
         num_s = np.where(valid, num_matrix + constant, 0.0)
         den_s = np.where(valid, den_matrix + constant, 0.0)
-
-        with np.errstate(divide="ignore", invalid="ignore"):
-            weight_matrix = np.where(valid, 2.0 * num_s * den_s / (num_s + den_s), 0.0)
+        finite = valid & (num_s > 0) & (den_s > 0)
 
         diffs = item_locations.values
         diff_matrix = diffs[:, None] - diffs[None, :]
 
         with np.errstate(divide="ignore", invalid="ignore"):
-            log_ratio = np.where(valid, np.log(num_s) - np.log(den_s), 0.0)
+            safe_num = np.where(finite, num_s, 1.0)
+            safe_den = np.where(finite, den_s, 1.0)
+            log_ratio = np.log(safe_num) - np.log(safe_den)
+            weight_matrix = np.where(finite, 2.0 * num_s * den_s / (num_s + den_s), 0.0)
 
         total_weight = weight_matrix.sum()
         if total_weight == 0:
-            return np.nan
+            raise ValueError(
+                f"CPAT threshold distance for threshold {threshold} could not be "
+                f"estimated: no pair of items has any adjacent-category "
+                f"co-occurrence at constant={constant}. Use a larger sample, "
+                f"a non-zero `constant`, or drop this threshold from the data."
+            )
         return (weight_matrix * (log_ratio + diff_matrix)).sum() / total_weight
 
     def ra_thresholds(self, item_locations, constant=0.1):
@@ -1443,6 +1494,39 @@ class MFRM(Rasch):
     # Rater facet_effect estimation
     # ------------------------------------------------------------------
 
+    def _warn_isolated_raters(self, matrix):
+        """
+        Warn (do not raise) when a facet_element has zero PAIR comparisons
+        with any other facet_element in `matrix`, checked BEFORE smoothing is
+        added. The log-lik (Bradley-Terry) update excludes the diagonal from
+        both wins and comparisons, so a structurally zero off-diagonal
+        row/column is unidentified regardless of `constant` — the smoothing
+        constant only ever gets added where (matrix + matrix.T) > 0 already,
+        so it cannot rescue a facet_element with no comparisons at all (worst
+        at constant=0, where the estimate is entirely undefined for it).
+
+        Deliberately does not raise: 'log-lik' tolerates an incomplete
+        comparison graph and still returns a usable answer for every other
+        facet_element (mirrors check_data_connectivity()'s item-level
+        equivalent, which also warns rather than raises). Python's default
+        warning filter collapses repeats of an identical message, so this is
+        safe to call from a per-item/per-threshold loop without flooding.
+        """
+        off_diag_row = matrix.sum(axis=1) - np.diagonal(matrix)
+        off_diag_col = matrix.sum(axis=0) - np.diagonal(matrix)
+        isolated = (off_diag_row == 0) & (off_diag_col == 0)
+        if isolated.any():
+            names = sorted(np.array(self.facet_names)[isolated].tolist())
+            warnings.warn(
+                f"{len(names)} facet_element(s) have zero PAIR comparisons "
+                f"with any other facet_element: {names}. Their estimate is "
+                f"unidentified from the data (undefined at constant=0; "
+                f"otherwise driven entirely by the smoothing constant). "
+                f"Consider dropping them or gathering more responses.",
+                UserWarning,
+                stacklevel=3,
+            )
+
     def _pair_matrix(self, data_2d, constant):
         """Build a PAIR pairwise matrix from (R, P) data and apply smoothing."""
         R = data_2d.shape[0]
@@ -1451,12 +1535,13 @@ class MFRM(Rasch):
             higher = (data_2d == category + 1).astype(np.float64)
             lower = (data_2d == category).astype(np.float64)
             matrix += higher @ lower.T
+        self._warn_isolated_raters(matrix)
         constant_matrix = ((matrix + matrix.T) > 0).astype(np.float64) * constant
         matrix += constant_matrix
         np.fill_diagonal(matrix, matrix.diagonal() + constant)
         return matrix
 
-    def _raise_matrix_power(self, matrix, matrix_power, constant):
+    def _raise_matrix_power(self, matrix, matrix_power, constant, method="log-lik"):
         """
         Raise a matrix to a given power, incrementing until no zeros remain.
 
@@ -1468,16 +1553,32 @@ class MFRM(Rasch):
         ----------
         matrix : numpy.ndarray
             Square comparison count matrix.
-        matrix_power : int
-            Starting matrix power.
+        matrix_power : int or None
+            Starting matrix power. ``None`` is resolved against ``method``
+            (0 for ``'log-lik'``, 3 otherwise; see
+            ``base.Rasch._resolve_matrix_power``). ``0`` skips powering
+            entirely and fills only the off-diagonal structural zeroes with
+            ``constant``.
         constant : float
             Smoothing constant added if zeros persist.
+        method : str, default 'log-lik'
+            Priority-vector method, used only to resolve ``matrix_power=None``.
 
         Returns
         -------
         numpy.ndarray
             Powered matrix with zeros resolved or smoothed.
         """
+        matrix_power = self._resolve_matrix_power(method, matrix_power)
+        if matrix_power == 0:
+            # No powering: 'log-lik' (Bradley-Terry) consumes structural
+            # zeroes directly. Fill remaining off-diagonal zeroes with
+            # `constant`.
+            mat = np.array(matrix, dtype=np.float64)
+            if constant:
+                off_diagonal_mask = ~np.eye(matrix.shape[0], dtype=bool)
+                mat[off_diagonal_mask & (mat == 0)] = constant
+            return mat
         mat = np.linalg.matrix_power(matrix, matrix_power)
         mat_pow = matrix_power
         while 0 in mat:
@@ -1489,7 +1590,7 @@ class MFRM(Rasch):
         return mat
 
     def _estimate_raters_global(
-        self, constant=0.1, method="cos", matrix_power=3, log_lik_tol=0.000001
+        self, constant=0.1, method="log-lik", matrix_power=None, log_lik_tol=0.000001
     ):
         """PAIR facet_element effect estimation — scalar per facet_element."""
         data = (
@@ -1514,23 +1615,23 @@ class MFRM(Rasch):
         matrix += constant_matrix
         np.fill_diagonal(matrix, matrix.diagonal() + constant)
 
-        mat = self._raise_matrix_power(matrix, matrix_power, constant)
+        mat = self._raise_matrix_power(matrix, matrix_power, constant, method)
         self.facet_effects_global = self.priority_vector(
             mat, method=method, log_lik_tol=log_lik_tol, raters=True
         )
 
     def _item_rater_element(
-        self, item, data, constant=0.1, method="cos", matrix_power=3, log_lik_tol=0.000001
+        self, item, data, constant=0.1, method="log-lik", matrix_power=None, log_lik_tol=0.000001
     ):
         """PAIR facet_element effect for a single item (items parameterisation)."""
         matrix = self._pair_matrix(data[item, :, :], constant)
-        mat = self._raise_matrix_power(matrix, matrix_power, constant)
+        mat = self._raise_matrix_power(matrix, matrix_power, constant, method)
         return self.priority_vector(
             mat, method=method, log_lik_tol=log_lik_tol, raters=True
         )
 
     def _estimate_raters_items(
-        self, constant=0.1, method="cos", matrix_power=3, log_lik_tol=0.000001
+        self, constant=0.1, method="log-lik", matrix_power=None, log_lik_tol=0.000001
     ):
         """PAIR facet_element effect estimation — vector per (facet_element, item)."""
         data = (
@@ -1555,7 +1656,7 @@ class MFRM(Rasch):
         )
 
     def _threshold_rater_element(
-        self, category, data, constant=0.1, method="cos", matrix_power=3, log_lik_tol=0.000001
+        self, category, data, constant=0.1, method="log-lik", matrix_power=None, log_lik_tol=0.000001
     ):
         """PAIR facet_element effect for a single threshold (thresholds parameterisation)."""
         # Sum across items: count(X_{i,r1}==k+1 AND X_{i,r2}==k)
@@ -1566,17 +1667,18 @@ class MFRM(Rasch):
             matrix += at_k @ at_km1.T
 
         matrix = matrix.astype(np.float64)
+        self._warn_isolated_raters(matrix)
         constant_matrix = ((matrix + matrix.T) > 0).astype(np.float64) * constant
         matrix += constant_matrix
         np.fill_diagonal(matrix, matrix.diagonal() + constant)
 
-        mat = self._raise_matrix_power(matrix, matrix_power, constant)
+        mat = self._raise_matrix_power(matrix, matrix_power, constant, method)
         return self.priority_vector(
             mat, method=method, log_lik_tol=log_lik_tol, raters=True
         )
 
     def _estimate_raters_thresholds(
-        self, constant=0.1, method="cos", matrix_power=3, log_lik_tol=0.000001
+        self, constant=0.1, method="log-lik", matrix_power=None, log_lik_tol=0.000001
     ):
         """PAIR facet_element effect estimation — vector per (facet_element, threshold)."""
         data = (
@@ -2079,7 +2181,7 @@ class MFRM(Rasch):
         return fig
 
     def _estimate_raters_centrality(
-        self, constant=0.1, method="cos", matrix_power=3, log_lik_tol=0.000001,
+        self, constant=0.1, method="log-lik", matrix_power=None, log_lik_tol=0.000001,
         regression="huber",
     ):
         """
@@ -2113,7 +2215,7 @@ class MFRM(Rasch):
         self._warn_nonpositive_stretch(omega, "omega", "centrality")
 
     def _estimate_raters_pseudo_halo(
-        self, constant=0.1, method="cos", matrix_power=3, log_lik_tol=0.000001,
+        self, constant=0.1, method="log-lik", matrix_power=None, log_lik_tol=0.000001,
         regression="huber",
     ):
         """
@@ -2159,8 +2261,8 @@ class MFRM(Rasch):
         category,
         data,
         constant=0.1,
-        method="cos",
-        matrix_power=3,
+        method="log-lik",
+        matrix_power=None,
         log_lik_tol=0.000001,
     ):
         """PAIR facet_element effect for a single (item, category) cell (matrix param)."""
@@ -2173,13 +2275,13 @@ class MFRM(Rasch):
         matrix += constant_matrix
         np.fill_diagonal(matrix, matrix.diagonal() + constant)
 
-        mat = self._raise_matrix_power(matrix, matrix_power, constant)
+        mat = self._raise_matrix_power(matrix, matrix_power, constant, method)
         return self.priority_vector(
             mat, method=method, log_lik_tol=log_lik_tol, raters=True
         )
 
     def _estimate_raters_matrix(
-        self, constant=0.1, method="cos", matrix_power=3, log_lik_tol=0.000001
+        self, constant=0.1, method="log-lik", matrix_power=None, log_lik_tol=0.000001
     ):
         """PAIR facet_element effect estimation — full (facet_element, item, threshold) matrix."""
         data = (
@@ -2374,15 +2476,64 @@ class MFRM(Rasch):
     # Calibration — top-level methods
     # ------------------------------------------------------------------
 
+    def _resolve_matrix_marginals(self, model, matrix_marginals, robust):
+        """Resolve the bivector/bistretch ``matrix_marginals`` argument.
+        See calibrate() for the resolution table."""
+        if model == "bistretch":
+            if matrix_marginals is False:
+                warnings.warn(
+                    "matrix_marginals=False for model='bistretch': direct "
+                    "marginals bias the stretch parameters toward omega=1; "
+                    "matrix marginals are recommended.",
+                    UserWarning, stacklevel=3,
+                )
+                return False
+            return True
+        # bivector
+        if matrix_marginals is None:
+            return not robust
+        if matrix_marginals and robust:
+            warnings.warn(
+                "robust=True with an explicit matrix_marginals=True for "
+                "model='bivector': the explicit matrix_marginals wins and the "
+                "direct-estimation robust route is not used.",
+                UserWarning, stacklevel=3,
+            )
+        return bool(matrix_marginals)
+
+    def _resolve_facet_constant(self, model, robust, mm):
+        """Per-model default facet_element (rater) stage smoothing constant,
+        used when ``constant`` is left None. See calibrate() for the
+        rationale and the simulation studies these values come from."""
+        if model in ("items", "thresholds"):
+            return 0.3
+        if model in ("centrality", "pseudo_halo"):
+            return 0.1
+        if model == "bistretch":
+            return 0.05 if robust else 0.1
+        if model == "bivector":
+            # matrix-marginal route: 0.3 on the underlying matrix cells;
+            # direct route (robust): the direct estimator's own flat wide
+            # basin, ~2.0.
+            return 0.3 if mm else 2.0
+        if model == "matrix":
+            m = float(self.responses.isna().to_numpy().mean())
+            R = self.no_of_facet_elements
+            c = (0.65 if robust else (0.68 - 0.22 * m)) / (R ** 0.5)
+            return float(min(0.5, max(0.15, c)))
+        return 0.1  # 'global'
+
     def calibrate(
         self,
         model="global",
-        constant=0.1,
-        method="cos",
-        matrix_power=3,
+        constant=None,
+        threshold_constant=None,
+        method=None,
+        matrix_power=None,
         log_lik_tol=0.000001,
-        matrix_marginals=True,
+        matrix_marginals=None,
         regression="huber",
+        robust=False,
     ):
         """
         Calibrate the MFRM for the specified facet_element parameterisation.
@@ -2395,16 +2546,41 @@ class MFRM(Rasch):
         Parameters
         ----------
         model : one of 'global', 'items', 'thresholds', 'matrix', 'bivector',
-            'centrality', 'pseudo_halo'
-        matrix_marginals : bool, default True
-            Bivector/bistretch only. If True (default), estimate item and
-            threshold vectors as marginal means of the full matrix PAIR
-            estimates -- Elliott & Buttery (2022a) find this recovers the
-            true parameters more accurately than direct estimation in almost
-            all conditions (see _estimate_raters_bivector). If False,
-            estimate each vector directly using its own pooled PAIR (items
-            PAIR summed across thresholds; thresholds PAIR summed across
-            items, corrected for per-facet_element mean item effect).
+            'centrality', 'pseudo_halo', 'bistretch'
+        constant : float or None, default None
+            Additive smoothing constant. ``None`` (default) uses the
+            simulation-tuned per-stage defaults (see ``robust`` and the note
+            below). An explicit float overrides every stage -- item
+            locations, thresholds and the facet_element (rater) stage all use
+            that value -- and takes precedence over ``robust`` and
+            ``threshold_constant``. Pass ``constant=0.1`` to reproduce
+            pre-1.3.0 output.
+        threshold_constant : float or None, default None
+            Overrides only the ``ra_thresholds`` (CPAT threshold-location)
+            stage. ``None`` follows ``constant``: the tuned default (0.3)
+            when ``constant`` is ``None``, else the explicit ``constant``.
+        method : {'cos', 'log-lik', 'ls', 'evm'} or None, default None
+            Priority-vector method. ``None`` resolves by estimand density:
+            ``'log-lik'`` for the low-parameter representations -- 'global'
+            (one severity per facet element from a small dense
+            facet-element x facet-element matrix) and the three stretch
+            models ('centrality', 'pseudo_halo', 'bistretch', whose parent
+            vector is re-pooled through a slope regression) -- and ``'cos'``
+            for 'items', 'thresholds', 'matrix' and 'bivector', where the
+            estimand is a thin per-item / per-threshold / per-cell /
+            per-marginal slice with no downstream re-pooling and 'cos'
+            degrades more gracefully on the sparser sub-matrices. An
+            explicit value is used as-is for every stage.
+        matrix_marginals : bool or None, default None
+            Bivector/bistretch only. ``None`` resolves to ``not robust`` for
+            'bivector' (matrix-marginal means by default; the direct
+            pooled-PAIR estimator under ``robust=True``) and to ``True`` for
+            'bistretch' (always matrix-marginal -- direct marginals bias its
+            stretch parameters toward omega=1). Elliott & Buttery (2022a)
+            find matrix-marginal means recover the true parameters more
+            accurately than direct estimation in almost all conditions. An
+            explicit ``True`` under ``robust=True`` wins, with a UserWarning;
+            an explicit ``False`` for 'bistretch' warns.
         regression : {'huber', 'theil-sen'}, default 'huber'
             centrality/pseudo_halo/bistretch only. Robust regression method
             used to recover each facet_element's raw lambda_r/omega_r (or
@@ -2412,30 +2588,94 @@ class MFRM(Rasch):
             deviation values. See _derive_stretch_model for the full
             rationale and the automatic huber->theil-sen fallback behaviour.
             Ignored for every other model.
+        robust : bool, default False
+            Selects the more conservative / tail-protective calibration for
+            rough data, resolved per model. It changes:
+            'matrix' -- the rater-cell constant switches from the
+            missing-sensitive default ``clip((0.68 - 0.22 m)/sqrt(R), 0.15,
+            0.5)`` to the R-only ``clip(0.65/sqrt(R), 0.15, 0.5)``, where
+            ``m`` is the observed missing-data proportion and ``R`` the
+            number of facet elements;
+            'bivector' -- switches to the direct pooled-PAIR estimator and a
+            larger rater-stage constant (~2.0);
+            'bistretch' -- the rater/stretch-stage constant drops from 0.1 to
+            0.05.
+            For every other model ``robust=True`` currently has no effect
+            (accepted for forward compatibility). Ignored, with a
+            UserWarning, if an explicit ``constant`` is also given.
+
+        Attributes set
+        --------------
+        constant : float
+            The item-location (item_diffs) smoothing constant used.
+        threshold_constant : float
+            The ra_thresholds (threshold-location) smoothing constant used.
+        facet_constant : float
+            The facet_element (rater) stage smoothing constant used, after
+            resolving ``None`` / ``robust`` / the per-model rule.
+
+        Notes
+        -----
+        Default additive smoothing constants were determined through
+        simulation studies.
         """
         model = self._MODEL_ALIASES.get(model, model)
         if model not in self._MODELS:
             raise ValueError(f"model must be one of {self._MODELS}")
 
-        if constant == 0:
-            all_max_items = [
-                item
-                for item in self.item_names
-                if (
-                    self.responses.xs(item, level=-1, axis=1)
-                    .dropna(how="all")
-                    .eq(self.max_score)
-                    .all(axis=None)
-                )
-            ]
-            if all_max_items:
-                warnings.warn(
-                    f"Items with all-maximum scores detected with constant=0: "
-                    f"{all_max_items}. Item estimation will fail. "
-                    f"Either drop these items or use a non-zero constant.",
-                    UserWarning,
-                    stacklevel=2,
-                )
+        _STRETCH = ("centrality", "pseudo_halo", "bistretch")
+        # Low-parameter representations (one severity per facet element, or a
+        # stretch pair re-pooled through a slope regression) default to
+        # 'log-lik'; the per-slice representations to 'cos'. See calibrate's
+        # `method` docstring.
+        _LOGLIK_DEFAULT = ("global",) + _STRETCH
+
+        if method is None:
+            method = "log-lik" if model in _LOGLIK_DEFAULT else "cos"
+
+        if constant is not None and robust:
+            warnings.warn(
+                f"Both `constant={constant}` and `robust=True` were passed. An "
+                f"explicit `constant` takes precedence and is used for every "
+                f"stage; the robust rule is not applied.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        # item-location (item_diffs) stage
+        item_constant = 0.1 if constant is None else constant
+
+        # threshold-location (ra_thresholds) stage
+        if threshold_constant is not None:
+            thr_constant = threshold_constant
+        elif constant is not None:
+            thr_constant = constant
+        else:
+            thr_constant = 0.3
+
+        # matrix_marginals resolution (bivector / bistretch only)
+        mm = None
+        if model in ("bivector", "bistretch"):
+            mm = self._resolve_matrix_marginals(model, matrix_marginals, robust)
+
+        # facet_element (rater) stage constant
+        if constant is not None:
+            facet_constant = constant
+        else:
+            facet_constant = self._resolve_facet_constant(model, robust, mm)
+
+        if item_constant == 0:
+            # Unsmoothed PAIR: re-run the structural connectivity check on the
+            # data as it stands now (not just at __init__(validate=True)) --
+            # constant=0 removes the only thing masking a directionally
+            # isolated item or disconnected component, both of which
+            # check_data_connectivity() already detects and warns about
+            # (does not raise; 'log-lik' tolerates an incomplete comparison
+            # graph and still returns an answer for the rest of the items).
+            # This covers the shared item-location PAIR stage only -- the
+            # facet_element (rater) PAIR stage below has its own analogous
+            # check, since raters have no counterpart in check_data_connectivity().
+            self.check_data_connectivity()
 
         if len(self.facet_names) == 1:
             warnings.warn(
@@ -2455,22 +2695,25 @@ class MFRM(Rasch):
 
         self._remove_null_persons()
         self.item_diffs(
-            constant=constant,
+            constant=item_constant,
             method=method,
             matrix_power=matrix_power,
             log_lik_tol=log_lik_tol,
         )
         self.thresholds = pd.Series(
-            self.ra_thresholds(self.items, constant=constant),
+            self.ra_thresholds(self.items, constant=thr_constant),
             index=range(1, self.max_score + 1),
         )
-        kw = dict(constant=constant, method=method,
+        kw = dict(constant=facet_constant, method=method,
                   matrix_power=matrix_power, log_lik_tol=log_lik_tol)
         if model in ("bivector", "bistretch"):
-            kw["matrix_marginals"] = matrix_marginals
-        if model in ("centrality", "pseudo_halo", "bistretch"):
+            kw["matrix_marginals"] = mm
+        if model in _STRETCH:
             kw["regression"] = regression
         getattr(self, f"_estimate_raters_{model}")(**kw)
+        self.constant = item_constant
+        self.threshold_constant = thr_constant
+        self.facet_constant = facet_constant
         self._set_facet_aliases(model)
 
     # Backwards-compatible aliases
@@ -2515,9 +2758,11 @@ class MFRM(Rasch):
         model,
         anchors,
         calibrate=False,
-        constant=0.1,
-        method="cos",
-        matrix_power=3,
+        constant=None,
+        threshold_constant=None,
+        method=None,
+        robust=False,
+        matrix_power=None,
         log_lik_tol=0.000001,
         adj=None,
         regression="huber",
@@ -2539,7 +2784,9 @@ class MFRM(Rasch):
             self.calibrate(
                 model=model,
                 constant=constant,
+                threshold_constant=threshold_constant,
                 method=method,
+                robust=robust,
                 matrix_power=matrix_power,
                 log_lik_tol=log_lik_tol,
                 **({"regression": regression} if model in ("centrality", "pseudo_halo", "bistretch") else {}),
@@ -2575,9 +2822,11 @@ class MFRM(Rasch):
         correction="bh",
         robust_z_threshold=3.5,
         no_of_samples=500,
-        constant=0.1,
-        method="cos",
-        matrix_power=3,
+        constant=None,
+        threshold_constant=None,
+        method=None,
+        robust=False,
+        matrix_power=None,
         log_lik_tol=0.000001,
         seed=None,
     ):
@@ -2720,7 +2969,9 @@ class MFRM(Rasch):
             self.calibrate(
                 model=model,
                 constant=constant,
+                threshold_constant=threshold_constant,
                 method=method,
+                robust=robust,
                 matrix_power=matrix_power,
                 log_lik_tol=log_lik_tol,
             )
@@ -2759,7 +3010,9 @@ class MFRM(Rasch):
                     no_of_samples=no_of_samples,
                     store_bootstrap=True,
                     constant=constant,
+                    threshold_constant=threshold_constant,
                     method=method,
+                    robust=robust,
                     matrix_power=matrix_power,
                     log_lik_tol=log_lik_tol,
                     seed=seed,
@@ -3254,9 +3507,11 @@ class MFRM(Rasch):
         anchors=None,
         interval=None,
         no_of_samples=500,
-        constant=0.1,
-        method="cos",
-        matrix_power=3,
+        constant=None,
+        threshold_constant=None,
+        method=None,
+        robust=False,
+        matrix_power=None,
         log_lik_tol=0.000001,
         store_bootstrap=False,
         seed=None,
@@ -3283,7 +3538,9 @@ class MFRM(Rasch):
             self._sync_mixed(
                 anchors,
                 constant=constant,
+                threshold_constant=threshold_constant,
                 method=method,
+                robust=robust,
                 matrix_power=matrix_power,
                 log_lik_tol=log_lik_tol,
                 seed=seed,
@@ -3317,7 +3574,9 @@ class MFRM(Rasch):
                 s.calibrate(
                     model="matrix",
                     constant=constant,
+                    threshold_constant=threshold_constant,
                     method=method,
+                    robust=robust,
                     matrix_power=matrix_power,
                     log_lik_tol=log_lik_tol,
                 )
@@ -3326,7 +3585,9 @@ class MFRM(Rasch):
                         "matrix",
                         anchors,
                         constant=constant,
+                        threshold_constant=threshold_constant,
                         method=method,
+                        robust=robust,
                         matrix_power=matrix_power,
                         log_lik_tol=log_lik_tol,
                         adj=adj_fixed,
@@ -3342,7 +3603,9 @@ class MFRM(Rasch):
             s.calibrate(
                 model=model,
                 constant=constant,
+                threshold_constant=threshold_constant,
                 method=method,
+                robust=robust,
                 matrix_power=matrix_power,
                 log_lik_tol=log_lik_tol,
             )
@@ -3351,7 +3614,9 @@ class MFRM(Rasch):
                     model,
                     anchors,
                     constant=constant,
+                    threshold_constant=threshold_constant,
                     method=method,
+                    robust=robust,
                     matrix_power=matrix_power,
                     log_lik_tol=log_lik_tol,
                     adj=adj_fixed,
@@ -3772,9 +4037,11 @@ class MFRM(Rasch):
         anchors=None,
         interval=None,
         no_of_samples=500,
-        constant=0.1,
-        method="cos",
-        matrix_power=3,
+        constant=None,
+        threshold_constant=None,
+        method=None,
+        robust=False,
+        matrix_power=None,
         log_lik_tol=0.000001,
         seed=None,
     ):
@@ -3842,7 +4109,9 @@ class MFRM(Rasch):
                     cal_model,
                     anchor_raters_used,
                     constant=constant,
+                    threshold_constant=threshold_constant,
                     method=method,
+                    robust=robust,
                     matrix_power=matrix_power,
                     log_lik_tol=log_lik_tol,
                     adj=adj_fixed,
@@ -3867,7 +4136,9 @@ class MFRM(Rasch):
                 s.calibrate(
                     model=cal_model,
                     constant=constant,
+                    threshold_constant=threshold_constant,
                     method=method,
+                    robust=robust,
                     matrix_power=matrix_power,
                     log_lik_tol=log_lik_tol,
                 )
@@ -3875,7 +4146,9 @@ class MFRM(Rasch):
                     cal_model,
                     anchors,
                     constant=constant,
+                    threshold_constant=threshold_constant,
                     method=method,
+                    robust=robust,
                     matrix_power=matrix_power,
                     log_lik_tol=log_lik_tol,
                     adj=adj_fixed,
@@ -3983,9 +4256,11 @@ class MFRM(Rasch):
         tolerance=0.00001,
         max_iters=100,
         ext_score_adjustment=0.5,
-        method="cos",
-        constant=0.1,
-        matrix_power=3,
+        method=None,
+        constant=None,
+        threshold_constant=None,
+        robust=False,
+        matrix_power=None,
         log_lik_tol=0.000001,
     ):
         """Build the (Rater, Person) × Items category probability DataFrames."""
@@ -5079,7 +5354,7 @@ class MFRM(Rasch):
         calib_kw = {
             k: v
             for k, v in kw.items()
-            if k in ("constant", "method", "matrix_power", "log_lik_tol")
+            if k in ("constant", "threshold_constant", "method", "robust", "matrix_power", "log_lik_tol")
         }
         abil_kw = {
             k: v
@@ -5863,9 +6138,11 @@ class MFRM(Rasch):
         tolerance=0.00001,
         max_iters=100,
         ext_score_adjustment=0.5,
-        method="cos",
-        constant=0.1,
-        matrix_power=3,
+        method=None,
+        constant=None,
+        threshold_constant=None,
+        robust=False,
+        matrix_power=None,
         log_lik_tol=0.000001,
         no_of_samples=500,
         interval=None,
@@ -5899,12 +6176,13 @@ class MFRM(Rasch):
             Maximum Newton-Raphson iterations.
         ext_score_adjustment : float, default 0.5
             Extreme score adjustment.
-        method : str, default 'cos'
+        method : str, default 'log-lik'
             Priority vector extraction method for calibration.
         constant : float, default 0.1
             Additive smoothing constant for calibration.
-        matrix_power : int, default 3
-            Matrix power for calibration.
+        matrix_power : int or None, default None
+            Matrix power for calibration. None resolves to 0 for
+            method='log-lik' (no powering), else 5.
         log_lik_tol : float, default 0.000001
             Convergence tolerance for calibration.
         no_of_samples : int, default 500
@@ -5943,7 +6221,9 @@ class MFRM(Rasch):
             self._sync_mixed(
                 anchors,
                 constant=constant,
+                threshold_constant=threshold_constant,
                 method=method,
+                robust=robust,
                 matrix_power=matrix_power,
                 log_lik_tol=log_lik_tol,
                 warm_corr=warm_corr,
@@ -5956,7 +6236,9 @@ class MFRM(Rasch):
             self.calibrate(
                 model=model,
                 constant=constant,
+                threshold_constant=threshold_constant,
                 method=method,
+                robust=robust,
                 matrix_power=matrix_power,
                 log_lik_tol=log_lik_tol,
             )
@@ -5967,7 +6249,9 @@ class MFRM(Rasch):
                 interval=interval,
                 no_of_samples=no_of_samples,
                 constant=constant,
+                threshold_constant=threshold_constant,
                 method=method,
+                robust=robust,
                 matrix_power=matrix_power,
                 log_lik_tol=log_lik_tol,
                 seed=seed,
@@ -5992,6 +6276,8 @@ class MFRM(Rasch):
             ext_score_adjustment=ext_score_adjustment,
             method=method,
             constant=constant,
+            threshold_constant=threshold_constant,
+            robust=robust,
             matrix_power=matrix_power,
             log_lik_tol=log_lik_tol,
         )
@@ -6045,9 +6331,11 @@ class MFRM(Rasch):
         tolerance=0.00001,
         max_iters=100,
         ext_score_adjustment=0.5,
-        constant=0.1,
-        method="cos",
-        matrix_power=3,
+        constant=None,
+        threshold_constant=None,
+        method=None,
+        robust=False,
+        matrix_power=None,
         log_lik_tol=0.000001,
     ):
         """
@@ -6161,9 +6449,11 @@ class MFRM(Rasch):
         tolerance=0.00001,
         max_iters=100,
         ext_score_adjustment=0.5,
-        constant=0.1,
-        method="cos",
-        matrix_power=3,
+        constant=None,
+        threshold_constant=None,
+        method=None,
+        robust=False,
+        matrix_power=None,
         log_lik_tol=0.000001,
         seed=None,
     ):
@@ -6308,7 +6598,7 @@ class MFRM(Rasch):
         k_model = {mod: shared_k + rater_k[mod] for mod in active_models}
 
         # Calibrate and person-estimate each active model
-        cal_kw = dict(constant=constant, method=method,
+        cal_kw = dict(constant=constant, threshold_constant=threshold_constant, method=method, robust=robust,
                       matrix_power=matrix_power, log_lik_tol=log_lik_tol)
         pe_kw = dict(warm_corr=warm_corr, tolerance=tolerance,
                      max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
@@ -6517,9 +6807,11 @@ class MFRM(Rasch):
         tolerance=0.00001,
         max_iters=100,
         ext_score_adjustment=0.5,
-        constant=0.1,
-        method="cos",
-        matrix_power=3,
+        constant=None,
+        threshold_constant=None,
+        method=None,
+        robust=False,
+        matrix_power=None,
         log_lik_tol=0.000001,
         seed=None,
     ):
@@ -6710,7 +7002,7 @@ class MFRM(Rasch):
         pseudo_halo_allowed = "pseudo_halo" in active_models
         bistretch_allowed = "bistretch" in active_models
 
-        cal_kw = dict(constant=constant, method=method,
+        cal_kw = dict(constant=constant, threshold_constant=threshold_constant, method=method, robust=robust,
                       matrix_power=matrix_power, log_lik_tol=log_lik_tol)
         pe_kw = dict(warm_corr=warm_corr, tolerance=tolerance,
                      max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
@@ -7070,6 +7362,16 @@ class MFRM(Rasch):
             setattr(self, f"anchor_{self.facets}_mixed", mixed_sev)
             self.anchor_per_rater_model_selection_table = table
             self.anchor_per_rater_model_selection_counts = counts
+            # 'mixed' has no calibrate_mixed_anchor() of its own -- item/
+            # threshold locations under anchoring are shared across every
+            # model regardless (only facet_effects differ per model), same
+            # as the unanchored case (_get_params always uses plain
+            # self.items/self.thresholds there, no per-model lookup at
+            # all). Mirror that here so _get_params('mixed', anchor=True)
+            # -- and everything routed through it: plot_data/icc/crcs/etc.
+            # -- has anchor_items_mixed/anchor_thresholds_mixed to find.
+            self.anchor_items_mixed = self.anchor_items_matrix
+            self.anchor_thresholds_mixed = self.anchor_thresholds_matrix
         else:
             self.rater_models = rater_models
             self.facet_effects_mixed = mixed_sev
@@ -7487,7 +7789,7 @@ class MFRM(Rasch):
         calib_kw = {
             k: v
             for k, v in kw.items()
-            if k in ("constant", "method", "matrix_power", "log_lik_tol")
+            if k in ("constant", "threshold_constant", "method", "robust", "matrix_power", "log_lik_tol")
         }
         abil_kw = {
             k: v
@@ -7521,6 +7823,8 @@ class MFRM(Rasch):
         log_lik_tol,
         seed=None,
         store_bootstrap=False,
+        threshold_constant=None,
+        robust=False,
     ):
         """Internal helper: compute standard errors (and optionally anchor SEs) if not yet done.
 
@@ -7553,7 +7857,9 @@ class MFRM(Rasch):
                         interval=interval,
                         no_of_samples=no_of_samples,
                         constant=constant,
+                        threshold_constant=threshold_constant,
                         method=method,
+                        robust=robust,
                         matrix_power=matrix_power,
                         log_lik_tol=log_lik_tol,
                         seed=seed,
@@ -7566,7 +7872,9 @@ class MFRM(Rasch):
                     interval=interval,
                     no_of_samples=no_of_samples,
                     constant=constant,
+                    threshold_constant=threshold_constant,
                     method=method,
+                    robust=robust,
                     matrix_power=matrix_power,
                     log_lik_tol=log_lik_tol,
                     seed=seed,
@@ -7587,9 +7895,11 @@ class MFRM(Rasch):
         tolerance=0.00001,
         max_iters=100,
         ext_score_adjustment=0.5,
-        method="cos",
-        constant=0.1,
-        matrix_power=3,
+        method=None,
+        constant=None,
+        threshold_constant=None,
+        robust=False,
+        matrix_power=None,
         log_lik_tol=0.000001,
         no_of_samples=500,
         interval=None,
@@ -7629,12 +7939,13 @@ class MFRM(Rasch):
             Maximum iterations.
         ext_score_adjustment : float, default 0.5
             Extreme score adjustment.
-        method : str, default 'cos'
+        method : str, default 'log-lik'
             Priority vector extraction method.
         constant : float, default 0.1
             Additive smoothing constant.
-        matrix_power : int, default 3
-            Matrix power for calibration.
+        matrix_power : int or None, default None
+            Matrix power for calibration. None resolves to 0 for
+            method='log-lik' (no powering), else 5.
         log_lik_tol : float, default 0.000001
             Calibration convergence tolerance.
         no_of_samples : int, default 500
@@ -7668,7 +7979,9 @@ class MFRM(Rasch):
             interval=interval,
             no_of_samples=no_of_samples,
             constant=constant,
+            threshold_constant=threshold_constant,
             method=method,
+            robust=robust,
             matrix_power=matrix_power,
             log_lik_tol=log_lik_tol,
             warm_corr=warm_corr,
@@ -7687,6 +8000,8 @@ class MFRM(Rasch):
                 method,
                 matrix_power,
                 log_lik_tol,
+                threshold_constant=threshold_constant,
+                robust=robust,
                 seed=seed,
             )
         if not hasattr(self, f"item_outfit_ms_{model}"):
@@ -7777,9 +8092,11 @@ class MFRM(Rasch):
         tolerance=0.00001,
         max_iters=100,
         ext_score_adjustment=0.5,
-        method="cos",
-        constant=0.1,
-        matrix_power=3,
+        method=None,
+        constant=None,
+        threshold_constant=None,
+        robust=False,
+        matrix_power=None,
         log_lik_tol=0.000001,
         no_of_samples=500,
         interval=None,
@@ -7819,12 +8136,13 @@ class MFRM(Rasch):
             Maximum iterations.
         ext_score_adjustment : float, default 0.5
             Extreme score adjustment.
-        method : str, default 'cos'
+        method : str, default 'log-lik'
             Priority vector extraction method.
         constant : float, default 0.1
             Smoothing constant.
-        matrix_power : int, default 3
-            Matrix power.
+        matrix_power : int or None, default None
+            Matrix power. None resolves to 0 for method='log-lik'
+            (no powering), else 5.
         log_lik_tol : float, default 0.000001
             Calibration convergence tolerance.
         no_of_samples : int, default 500
@@ -7855,7 +8173,9 @@ class MFRM(Rasch):
             interval=interval,
             no_of_samples=no_of_samples,
             constant=constant,
+            threshold_constant=threshold_constant,
             method=method,
+            robust=robust,
             matrix_power=matrix_power,
             log_lik_tol=log_lik_tol,
             warm_corr=warm_corr,
@@ -7874,6 +8194,8 @@ class MFRM(Rasch):
                 method,
                 matrix_power,
                 log_lik_tol,
+                threshold_constant=threshold_constant,
+                robust=robust,
                 seed=seed,
             )
         if not hasattr(self, f"threshold_outfit_ms_{model}"):
@@ -7972,9 +8294,11 @@ class MFRM(Rasch):
         tolerance=0.00001,
         max_iters=100,
         ext_score_adjustment=0.5,
-        method="cos",
-        constant=0.1,
-        matrix_power=3,
+        method=None,
+        constant=None,
+        threshold_constant=None,
+        robust=False,
+        matrix_power=None,
         log_lik_tol=0.000001,
         no_of_samples=500,
         interval=None,
@@ -8057,7 +8381,9 @@ class MFRM(Rasch):
             interval=interval,
             no_of_samples=no_of_samples,
             constant=constant,
+            threshold_constant=threshold_constant,
             method=method,
+            robust=robust,
             matrix_power=matrix_power,
             log_lik_tol=log_lik_tol,
             warm_corr=warm_corr,
@@ -8075,6 +8401,8 @@ class MFRM(Rasch):
             method,
             matrix_power,
             log_lik_tol,
+            threshold_constant=threshold_constant,
+            robust=robust,
             seed=seed,
         )
 
@@ -8158,9 +8486,11 @@ class MFRM(Rasch):
         tolerance=0.00001,
         max_iters=100,
         ext_score_adjustment=0.5,
-        method="cos",
-        constant=0.1,
-        matrix_power=3,
+        method=None,
+        constant=None,
+        threshold_constant=None,
+        robust=False,
+        matrix_power=None,
         log_lik_tol=0.000001,
         interval=None,
         no_of_samples=500,
@@ -8193,12 +8523,13 @@ class MFRM(Rasch):
             Maximum iterations.
         ext_score_adjustment : float, default 0.5
             Extreme score adjustment.
-        method : str, default 'cos'
+        method : str, default 'log-lik'
             Priority vector extraction method.
         constant : float, default 0.1
             Smoothing constant.
-        matrix_power : int, default 3
-            Matrix power.
+        matrix_power : int or None, default None
+            Matrix power. None resolves to 0 for method='log-lik'
+            (no powering), else 5.
         log_lik_tol : float, default 0.000001
             Calibration convergence tolerance.
         interval : float or None, default None
@@ -8222,7 +8553,9 @@ class MFRM(Rasch):
             max_iters=max_iters,
             ext_score_adjustment=ext_score_adjustment,
             constant=constant,
+            threshold_constant=threshold_constant,
             method=method,
+            robust=robust,
             matrix_power=matrix_power,
             log_lik_tol=log_lik_tol,
         )
@@ -8298,9 +8631,11 @@ class MFRM(Rasch):
         tolerance=0.00001,
         max_iters=100,
         ext_score_adjustment=0.5,
-        method="cos",
-        constant=0.1,
-        matrix_power=3,
+        method=None,
+        constant=None,
+        threshold_constant=None,
+        robust=False,
+        matrix_power=None,
         log_lik_tol=0.000001,
         no_of_samples=500,
         seed=None,
@@ -8325,12 +8660,13 @@ class MFRM(Rasch):
             Maximum iterations.
         ext_score_adjustment : float, default 0.5
             Extreme score adjustment.
-        method : str, default 'cos'
+        method : str, default 'log-lik'
             Priority vector extraction method.
         constant : float, default 0.1
             Smoothing constant.
-        matrix_power : int, default 3
-            Matrix power.
+        matrix_power : int or None, default None
+            Matrix power. None resolves to 0 for method='log-lik'
+            (no powering), else 5.
         log_lik_tol : float, default 0.000001
             Calibration convergence tolerance.
         no_of_samples : int, default 500
@@ -8350,7 +8686,9 @@ class MFRM(Rasch):
         self._ensure_calibrated(
             model,
             constant=constant,
+            threshold_constant=threshold_constant,
             method=method,
+            robust=robust,
             matrix_power=matrix_power,
             log_lik_tol=log_lik_tol,
             seed=seed,
@@ -8441,9 +8779,11 @@ class MFRM(Rasch):
         tolerance=0.00001,
         max_iters=100,
         ext_score_adjustment=0.5,
-        method="cos",
-        constant=0.1,
-        matrix_power=3,
+        method=None,
+        constant=None,
+        threshold_constant=None,
+        robust=False,
+        matrix_power=None,
         log_lik_tol=0.000001,
         no_of_samples=500,
         interval=None,
@@ -8558,12 +8898,13 @@ class MFRM(Rasch):
             Maximum iterations.
         ext_score_adjustment : float, default 0.5
             Extreme score adjustment.
-        method : str, default 'cos'
+        method : str, default 'log-lik'
             Priority vector extraction method.
         constant : float, default 0.1
             Smoothing constant.
-        matrix_power : int, default 3
-            Matrix power.
+        matrix_power : int or None, default None
+            Matrix power. None resolves to 0 for method='log-lik'
+            (no powering), else 5.
         log_lik_tol : float, default 0.000001
             Calibration convergence tolerance.
         no_of_samples : int, default 500
@@ -8591,7 +8932,9 @@ class MFRM(Rasch):
             interval=interval,
             no_of_samples=no_of_samples,
             constant=constant,
+            threshold_constant=threshold_constant,
             method=method,
+            robust=robust,
             matrix_power=matrix_power,
             log_lik_tol=log_lik_tol,
             warm_corr=warm_corr,
@@ -8609,6 +8952,8 @@ class MFRM(Rasch):
             method,
             matrix_power,
             log_lik_tol,
+            threshold_constant=threshold_constant,
+            robust=robust,
             seed=seed,
             store_bootstrap=(
                 divergence_test is not None
@@ -9053,9 +9398,11 @@ class MFRM(Rasch):
         tolerance=0.00001,
         max_iters=100,
         ext_score_adjustment=0.5,
-        method="cos",
-        constant=0.1,
-        matrix_power=3,
+        method=None,
+        constant=None,
+        threshold_constant=None,
+        robust=False,
+        matrix_power=None,
         log_lik_tol=0.000001,
         no_of_samples=500,
         interval=None,
@@ -9116,12 +9463,13 @@ class MFRM(Rasch):
             Maximum iterations.
         ext_score_adjustment : float, default 0.5
             Extreme score adjustment.
-        method : str, default 'cos'
+        method : str, default 'log-lik'
             Priority vector extraction method.
         constant : float, default 0.1
             Smoothing constant.
-        matrix_power : int, default 3
-            Matrix power.
+        matrix_power : int or None, default None
+            Matrix power. None resolves to 0 for method='log-lik'
+            (no powering), else 5.
         log_lik_tol : float, default 0.000001
             Calibration convergence tolerance.
         no_of_samples : int, default 500
@@ -9139,6 +9487,8 @@ class MFRM(Rasch):
             ext_score_adjustment=ext_score_adjustment,
             method=method,
             constant=constant,
+            threshold_constant=threshold_constant,
+            robust=robust,
             matrix_power=matrix_power,
             log_lik_tol=log_lik_tol,
         )
@@ -9840,25 +10190,52 @@ class MFRM(Rasch):
             person_locations, item_locations, facet_effects, "bivector", **kw
         )
 
-    # ------------------------------------------------------------------
-    # Plots
-    # ------------------------------------------------------------------
     def class_intervals_thr_centrality(self, person_locations, item_locations, facet_effects, **kw):
         """Alias for class_intervals_thr(model='centrality'). See class_intervals_thr for full documentation."""
         return self.class_intervals_thr(
             person_locations, item_locations, facet_effects, "centrality", **kw
         )
+
     def class_intervals_thr_pseudo_halo(self, person_locations, item_locations, facet_effects, **kw):
         """Alias for class_intervals_thr(model='pseudo_halo'). See class_intervals_thr for full documentation."""
         return self.class_intervals_thr(
             person_locations, item_locations, facet_effects, "pseudo_halo", **kw
         )
+
     def class_intervals_thr_bistretch(self, person_locations, item_locations, facet_effects, **kw):
         """Alias for class_intervals_thr(model='bistretch'). See class_intervals_thr for full documentation."""
         return self.class_intervals_thr(
             person_locations, item_locations, facet_effects, "bistretch", **kw
         )
 
+    def _label_height_frac(self, font, axis_font_size, figsize):
+        """
+        Fraction of the axes' own pixel height that one line of label
+        text occupies, at the given font/size/figure size -- measured
+        directly via a probe render (not guessed), so callers can
+        convert it into an exact data-unit label height for whatever
+        y-range they end up using (that height scales linearly with the
+        y-range, since the axes' pixel height itself doesn't depend on
+        the data plotted). Used to size ymax and place stacked
+        central_location labels with a small, guaranteed gap rather
+        than a fixed fraction of y_max (see feedback_plot_layout_rigor
+        -- measure, don't guess).
+        """
+        probe_fig = plt.figure(figsize=figsize)
+        probe_ax = probe_fig.add_subplot(111)
+        probe_txt = probe_ax.text(
+            0, 0, "Item_1: 0.000", fontsize=axis_font_size, fontfamily=font
+        )
+        probe_fig.canvas.draw()
+        renderer = probe_fig.canvas.get_renderer()
+        label_h_px = probe_txt.get_window_extent(renderer=renderer).height
+        ax_h_px = probe_ax.get_window_extent(renderer=renderer).height
+        plt.close(probe_fig)
+        return label_h_px / ax_h_px
+
+    # ------------------------------------------------------------------
+    # Plots
+    # ------------------------------------------------------------------
     def plot_data(
         self,
         x_data,
@@ -9866,13 +10243,20 @@ class MFRM(Rasch):
         model="global",
         anchor=False,
         items=None,
+        curve_labels=None,
+        legend_loc=None,
         facet_elements=None,
         obs=None,
+        obs_by_column=False,
+        obs_curve_index=None,
+        marker_border=True,
+        line_border=False,
         thresh_obs=None,
         x_obs_data=np.array([]),
         y_obs_data=np.array([]),
         thresh_lines=False,
         central_location=False,
+        central_location_fit=False,
         score_lines_item=[None, None],
         score_lines_test=None,
         point_info_lines_item=[None, None],
@@ -9887,7 +10271,7 @@ class MFRM(Rasch):
         graph_title="",
         y_label="",
         plot_style="white",
-        palette="dark blue",
+        palette="colorblind multi",
         black=False,
         figsize=(8, 6),
         font="Times New Roman",
@@ -9912,10 +10296,7 @@ class MFRM(Rasch):
         if isinstance(items, str):
             items = None if items == "all" else items
 
-        if plot_style == "dark":
-            sns.set_style("darkgrid")
-        else:
-            sns.set_style("whitegrid")
+        self._apply_plot_style(plot_style)
 
         palette_dict = {
             "dark blue": ["dark", "royalblue"],
@@ -9928,9 +10309,20 @@ class MFRM(Rasch):
             "light grey": ["light", "darkgrey"],
             "dark multi": ["dark", "dark"],
             "light multi": ["light", "muted"],
+            "colorblind multi": ["dark", "colorblind"],
         }
         shade, base_color = palette_dict[palette]
-        if shade == "dark":
+        if palette == "colorblind multi":
+            # Okabe & Ito (2008) -- colour-vision-deficiency-safe
+            # qualitative palette, the scientific-publishing standard.
+            # The 8th (black) entry is swapped for white on dark
+            # backgrounds, where it would otherwise be invisible.
+            color_map = [
+                "#E69F00", "#56B4E9", "#009E73", "#F0E442",
+                "#0072B2", "#D55E00", "#CC79A7",
+                "#FFFFFF" if plot_style in self._DARK_BACKGROUND_STYLES else "#000000",
+            ]
+        elif shade == "dark":
             color_map = (
                 sns.color_palette("dark", as_cmap=True)
                 if palette == "dark multi"
@@ -9950,6 +10342,18 @@ class MFRM(Rasch):
             if "multi" not in palette:
                 scalarMap = cmx.ScalarMappable(norm=cNorm, cmap=color_map)
 
+            # A thin contrasting stroke around each curve line, so it stays
+            # legible on a background/gridline colour close to its own --
+            # white on the darker plot_style schemes, black otherwise.
+            line_fx = (
+                [path_effects.withStroke(
+                    linewidth=2.5,
+                    foreground="white" if plot_style in self._DARK_BACKGROUND_STYLES else "black",
+                )]
+                if line_border
+                else None
+            )
+
             for i in range(no_of_plots):
                 col = (
                     "black"
@@ -9958,7 +10362,14 @@ class MFRM(Rasch):
                         scalarMap.to_rgba(i) if "multi" not in palette else color_map[i]
                     )
                 )
-                ax.plot(x_data, y_data[:, i], "", color=col, label=i + 1)
+                label = curve_labels[i] if curve_labels is not None else i + 1
+                ax.plot(
+                    x_data, y_data[:, i], "", color=col, label=label,
+                    path_effects=line_fx,
+                )
+
+            if curve_labels is not None:
+                ax.legend(loc=legend_loc if legend_loc is not None else "best")
 
             if obs is not None:
                 try:
@@ -9968,27 +10379,53 @@ class MFRM(Rasch):
                             if "multi" not in palette
                             else color_map[0]
                         )
-                        ax.plot(x_obs_data, y_obs_data, "o", color=col)
-                    else:
-                        for j in range(y_obs_data.shape[0]):
+                        ax.plot(
+                            x_obs_data, y_obs_data, "o", color=col,
+                            markeredgecolor="k" if marker_border else "none", zorder=3,
+                        )
+                    elif obs_by_column:
+                        # icc()'s own multi-curve convention: one column
+                        # per curve (item and/or facet_element list),
+                        # matching y_data's own column layout -- colour
+                        # each to match its curve.
+                        for j in range(y_obs_data.shape[1]):
                             col = (
                                 scalarMap.to_rgba(j)
                                 if "multi" not in palette
                                 else color_map[j]
                             )
-                            ax.plot(x_obs_data, y_obs_data[j, :], "o", color=col)
+                            ax.plot(
+                                x_obs_data, y_obs_data[:, j], "o", color=col,
+                                markeredgecolor="k" if marker_border else "none", zorder=3,
+                            )
+                    else:
+                        for j in range(y_obs_data.shape[0]):
+                            k = obs_curve_index[j] if obs_curve_index is not None else j
+                            col = (
+                                scalarMap.to_rgba(k)
+                                if "multi" not in palette
+                                else color_map[k]
+                            )
+                            ax.plot(
+                                x_obs_data, y_obs_data[j, :], "o", color=col,
+                                markeredgecolor="k" if marker_border else "none", zorder=3,
+                            )
                 except Exception:
                     pass
 
             if thresh_obs is not None:
                 try:
                     for j in range(x_obs_data.shape[0]):
+                        k = obs_curve_index[j] if obs_curve_index is not None else j
                         col = (
-                            scalarMap.to_rgba(j)
+                            scalarMap.to_rgba(k)
                             if "multi" not in palette
-                            else color_map[j]
+                            else color_map[k]
                         )
-                        ax.plot(x_obs_data[j, :], y_obs_data[j, :], "o", color=col)
+                        ax.plot(
+                            x_obs_data[j, :], y_obs_data[j, :], "o", color=col,
+                            markeredgecolor="k" if marker_border else "none", zorder=3,
+                        )
                 except Exception:
                     pass
 
@@ -10024,48 +10461,136 @@ class MFRM(Rasch):
                         )
                     xval = diff_val + thresholds[t + 1] + sev_val
                     ax.axvline(x=xval, color="black", linestyle="--")
+                    # Staggered onto two rows near the bottom so that any
+                    # two adjacent thresholds (the only ones close enough
+                    # in x to clash) never share a row.
+                    label_y = y_max * (0.05 if t % 2 == 0 else 0.11)
+                    ax.text(
+                        xval + (x_max - x_min) / 100,
+                        label_y,
+                        str(t + 1),
+                        color="black",
+                        va="bottom",
+                        ha="left",
+                    )
 
             if central_location:
-                if items is None:
-                    ax.axvline(x=0, color="darkred", linestyle="--")
-                else:
-                    ax.axvline(
-                        x=float(item_locations[items]), color="darkred", linestyle="--"
+                # items may be a list (one curve per item) -- draw each
+                # item's own central location, always plain darkred
+                # (colour isn't needed to disambiguate since each line
+                # is labelled with its own item name).
+                items_multi = isinstance(items, list)
+                items_list = items if items_multi else [items]
+                n_labels = len(items_list)
+                if central_location_fit and items_multi and n_labels > 0:
+                    # "Fit" style (iic): the curve's own peak sits right
+                    # at each item's central location, so labels are
+                    # stacked with a probe-measured height above that
+                    # peak -- ymax is pre-widened by the caller to fit
+                    # them exactly (measure, don't guess -- see
+                    # feedback_plot_layout_rigor).
+                    k = self._label_height_frac(font, axis_font_size, figsize)
+                    label_h_data = k * y_max
+                    gap = 0.3 * label_h_data
+                    curve_peak = float(np.nanmax(y_data))
+                for idx, it in enumerate(items_list):
+                    xval = 0 if it is None else float(item_locations[it])
+                    ax.axvline(x=xval, color="darkred", linestyle="--")
+                    label = (
+                        f"{it}: {round(xval, 2)}"
+                        if items_multi and it is not None
+                        else str(round(xval, 2))
+                    )
+                    if central_location_fit and items_multi:
+                        label_y = curve_peak + gap + label_h_data * (n_labels - idx - 0.5)
+                        label_x = xval - (x_max - x_min) / 100
+                        ha = "right"
+                    elif items_multi:
+                        # "Top" style (icc): the curve is an ogive, near
+                        # its ceiling by the time it nears max score, so
+                        # labels just stack near the top of the fixed
+                        # y_max instead -- placed to the *left* of each
+                        # line (curves rise left-to-right, so that side
+                        # stays clear of the curve even close to the
+                        # ceiling) rather than boosting y_max past its
+                        # own meaningful value.
+                        label_y = y_max * 0.95 - idx * y_max * 0.05
+                        label_x = xval - (x_max - x_min) / 100
+                        ha = "right"
+                    else:
+                        label_y = y_max * 0.95
+                        label_x = xval + (x_max - x_min) / 100
+                        ha = "left"
+                        label = f"Central location: {round(xval, 2)}"
+                    ax.text(
+                        label_x,
+                        label_y,
+                        label,
+                        color="black",
+                        va="center",
+                        ha=ha,
                     )
 
             if score_lines_item[1] is not None:
-                item = score_lines_item[0]
+                # ICC score line(s): invert each curve numerically by
+                # finding the x value where that curve's own y_data column
+                # is closest to s. y_data has one column per curve
+                # (item and/or facet_element list), so this naturally
+                # covers every combination without needing to know which
+                # dimension(s) were lists -- each curve's own line(s) are
+                # drawn in that curve's own colour (single-curve calls
+                # keep the original plain black lines).
+                n_curves = y_data.shape[1]
+                multi_curves = n_curves > 1
                 if all(s > 0 for s in score_lines_item[1]) and all(
                     s < self.max_score for s in score_lines_item[1]
                 ):
-                    # ICC score line: invert the curve numerically by finding
-                    # the x value where y_data is closest to s
-                    for s in score_lines_item[1]:
-                        idx = np.argmin(np.abs(y_data[:, 0] - s))
-                        estimate = x_data[idx]
-                        ax.vlines(
-                            x=estimate,
-                            ymin=0,
-                            ymax=s,
-                            color="black",
-                            linestyles="dashed",
-                        )
-                        ax.hlines(
-                            y=s,
-                            xmin=x_min,
-                            xmax=estimate,
-                            color="black",
-                            linestyles="dashed",
-                        )
-                        if score_labels:
-                            ax.text(
-                                estimate + (x_max - x_min) / 100,
-                                y_max / 50,
-                                str(round(estimate, 2)),
+                    for i in range(n_curves):
+                        colorVal = (
+                            "black"
+                            if black or not multi_curves
+                            else (
+                                scalarMap.to_rgba(i)
+                                if "multi" not in palette
+                                else color_map[i]
                             )
-                            ax.text(
-                                x_min + (x_max - x_min) / 100, s + y_max / 50, str(s)
+                        )
+                        for s in score_lines_item[1]:
+                            idx = np.argmin(np.abs(y_data[:, i] - s))
+                            estimate = x_data[idx]
+                            ax.vlines(
+                                x=estimate,
+                                ymin=0,
+                                ymax=s,
+                                color=colorVal,
+                                linestyles="dashed",
                             )
+                            ax.hlines(
+                                y=s,
+                                xmin=x_min,
+                                xmax=estimate,
+                                color=colorVal,
+                                linestyles="dashed",
+                            )
+                            if score_labels:
+                                # Stagger each curve's estimate label a
+                                # bit higher up than the last, so nearby
+                                # curves' labels don't overwrite each
+                                # other -- single-curve calls keep the
+                                # original fixed height.
+                                label_y = y_max / 50 + (
+                                    i * y_max * 0.05 if multi_curves else 0
+                                )
+                                ax.text(
+                                    estimate + (x_max - x_min) / 100,
+                                    label_y,
+                                    str(round(estimate, 2)),
+                                    color=colorVal,
+                                )
+                                ax.text(
+                                    x_min + (x_max - x_min) / 100, s + y_max / 50, str(s),
+                                    color=colorVal,
+                                )
                 else:
                     warnings.warn(
                         "Invalid score for score line: values must be "
@@ -10129,45 +10654,80 @@ class MFRM(Rasch):
                     )
 
             if point_info_lines_item[1] is not None:
-                item = point_info_lines_item[0]
-                r = (
-                    facet_elements[0]
-                    if isinstance(facet_elements, list)
-                    else (
-                        facet_elements
-                        if facet_elements is not None
-                        else list(self.facet_names)[0]
-                    )
-                )
-                for estimate in point_info_lines_item[1]:
-                    info = self.variance(
-                        estimate, item, item_locations, r, facet_effects, thresholds, model
-                    )
-                    ax.vlines(
-                        x=estimate,
-                        ymin=-100,
-                        ymax=info,
-                        color="black",
-                        linestyles="dashed",
-                    )
-                    ax.hlines(
-                        y=info,
-                        xmin=-100,
-                        xmax=estimate,
-                        color="black",
-                        linestyles="dashed",
-                    )
-                    if score_labels:
-                        ax.text(
-                            estimate + (x_max - x_min) / 100,
-                            y_max / 50,
-                            str(round(estimate, 2)),
+                # items and/or facet_elements may be a list (one curve
+                # per combination) -- for a given location, every
+                # curve's own information value is genuinely different
+                # (that's the whole point of comparing them), so each
+                # gets its own "curve: info" label near the y-axis,
+                # nudged sideways per curve so close values don't
+                # collide. Single-curve calls keep the original separate
+                # location/info label pair. Reuses curve_labels (already
+                # built by icc()/iic() for the legend) for the label
+                # text when available, so it always matches.
+                items_arg = point_info_lines_item[0]
+                items_multi = isinstance(items_arg, list)
+                raters_multi = isinstance(facet_elements, list)
+                items_list = items_arg if items_multi else [items_arg]
+                raters_list = facet_elements if raters_multi else [facet_elements]
+                multi_curves = items_multi or raters_multi
+
+                curve_i = 0
+                for it in items_list:
+                    for fe in raters_list:
+                        colorVal = (
+                            "black"
+                            if black or not multi_curves
+                            else (
+                                scalarMap.to_rgba(curve_i)
+                                if "multi" not in palette
+                                else color_map[curve_i]
+                            )
                         )
-                        ax.text(
-                            x_min + (x_max - x_min) / 100,
-                            info + y_max / 50,
-                            str(round(info, 3)),
+                        r = (
+                            fe if fe is not None and fe not in ("none", "zero")
+                            else list(self.facet_names)[0]
                         )
+                        for estimate in point_info_lines_item[1]:
+                            info = self.variance(
+                                estimate, it, item_locations, r, facet_effects,
+                                thresholds, model,
+                            )
+                            ax.vlines(
+                                x=estimate, ymin=-100, ymax=info, color=colorVal,
+                                linestyles="dashed",
+                            )
+                            ax.hlines(
+                                y=info, xmin=-100, xmax=estimate, color=colorVal,
+                                linestyles="dashed",
+                            )
+                            if score_labels:
+                                if multi_curves:
+                                    name = (
+                                        curve_labels[curve_i]
+                                        if curve_labels is not None
+                                        else f"{it} / {r}"
+                                    )
+                                    label_x = (
+                                        x_min
+                                        + (x_max - x_min) / 100
+                                        + curve_i * (x_max - x_min) * 0.03
+                                    )
+                                    ax.text(
+                                        label_x, info + y_max / 50,
+                                        f"{name}: {round(info, 3)}", color=colorVal,
+                                    )
+                                else:
+                                    ax.text(
+                                        estimate + (x_max - x_min) / 100,
+                                        y_max / 50,
+                                        str(round(estimate, 2)),
+                                    )
+                                    ax.text(
+                                        x_min + (x_max - x_min) / 100,
+                                        info + y_max / 50,
+                                        str(round(info, 3)),
+                                    )
+                        curve_i += 1
 
             if point_info_lines_test is not None:
                 item_keys = list(self.item_names) if items is None else items
@@ -10322,19 +10882,21 @@ class MFRM(Rasch):
         """Alias for plot_data(model='bivector'). See plot_data for full documentation."""
         return self.plot_data(*args, model="bivector", **kw)
 
-    # ------------------------------------------------------------------
-    # ICC, CRCS, Threshold CCS, IIC, TCC, Test info, Test CSEM, Residuals
-    # ------------------------------------------------------------------
     def plot_data_centrality(self, *args, **kw):
         """Alias for plot_data(model='centrality'). See plot_data for full documentation."""
         return self.plot_data(*args, model="centrality", **kw)
+
     def plot_data_pseudo_halo(self, *args, **kw):
         """Alias for plot_data(model='pseudo_halo'). See plot_data for full documentation."""
         return self.plot_data(*args, model="pseudo_halo", **kw)
+
     def plot_data_bistretch(self, *args, **kw):
         """Alias for plot_data(model='bistretch'). See plot_data for full documentation."""
         return self.plot_data(*args, model="bistretch", **kw)
 
+    # ------------------------------------------------------------------
+    # ICC, CRCS, Threshold CCS, IIC, TCC, Test info, Test CSEM, Residuals
+    # ------------------------------------------------------------------
     def icc(
         self,
         item,
@@ -10353,8 +10915,10 @@ class MFRM(Rasch):
         central_location=False,
         cat_highlight=None,
         plot_style="white",
-        palette="dark blue",
+        palette="colorblind multi",
         black=False,
+        marker_border=True,
+        line_border=False,
         font="Times New Roman",
         title_font_size=15,
         axis_font_size=12,
@@ -10363,57 +10927,141 @@ class MFRM(Rasch):
         file_format="png",
         dpi=300,
     ):
-        """Item Characteristic Curve."""
+        """
+        Item Characteristic Curve for one item and/or facet element (e.g.
+        rater), or several of either (or both) overlaid on the same axes.
+
+        item : str or list of str
+            A single name draws one curve, as before. A list overlays one
+            curve per item (in the given order), each in its own colour.
+            thresh_lines/cat_highlight only make sense for one curve's
+            own location, so they just silently no-op with several
+            plotted at once rather than erroring. obs, central_location,
+            and score_lines all work fine with item and/or facet_element
+            as a list -- obs and score_lines each draw every curve's own
+            point(s)/line(s) in that curve's own colour; central_location
+            draws each item's own line, labelled with the value (and
+            item name, when item is a list -- staggered downward from
+            the top, one step per item, so nearby curves' labels don't
+            overwrite each other), colour-matched too when facet_element
+            isn't also a list (so each item maps to exactly one curve)
+            and plain darkred otherwise (an item spans several curves
+            there, with no single one to match).
+        facet_element : str, list of str, or None
+            A single name (or None, averaging across every facet
+            element) draws one curve, as before. A list overlays one
+            curve per named element instead (None isn't valid inside the
+            list -- pass an explicit "average" entry isn't supported;
+            use the scalar None case for that curve on its own).
+
+            item and facet_element can both be lists at once, giving one
+            curve per (item, facet element) combination -- legended
+            "item / facet_element" -- but this is really a lot of curves
+            on one plot at once and can get hard to read fast; one list
+            and one fixed value (one item across several raters, or one
+            rater across several items) reads far more clearly. See the
+            manual for an example of each.
+        """
         model = self._MODEL_ALIASES.get(model, model)
         item_locations, thresholds, facet_effects = self._get_params(model, anchor)
-        if facet_element in ("none", "zero"):
+
+        items_multi = isinstance(item, list)
+        raters_multi = isinstance(facet_element, list)
+        if raters_multi:
+            facet_element = [
+                (None if fe in ("none", "zero") else fe) for fe in facet_element
+            ]
+        elif facet_element in ("none", "zero"):
             facet_element = None
 
+        if items_multi or raters_multi:
+            # thresh_lines/cat_highlight each only make sense for a
+            # single item's own location -- silently no-op with several
+            # curves plotted at once rather than erroring, since they'd
+            # just be visual clutter with no obvious single "right" curve
+            # anyway.
+            thresh_lines = False
+            cat_highlight = None
+
         person_locations_arr = np.arange(-20, 20, 0.1)
-        r_use = (
-            facet_element if facet_element is not None else list(self.facet_names)[0]
-        )
-        # When no specific facet_element requested, average exp_score across all facet_elements
-        # to match the obs y-values which are mean scores across the facet_element pool.
-        if facet_element is None:
-            all_raters = list(self.facet_names)
-            y = np.array(
-                [
+        items_to_plot = item if items_multi else [item]
+        raters_to_plot = facet_element if raters_multi else [facet_element]
+        all_raters = list(self.facet_names)
+
+        def _curve(it, fe):
+            # None averages exp_score across every facet element, to
+            # match the obs y-values (mean scores across the pool).
+            if fe is None:
+                return [
                     np.mean(
                         [
                             self.exp_score(
-                                a, item, item_locations, r, facet_effects, thresholds, model
+                                a, it, item_locations, r, facet_effects, thresholds, model
                             )
                             for r in all_raters
                         ]
                     )
                     for a in person_locations_arr
                 ]
-            ).reshape(-1, 1)
-        else:
-            y = np.array(
-                [
-                    self.exp_score(
-                        a, item, item_locations, r_use, facet_effects, thresholds, model
-                    )
-                    for a in person_locations_arr
-                ]
-            ).reshape(-1, 1)
+            return [
+                self.exp_score(a, it, item_locations, fe, facet_effects, thresholds, model)
+                for a in person_locations_arr
+            ]
 
+        y = np.column_stack(
+            [_curve(it, fe) for it in items_to_plot for fe in raters_to_plot]
+        )
+
+        if items_multi and raters_multi:
+            curve_labels = [
+                f"{it} / {'Average' if fe is None else fe}"
+                for it in items_to_plot
+                for fe in raters_to_plot
+            ]
+        elif items_multi:
+            curve_labels = items_to_plot
+        elif raters_multi:
+            curve_labels = ["Average" if fe is None else fe for fe in raters_to_plot]
+        else:
+            curve_labels = None
+
+        obs_by_column = False
         if obs is not None:
             persons_attr = f'{"anchor_" if anchor else ""}persons_{model}'
             if not hasattr(self, persons_attr):
                 self.person_estimates(model=model, anchor=anchor)
             person_estimates = getattr(self, persons_attr)
-            xobsdata, yobsdata = self.class_intervals(
-                person_estimates,
-                items=item,
-                facet_elements=facet_element,
-                no_of_classes=no_of_classes,
-            )
-            # Keep yobsdata as a pd.Series so plot_data uses the scalar
-            # obs branch (ax.plot(x, y, 'o')) rather than the row-iteration
-            # branch, which mismatches shapes for the single-curve ICC case.
+            if items_multi or raters_multi:
+                # Same person-location class intervals for every curve
+                # where possible (quantile groups come from the overall
+                # ability estimate, not an item/rater-specific one, so
+                # they mostly line up); the first curve's own x values
+                # are reused for the rest. One observed-mean column per
+                # curve, in that curve's own colour (obs_by_column=True
+                # tells plot_data to read y_obs_data this way).
+                obs_by_column = True
+                xobsdata = None
+                yobs_cols = []
+                for it in items_to_plot:
+                    for fe in raters_to_plot:
+                        xd, yd = self.class_intervals(
+                            person_estimates, items=it, facet_elements=fe,
+                            no_of_classes=no_of_classes,
+                        )
+                        if xobsdata is None:
+                            xobsdata = xd
+                        yobs_cols.append(np.array(yd))
+                yobsdata = np.column_stack(yobs_cols)
+            else:
+                xobsdata, yobsdata = self.class_intervals(
+                    person_estimates,
+                    items=item,
+                    facet_elements=facet_element,
+                    no_of_classes=no_of_classes,
+                )
+                # Keep yobsdata as a pd.Series so plot_data uses the scalar
+                # obs branch (ax.plot(x, y, 'o')) rather than the row-iteration
+                # branch, which mismatches shapes for the single-curve ICC case.
         else:
             xobsdata = yobsdata = np.array(np.nan)
 
@@ -10423,8 +11071,13 @@ class MFRM(Rasch):
             model=model,
             anchor=anchor,
             items=item,
+            curve_labels=curve_labels,
+            legend_loc="upper left" if score_lines is not None else "lower right",
             facet_elements=facet_element,
             obs=obs,
+            obs_by_column=obs_by_column,
+            marker_border=marker_border,
+            line_border=line_border,
             warm=warm,
             x_obs_data=xobsdata,
             y_obs_data=yobsdata,
@@ -10469,14 +11122,17 @@ class MFRM(Rasch):
     def icc_bivector(self, item, **kw):
         """Alias for icc(model='bivector'). See icc for full documentation."""
         return self.icc(item, model="bivector", **kw)
+
     def icc_centrality(self, item, **kw):
-        """Alias for icc(model='bivector'). See icc for full documentation."""
+        """Alias for icc(model='centrality'). See icc for full documentation."""
         return self.icc(item, model="centrality", **kw)
+
     def icc_pseudo_halo(self, item, **kw):
-        """Alias for icc(model='bivector'). See icc for full documentation."""
+        """Alias for icc(model='pseudo_halo'). See icc for full documentation."""
         return self.icc(item, model="pseudo_halo", **kw)
+
     def icc_bistretch(self, item, **kw):
-        """Alias for icc(model='bivector'). See icc for full documentation."""
+        """Alias for icc(model='bistretch'). See icc for full documentation."""
         return self.icc(item, model="bistretch", **kw)
 
     def crcs(
@@ -10494,8 +11150,10 @@ class MFRM(Rasch):
         xmin=-5,
         xmax=5,
         plot_style="white",
-        palette="dark blue",
+        palette="colorblind multi",
         black=False,
+        marker_border=True,
+        line_border=False,
         font="Times New Roman",
         title_font_size=15,
         axis_font_size=12,
@@ -10584,7 +11242,11 @@ class MFRM(Rasch):
             anchor=anchor,
             items=item,
             facet_elements=facet_element,
+            curve_labels=[f"Category {c}" for c in range(self.max_score + 1)],
             obs=obs,
+            obs_curve_index=obs if obs is not None else None,
+            marker_border=marker_border,
+            line_border=line_border,
             x_obs_data=xobsdata,
             y_obs_data=yobsdata,
             x_min=xmin,
@@ -10626,14 +11288,17 @@ class MFRM(Rasch):
     def crcs_bivector(self, item=None, **kw):
         """Alias for crcs(model='bivector'). See crcs for full documentation."""
         return self.crcs(model="bivector", item=item, **kw)
+
     def crcs_centrality(self, item=None, **kw):
-        """Alias for crcs(model='bivector'). See crcs for full documentation."""
+        """Alias for crcs(model='centrality'). See crcs for full documentation."""
         return self.crcs(model="centrality", item=item, **kw)
+
     def crcs_pseudo_halo(self, item=None, **kw):
-        """Alias for crcs(model='bivector'). See crcs for full documentation."""
+        """Alias for crcs(model='pseudo_halo'). See crcs for full documentation."""
         return self.crcs(model="pseudo_halo", item=item, **kw)
+
     def crcs_bistretch(self, item=None, **kw):
-        """Alias for crcs(model='bivector'). See crcs for full documentation."""
+        """Alias for crcs(model='bistretch'). See crcs for full documentation."""
         return self.crcs(model="bistretch", item=item, **kw)
 
     def threshold_ccs(
@@ -10651,8 +11316,10 @@ class MFRM(Rasch):
         xmin=-5,
         xmax=5,
         plot_style="white",
-        palette="dark blue",
+        palette="colorblind multi",
         black=False,
+        marker_border=True,
+        line_border=False,
         font="Times New Roman",
         title_font_size=15,
         axis_font_size=12,
@@ -10705,6 +11372,7 @@ class MFRM(Rasch):
         abs_thresh = thresholds + diff_shift + sev_thresh
 
         xobsdata = yobsdata = np.array(np.nan)
+        obs_curve_index = None
         if obs is not None:
             persons_attr = f'{"anchor_" if anchor else ""}persons_{model}'
             if not hasattr(self, persons_attr):
@@ -10745,6 +11413,7 @@ class MFRM(Rasch):
                 obs_idx = [o - 1 for o in obs]
                 xobsdata = xobsdata[obs_idx, :]
                 yobsdata = yobsdata[obs_idx, :]
+                obs_curve_index = obs_idx
         y = np.array(
             [
                 [1.0 / (1.0 + np.exp(thr - a)) for thr in abs_thresh]
@@ -10759,8 +11428,12 @@ class MFRM(Rasch):
             anchor=anchor,
             items=item,
             facet_elements=facet_element,
+            curve_labels=[f"Threshold {t + 1}" for t in range(self.max_score)],
             obs=None,
             thresh_obs=obs,
+            obs_curve_index=obs_curve_index,
+            marker_border=marker_border,
+            line_border=line_border,
             x_obs_data=xobsdata,
             y_obs_data=yobsdata,
             x_min=xmin,
@@ -10802,14 +11475,17 @@ class MFRM(Rasch):
     def threshold_ccs_bivector(self, item=None, **kw):
         """Alias for threshold_ccs(model='bivector'). See threshold_ccs for full documentation."""
         return self.threshold_ccs(model="bivector", item=item, **kw)
+
     def threshold_ccs_centrality(self, item=None, **kw):
-        """Alias for threshold_ccs(model='bivector'). See threshold_ccs for full documentation."""
+        """Alias for threshold_ccs(model='centrality'). See threshold_ccs for full documentation."""
         return self.threshold_ccs(model="centrality", item=item, **kw)
+
     def threshold_ccs_pseudo_halo(self, item=None, **kw):
-        """Alias for threshold_ccs(model='bivector'). See threshold_ccs for full documentation."""
+        """Alias for threshold_ccs(model='pseudo_halo'). See threshold_ccs for full documentation."""
         return self.threshold_ccs(model="pseudo_halo", item=item, **kw)
+
     def threshold_ccs_bistretch(self, item=None, **kw):
-        """Alias for threshold_ccs(model='bivector'). See threshold_ccs for full documentation."""
+        """Alias for threshold_ccs(model='bistretch'). See threshold_ccs for full documentation."""
         return self.threshold_ccs(model="bistretch", item=item, **kw)
 
     def iic(
@@ -10828,7 +11504,7 @@ class MFRM(Rasch):
         xmin=-5,
         xmax=5,
         plot_style="white",
-        palette="dark blue",
+        palette="colorblind multi",
         black=False,
         font="Times New Roman",
         title_font_size=15,
@@ -10838,41 +11514,112 @@ class MFRM(Rasch):
         file_format="png",
         dpi=300,
     ):
-        """Item Information Curve."""
+        """
+        Item Information Curve for one item and/or facet element (e.g.
+        rater), or several of either (or both) overlaid on the same axes.
+
+        item : str or list of str
+            A single name draws one curve, as before. A list overlays
+            one curve per item (in the given order), each in its own
+            colour. thresh_lines/cat_highlight only make sense for one
+            curve's own location, so they just silently no-op with
+            several plotted at once rather than erroring. central_location
+            and point_info_lines both work fine with item and/or
+            facet_element as a list -- central_location draws each
+            item's own line, labelled with its value (and item name);
+            point_info_lines draws every curve's own information value
+            at each requested location, labelled "curve: info", since
+            that comparison at a shared location is the point.
+        facet_element : str, list of str, or None
+            A single name draws one curve, as before -- None (or
+            'none'/'zero') isn't an average here (unlike icc/other
+            methods): it resolves to the first facet element, same as
+            always. A list overlays one curve per named element instead.
+
+            item and facet_element can both be lists at once, giving one
+            curve per (item, facet element) combination -- legended
+            "item / facet_element" -- but this is really a lot of curves
+            on one plot at once and can get hard to read fast; one list
+            and one fixed value reads far more clearly.
+        """
         model = self._MODEL_ALIASES.get(model, model)
         item_locations, thresholds, facet_effects = self._get_params(model, anchor)
-        r_use = (
-            facet_element[0]
-            if isinstance(facet_element, list)
-            else (
-                facet_element
-                if facet_element is not None and facet_element not in ("none", "zero")
+
+        items_multi = isinstance(item, list)
+        raters_multi = isinstance(facet_element, list)
+
+        if (items_multi or raters_multi):
+            # thresh_lines/cat_highlight each only make sense for a
+            # single curve's own location -- silently no-op with several
+            # plotted at once rather than erroring, since they'd just be
+            # visual clutter with no obvious single "right" curve anyway.
+            thresh_lines = False
+            cat_highlight = None
+
+        estimates = np.arange(-20, 20, 0.1)
+        items_to_plot = item if items_multi else [item]
+        raters_to_plot = facet_element if raters_multi else [facet_element]
+
+        def _r_use(fe):
+            return (
+                fe if fe is not None and fe not in ("none", "zero")
                 else list(self.facet_names)[0]
             )
-        )
-        estimates = np.arange(-20, 20, 0.1)
-        y = np.array(
-            [
-                self.variance(
-                    a, item, item_locations, r_use, facet_effects, thresholds, model
-                )
+
+        def _curve(it, fe):
+            r = _r_use(fe)
+            return [
+                self.variance(a, it, item_locations, r, facet_effects, thresholds, model)
                 for a in estimates
             ]
-        ).reshape(-1, 1)
+
+        y = np.column_stack(
+            [_curve(it, fe) for it in items_to_plot for fe in raters_to_plot]
+        )
+
+        if items_multi and raters_multi:
+            curve_labels = [
+                f"{it} / {_r_use(fe)}" for it in items_to_plot for fe in raters_to_plot
+            ]
+        elif items_multi:
+            curve_labels = items_to_plot
+        elif raters_multi:
+            curve_labels = [_r_use(fe) for fe in raters_to_plot]
+        else:
+            curve_labels = None
+
         if ymax is None:
             ymax = float(y.max()) * 1.1
+            if central_location and len(items_to_plot) > 0:
+                # central_location's labels stack above the curve's own
+                # peak (which sits right at each item's own central
+                # location -- exactly where those labels are), so widen
+                # ymax by exactly the measured label-stack height plus a
+                # small gap, rather than guessing a fixed fraction (see
+                # _label_height_frac / feedback_plot_layout_rigor --
+                # measure, don't guess). Labels are then placed using
+                # this same y.max()/k/gap_frac relationship in plot_data,
+                # so the fit is exact, not approximate. (central_location's
+                # own loop is item-only, independent of facet_element.)
+                n_labels = len(items_to_plot)
+                k = self._label_height_frac(font, axis_font_size, (8, 6))
+                gap_frac = 0.3
+                denom = max(1 - k * (n_labels + 2 * gap_frac), 0.1)
+                ymax = max(ymax, float(y.max()) / denom)
         return self.plot_data(
             x_data=estimates,
             y_data=y,
             model=model,
             anchor=anchor,
             items=item,
+            curve_labels=curve_labels,
             facet_elements=facet_element,
             x_min=xmin,
             x_max=xmax,
             y_max=ymax,
             thresh_lines=thresh_lines,
             central_location=central_location,
+            central_location_fit=True,
             point_info_lines_item=[item, point_info_lines],
             score_labels=point_info_labels,
             cat_highlight=cat_highlight,
@@ -10909,14 +11656,17 @@ class MFRM(Rasch):
     def iic_bivector(self, item, **kw):
         """Alias for iic(model='bivector'). See iic for full documentation."""
         return self.iic(item, model="bivector", **kw)
+
     def iic_centrality(self, item, **kw):
-        """Alias for iic(model='bivector'). See iic for full documentation."""
+        """Alias for iic(model='centrality'). See iic for full documentation."""
         return self.iic(item, model="centrality", **kw)
+
     def iic_pseudo_halo(self, item, **kw):
-        """Alias for iic(model='bivector'). See iic for full documentation."""
+        """Alias for iic(model='pseudo_halo'). See iic for full documentation."""
         return self.iic(item, model="pseudo_halo", **kw)
+
     def iic_bistretch(self, item, **kw):
-        """Alias for iic(model='bivector'). See iic for full documentation."""
+        """Alias for iic(model='bistretch'). See iic for full documentation."""
         return self.iic(item, model="bistretch", **kw)
 
     def tcc(
@@ -10933,8 +11683,10 @@ class MFRM(Rasch):
         xmin=-5,
         xmax=5,
         plot_style="white",
-        palette="dark blue",
+        palette="colorblind multi",
         black=False,
+        marker_border=True,
+        line_border=False,
         font="Times New Roman",
         title_font_size=15,
         axis_font_size=12,
@@ -11061,6 +11813,8 @@ class MFRM(Rasch):
             items=items,
             facet_elements=facet_elements,
             obs=obs,
+            marker_border=marker_border,
+            line_border=line_border,
             x_obs_data=xobsdata,
             y_obs_data=yobsdata,
             x_min=xmin,
@@ -11101,14 +11855,17 @@ class MFRM(Rasch):
     def tcc_bivector(self, **kw):
         """Alias for tcc(model='bivector'). See tcc for full documentation."""
         return self.tcc(model="bivector", **kw)
+
     def tcc_centrality(self, **kw):
-        """Alias for tcc(model='bivector'). See tcc for full documentation."""
+        """Alias for tcc(model='centrality'). See tcc for full documentation."""
         return self.tcc(model="centrality", **kw)
+
     def tcc_pseudo_halo(self, **kw):
-        """Alias for tcc(model='bivector'). See tcc for full documentation."""
+        """Alias for tcc(model='pseudo_halo'). See tcc for full documentation."""
         return self.tcc(model="pseudo_halo", **kw)
+
     def tcc_bistretch(self, **kw):
-        """Alias for tcc(model='bivector'). See tcc for full documentation."""
+        """Alias for tcc(model='bistretch'). See tcc for full documentation."""
         return self.tcc(model="bistretch", **kw)
 
     def test_info(
@@ -11124,7 +11881,7 @@ class MFRM(Rasch):
         ymax=None,
         title=None,
         plot_style="white",
-        palette="dark blue",
+        palette="colorblind multi",
         black=False,
         font="Times New Roman",
         title_font_size=15,
@@ -11215,14 +11972,17 @@ class MFRM(Rasch):
     def test_info_bivector(self, **kw):
         """Alias for test_info(model='bivector'). See test_info for full documentation."""
         return self.test_info(model="bivector", **kw)
+
     def test_info_centrality(self, **kw):
-        """Alias for test_info(model='bivector'). See test_info for full documentation."""
+        """Alias for test_info(model='centrality'). See test_info for full documentation."""
         return self.test_info(model="centrality", **kw)
+
     def test_info_pseudo_halo(self, **kw):
-        """Alias for test_info(model='bivector'). See test_info for full documentation."""
+        """Alias for test_info(model='pseudo_halo'). See test_info for full documentation."""
         return self.test_info(model="pseudo_halo", **kw)
+
     def test_info_bistretch(self, **kw):
-        """Alias for test_info(model='bivector'). See test_info for full documentation."""
+        """Alias for test_info(model='bistretch'). See test_info for full documentation."""
         return self.test_info(model="bistretch", **kw)
 
     def test_csem(
@@ -11238,7 +11998,7 @@ class MFRM(Rasch):
         ymax=5,
         title=None,
         plot_style="white",
-        palette="dark blue",
+        palette="colorblind multi",
         black=False,
         font="Times New Roman",
         title_font_size=15,
@@ -11328,14 +12088,17 @@ class MFRM(Rasch):
     def test_csem_bivector(self, **kw):
         """Alias for test_csem(model='bivector'). See test_csem for full documentation."""
         return self.test_csem(model="bivector", **kw)
+
     def test_csem_centrality(self, **kw):
-        """Alias for test_csem(model='bivector'). See test_csem for full documentation."""
+        """Alias for test_csem(model='centrality'). See test_csem for full documentation."""
         return self.test_csem(model="centrality", **kw)
+
     def test_csem_pseudo_halo(self, **kw):
-        """Alias for test_csem(model='bivector'). See test_csem for full documentation."""
+        """Alias for test_csem(model='pseudo_halo'). See test_csem for full documentation."""
         return self.test_csem(model="pseudo_halo", **kw)
+
     def test_csem_bistretch(self, **kw):
-        """Alias for test_csem(model='bivector'). See test_csem for full documentation."""
+        """Alias for test_csem(model='bistretch'). See test_csem for full documentation."""
         return self.test_csem(model="bistretch", **kw)
 
     def std_residuals_plot(
@@ -11349,6 +12112,7 @@ class MFRM(Rasch):
         normal=False,
         title=None,
         plot_style="white",
+        black=False,
         font="Times New Roman",
         title_font_size=15,
         axis_font_size=12,
@@ -11396,6 +12160,7 @@ class MFRM(Rasch):
             normal=normal,
             title=title,
             plot_style=plot_style,
+            black=black,
             font=font,
             title_font_size=title_font_size,
             axis_font_size=axis_font_size,
@@ -11425,7 +12190,7 @@ class MFRM(Rasch):
         """Alias for std_residuals_plot(model='bivector'). See std_residuals_plot for full documentation."""
         return self.std_residuals_plot(model="bivector", **kw)
     def std_residuals_plot_bistretch(self, **kw):
-        """Alias for std_residuals_plot(model='bivector'). See std_residuals_plot for full documentation."""
+        """Alias for std_residuals_plot(model='bistretch'). See std_residuals_plot for full documentation."""
         return self.std_residuals_plot(model="bistretch", **kw)
 
     def std_residuals_plot_centrality(self, **kw):
@@ -11435,3 +12200,2487 @@ class MFRM(Rasch):
     def std_residuals_plot_pseudo_halo(self, **kw):
         """Alias for std_residuals_plot(model='pseudo_halo'). See std_residuals_plot for full documentation."""
         return self.std_residuals_plot(model="pseudo_halo", **kw)
+
+
+    def wright_map(
+        self,
+        model,
+        person_names=None,
+        item_names=None,
+        facet_element_names=None,
+        expand_model=False,
+        show_stretch=True,
+        item_level="items",
+        orientation="vertical",
+        map_type="hist",
+        item_labels=False,
+        item_strip=False,
+        item_distribution=False,
+        facet_labels=False,
+        overlay_facet=False,
+        strip_thickness=2.0,
+        strip_alpha=0.3,
+        sort="location",
+        palette="colorblind multi",
+        neutral_extremes=False,
+        item_row_height=None,
+        facet_row_height=None,
+        narrow_font=False,
+        edge_padding=0.5,
+        distribution_markers=False,
+        group_by=None,
+        group_colors=None,
+        stack=True,
+        blend=False,
+        prop=False,
+        person_lim=None,
+        item_lim=None,
+        facet_lim=None,
+        person_scaling=1,
+        facet_scaling=1,
+        no_of_bins=20,
+        pad=False,
+        plot_range=None,
+        kde_points=500,
+        bw_method="scott",
+        line_width=1,
+        figsize=None,
+        title=None,
+        plot_style="white",
+        edge_color="black",
+        person_color="skyblue",
+        item_color="salmon",
+        facet_color="mediumseagreen",
+        person_line_color="black",
+        item_line_color="black",
+        facet_line_color="black",
+        marker_color="darkred",
+        alpha=0.6,
+        black=False,
+        font="Times New Roman",
+        title_font_size=15,
+        axis_font_size=12,
+        labelsize=12,
+        item_label_size=8,
+        facet_label_size=8,
+        tick_interval=1,
+        filename=None,
+        file_format="png",
+        dpi=300,
+    ):
+        """
+        Plot a Wright map showing person, item, and facet-element location
+        distributions.
+
+        Global-model MFRM extension of RSM's wright_map, adding the
+        calibration facet (e.g. raters) as a third dimension. Persons and
+        items behave identically to RSM's own wright_map (same parameters,
+        same layout engine); a facet-element panel is added alongside,
+        either as its own dedicated panel (default) or overlaid onto the
+        items panel/axis (overlay_facet=True). The facet named 'raters' by
+        default is whatever self.facets/self.facet_names alias to for this
+        instance (e.g. 'judges', if constructed with a custom facet name).
+
+        Parameters
+        ----------
+        model : str
+            MFRM sub-model: 'global', 'items', 'thresholds', 'matrix',
+            'bivector', 'centrality', 'pseudo_halo', or 'bistretch'.
+            Required and positional -- there is no default, so the model
+            actually plotted always matches what was passed (rather than
+            silently falling back to 'global' and, if that hasn't been
+            calibrated yet, calibrating it fresh). Prefer the
+            model-specific aliases (wright_map_global, wright_map_items,
+            wright_map_thresholds, wright_map_matrix, wright_map_bivector,
+            wright_map_centrality, wright_map_pseudo_halo,
+            wright_map_bistretch) when convenient. For 'items'/
+            'thresholds', each facet element's own multiple severities
+            (one per item, or one per threshold) are all plotted
+            individually, named e.g. 'Rater_1_Item_1'/'Rater_1_1'. For
+            'matrix', every (facet element, item, threshold) combination
+            is plotted individually, named e.g. 'Rater_1_Item_1_1' --
+            this can be a *lot* of individual values (facet elements x
+            items x max_score), so facet_labels=True in particular can
+            produce a very tall panel there. For 'bivector', its own two
+            marginal severity vectors (per item, per threshold) are
+            plotted directly by default rather than the full (facet
+            element, item, threshold) grid they're summed to reconstruct
+            -- see expand_model below to plot that full grid instead.
+            Named the same way as 'items'/'thresholds' (e.g.
+            'Rater_1_Item_1' and 'Rater_1_1' both appearing for the same
+            rater). For the stretch models (centrality, pseudo_halo,
+            bistretch), each is a 2-(or 3-)parameter (lambda shift,
+            omega stretch[es]) restriction of an unrestricted model --
+            the facet panel plots lambda (a plain logit-scale shift, one
+            value per rater) exactly as 'global' would by default; see
+            expand_model below to plot each rater's full reconstructed
+            vector instead. omega isn't a logit value at all either way
+            (a dimensionless spread multiplier centred on 1), so it
+            never appears on this axis -- see show_stretch below for the
+            separate panel(s) it gets instead.
+        person_names : str, list, or None, default None
+            Person subset to include. None uses all persons.
+        item_names : str, list, or None, default None
+            Item subset to include. None uses all items.
+        facet_element_names : str, list, or None, default None
+            Facet-element subset to include (e.g. specific raters). None
+            uses all elements of the facet.
+        expand_model : bool, default False
+            Only used for model='bivector' or one of the stretch models
+            (centrality, pseudo_halo, bistretch; silently ignored for
+            every other model). If True, plots each facet element's full
+            reconstructed vector instead of its single marginal/lambda
+            point -- shaped differently depending on model:
+              - 'bivector': the full (facet element, item, threshold)
+                grid, from summing its own two marginal severity vectors
+                -- every entry is just one item-vector value plus one
+                threshold-vector value, not an independent estimate, but
+                this can still be useful to see how the two vectors
+                interact at each individual (item, threshold)
+                combination. Named the same way as 'matrix', e.g.
+                'Rater_1_Item_1_1'.
+              - 'centrality': the per-threshold vector lambda + (omega -
+                1) * tau_k reconstructs, one point per Rasch-Andrich
+                threshold, named the same way 'thresholds' would be
+                (e.g. 'Rater_1_1').
+              - 'pseudo_halo': the per-item vector lambda + (omega - 1) *
+                delta_i reconstructs, one point per item, named the same
+                way 'items' would be (e.g. 'Rater_1_Item_1').
+              - 'bistretch': the per-(item, threshold) vector both
+                reconstructed axes sum to, named the same way 'matrix'
+                would be (e.g. 'Rater_1_Item_1_1').
+            The stretch panel(s) below (show_stretch) are unaffected
+            either way -- they show omega itself, not a location, so
+            there's nothing to expand there.
+        show_stretch : bool, default True
+            Only used for the stretch models (centrality, pseudo_halo,
+            bistretch; silently ignored for every other model). Adds
+            omega -- each rater's stretch factor(s) -- as its own
+            panel(s) bolted onto the right of the whole figure, one bar
+            per rater in plain facet-name order, centred on 1 (>1
+            expands, <1 compresses; see each model's own calibrate_*
+            docstring for what that means there) rather than 0, on its
+            own scale entirely unrelated to the shared Location axis.
+            bistretch gets two such panels stacked (omega_items above
+            omega_thresholds), sharing the same rater order and the same
+            y-limits as each other (so a bar's length is comparable
+            panel to panel, not just within its own). Set False for a
+            plain shift-only (lambda) map, styled exactly like
+            model='global'.
+        item_level : str, default 'items'
+            'items' plots one point per item at its central location.
+            'thresholds' plots one point per Rasch-Andrich threshold
+            instead, flattened across all items. Ignored when
+            item_strip=True, which always needs each item's full threshold
+            set regardless of this setting.
+        orientation : str, default 'vertical'
+            'vertical' places location on the x-axis, persons above the
+            baseline. 'horizontal' places location on the y-axis, persons
+            to the left of the baseline.
+        map_type : str, default 'hist'
+            'hist' plots (back-to-back, when item_labels=False) histograms.
+            'kde' plots smoothed kernel density estimate curves instead.
+            Only governs the person side once item_labels=True, since the
+            item side becomes a label panel rather than a distribution.
+            Also governs the facet panel, when it is a distribution rather
+            than facet_labels.
+        item_labels : bool, default False
+            If True, items are listed by name in a dedicated panel next to
+            the person distribution (grouped into no_of_bins location bins,
+            stacked as rows within a bin, ordered by location) rather than
+            mirrored as a second distribution sharing the same axis.
+        item_strip : bool, default False
+            If True, draws each item as a Winsteps-style divided strip --
+            one row per item, spanning its own threshold range, divided
+            into coloured category segments with a boundary line at each
+            threshold. Implies item_labels=True.
+        item_distribution : bool, default False
+            If True, adds a further panel -- a plain (non-mirrored) hist or
+            KDE of item (or threshold, per item_level) locations -- between
+            the person panel and the item_labels panel. Implies
+            item_labels=True.
+        facet_labels : bool, default False
+            If True, facet elements are listed by name in a dedicated
+            panel (grouped into no_of_bins location bins, stacked as rows
+            within a bin, ordered by location), the same way item_labels
+            lists items, rather than shown as a hist/kde distribution.
+            Forces overlay_facet=False.
+        overlay_facet : bool, default False
+            If True, the facet distribution is overlaid (as an outlined,
+            hatched shape rather than a filled one) onto the items panel
+            or axis instead of getting its own dedicated panel. Silently
+            forced to False whenever item_labels=True and/or
+            facet_labels=True, since overlaying a distribution onto a
+            name-label panel doesn't make visual sense.
+        strip_thickness : float, default 2.0
+            Multiplier on the physical height (vertical orientation) or
+            width (horizontal orientation) of each item's strip row. Only
+            used when item_strip=True.
+        strip_alpha : float, default 0.3
+            Fill transparency for the strip's category segments. Only used
+            when item_strip=True.
+        sort : str, default 'location'
+            Ordering of item strip rows. 'location' sorts by each item's
+            lowest threshold. 'order' preserves self.items' own index
+            order. Only used when item_strip=True.
+        palette : str or None, default 'dark multi'
+            Named colour palette for the strip's category segments,
+            reusing the same palette_dict convention as plot_data(). None
+            uses a flat item_color fill with no per-category distinction.
+            Only used when item_strip=True.
+        neutral_extremes : bool, default False
+            The strip's open (unbounded) top and bottom categories always
+            draw out to the location axis limits (there's no real boundary
+            to stop short at). If True, they fade from a neutral cream
+            colour toward the real threshold instead of using a flat fill
+            in the category palette -- de-emphasising the open-ended
+            extremes rather than drawing the viewer's eye to an arbitrary
+            width. Only used when item_strip=True.
+        item_row_height : float or None, default None
+            Physical height, in inches, allocated per stacked item-label
+            row. If None, measured automatically from the longest item
+            name at the given font size. Only used when item_labels=True.
+        facet_row_height : float or None, default None
+            Physical height, in inches, allocated per stacked facet-label
+            row. If None, measured automatically from the longest facet
+            element name at the given font size. Only used when
+            facet_labels=True.
+        narrow_font : bool, default False
+            If True, item labels, facet-element labels, and (with
+            item_strip=True) the row labels beside the strip are set in
+            'Arial Narrow' instead of font. A condensed font renders each
+            name shorter, so it needs less stacked row height -- useful
+            when names are long and many end up sharing a bin or crowding
+            the strip. Falls back to matplotlib's usual font substitution
+            if 'Arial Narrow' isn't installed. Only affects item_labels=True
+            and/or facet_labels=True; everything else (axis text, legend,
+            title) still uses font.
+        edge_padding : float, default 0.5
+            Extra padding, in inches, added around the item-label margin
+            (left of the axes in vertical orientation, below the axes in
+            horizontal orientation) beyond what's needed to fit the
+            longest item name. The same value produces matching-looking
+            margins in both orientations. Only used when item_strip=True
+            (facet_labels' own binned panel, like item_labels' own,
+            doesn't need this margin -- names are drawn inside the panel,
+            not as outside row labels).
+        distribution_markers : bool, default False
+            If True, overlays mean/+-1SD/+-2SD reference marks (labelled
+            mu, mu+-sigma, mu+-2sigma) for persons and items, in their
+            respective colours.
+        group_by : pandas.Series or None, default None
+            Person-level grouping (e.g. a DIF group), indexed like
+            self.persons_{model}, used to split the person distribution
+            into one sub-distribution per unique value. None plots persons
+            as a single series.
+        group_colors : dict or None, default None
+            Mapping from each group_by value to a colour. If None, colours
+            are drawn from the 'tab10' colormap in sorted group order.
+        stack : bool, default True
+            When group_by is set: for map_type='hist', True draws one
+            segmented column per bin (each group's count stacked within
+            the bar); False draws separate columns per group (dodged, or
+            alpha-blended if blend=True). For map_type='kde', True draws
+            curves cumulatively stacked (streamgraph-style); False overlays
+            each group's curve from zero.
+        blend : bool, default False
+            Only relevant when group_by is set, map_type='hist', and
+            stack=False. If True, draws each group as full-height,
+            alpha-blended overlapping bars instead of dodged (side-by-side)
+            bars.
+        prop : bool, default False
+            If True, normalises each distribution to proportions/density
+            rather than raw counts.
+        person_lim : float or None, default None
+            One-sided magnitude for persons' own Count/Proportion axis
+            (e.g. person_lim=30 shows 0 to 30). If None, chosen
+            automatically from persons' own natural peak, independently
+            of items'/facets' own scale. Persons' own panel always keeps
+            its full physical size regardless of this value -- items'
+            and facets' own panels (when they get a dedicated hist/kde
+            panel, i.e. item_distribution=True and/or a non-facet_labels,
+            non-overlaid facet panel) are sized proportionally against
+            it, so a given Count/Proportion value reads at the same
+            physical scale in every panel that participates.
+        item_lim : float or None, default None
+            One-sided magnitude for items' own Count/Proportion axis.
+            Same semantics as person_lim, for whichever panel items end
+            up in (mirrored onto the same axis as persons when
+            item_labels=False, or their own item_distribution panel).
+        facet_lim : float or None, default None
+            One-sided magnitude for the facet-element distribution's own
+            Count/Proportion axis. Same semantics as person_lim, for
+            whichever panel the facet distribution ends up in (overlaid
+            onto the items panel/axis when overlay_facet=True, or its
+            own dedicated panel). Only used when the facet is shown as a
+            distribution rather than facet_labels.
+        person_scaling : float, default 1
+            Deliberately breaks the "same Count/Proportion value reads
+            at the same physical scale" property that item_distribution/
+            facet panel sizing otherwise guarantees, in favour of giving
+            those panels more usable room -- useful when there are far
+            more persons than items/facet elements, which otherwise
+            leaves the item/facet panel's own real variation looking
+            like a flat, uninformative squiggle at persons' own scale.
+            person_scaling=10 makes items'/the facet's own panel(s) 10x
+            larger than a strict equal-scale match would give them (so
+            persons' own axis effectively reads 10x coarser than theirs)
+            -- persons' and items'/the facet's own displayed axis values
+            are unaffected either way, only how much physical space
+            item_distribution's and/or the facet's own panel gets. Only
+            has an effect where panel sizing is already proportionally
+            matched to begin with (i.e. whenever ax itself is one-sided
+            -- item_labels=True); see person_lim above for why that
+            comparison isn't otherwise well-defined.
+        facet_scaling : float, default 1
+            Reduces the facet panel's own physical size by this factor,
+            on top of person_scaling -- independent of it, so the facet
+            panel can be dialled back without changing the item panel.
+            facet_scaling=10 makes the facet panel 10x smaller than it
+            would otherwise be. Useful for the extended MFRM models
+            (items, thresholds, matrix, bivector), where the facet
+            panel's natural range comes from far more individual values
+            than persons'/items' (e.g. matrix's facet_elements x items x
+            max_score raw severities), which can otherwise make it
+            balloon out of proportion even at person_scaling=1 -- and
+            gets worse still if person_scaling != 1, since that
+            multiplier applies to the facet panel too. facet_scaling=1
+            leaves that behaviour as-is.
+        no_of_bins : int, default 20
+            Number of histogram bins spanning the location range. Also
+            defines the location-binning grid used for item_labels=True
+            and facet_labels=True.
+        pad : bool, default False
+            If True, adds 5% padding to either end of the location axis
+            limits. If False, the location axis is bounded exactly to the
+            plotted range.
+        plot_range : tuple of (float, float) or None, default None
+            (lo, hi) limits for the location axis. If None, uses the floor
+            of the combined minimum and the ceiling of the combined maximum
+            of persons, items, and facet elements.
+        kde_points : int, default 500
+            Number of points at which each KDE curve is evaluated. Only
+            used when map_type='kde'.
+        bw_method : str, scalar, or callable, default 'scott'
+            Bandwidth selection method passed to scipy.stats.gaussian_kde.
+            Only used when map_type='kde'.
+        line_width : float, default 1
+            Line width of the KDE curves. Only used when map_type='kde'.
+        figsize : tuple of (float, float) or None, default None
+            Base figure size in inches for the person distribution. If
+            None, defaults to (8, 6) for orientation='vertical' or (4, 8)
+            for orientation='horizontal'. When item_labels=True, the person
+            panel gets half of this (matching how much space it occupied
+            in the original mirrored layout), and the figure grows further
+            to fit however many stacked item and/or facet-element rows are
+            needed -- the person distribution's own size is never reduced
+            to make room.
+        title : str or None, default None
+            Plot title. If None, no title is shown.
+        plot_style : str, default 'white'
+            Plot background style: 'white' or 'dark'.
+        edge_color : str, default 'black'
+            Edge colour of the histogram bars. Only used when
+            map_type='hist' and group_by is None.
+        person_color : str, default 'skyblue'
+            Fill colour for the person distribution. Ignored when group_by
+            is set (each group uses group_colors instead). Overridden by a
+            grey shade when black=True.
+        item_color : str, default 'salmon'
+            Fill colour for the item distribution. Only used when
+            item_labels=False. Overridden by a grey shade when black=True.
+        facet_color : str, default 'mediumseagreen'
+            Fill colour for the facet-element distribution. Only used when
+            facet_labels=False. Overridden by a grey shade when black=True.
+        person_line_color : str, default 'black'
+            Line colour for the person KDE curve. Only used when
+            map_type='kde' and group_by is None.
+        item_line_color : str, default 'black'
+            Colour for item labels (item_labels=True) or the item KDE
+            curve line (item_labels=False, map_type='kde').
+        facet_line_color : str, default 'black'
+            Colour for facet-element labels (facet_labels=True) or the
+            facet KDE curve line (facet_labels=False, map_type='kde').
+        marker_color : str, default 'darkred'
+            Colour of the tick marks and labels drawn when
+            distribution_markers=True. Only used for the single-series
+            (group_by=None) case -- grouped marks use each group's own
+            colour instead, to stay identifiable against its distribution.
+        alpha : float, default 0.6
+            Fill transparency for the distributions.
+        black : bool, default False
+            If True, renders person_color/item_color/facet_color as grey
+            shades instead. Has no effect on group_by colours.
+        font : str, default 'Times New Roman'
+            Font family for all plot text.
+        title_font_size : int, default 15
+            Title font size in points.
+        axis_font_size : int, default 12
+            Axis label font size in points.
+        labelsize : int, default 12
+            Tick label font size in points.
+        item_label_size : int, default 8
+            Font size, in points, for item names in the item_labels panel.
+        facet_label_size : int, default 8
+            Font size, in points, for facet-element names in the
+            facet_labels panel.
+        tick_interval : float, default 1
+            Spacing between Location axis ticks. Ticks are evenly spaced
+            at multiples of this value across the plotted range, rather
+            than using matplotlib's own automatic tick choice.
+        filename : str or None, default None
+            If provided, saves the plot to this path. No file extension
+            needed.
+        file_format : str, default 'png'
+            Output file format.
+        dpi : int, default 300
+            Output resolution in dots per inch.
+
+        Returns
+        -------
+        None
+            Displays and closes the figure. Use filename to save.
+        """
+        if model not in (
+            "global", "items", "thresholds", "matrix", "bivector",
+            "centrality", "pseudo_halo", "bistretch",
+        ):
+            raise NotImplementedError(f"wright_map does not support the {model!r} MFRM model.")
+
+        if black:
+            person_color = "lightgray"
+            item_color = "darkgray"
+            facet_color = "gray"
+
+        if not hasattr(self, f"persons_{model}"):
+            self.person_estimates(model=model)
+
+        all_persons = getattr(self, f"persons_{model}")
+        persons = all_persons if person_names is None else all_persons.loc[person_names]
+
+        # a strip needs every item's full threshold set regardless of
+        # item_level (it draws the whole operating range, not one point),
+        # so it also implies item_labels -- friendlier than raising when
+        # someone passes item_strip=True on its own
+        if item_strip:
+            item_labels = True
+
+        # a plain item/threshold hist or KDE panel only makes sense as a
+        # further panel alongside the labelled one -- on its own it's just
+        # the old mirrored mode with item_labels=False
+        if item_distribution:
+            item_labels = True
+
+        # overlaying a distribution onto a name-label panel doesn't make
+        # visual sense -- always use a separate facet panel in that case
+        if item_labels or facet_labels:
+            overlay_facet = False
+
+        # items get a genuine, separate, scale-matched panel whenever
+        # explicitly requested (item_distribution=True) or, even without
+        # item_labels, whenever person_scaling deliberately rebalances
+        # panel sizes -- the old mirrored mode (item_labels=False,
+        # person_scaling=1) is otherwise uninformative once persons
+        # vastly outnumber items, since items are then squeezed onto the
+        # same shared axis as persons' own much larger range, with no
+        # way to give them more visual room on that shared axis
+        item_dist_panel = item_distribution or (not item_labels and person_scaling != 1)
+
+        base_items = self.items if item_names is None else self.items.loc[item_names]
+
+        if not hasattr(self, f"facet_effects_{model}"):
+            self.calibrate(model=model)
+
+        # facet_element_names always filters by rater name (matching
+        # what it does for 'global'), applied before flattening below --
+        # for 'items'/'thresholds' that's the raw table's own row index;
+        # for 'matrix' it's the first level of its (rater, item) row
+        # index, which .loc[] with a plain list of rater names also
+        # selects on
+        def _filter_by_rater(table):
+            return table if facet_element_names is None else table.loc[facet_element_names]
+
+        def _flatten_facets(table):
+            # one row per rater, one column per item/threshold/category
+            # -- stacking flattens that to one entry per combination,
+            # e.g. 'Rater_1_Item_1' or 'Rater_1_1' for a 2-level table,
+            # 'Rater_1_Item_1_1' for a 3-level one (matrix's own (rater,
+            # item) row index plus the stacked category column)
+            stacked = table.stack().dropna()
+            return stacked.set_axis(
+                ["_".join(str(p) for p in idx) for idx in stacked.index]
+            )
+
+        # The stretch models (centrality, pseudo_halo, bistretch) are each
+        # a 2-(or 3-)parameter (lambda shift, omega stretch[es])
+        # restriction of an unrestricted model -- lambda is a plain
+        # logit-scale shift, one value per rater, structurally identical
+        # to facet_effects_global, so it plots exactly like 'global' by
+        # default. omega (a dimensionless spread multiplier centred on 1,
+        # not a logit value) has no meaningful place on the shared
+        # Location axis at all either way -- see the bolted-on stretch
+        # panel(s) near the end of this method instead (show_stretch=
+        # True). expand_model=True swaps facets for the full
+        # reconstructed per-threshold (centrality)/per-item (pseudo_halo)/
+        # per-(item, threshold) (bistretch) vector instead of the single
+        # lambda point -- lambda + omega combined back out to individual
+        # element positions, named the same way the corresponding
+        # unrestricted model (thresholds/items/matrix) would be. The
+        # omega panel(s) below are unaffected either way, since they show
+        # what drove the expansion, not a location. Same argument
+        # bivector's own expansion below uses -- each model resolves it
+        # to whatever shape (flat per-element vector here; a (facet
+        # element, item, threshold) grid there) its own restriction
+        # implies.
+        stretch_omega = None
+        if model in ("centrality", "pseudo_halo", "bistretch"):
+            fe_stretch = getattr(self, f"facet_effects_{model}")
+            if expand_model:
+                facets = _flatten_facets(
+                    _filter_by_rater(
+                        getattr(self, f"facet_effects_{model}_full_vector")
+                    )
+                )
+            else:
+                facets = _filter_by_rater(fe_stretch["lambda"])
+            if model == "bistretch":
+                stretch_omega = {
+                    "omega_items": _filter_by_rater(fe_stretch["omega_items"]),
+                    "omega_thresholds": _filter_by_rater(fe_stretch["omega_thresholds"]),
+                }
+            else:
+                stretch_omega = {"omega": _filter_by_rater(fe_stretch["omega"])}
+        elif model == "global":
+            facets = _filter_by_rater(self.facet_effects_global)
+        elif model == "bivector" and not expand_model:
+            # bivector's true parameters are the two marginal vectors
+            # (per-item severity, per-threshold severity) its full
+            # (rater, item, threshold) matrix is reconstructed FROM (as
+            # their sum) -- showing that full reconstructed matrix would
+            # be redundant, since every entry is just one item-vector
+            # value plus one threshold-vector value, not an independent
+            # estimate. Plotting the two vectors directly instead, named
+            # the same way the standalone items/thresholds models are,
+            # shows what bivector actually estimates. expand_model=True
+            # opts into the full grid instead (silently ignored for
+            # every other model, where it has no separate meaning).
+            items_facets = _flatten_facets(
+                _filter_by_rater(self.facet_effects_bivector_items)
+            )
+            thr_facets = _flatten_facets(
+                _filter_by_rater(self.facet_effects_bivector_thresholds)
+            )
+            facets = pd.concat([items_facets, thr_facets])
+        else:
+            facets = _flatten_facets(
+                _filter_by_rater(getattr(self, f"facet_effects_{model}"))
+            )
+        facet_label = self.facets.capitalize()
+
+        if item_level == "items" and not item_strip:
+            items = base_items
+        else:
+            # one entry per Rasch-Andrich threshold rather than one per item.
+            # self.thresholds is a Series of step values tau_k, shared
+            # across items (Global MFRM builds on RSM's own threshold
+            # structure): delta_i + tau_k as one outer-sum matrix.
+            matrix = pd.DataFrame(
+                base_items.values[:, None] + self.thresholds.values[None, :],
+                index=base_items.index,
+                columns=self.thresholds.index,
+            )
+
+            # pandas' stack() stopped dropping NaN by default as of the
+            # 2.1+ implementation, so drop the short items' padding NaNs
+            # explicitly rather than relying on stack()'s own default
+            stacked = matrix.stack().dropna()
+            items = stacked.set_axis(
+                [f"{item} (τ{k})" for item, k in stacked.index]
+            )
+
+            if item_strip:
+                # kept grouped by item (not flattened) for the strip
+                # renderer, which needs each item's own ordered threshold
+                # list rather than one independent point per threshold.
+                # Segments are the item's own *most probable category*
+                # map -- the theta interval where each category actually
+                # has the highest response probability -- rather than
+                # just the interval between two raw threshold values.
+                # Category k's (unnormalised) log-response-odds relative
+                # to category 0 is S_k(theta) = k*theta - T_k, a straight
+                # line in theta (T_k = the cumulative sum of thresholds
+                # 1..k in their own natural, possibly disordered, order);
+                # "most probable category" is exactly whichever line is
+                # highest, so the segments are the upper envelope of
+                # these lines. For ordered thresholds this reduces to
+                # exactly the interval between adjacent thresholds; when
+                # disordered, a category whose bump never rises above its
+                # neighbours' is correctly dropped from the envelope
+                # entirely, rather than drawn as a spurious sliver.
+                def _most_probable_category_segments(thresholds_natural):
+                    m = len(thresholds_natural)
+                    T = np.concatenate([[0.0], np.cumsum(thresholds_natural)])
+                    hull = []
+
+                    def redundant(l1, l2, l3):
+                        m1, b1 = l1
+                        m2, b2 = l2
+                        m3, b3 = l3
+                        return (b3 - b1) * (m1 - m2) <= (b2 - b1) * (m1 - m3)
+
+                    # slopes (category numbers 0..m) are already sorted
+                    # ascending regardless of threshold order, which is
+                    # what lets this single-pass stack (the sorted-slope
+                    # convex-hull trick) work without re-sorting anything
+                    for h in range(m + 1):
+                        line = (h, -T[h])
+                        while len(hull) >= 2 and redundant(hull[-2], hull[-1], line):
+                            hull.pop()
+                        hull.append(line)
+                    segs = []
+                    for i, (slope, intercept) in enumerate(hull):
+                        seg_lo = (
+                            None
+                            if i == 0
+                            else (intercept - hull[i - 1][1])
+                            / (hull[i - 1][0] - slope)
+                        )
+                        seg_hi = (
+                            None
+                            if i == len(hull) - 1
+                            else (hull[i + 1][1] - intercept)
+                            / (slope - hull[i + 1][0])
+                        )
+                        segs.append((seg_lo, seg_hi, slope))
+                    return segs
+
+                item_thresholds_natural = {
+                    item: row.dropna().values for item, row in matrix.iterrows()
+                }
+                item_segments = {
+                    item: _most_probable_category_segments(t)
+                    for item, t in item_thresholds_natural.items()
+                }
+                # a category missing from its item's segments never has
+                # the highest response probability anywhere -- exactly
+                # what disordered Rasch-Andrich thresholds mean
+                # geometrically (its own probability "bump" never rises
+                # above its neighbours')
+                item_missing_categories = {
+                    item: sorted(
+                        set(range(len(t) + 1))
+                        - {lab for _, _, lab in item_segments[item]}
+                    )
+                    for item, t in item_thresholds_natural.items()
+                }
+                disordered_items = [
+                    item
+                    for item, missing in item_missing_categories.items()
+                    if missing
+                ]
+                if disordered_items:
+                    warnings.warn(
+                        "Disordered thresholds for item(s) "
+                        f"{', '.join(str(i) for i in disordered_items)}. "
+                        "Only categories that are most probable for some "
+                        "range of the trait shown. For more detailed "
+                        "inspection of threshold structure, run self.crcs() "
+                        "plot and/or self.threshold_stats_df()."
+                    )
+
+        no_of_items = len(items)
+        no_of_facets = len(facets)
+
+        if group_by is not None:
+            group_by = group_by.reindex(persons.index)
+            person_group_values = sorted(group_by.dropna().unique(), key=str)
+            if group_colors is None:
+                cmap = plt.get_cmap("tab10")
+                group_colors = {
+                    g: cmap(i % 10) for i, g in enumerate(person_group_values)
+                }
+
+        if plot_range is None:
+            combined = np.concatenate([persons.values, items.values, facets.values])
+            span_lo, span_hi = float(combined.min()), float(combined.max())
+            if distribution_markers:
+                # the μ±2σ ticks (and their rotated labels) are drawn at
+                # mean ± 2·SD of each plotted distribution and can fall
+                # outside its raw data extent when that distribution is
+                # wide or heavy-tailed — fold them into the range so they
+                # stay on-canvas rather than being clipped at the spine
+                marker_values = [items.values, facets.values]
+                if group_by is not None:
+                    marker_values += [
+                        persons.values[group_by.values == g]
+                        for g in person_group_values
+                    ]
+                else:
+                    marker_values.append(persons.values)
+                for mv in marker_values:
+                    if len(mv):
+                        mv_mean, mv_sd = float(np.mean(mv)), float(np.std(mv))
+                        span_lo = min(span_lo, mv_mean - 2 * mv_sd)
+                        span_hi = max(span_hi, mv_mean + 2 * mv_sd)
+            lo = np.floor(span_lo)
+            hi = np.ceil(span_hi)
+        else:
+            lo, hi = plot_range[0], plot_range[1]
+
+        bins = np.linspace(lo, hi, no_of_bins + 1)
+
+        # each distribution's own natural peak, computed analytically
+        # (no plotting needed) so panel sizing/axis ranges can be
+        # resolved before the figure is even built. Computed
+        # independently per distribution -- deliberately NOT sharing a
+        # single "widest" value across persons/items/facets, since a
+        # small-N facet's own much more sharply peaked KDE would
+        # otherwise force persons' own well-populated distribution onto
+        # a needlessly inflated scale (and vice versa for a tiny facet
+        # squeezed onto persons' own wide one)
+        def _natural_max(values, n):
+            if map_type == "hist":
+                counts, _ = np.histogram(values, bins=bins)
+                peak = counts.max() if len(counts) else 0
+                return peak / n if prop else peak
+            kde_vals = gaussian_kde(values, bw_method=bw_method)(
+                np.linspace(lo, hi, kde_points)
+            )
+            peak = kde_vals.max() if len(kde_vals) else 0
+            return peak if prop else peak * n
+
+        person_natural_max = _natural_max(persons.values, len(persons))
+        item_natural_max = _natural_max(items.values, no_of_items)
+        facet_natural_max = _natural_max(facets.values, no_of_facets)
+
+        # rounds a natural peak up to a "neat" ceiling -- 1/1.5/2/2.5/3/
+        # 4/5/6/8/10 x a power of 10 -- and picks a tick step that
+        # divides it exactly, from a matching per-fraction divisor,
+        # rather than leaving the step to a separately-chosen locator
+        # that has no reason to land on a divisor of this specific
+        # ceiling (which previously left the axis's own true top edge
+        # short of its last drawn tick, e.g. ticks 0..28 against a
+        # ceiling of 30). The 10% pad before searching guarantees the
+        # chosen ceiling sits visibly above the true peak even when that
+        # peak already IS a neat number itself (a small integer count,
+        # for instance) -- without it, the tallest bar/curve would land
+        # flush against the axis's own edge, with no headroom at all.
+        _nice_fractions = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10]
+        _nice_divisors = {1: 4, 1.5: 3, 2: 4, 2.5: 5, 3: 3, 4: 4, 5: 5, 6: 3, 8: 4, 10: 5}
+
+        def _nice_ceil_and_step(x, integer):
+            if x <= 0:
+                return 0, (1 if integer else 0.1)
+            x = x * 1.1
+            exponent = np.floor(np.log10(x))
+            fraction = x / 10**exponent
+            nice_fraction = next(f for f in _nice_fractions if f >= fraction - 1e-9)
+            ceiling = nice_fraction * 10**exponent
+            step = ceiling / _nice_divisors[nice_fraction]
+            if integer:
+                step = max(1, round(step))
+                ceiling = step * np.ceil(x / step)
+            return ceiling, step
+
+        def _nice_step_for(ceiling, integer):
+            # an explicit *_lim is used exactly as given (the ceiling
+            # itself isn't adjusted), but still gets a step matched to
+            # whichever known "nice" fraction it's closest to, so it at
+            # least *usually* divides evenly -- an arbitrary user value
+            # isn't guaranteed to, the way an auto-computed ceiling is
+            if ceiling <= 0:
+                return 1 if integer else 0.1
+            exponent = np.floor(np.log10(ceiling))
+            fraction = ceiling / 10**exponent
+            nice_fraction = min(_nice_fractions, key=lambda f: abs(f - fraction))
+            step = ceiling / _nice_divisors[nice_fraction]
+            if integer:
+                step = max(1, round(step))
+            return step
+
+        _integer_counts = map_type == "hist" and not prop
+
+        if person_lim is not None:
+            person_range = person_lim
+            person_step = _nice_step_for(person_lim, _integer_counts)
+        else:
+            person_range, person_step = _nice_ceil_and_step(
+                person_natural_max, _integer_counts
+            )
+        if item_lim is not None:
+            item_range = item_lim
+            item_step = _nice_step_for(item_lim, _integer_counts)
+        else:
+            item_range, item_step = _nice_ceil_and_step(item_natural_max, _integer_counts)
+        if facet_lim is not None:
+            facet_range = facet_lim
+            facet_step = _nice_step_for(facet_lim, _integer_counts)
+        else:
+            facet_range, facet_step = _nice_ceil_and_step(
+                facet_natural_max, _integer_counts
+            )
+
+        # breathing room reserved before row 0 of the item panel (used for
+        # both the boundary_margin below and, when distribution_markers
+        # draws a tick alongside each item-side mark, for keeping that
+        # tick inside the margin and clear of row 0's own text -- shared
+        # so the two stay consistent if this value ever changes)
+        item_row_margin = 0.45
+        # same idea for the facet-labels panel, which never carries
+        # distribution_markers' own reserved band -- kept as its own named
+        # constant (same value) purely for readability at its call sites
+        facet_row_margin = 0.45
+
+        # shared physical sizing for distribution_markers' ticks: a fixed
+        # gap (inches) between a tick and its own label, and a fixed tick
+        # length (rows) on the item side -- both fixed in real inches
+        # rather than a fraction of whatever data range is being plotted,
+        # so the two sides (persons' count-axis-based scale vs items'
+        # row-based scale) end up visually consistent instead of drifting
+        # apart depending on the dataset
+        mark_gap_in = 0.065
+        mark_tick_rows = 0.15
+        # physical breathing room (inches) between the widest mark's own
+        # label and where item names start -- separate from the +0.5-row
+        # collision buffer below (that one exists purely to stop an
+        # item's own centred text reaching back into the mark's text; this
+        # one is just visual spacing between the two blocks of text)
+        item_label_gap_in = 0.08
+
+        # when item_labels shows a dedicated item panel (rather than
+        # item_distribution's separate histogram/KDE), distribution_markers'
+        # item-side marks are drawn straight into that panel's own row
+        # grid, all at row 0 -- items then start uniformly at row 1,
+        # regardless of which bin(s) the marks themselves land in.
+        item_mark_rows = {}
+        mark_row_depth = 0
+        if distribution_markers and item_labels and not item_distribution and not item_strip:
+            item_mean = items.mean()
+            item_sd = items.std()
+            for mark_label, mark_loc in (
+                ("μ", item_mean),
+                ("μ−σ", item_mean - item_sd),
+                ("μ+σ", item_mean + item_sd),
+                ("μ−2σ", item_mean - 2 * item_sd),
+                ("μ+2σ", item_mean + 2 * item_sd),
+            ):
+                item_mark_rows[mark_label] = mark_loc
+            mark_row_depth = 1
+
+        if figsize is None:
+            base_w, base_h = (8, 6) if orientation == "vertical" else (4, 8)
+        else:
+            base_w, base_h = figsize
+
+        style_overrides = {"font.family": font, "font.size": axis_font_size}
+
+        with plt.rc_context(style_overrides):
+
+            if plot_style != "white":
+                self._apply_plot_style(plot_style)
+
+            label_margin_in = 0.0
+            item_font = "Arial Narrow" if narrow_font else font
+            facet_font = "Arial Narrow" if narrow_font else font
+
+            if item_labels and item_strip:
+                # divided-strip layout: each item is one row spanning its
+                # own threshold range. Row labels are drawn once per row,
+                # like a tick label, so each item always gets its own row
+                # (no packing) to keep that labelling unambiguous.
+                strip_ext = (hi - lo) * 0.03
+
+                def _draw_bounds(segs):
+                    if len(segs) >= 3:
+                        return (
+                            segs[0][1] - (segs[1][1] - segs[1][0]),
+                            segs[-1][0] + (segs[-2][1] - segs[-2][0]),
+                        )
+                    return segs[0][1] - strip_ext, segs[-1][0] + strip_ext
+
+                item_spans = {
+                    name: _draw_bounds(segs) for name, segs in item_segments.items()
+                }
+
+                if sort == "location":
+                    ordered_names = sorted(item_spans, key=lambda name: item_spans[name][0])
+                else:
+                    ordered_names = list(item_thresholds_natural.keys())
+
+                item_rows = {name: i for i, name in enumerate(ordered_names)}
+                max_depth = len(ordered_names)
+
+                row_names = {}
+                for name in ordered_names:
+                    row_names.setdefault(item_rows[name], []).append(name)
+                row_labels = {row: ", ".join(names) for row, names in row_names.items()}
+
+                widest_label = max(row_labels.values(), key=len)
+                probe_fig = plt.figure()
+                probe_ax = probe_fig.add_subplot(111)
+                label_rotation = 0 if orientation == "vertical" else 90
+                probe_text = probe_ax.text(
+                    0,
+                    0,
+                    widest_label,
+                    fontsize=labelsize,
+                    fontfamily=item_font,
+                    rotation=label_rotation,
+                    rotation_mode="anchor",
+                )
+                probe_fig.canvas.draw()
+                bbox = probe_text.get_window_extent(
+                    renderer=probe_fig.canvas.get_renderer()
+                )
+                label_dim = bbox.width if orientation == "vertical" else bbox.height
+                label_margin_in = label_dim / probe_fig.dpi + edge_padding
+                plt.close(probe_fig)
+
+                if item_row_height is None:
+                    probe_fig = plt.figure()
+                    probe_ax = probe_fig.add_subplot(111)
+                    probe_text = probe_ax.text(
+                        0, 0, "Ag", fontsize=labelsize, fontfamily=item_font
+                    )
+                    probe_fig.canvas.draw()
+                    bbox = probe_text.get_window_extent(
+                        renderer=probe_fig.canvas.get_renderer()
+                    )
+                    row_height_in = bbox.height / probe_fig.dpi * 1.6 * strip_thickness
+                    plt.close(probe_fig)
+                else:
+                    row_height_in = item_row_height * strip_thickness
+
+                # the axis itself later spans (max_depth + 0.1 +
+                # boundary_margin) row-units, not just max_depth -- sizing
+                # the panel to only max_depth*row_height_in would leave
+                # every row rendered slightly smaller than row_height_in
+                # actually intended, quietly eating into the buffer built
+                # into row_height_in's own measurement
+                item_panel_in = (
+                    max_depth + 0.1 + (0.7 if distribution_markers else 0.45)
+                ) * row_height_in
+
+            elif item_labels:
+                # Winsteps-style: bin items onto the histogram grid and
+                # stack names as rows within each occupied bin.
+                bin_idx = np.clip(
+                    np.digitize(items.values, bins) - 1, 0, no_of_bins - 1
+                )
+                bin_centers = (bins[:-1] + bins[1:]) / 2
+                item_groups = {}
+                for (name, loc), b in zip(items.items(), bin_idx):
+                    item_groups.setdefault(b, []).append((loc, name))
+
+                if item_row_height is None:
+                    longest_name = max((str(n) for n in items.index), key=len)
+                    probe_fig = plt.figure()
+                    probe_ax = probe_fig.add_subplot(111)
+                    probe_text = probe_ax.text(
+                        0,
+                        0,
+                        longest_name,
+                        rotation=90,
+                        fontsize=item_label_size,
+                        fontfamily=item_font,
+                        rotation_mode="anchor",
+                    )
+                    probe_fig.canvas.draw()
+                    bbox = probe_text.get_window_extent(
+                        renderer=probe_fig.canvas.get_renderer()
+                    )
+                    row_height_in = bbox.height / probe_fig.dpi * 1.3
+                    plt.close(probe_fig)
+                else:
+                    row_height_in = item_row_height
+
+                if item_mark_rows:
+                    probe_fig = plt.figure()
+                    probe_ax = probe_fig.add_subplot(111)
+                    probe_text = probe_ax.text(
+                        0, 0, "μ+2σ", rotation=90, fontsize=labelsize,
+                        rotation_mode="anchor",
+                    )
+                    probe_fig.canvas.draw()
+                    bbox = probe_text.get_window_extent(
+                        renderer=probe_fig.canvas.get_renderer()
+                    )
+                    mark_label_in = bbox.height / probe_fig.dpi
+                    plt.close(probe_fig)
+                    mark_gap_rows = mark_gap_in / row_height_in
+                    mark_text_row = -item_row_margin + mark_tick_rows + mark_gap_rows
+                    mark_row_depth = max(
+                        1.0,
+                        mark_text_row
+                        + mark_label_in / row_height_in
+                        + item_label_gap_in / row_height_in
+                        + 0.5,
+                    )
+                else:
+                    mark_row_depth = (
+                        -item_row_margin + item_label_gap_in / row_height_in + 0.5
+                    )
+
+                max_depth = max(
+                    max((len(v) for v in item_groups.values()), default=0)
+                    + mark_row_depth,
+                    1,
+                )
+                # the axis itself later spans (max_depth + 0.1 +
+                # item_row_margin) row-units, not just max_depth -- sizing
+                # the panel to only max_depth*row_height_in would leave
+                # every row rendered slightly smaller than row_height_in
+                # actually intended, quietly eating into the buffer built
+                # into row_height_in's own measurement (most visible on
+                # whichever item lands in the last row, right against the
+                # panel's outer edge)
+                item_panel_in = (max_depth + 0.1 + item_row_margin) * row_height_in
+            else:
+                item_panel_in = 0
+
+            if facet_labels:
+                # same binned-row-stacking approach as item_labels' own
+                # non-strip branch above, minus the mark_row_depth
+                # reservation -- distribution_markers isn't extended to
+                # the facet panel, so every bin's names simply start
+                # stacking from row 0
+                facet_bin_idx = np.clip(
+                    np.digitize(facets.values, bins) - 1, 0, no_of_bins - 1
+                )
+                facet_bin_centers = (bins[:-1] + bins[1:]) / 2
+                facet_groups = {}
+                for (name, loc), b in zip(facets.items(), facet_bin_idx):
+                    facet_groups.setdefault(b, []).append((loc, name))
+
+                if facet_row_height is None:
+                    longest_facet_name = max((str(n) for n in facets.index), key=len)
+                    probe_fig = plt.figure()
+                    probe_ax = probe_fig.add_subplot(111)
+                    probe_text = probe_ax.text(
+                        0,
+                        0,
+                        longest_facet_name,
+                        rotation=90,
+                        fontsize=facet_label_size,
+                        fontfamily=facet_font,
+                        rotation_mode="anchor",
+                    )
+                    probe_fig.canvas.draw()
+                    bbox = probe_text.get_window_extent(
+                        renderer=probe_fig.canvas.get_renderer()
+                    )
+                    facet_row_height_in = bbox.height / probe_fig.dpi * 1.3
+                    plt.close(probe_fig)
+                else:
+                    facet_row_height_in = facet_row_height
+
+                facet_max_depth = max(
+                    max((len(v) for v in facet_groups.values()), default=0), 1
+                )
+                # same reasoning as item_panel_in above -- the axis
+                # itself later spans (facet_max_depth + 0.1 +
+                # facet_row_margin) row-units, not just facet_max_depth
+                facet_panel_in = (
+                    facet_max_depth + 0.1 + facet_row_margin
+                ) * facet_row_height_in
+            else:
+                facet_panel_in = None  # resolved below, once person_panel_h/w exist
+
+            # figsize originally described the whole mirrored plot (persons
+            # above, items below, sharing base_h/base_w). Now that items
+            # get their own panel, persons only need the half of that
+            # budget they used to occupy -- and persons' own panel always
+            # gets that full share regardless of person_range, per the
+            # docstring's promise that it never shrinks to make room.
+            #
+            # item_distribution's panel (always alongside a one-sided ax,
+            # since item_distribution implies item_labels=True) is sized
+            # proportionally to item_range vs person_range, so a given
+            # Count/Proportion value ends up at the same physical scale
+            # in both -- e.g. an item panel needing half of persons' own
+            # range gets half of persons' own physical size, not a fixed
+            # fraction of the whole figure regardless of what it actually
+            # needs.
+            #
+            # The facet panel always matches items' own effective scale.
+            # When items have their own panel (item_labels=True, or
+            # item_dist_panel even without item_labels), that's the same
+            # person_panel_h/person_range reference item_dist_panel_h
+            # itself uses below. When persons and items still mirror
+            # onto the *same* ax instead (item_labels=False,
+            # item_dist_panel=False -- which, per item_dist_panel's own
+            # definition above, only happens when person_scaling=1),
+            # items' effective scale IS ax's own: a single physical axis
+            # has one px-per-unit throughout, regardless of the two
+            # sides showing different data values, so ax's own combined
+            # span (person_range + item_range) against its own physical
+            # size gives that same reference directly.
+            person_panel_h = base_h / 2 if item_labels else base_h
+            person_panel_w = base_w / 2 if item_labels else base_w
+            item_dist_panel_h = (
+                person_panel_h * (item_range / person_range) * person_scaling
+                if item_dist_panel and person_range > 0
+                else (person_panel_h if item_dist_panel else 0)
+            )
+            item_dist_panel_w = (
+                person_panel_w * (item_range / person_range) * person_scaling
+                if item_dist_panel and person_range > 0
+                else (person_panel_w if item_dist_panel else 0)
+            )
+            if facet_panel_in is None:
+                if overlay_facet:
+                    facet_panel_in = 0
+                elif (item_labels or item_dist_panel) and person_range > 0:
+                    facet_panel_in = (
+                        (person_panel_h if orientation == "vertical" else person_panel_w)
+                        * (facet_range / person_range)
+                        * person_scaling
+                        / facet_scaling
+                    )
+                elif person_range + item_range > 0:
+                    facet_panel_in = (
+                        (person_panel_h if orientation == "vertical" else person_panel_w)
+                        * (facet_range / (person_range + item_range))
+                        / facet_scaling
+                    )
+                else:
+                    facet_panel_in = (
+                        (base_h / 3 if orientation == "vertical" else base_w / 3)
+                        / facet_scaling
+                    )
+
+            # nothing needs its own panel only when there's no item panel
+            # of any kind (neither a name-label panel nor a separate,
+            # scale-matched distribution panel) *and* the facet
+            # distribution is being overlaid onto the (then single,
+            # mirrored) axis -- the one case that still collapses to a
+            # single simple axes, as in the original two-family
+            # (persons/items) layout
+            if not item_labels and not item_dist_panel and overlay_facet:
+                fig, ax = plt.subplots(figsize=(base_w, base_h))
+                ax_items = None
+                ax_item_dist = None
+                ax_facet = None
+            elif orientation == "vertical":
+                margin_top_in, margin_bottom_in = 1.0, 0.6
+                margin_right_in = edge_padding
+                fig_w = base_w + label_margin_in + margin_right_in
+                panel_sizes = [person_panel_h]
+                if item_dist_panel:
+                    panel_sizes.append(item_dist_panel_h)
+                if item_labels:
+                    panel_sizes.append(item_panel_in)
+                if not overlay_facet:
+                    panel_sizes.append(facet_panel_in)
+                fig_h = sum(panel_sizes) + margin_top_in + margin_bottom_in
+                fig = plt.figure(figsize=(fig_w, fig_h))
+                nrows = len(panel_sizes)
+                gridspec_kwargs = dict(
+                    height_ratios=panel_sizes,
+                    hspace=0,
+                    top=1 - margin_top_in / fig_h,
+                    bottom=margin_bottom_in / fig_h,
+                    right=1 - margin_right_in / fig_w,
+                )
+                if label_margin_in:
+                    gridspec_kwargs["left"] = label_margin_in / fig_w
+                gs = fig.add_gridspec(nrows, 1, **gridspec_kwargs)
+                ax = fig.add_subplot(gs[0])
+                row_i = 1
+                if item_dist_panel:
+                    ax_item_dist = fig.add_subplot(gs[row_i], sharex=ax)
+                    row_i += 1
+                else:
+                    ax_item_dist = None
+                if item_labels:
+                    ax_items = fig.add_subplot(gs[row_i], sharex=ax)
+                    row_i += 1
+                else:
+                    ax_items = None
+                if not overlay_facet:
+                    ax_facet = fig.add_subplot(gs[row_i], sharex=ax)
+                    row_i += 1
+                else:
+                    ax_facet = None
+            else:
+                margin_left_in, margin_right_in = 0.7, 0.7
+                margin_top_in = 0.67
+                panel_sizes = [person_panel_w]
+                if item_dist_panel:
+                    panel_sizes.append(item_dist_panel_w)
+                if item_labels:
+                    panel_sizes.append(item_panel_in)
+                if not overlay_facet:
+                    panel_sizes.append(facet_panel_in)
+                fig_w = sum(panel_sizes) + margin_left_in + margin_right_in
+                fig_h = base_h + label_margin_in + margin_top_in
+                fig = plt.figure(figsize=(fig_w, fig_h))
+                ncols = len(panel_sizes)
+                gridspec_kwargs = dict(
+                    width_ratios=panel_sizes,
+                    wspace=0,
+                    left=margin_left_in / fig_w,
+                    right=1 - margin_right_in / fig_w,
+                    top=1 - margin_top_in / fig_h,
+                )
+                if label_margin_in:
+                    gridspec_kwargs["bottom"] = label_margin_in / fig_h
+                gs = fig.add_gridspec(1, ncols, **gridspec_kwargs)
+                ax = fig.add_subplot(gs[0])
+                col_i = 1
+                if item_dist_panel:
+                    ax_item_dist = fig.add_subplot(gs[col_i], sharey=ax)
+                    col_i += 1
+                else:
+                    ax_item_dist = None
+                if item_labels:
+                    ax_items = fig.add_subplot(gs[col_i], sharey=ax)
+                    col_i += 1
+                else:
+                    ax_items = None
+                if not overlay_facet:
+                    ax_facet = fig.add_subplot(gs[col_i], sharey=ax)
+                    col_i += 1
+                else:
+                    ax_facet = None
+
+            # ordered outer-to-inner list of every panel beyond ax itself
+            # -- the last one is the true outer edge of the whole figure
+            # (gets the real Location ticks/label); everything before it
+            # is an interior panel (shares the Location scale but hides
+            # its own duplicate tick labels)
+            extra_axes = []
+            if item_dist_panel:
+                extra_axes.append(ax_item_dist)
+            if item_labels:
+                extra_axes.append(ax_items)
+            if not overlay_facet:
+                extra_axes.append(ax_facet)
+            outer_ax = extra_axes[-1] if extra_axes else ax
+            interior_axes = extra_axes[:-1]
+
+            for a in interior_axes:
+                if orientation == "vertical":
+                    a.tick_params(labelbottom=False)
+                else:
+                    a.tick_params(labelleft=False)
+
+            person_sign = 1 if orientation == "vertical" else -1
+            item_sign = -1 if orientation == "vertical" else 1
+            facet_sign = -1 if orientation == "vertical" else 1
+
+            if item_dist_panel:
+                item_ax = ax_item_dist
+            elif not item_labels:
+                item_ax = ax
+            else:
+                item_ax = None
+                item_sign = None
+
+            if overlay_facet:
+                # facets overlay onto wherever items themselves are
+                # drawn -- their own separate distribution panel if they
+                # have one (even without item_labels, per item_dist_panel
+                # above), the item_labels row panel otherwise (though
+                # overlay_facet is already forced off whenever
+                # item_labels=True, so this branch can't actually be
+                # reached that way), or plain ax as the final fallback
+                facet_dist_ax = (
+                    ax_item_dist if item_dist_panel
+                    else (ax_items if ax_items is not None else ax)
+                )
+            elif not facet_labels:
+                facet_dist_ax = ax_facet
+            else:
+                facet_dist_ax = None
+
+            if map_type == "kde":
+                x_grid = np.linspace(lo, hi, kde_points)
+
+            if group_by is None:
+                person_groups = [("Persons", persons, person_color, person_line_color)]
+            else:
+                person_groups = [
+                    (str(g), persons[group_by == g], group_colors[g], group_colors[g])
+                    for g in person_group_values
+                ]
+
+            if map_type == "hist":
+                if stack or group_by is None:
+                    data = [sub for _, sub, _, _ in person_groups]
+                    weights = [
+                        person_sign * np.ones_like(sub) / (len(sub) if prop else 1)
+                        for sub in data
+                    ]
+                    bar_colors = [c for _, _, c, _ in person_groups]
+                    group_labels = [label for label, _, _, _ in person_groups]
+
+                    ax.hist(
+                        data,
+                        weights=weights,
+                        bins=bins,
+                        color=bar_colors,
+                        edgecolor=edge_color,
+                        label=group_labels,
+                        alpha=alpha,
+                        orientation=orientation,
+                        stacked=True,
+                    )
+
+                elif not blend:
+                    data = [sub for _, sub, _, _ in person_groups]
+                    weights = [
+                        person_sign * np.ones_like(sub) / (len(sub) if prop else 1)
+                        for sub in data
+                    ]
+                    bar_colors = [c for _, _, c, _ in person_groups]
+                    group_labels = [label for label, _, _, _ in person_groups]
+
+                    ax.hist(
+                        data,
+                        weights=weights,
+                        bins=bins,
+                        color=bar_colors,
+                        edgecolor=edge_color,
+                        label=group_labels,
+                        alpha=alpha,
+                        orientation=orientation,
+                        stacked=False,
+                    )
+
+                else:
+                    for label, sub, fill_color, line_color in person_groups:
+                        weights = person_sign * np.ones_like(sub)
+                        if prop:
+                            weights = weights / len(sub)
+
+                        ax.hist(
+                            sub,
+                            weights=weights,
+                            bins=bins,
+                            color=fill_color,
+                            edgecolor=edge_color,
+                            label=label,
+                            alpha=alpha,
+                            orientation=orientation,
+                        )
+
+            else:
+                cumulative = np.zeros_like(x_grid)
+                for label, sub, fill_color, line_color in person_groups:
+                    n_sub = len(sub)
+                    kde_sub = gaussian_kde(sub, bw_method=bw_method)(x_grid)
+                    curve = person_sign * (kde_sub if prop else kde_sub * n_sub)
+
+                    if stack:
+                        base, top = cumulative, cumulative + curve
+                        cumulative = top
+                    else:
+                        base, top = np.zeros_like(x_grid), curve
+
+                    if orientation == "vertical":
+                        ax.plot(x_grid, top, color=line_color, linewidth=line_width)
+                        ax.fill_between(
+                            x_grid,
+                            base,
+                            top,
+                            color=fill_color,
+                            alpha=alpha,
+                            edgecolor=line_color,
+                            linewidth=line_width,
+                            label=label,
+                        )
+                    else:
+                        ax.plot(top, x_grid, color=line_color, linewidth=line_width)
+                        ax.fill_betweenx(
+                            x_grid,
+                            base,
+                            top,
+                            color=fill_color,
+                            alpha=alpha,
+                            edgecolor=line_color,
+                            linewidth=line_width,
+                            label=label,
+                        )
+
+            # --- items: a hist/kde on their own axis (either the old
+            # mirrored ax, sign-flipped, or the item_distribution panel,
+            # unflipped), or labelled rows in a dedicated panel, or both ---
+            if item_ax is not None:
+                if map_type == "hist":
+                    item_weights = item_sign * np.ones_like(items)
+                    if prop:
+                        item_weights = item_weights / no_of_items
+
+                    item_ax.hist(
+                        items,
+                        weights=item_weights,
+                        bins=bins,
+                        color=item_color,
+                        edgecolor=edge_color,
+                        label="Items",
+                        alpha=alpha,
+                        orientation=orientation,
+                    )
+
+                else:
+                    kde_items = gaussian_kde(items, bw_method=bw_method)(x_grid)
+                    item_curve = item_sign * (
+                        kde_items if prop else kde_items * no_of_items
+                    )
+
+                    if orientation == "vertical":
+                        item_ax.plot(
+                            x_grid,
+                            item_curve,
+                            color=item_line_color,
+                            linewidth=line_width,
+                        )
+                        item_ax.fill_between(
+                            x_grid,
+                            0,
+                            item_curve,
+                            color=item_color,
+                            alpha=alpha,
+                            edgecolor=item_line_color,
+                            linewidth=line_width,
+                            label="Items",
+                        )
+                    else:
+                        item_ax.plot(
+                            item_curve,
+                            x_grid,
+                            color=item_line_color,
+                            linewidth=line_width,
+                        )
+                        item_ax.fill_betweenx(
+                            x_grid,
+                            0,
+                            item_curve,
+                            color=item_color,
+                            alpha=alpha,
+                            edgecolor=item_line_color,
+                            linewidth=line_width,
+                            label="Items",
+                        )
+
+            if item_dist_panel:
+                if orientation == "vertical":
+                    ax_item_dist.spines["top"].set_visible(False)
+                else:
+                    ax_item_dist.spines["left"].set_visible(False)
+
+            # --- facets: hist/kde (own panel or overlaid onto items), or
+            # labelled rows in a dedicated panel ---
+            if facet_dist_ax is not None:
+                if map_type == "hist":
+                    facet_weights = facet_sign * np.ones_like(facets)
+                    if prop:
+                        facet_weights = facet_weights / no_of_facets
+
+                    facet_dist_ax.hist(
+                        facets,
+                        weights=facet_weights,
+                        bins=bins,
+                        facecolor="none" if overlay_facet else facet_color,
+                        edgecolor=facet_color if overlay_facet else edge_color,
+                        linewidth=line_width * (2 if overlay_facet else 1),
+                        hatch="///" if overlay_facet else None,
+                        label=facet_label,
+                        alpha=1 if overlay_facet else alpha,
+                        orientation=orientation,
+                    )
+
+                else:
+                    kde_facets = gaussian_kde(facets, bw_method=bw_method)(x_grid)
+                    facet_curve = facet_sign * (
+                        kde_facets if prop else kde_facets * no_of_facets
+                    )
+
+                    if overlay_facet:
+                        if orientation == "vertical":
+                            facet_dist_ax.plot(
+                                x_grid, facet_curve, color=facet_color,
+                                linewidth=line_width * 2, label=facet_label,
+                            )
+                        else:
+                            facet_dist_ax.plot(
+                                facet_curve, x_grid, color=facet_color,
+                                linewidth=line_width * 2, label=facet_label,
+                            )
+                    elif orientation == "vertical":
+                        facet_dist_ax.plot(
+                            x_grid,
+                            facet_curve,
+                            color=facet_line_color,
+                            linewidth=line_width,
+                        )
+                        facet_dist_ax.fill_between(
+                            x_grid,
+                            0,
+                            facet_curve,
+                            color=facet_color,
+                            alpha=alpha,
+                            edgecolor=facet_line_color,
+                            linewidth=line_width,
+                            label=facet_label,
+                        )
+                    else:
+                        facet_dist_ax.plot(
+                            facet_curve,
+                            x_grid,
+                            color=facet_line_color,
+                            linewidth=line_width,
+                        )
+                        facet_dist_ax.fill_betweenx(
+                            x_grid,
+                            0,
+                            facet_curve,
+                            color=facet_color,
+                            alpha=alpha,
+                            edgecolor=facet_line_color,
+                            linewidth=line_width,
+                            label=facet_label,
+                        )
+
+            # the labelled panel is independent of whether item_ax drew a
+            # hist/kde above -- item_distribution can add that panel on
+            # top of either labelling style, so this is its own if/elif
+            # rather than chained onto the item_ax branch above
+            if item_labels and item_strip:
+                boundary_margin = 0.7 if distribution_markers else 0.45
+                if orientation == "vertical":
+                    ax_items.set_ylim(max_depth + 0.1, -boundary_margin)
+                else:
+                    ax_items.set_xlim(-boundary_margin, max_depth + 0.1)
+
+                if palette is not None:
+                    palette_dict = {
+                        "dark blue": ["dark", "royalblue"],
+                        "light blue": ["light", "cornflowerblue"],
+                        "dark red": ["dark", "firebrick"],
+                        "light red": ["light", "indianred"],
+                        "dark green": ["dark", "forestgreen"],
+                        "light green": ["light", "mediumseagreen"],
+                        "dark grey": ["dark", "dimgrey"],
+                        "light grey": ["light", "darkgrey"],
+                        "dark multi": ["dark", "dark"],
+                        "light multi": ["light", "muted"],
+                        "colorblind multi": ["dark", "colorblind"],
+                    }
+                    shade, base_color = palette_dict[palette]
+                    if palette == "colorblind multi":
+                        # Okabe & Ito (2008) -- colour-vision-deficiency-safe
+                        # qualitative palette, the scientific-publishing standard.
+                        # The 8th (black) entry is swapped for white on dark
+                        # backgrounds, where it would otherwise be invisible.
+                        color_map = [
+                            "#E69F00", "#56B4E9", "#009E73", "#F0E442",
+                            "#0072B2", "#D55E00", "#CC79A7",
+                            "#FFFFFF" if plot_style in self._DARK_BACKGROUND_STYLES else "#000000",
+                        ]
+                    elif shade == "dark":
+                        color_map = (
+                            sns.color_palette("dark", as_cmap=True)
+                            if palette == "dark multi"
+                            else sns.dark_palette(base_color, reverse=True, as_cmap=True)
+                        )
+                    else:
+                        color_map = (
+                            sns.color_palette("muted", as_cmap=True)
+                            if palette == "light multi"
+                            else sns.light_palette(
+                                base_color, reverse=True, as_cmap=True
+                            )
+                        )
+                    max_categories = (
+                        max(len(t) for t in item_thresholds_natural.values()) + 1
+                    )
+                    cNorm = colors.Normalize(vmin=0, vmax=max_categories + 2)
+                    if "multi" not in palette:
+                        scalar_map = cmx.ScalarMappable(norm=cNorm, cmap=color_map)
+
+                    def category_color(k):
+                        return (
+                            scalar_map.to_rgba(k)
+                            if "multi" not in palette
+                            else color_map[k]
+                        )
+
+                else:
+
+                    def category_color(k):
+                        return item_color
+
+                bar_half = 0.3
+                min_label_width = (hi - lo) * 0.02
+
+                for name, segs in item_segments.items():
+                    row = item_rows[name]
+                    # the open (unbounded) top/bottom categories always draw
+                    # out to the panel edge -- there's no real boundary to
+                    # stop at, so stopping partway (at item_spans' own
+                    # adjacent-width bound) just left an unexplained gap of
+                    # blank background between the strip and the axis edge.
+                    # neutral_extremes only controls whether that edge fill
+                    # is a flat block in the category colour (False) or
+                    # fades to a neutral colour (True), not whether it
+                    # reaches the edge at all.
+                    edge_lo, edge_hi = lo, hi
+
+                    n_segs = len(segs)
+                    for i, (seg_lo, seg_hi, k) in enumerate(segs):
+                        x0 = edge_lo if seg_lo is None else seg_lo
+                        x1 = edge_hi if seg_hi is None else seg_hi
+                        is_extreme = neutral_extremes and (i == 0 or i == n_segs - 1)
+
+                        if is_extreme:
+                            fade_steps = 8
+                            neutral_color = "#EDE6D6"
+                            slice_width = (x1 - x0) / fade_steps
+                            for s in range(fade_steps):
+                                sx0 = x0 + s * slice_width
+                                sx1 = sx0 + slice_width
+                                frac = (
+                                    (s + 1) / fade_steps
+                                    if k == 0
+                                    else (fade_steps - s) / fade_steps
+                                )
+                                slice_alpha = strip_alpha * frac
+                                if orientation == "vertical":
+                                    ax_items.add_patch(
+                                        Rectangle(
+                                            (sx0, row - bar_half),
+                                            sx1 - sx0,
+                                            2 * bar_half,
+                                            facecolor=neutral_color,
+                                            alpha=slice_alpha,
+                                            edgecolor="none",
+                                        )
+                                    )
+                                else:
+                                    ax_items.add_patch(
+                                        Rectangle(
+                                            (row - bar_half, sx0),
+                                            2 * bar_half,
+                                            sx1 - sx0,
+                                            facecolor=neutral_color,
+                                            alpha=slice_alpha,
+                                            edgecolor="none",
+                                        )
+                                    )
+                            if orientation == "vertical":
+                                ax_items.add_patch(
+                                    Rectangle(
+                                        (x0, row - bar_half),
+                                        x1 - x0,
+                                        2 * bar_half,
+                                        facecolor="none",
+                                        edgecolor="black",
+                                        linewidth=0.5,
+                                        alpha=strip_alpha,
+                                    )
+                                )
+                            else:
+                                ax_items.add_patch(
+                                    Rectangle(
+                                        (row - bar_half, x0),
+                                        2 * bar_half,
+                                        x1 - x0,
+                                        facecolor="none",
+                                        edgecolor="black",
+                                        linewidth=0.5,
+                                        alpha=strip_alpha,
+                                    )
+                                )
+                        else:
+                            color = category_color(k)
+                            if orientation == "vertical":
+                                ax_items.add_patch(
+                                    Rectangle(
+                                        (x0, row - bar_half),
+                                        x1 - x0,
+                                        2 * bar_half,
+                                        facecolor=color,
+                                        alpha=strip_alpha,
+                                        edgecolor="black",
+                                        linewidth=0.5,
+                                    )
+                                )
+                            else:
+                                ax_items.add_patch(
+                                    Rectangle(
+                                        (row - bar_half, x0),
+                                        2 * bar_half,
+                                        x1 - x0,
+                                        facecolor=color,
+                                        alpha=strip_alpha,
+                                        edgecolor="black",
+                                        linewidth=0.5,
+                                    )
+                                )
+
+                        label_color = "dimgrey" if is_extreme else "black"
+                        seg_center = (x0 + x1) / 2
+
+                        if x1 - x0 > min_label_width:
+                            if orientation == "vertical":
+                                ax_items.text(
+                                    seg_center,
+                                    row,
+                                    str(k),
+                                    ha="center",
+                                    va="center",
+                                    fontsize=labelsize,
+                                    fontweight="bold",
+                                    color=label_color,
+                                )
+                            else:
+                                ax_items.text(
+                                    row,
+                                    seg_center,
+                                    str(k),
+                                    ha="center",
+                                    va="center_baseline",
+                                    fontsize=labelsize,
+                                    fontweight="bold",
+                                    color=label_color,
+                                )
+                        else:
+                            leader_len = bar_half * 0.35
+                            leader_start = row + bar_half / 3
+                            leader_end = row + bar_half + leader_len
+                            if orientation == "vertical":
+                                ax_items.plot(
+                                    [seg_center, seg_center],
+                                    [leader_start, leader_end],
+                                    color=label_color,
+                                    linewidth=0.6,
+                                )
+                                ax_items.text(
+                                    seg_center,
+                                    leader_end,
+                                    str(k),
+                                    ha="center",
+                                    va="top",
+                                    fontsize=labelsize * 0.75,
+                                    fontweight="bold",
+                                    color=label_color,
+                                )
+                            else:
+                                ax_items.plot(
+                                    [leader_start, leader_end],
+                                    [seg_center, seg_center],
+                                    color=label_color,
+                                    linewidth=0.6,
+                                )
+                                ax_items.text(
+                                    leader_end,
+                                    seg_center,
+                                    str(k),
+                                    ha="left",
+                                    va="center_baseline",
+                                    fontsize=labelsize * 0.75,
+                                    fontweight="bold",
+                                    color=label_color,
+                                )
+
+                for label_row, label_text in row_labels.items():
+                    row_disordered = any(
+                        n in disordered_items for n in row_names[label_row]
+                    )
+                    label_kwargs = (
+                        {"color": "firebrick", "fontweight": "bold"}
+                        if row_disordered
+                        else {"color": item_line_color}
+                    )
+                    if orientation == "vertical":
+                        ax_items.text(
+                            -0.015,
+                            label_row,
+                            f"{label_text} ",
+                            transform=ax_items.get_yaxis_transform(),
+                            ha="right",
+                            va="center",
+                            fontsize=labelsize,
+                            fontfamily=item_font,
+                            clip_on=False,
+                            **label_kwargs,
+                        )
+                    else:
+                        ax_items.text(
+                            label_row,
+                            -0.015,
+                            f"{label_text} ",
+                            transform=ax_items.get_xaxis_transform(),
+                            ha="right",
+                            va="center",
+                            fontsize=labelsize,
+                            fontfamily=item_font,
+                            rotation=90,
+                            rotation_mode="anchor",
+                            clip_on=False,
+                            **label_kwargs,
+                        )
+
+                if orientation == "vertical":
+                    ax_items.spines["top"].set_visible(False)
+                    ax_items.set_yticks([])
+                else:
+                    ax_items.spines["left"].set_visible(False)
+                    ax_items.set_xticks([])
+
+            elif item_labels:
+                boundary_margin = item_row_margin
+                if orientation == "vertical":
+                    ax_items.set_ylim(max_depth + 0.1, -boundary_margin)
+                else:
+                    ax_items.set_xlim(-boundary_margin, max_depth + 0.1)
+
+                for b, entries in item_groups.items():
+                    x = bin_centers[b]
+                    for i, (loc, name) in enumerate(sorted(entries)):
+                        level = i + mark_row_depth
+                        if orientation == "vertical":
+                            ax_items.text(
+                                x,
+                                level,
+                                str(name),
+                                color=item_line_color,
+                                rotation=90,
+                                ha="center",
+                                va="top",
+                                fontsize=item_label_size,
+                                fontfamily=item_font,
+                            )
+                        else:
+                            ax_items.text(
+                                level,
+                                x,
+                                str(name),
+                                color=item_line_color,
+                                ha="left",
+                                va="center",
+                                fontsize=item_label_size,
+                                fontfamily=item_font,
+                            )
+
+                if orientation == "vertical":
+                    ax_items.spines["top"].set_visible(False)
+                    ax_items.set_yticks([])
+                else:
+                    ax_items.spines["left"].set_visible(False)
+                    ax_items.set_xticks([])
+
+            if facet_labels:
+                if orientation == "vertical":
+                    ax_facet.set_ylim(facet_max_depth + 0.1, -facet_row_margin)
+                else:
+                    ax_facet.set_xlim(-facet_row_margin, facet_max_depth + 0.1)
+
+                for b, entries in facet_groups.items():
+                    x = facet_bin_centers[b]
+                    for i, (loc, name) in enumerate(sorted(entries)):
+                        if orientation == "vertical":
+                            ax_facet.text(
+                                x,
+                                i,
+                                str(name),
+                                color=facet_line_color,
+                                rotation=90,
+                                ha="center",
+                                va="top",
+                                fontsize=facet_label_size,
+                                fontfamily=facet_font,
+                            )
+                        else:
+                            ax_facet.text(
+                                i,
+                                x,
+                                str(name),
+                                color=facet_line_color,
+                                ha="left",
+                                va="center",
+                                fontsize=facet_label_size,
+                                fontfamily=facet_font,
+                            )
+
+                if orientation == "vertical":
+                    ax_facet.spines["top"].set_visible(False)
+                    ax_facet.set_yticks([])
+                else:
+                    ax_facet.spines["left"].set_visible(False)
+                    ax_facet.set_xticks([])
+                ax_facet.axhline(
+                    -facet_row_margin, color="black", linewidth=1.3, zorder=5
+                ) if orientation == "vertical" else ax_facet.axvline(
+                    -facet_row_margin, color="black", linewidth=1.3, zorder=5
+                )
+
+            if distribution_markers:
+
+                if orientation == "vertical":
+                    y0, y1 = ax.get_ylim()
+                    nice_ticks = ax.get_yticks()
+                    if len(nice_ticks):
+                        y1 = max(y1, max(nice_ticks))
+                    ax.set_ylim(y0, y1)
+                else:
+                    x0, x1 = ax.get_xlim()
+                    nice_ticks = ax.get_xticks()
+                    if len(nice_ticks):
+                        x0 = min(x0, min(nice_ticks))
+                    ax.set_xlim(x0, x1)
+
+                def _mark_len(target_ax):
+                    if orientation == "vertical":
+                        _, y1 = target_ax.get_ylim()
+                        return 0.015 * y1
+                    else:
+                        x0, _ = target_ax.get_xlim()
+                        return 0.015 * abs(x0)
+
+                marker_fontsize = labelsize
+
+                def _in_per_unit(target_ax):
+                    bbox = target_ax.get_window_extent(
+                        renderer=fig.canvas.get_renderer()
+                    )
+                    if orientation == "vertical":
+                        _, y1 = target_ax.get_ylim()
+                        return (bbox.height / fig.dpi) / y1
+                    else:
+                        x0, _ = target_ax.get_xlim()
+                        return (bbox.width / fig.dpi) / abs(x0)
+
+                def add_distribution_markers(values, sign, color, target_ax, mark_len):
+                    mean = values.mean()
+                    sd = values.std()
+                    marks = [
+                        ("μ", mean),
+                        ("μ−σ", mean - sd),
+                        ("μ+σ", mean + sd),
+                        ("μ−2σ", mean - 2 * sd),
+                        ("μ+2σ", mean + 2 * sd),
+                    ]
+                    gap = mark_gap_in / _in_per_unit(target_ax)
+                    text_offset = sign * (mark_len + gap)
+
+                    for label, loc in marks:
+                        if orientation == "vertical":
+                            target_ax.plot(
+                                [loc, loc],
+                                [0, sign * mark_len],
+                                color=color,
+                                linewidth=1,
+                                solid_capstyle="butt",
+                                clip_on=False,
+                                zorder=6,
+                            )
+                            target_ax.text(
+                                loc,
+                                text_offset,
+                                label,
+                                color=color,
+                                ha="center",
+                                va="bottom" if sign > 0 else "top",
+                                fontsize=marker_fontsize,
+                                clip_on=False,
+                                zorder=6,
+                            )
+                        else:
+                            target_ax.plot(
+                                [0, sign * mark_len],
+                                [loc, loc],
+                                color=color,
+                                linewidth=1,
+                                solid_capstyle="butt",
+                                clip_on=False,
+                                zorder=6,
+                            )
+                            target_ax.text(
+                                text_offset,
+                                loc,
+                                label,
+                                color=color,
+                                ha="left" if sign > 0 else "right",
+                                va="center",
+                                fontsize=marker_fontsize,
+                                clip_on=False,
+                                zorder=6,
+                            )
+
+                if item_mark_rows:
+                    items_bbox = ax_items.get_window_extent(
+                        renderer=fig.canvas.get_renderer()
+                    )
+                    if orientation == "vertical":
+                        y0i, y1i = ax_items.get_ylim()
+                        items_in_per_row = (items_bbox.height / fig.dpi) / abs(
+                            y1i - y0i
+                        )
+                    else:
+                        x0i, x1i = ax_items.get_xlim()
+                        items_in_per_row = (items_bbox.width / fig.dpi) / abs(
+                            x1i - x0i
+                        )
+                    person_mark_len = (
+                        mark_tick_rows * items_in_per_row
+                    ) / _in_per_unit(ax)
+                else:
+                    person_mark_len = _mark_len(ax)
+                if group_by is None:
+                    add_distribution_markers(
+                        persons, person_sign, marker_color, ax, person_mark_len
+                    )
+                else:
+                    for label, sub, fill_color, line_color in person_groups:
+                        add_distribution_markers(
+                            sub, person_sign, line_color, ax, person_mark_len
+                        )
+
+                if item_dist_panel:
+                    add_distribution_markers(
+                        items,
+                        item_sign,
+                        marker_color,
+                        ax_item_dist,
+                        _mark_len(ax_item_dist),
+                    )
+                elif item_labels and not item_strip:
+                    tick_near = -item_row_margin
+                    tick_far = tick_near + mark_tick_rows
+                    for mark_label, mark_loc in item_mark_rows.items():
+                        if orientation == "vertical":
+                            ax_items.plot(
+                                [mark_loc, mark_loc],
+                                [tick_near, tick_far],
+                                color=marker_color,
+                                linewidth=1,
+                                solid_capstyle="butt",
+                                zorder=6,
+                            )
+                            ax_items.text(
+                                mark_loc,
+                                mark_text_row,
+                                mark_label,
+                                color=marker_color,
+                                rotation=90,
+                                ha="center",
+                                va="top",
+                                fontsize=marker_fontsize,
+                            )
+                        else:
+                            ax_items.plot(
+                                [tick_near, tick_far],
+                                [mark_loc, mark_loc],
+                                color=marker_color,
+                                linewidth=1,
+                                solid_capstyle="butt",
+                                zorder=6,
+                            )
+                            ax_items.text(
+                                mark_text_row,
+                                mark_loc,
+                                mark_label,
+                                color=marker_color,
+                                ha="left",
+                                va="center",
+                                fontsize=marker_fontsize,
+                            )
+                else:
+                    add_distribution_markers(
+                        items,
+                        -person_sign if item_labels else item_sign,
+                        marker_color,
+                        ax,
+                        person_mark_len,
+                    )
+
+            has_extra_panels = bool(extra_axes)
+
+            # ax's, ax_item_dist's, and ax_facet's own Count/Proportion
+            # limits are set explicitly further below (from
+            # person_range/item_range/facet_range), which fully
+            # supersedes pinning just one side of each to 0 here.
+
+            padding = (hi - lo) * 0.05 if pad else 0
+            loc_axis = outer_ax if (has_extra_panels and orientation == "vertical") else ax
+            loc_axis_h = (
+                outer_ax if (has_extra_panels and orientation == "horizontal") else ax
+            )
+
+            if has_extra_panels and orientation == "horizontal":
+                outer_ax.yaxis.set_ticks_position("right")
+                outer_ax.yaxis.set_label_position("right")
+
+            def _regular_loc_ticks(axis_lo, axis_hi):
+                start = np.ceil(axis_lo / tick_interval) * tick_interval
+                n = int(np.floor((axis_hi - start) / tick_interval + 1e-9)) + 1
+                return [start + i * tick_interval for i in range(max(n, 0))]
+
+            if orientation == "vertical":
+                ax.set_xlim(lo - padding, hi + padding)
+                loc_ticks = _regular_loc_ticks(lo - padding, hi + padding)
+                for a in extra_axes:
+                    a.set_xticks(loc_ticks)
+                loc_axis.set_xticks(loc_ticks)
+            else:
+                ax.set_ylim(lo - padding, hi + padding)
+                loc_ticks = _regular_loc_ticks(lo - padding, hi + padding)
+                for a in extra_axes:
+                    a.set_yticks(loc_ticks)
+                loc_axis_h.set_yticks(loc_ticks)
+
+            has_facet_dist_panel = (
+                facet_dist_ax is not None and not overlay_facet and not facet_labels
+            )
+
+            if has_extra_panels:
+                if orientation == "vertical":
+                    ax.spines["bottom"].set_visible(False)
+                    ax.tick_params(
+                        axis="x", bottom=False, top=True, labelbottom=False, labeltop=True
+                    )
+                else:
+                    ax.spines["right"].set_visible(False)
+
+            is_vertical = orientation == "vertical"
+
+            # each panel's own (lo, hi) limits, set directly from
+            # person_range/item_range/facet_range (an explicit *_lim
+            # override, or each distribution's own natural peak,
+            # resolved earlier) rather than left to independent
+            # autoscale -- this is also exactly what panel sizing above
+            # already assumed, so the rendered axis and the physical
+            # space allocated for it always agree. ax is one-sided
+            # (persons only) whenever items have moved off it into their
+            # own panel -- either the item_labels row panel, or (even
+            # without item_labels) item_dist_panel's own scale-matched
+            # one; only when neither applies do persons and items still
+            # mirror onto the same ax, each of its own two sides getting
+            # its own real range rather than a shared one.
+            if item_labels or item_dist_panel:
+                ax_lo = -person_range if person_sign < 0 else 0
+                ax_hi = person_range if person_sign > 0 else 0
+            else:
+                ax_lo = -(person_range if person_sign < 0 else item_range)
+                ax_hi = person_range if person_sign > 0 else item_range
+            if is_vertical:
+                ax.set_ylim(ax_lo, ax_hi)
+            else:
+                ax.set_xlim(ax_lo, ax_hi)
+
+            if item_dist_panel:
+                dist_lo = -item_range if item_sign < 0 else 0
+                dist_hi = item_range if item_sign > 0 else 0
+                if is_vertical:
+                    ax_item_dist.set_ylim(dist_lo, dist_hi)
+                else:
+                    ax_item_dist.set_xlim(dist_lo, dist_hi)
+
+            if has_facet_dist_panel:
+                facet_lo = -facet_range if facet_sign < 0 else 0
+                facet_hi = facet_range if facet_sign > 0 else 0
+                if is_vertical:
+                    ax_facet.set_ylim(facet_lo, facet_hi)
+                else:
+                    ax_facet.set_xlim(facet_lo, facet_hi)
+
+            def _side_ticks(reach, step):
+                # evenly spaced ticks from 0 to reach inclusive, using
+                # exactly the step already resolved (together with
+                # reach itself) to divide it evenly -- generated
+                # explicitly rather than left to a locator, which has no
+                # reason to land on a divisor of this specific ceiling
+                if reach <= 0 or step <= 0:
+                    return [0.0]
+                n = int(round(reach / step))
+                return [i * step for i in range(n + 1)]
+
+            def _relabel(ax_obj, pos_reach, pos_step, neg_reach, neg_step, drop_zero=False):
+                ticks = sorted(
+                    set(_side_ticks(pos_reach, pos_step))
+                    | {-t for t in _side_ticks(neg_reach, neg_step)}
+                )
+                # item_dist's/facet's own zero always sits exactly at the
+                # boundary shared with its neighbour -- in horizontal
+                # orientation that boundary is a narrow vertical seam
+                # with both panels' own "0" label sitting right next to
+                # it, close enough to visually collide. Dropping the
+                # secondary panel's own redundant zero (ax's own stays)
+                # avoids that; not an issue in vertical orientation,
+                # where the seam is horizontal and the two labels don't
+                # compete for the same space.
+                if drop_zero and not is_vertical:
+                    ticks = [t for t in ticks if t != 0]
+                labels = (
+                    [f"{abs(t):.2f}" for t in ticks]
+                    if prop
+                    else [str(int(round(abs(t)))) for t in ticks]
+                )
+                if is_vertical:
+                    ax_obj.set_yticks(ticks)
+                    ax_obj.set_yticklabels(labels, fontsize=labelsize)
+                else:
+                    ax_obj.set_xticks(ticks)
+                    ax_obj.set_xticklabels(labels, fontsize=labelsize)
+
+            if item_labels or item_dist_panel:
+                if person_sign > 0:
+                    _relabel(ax, person_range, person_step, 0, 1)
+                else:
+                    _relabel(ax, 0, 1, person_range, person_step)
+            elif person_sign > 0:
+                _relabel(ax, person_range, person_step, item_range, item_step)
+            else:
+                _relabel(ax, item_range, item_step, person_range, person_step)
+
+            if item_dist_panel:
+                if item_sign > 0:
+                    _relabel(ax_item_dist, item_range, item_step, 0, 1, drop_zero=True)
+                else:
+                    _relabel(ax_item_dist, 0, 1, item_range, item_step, drop_zero=True)
+
+            if has_facet_dist_panel:
+                if facet_sign > 0:
+                    _relabel(ax_facet, facet_range, facet_step, 0, 1, drop_zero=True)
+                else:
+                    _relabel(ax_facet, 0, 1, facet_range, facet_step, drop_zero=True)
+
+            # the explicit axhline/axvline boundary lines and the "hide
+            # the gridline that would otherwise sit right under them"
+            # cleanup both need the *final* tick set from _relabel above
+            # -- doing this earlier (against whatever ticks autoscale
+            # had chosen before the real limits were even set) hid
+            # whichever gridline happened to occupy that position in the
+            # stale tick list, not necessarily the one actually at 0
+            if is_vertical:
+                ax.axhline(0, color="black", linewidth=1.3, zorder=5)
+                for tick, gridline in zip(ax.get_yticks(), ax.yaxis.get_gridlines()):
+                    if tick == 0:
+                        gridline.set_visible(False)
+                if item_labels:
+                    ax_items.axhline(
+                        -item_row_margin, color="black", linewidth=1.3, zorder=5
+                    )
+                if has_facet_dist_panel:
+                    ax_facet.axhline(0, color="black", linewidth=1.3, zorder=5)
+                    for tick, gridline in zip(
+                        ax_facet.get_yticks(), ax_facet.yaxis.get_gridlines()
+                    ):
+                        if tick == 0:
+                            gridline.set_visible(False)
+            else:
+                ax.axvline(0, color="black", linewidth=1.3, zorder=5)
+                if item_labels:
+                    ax_items.axvline(
+                        -item_row_margin, color="black", linewidth=1.3, zorder=5
+                    )
+                if has_facet_dist_panel:
+                    ax_facet.axvline(0, color="black", linewidth=1.3, zorder=5)
+                    for tick, gridline in zip(
+                        ax_facet.get_xticks(), ax_facet.xaxis.get_gridlines()
+                    ):
+                        if tick == 0:
+                            gridline.set_visible(False)
+                for tick, gridline in zip(ax.get_xticks(), ax.xaxis.get_gridlines()):
+                    if tick == 0:
+                        gridline.set_visible(False)
+
+            if is_vertical:
+                loc_axis.set_xlabel(
+                    "Location", fontsize=axis_font_size, fontweight="bold"
+                )
+                ax.set_ylabel(
+                    "Proportion" if prop else "Count",
+                    fontsize=axis_font_size,
+                    fontweight="bold",
+                )
+                if facet_labels:
+                    ax_facet.set_ylabel(
+                        facet_label, fontsize=axis_font_size, fontweight="bold"
+                    )
+            else:
+                loc_axis_h.set_ylabel(
+                    "Location", fontsize=axis_font_size, fontweight="bold"
+                )
+                ax.set_xlabel(
+                    "Proportion" if prop else "Count",
+                    fontsize=axis_font_size,
+                    fontweight="bold",
+                )
+                if facet_labels:
+                    ax_facet.set_xlabel(
+                        facet_label, fontsize=axis_font_size, fontweight="bold"
+                    )
+
+            ax.tick_params(axis="x", labelsize=labelsize)
+            ax.tick_params(axis="y", labelsize=labelsize)
+            for a in extra_axes:
+                a.tick_params(axis="x", labelsize=labelsize)
+                a.tick_params(axis="y", labelsize=labelsize)
+
+            if title is not None:
+                if has_extra_panels:
+                    title_y = 1 - (margin_top_in * 0.4) / fig_h
+                    fig.suptitle(
+                        title, fontsize=title_font_size, fontweight="bold", y=title_y
+                    )
+                else:
+                    ax.set_title(title, fontsize=title_font_size, fontweight="bold")
+
+            legend_handles, legend_labels = ax.get_legend_handles_labels()
+            if item_dist_panel:
+                dist_handles, dist_labels = ax_item_dist.get_legend_handles_labels()
+                legend_handles += dist_handles
+                legend_labels += dist_labels
+            if facet_dist_ax is not None and not overlay_facet and not facet_labels:
+                fdist_handles, fdist_labels = ax_facet.get_legend_handles_labels()
+                legend_handles += fdist_handles
+                legend_labels += fdist_labels
+            legend_loc = "upper left" if person_sign < 0 else "upper right"
+            ax.legend(legend_handles, legend_labels, loc=legend_loc)
+
+            # Stretch panel(s) -- bolted onto the right of the whole
+            # figure, after everything else is built and sized. omega
+            # isn't a logit value (see the comment by stretch_omega's own
+            # definition above), so it gets its own axis/scale entirely,
+            # centred on 1 rather than 0, one bar per rater in plain
+            # facet-name order (unrelated to whatever order the shift
+            # panel's own binning happened to place them in). bistretch
+            # gets two such panels, stacked (omega_items above
+            # omega_thresholds), sharing the same rater order/x-axis.
+            if stretch_omega is not None and show_stretch:
+                stretch_main_axes = [ax] + extra_axes
+                stretch_orig_w, stretch_orig_h = fig.get_size_inches()
+
+                stretch_gap_in = 0.073
+                stretch_margin_in = 0.55
+                n_stretch = len(stretch_omega)
+                raters_order = list(next(iter(stretch_omega.values())).index)
+                n_raters = len(raters_order)
+                stretch_col_w_in = max(1.8, 0.35 * n_raters)
+
+                stretch_extra_w_in = stretch_gap_in + stretch_col_w_in + stretch_margin_in
+                stretch_new_w = stretch_orig_w + stretch_extra_w_in
+                fig.set_size_inches(stretch_new_w, stretch_orig_h)
+                stretch_shrink = stretch_orig_w / stretch_new_w
+                for a in stretch_main_axes:
+                    pos = a.get_position()
+                    a.set_position(
+                        [pos.x0 * stretch_shrink, pos.y0, pos.width * stretch_shrink, pos.height]
+                    )
+
+                stretch_tops = [a.get_position().y1 for a in stretch_main_axes]
+                stretch_bots = [a.get_position().y0 for a in stretch_main_axes]
+                stretch_y0, stretch_y1 = min(stretch_bots), max(stretch_tops)
+                x0_frac = 1 - (stretch_col_w_in + stretch_margin_in) / stretch_new_w
+                w_frac = stretch_col_w_in / stretch_new_w
+
+                expand_color = "gray" if black else "steelblue"
+                compress_color = "darkgray" if black else "indianred"
+                omega_symbols = {
+                    "omega": "$\\omega$",
+                    "omega_items": "$\\omega_{items}$",
+                    "omega_thresholds": "$\\omega_{thresholds}$",
+                }
+
+                row_gap_frac = 0.06 * (stretch_y1 - stretch_y0)
+                row_h = (stretch_y1 - stretch_y0 - row_gap_frac * (n_stretch - 1)) / n_stretch
+
+                # Shared y-limits across every stretch panel (e.g.
+                # bistretch's omega_items/omega_thresholds), so a bar's
+                # length is comparable panel to panel rather than each
+                # auto-scaling to its own data independently.
+                all_omega_vals = [
+                    v for s in stretch_omega.values() for v in s.values if v == v
+                ]
+                if all_omega_vals:
+                    om_lo, om_hi = min(all_omega_vals), max(all_omega_vals)
+                    om_pad = max((om_hi - om_lo) * 0.15, 0.05)
+                    shared_ylim = (min(om_lo, 1) - om_pad, max(om_hi, 1) + om_pad)
+                else:
+                    shared_ylim = (0.5, 1.5)
+
+                for i, (omega_key, omega_series) in enumerate(stretch_omega.items()):
+                    row_top = stretch_y1 - i * (row_h + row_gap_frac)
+                    ax_stretch = fig.add_axes([x0_frac, row_top - row_h, w_frac, row_h])
+                    bar_xs = list(range(n_raters))
+                    bar_vals = [omega_series.get(r, np.nan) for r in raters_order]
+                    bar_colors = [
+                        (compress_color if v < 1 else expand_color)
+                        if v == v else "lightgray"
+                        for v in bar_vals
+                    ]
+                    ax_stretch.bar(
+                        bar_xs,
+                        [(v - 1) if v == v else 0 for v in bar_vals],
+                        bottom=1,
+                        color=bar_colors,
+                        edgecolor=edge_color,
+                        width=0.6,
+                    )
+                    ax_stretch.axhline(1, color=edge_color, linewidth=1)
+                    ax_stretch.set_xlim(-0.6, n_raters - 0.4)
+                    ax_stretch.set_ylim(shared_ylim)
+                    ax_stretch.set_xticks(bar_xs)
+                    ax_stretch.set_ylabel(
+                        omega_symbols.get(omega_key, omega_key),
+                        fontsize=axis_font_size,
+                        fontweight="bold",
+                    )
+                    ax_stretch.yaxis.tick_right()
+                    ax_stretch.yaxis.set_label_position("right")
+                    ax_stretch.spines["top"].set_visible(False)
+                    ax_stretch.spines["left"].set_visible(False)
+                    ax_stretch.tick_params(axis="y", labelsize=labelsize)
+                    if i == n_stretch - 1:
+                        ax_stretch.set_xticklabels(
+                            raters_order,
+                            fontsize=facet_label_size,
+                            fontfamily=facet_font,
+                            rotation=90,
+                        )
+                    else:
+                        ax_stretch.tick_params(labelbottom=False)
+
+            if filename is not None:
+                fig.savefig(filename + f".{file_format}", dpi=dpi)
+
+            plt.show(block=False)
+            plt.pause(0.001)
+            plt.close(fig)
+
+    # Backwards-compatible aliases
+    def wright_map_global(self, **kw):
+        """Alias for wright_map(model='global'). See wright_map for full documentation."""
+        self.wright_map(model="global", **kw)
+
+    def wright_map_items(self, **kw):
+        """Alias for wright_map(model='items'). See wright_map for full documentation."""
+        self.wright_map(model="items", **kw)
+
+    def wright_map_thresholds(self, **kw):
+        """Alias for wright_map(model='thresholds'). See wright_map for full documentation."""
+        self.wright_map(model="thresholds", **kw)
+
+    def wright_map_matrix(self, **kw):
+        """Alias for wright_map(model='matrix'). See wright_map for full documentation."""
+        self.wright_map(model="matrix", **kw)
+
+    def wright_map_bivector(self, **kw):
+        """Alias for wright_map(model='bivector'). See wright_map for full documentation."""
+        self.wright_map(model="bivector", **kw)
+
+    def wright_map_centrality(self, **kw):
+        """Alias for wright_map(model='centrality'). See wright_map for full documentation."""
+        self.wright_map(model="centrality", **kw)
+
+    def wright_map_pseudo_halo(self, **kw):
+        """Alias for wright_map(model='pseudo_halo'). See wright_map for full documentation."""
+        self.wright_map(model="pseudo_halo", **kw)
+
+    def wright_map_bistretch(self, **kw):
+        """Alias for wright_map(model='bistretch'). See wright_map for full documentation."""
+        self.wright_map(model="bistretch", **kw)

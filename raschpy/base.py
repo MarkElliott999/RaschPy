@@ -6,6 +6,7 @@ from matplotlib import pyplot as plt
 import seaborn as sns
 from math import floor
 from scipy.stats import norm, t as t_dist
+from scipy.sparse.csgraph import connected_components
 
 # PCA import guarded — only needed for the 'evm' priority_vector method.
 try:
@@ -107,6 +108,172 @@ class Rasch:
     logic.
     """
 
+    # Named plot_style schemes shared by every plot_data()/wright_map()/
+    # plot_anchor_selection()/std_residuals_hist() call across all four
+    # model classes. 'base' is the seaborn style passed to sns.set_style()
+    # (controls whether gridlines/spines are on by default); 'rc' is a
+    # dict of rcParam overrides applied on top of it. 'white'/'dark' are
+    # the original two schemes and carry no overrides, so they are
+    # byte-for-byte unchanged from before this dict existed.
+    _PLOT_STYLE_RC = {
+        "white": {"base": "whitegrid", "rc": {}},
+        "dark": {"base": "darkgrid", "rc": {}},
+        "minimal": {"base": "white", "rc": {}},
+        "black": {
+            "base": "darkgrid",
+            "rc": {
+                "figure.facecolor": "#000000",
+                "axes.facecolor": "#000000",
+                "axes.edgecolor": "#4D4D4D",
+                "axes.labelcolor": "#FFFFFF",
+                "text.color": "#FFFFFF",
+                "xtick.color": "#FFFFFF",
+                "ytick.color": "#FFFFFF",
+                "grid.color": "#333333",
+            },
+        },
+        "parchment": {
+            "base": "whitegrid",
+            "rc": {
+                "figure.facecolor": "#F4ECD8",
+                "axes.facecolor": "#F4ECD8",
+                "axes.edgecolor": "#8B7355",
+                "axes.labelcolor": "#4A3728",
+                "text.color": "#4A3728",
+                "xtick.color": "#4A3728",
+                "ytick.color": "#4A3728",
+                "grid.color": "#D8C9A3",
+            },
+        },
+        "print": {
+            "base": "whitegrid",
+            "rc": {
+                "figure.facecolor": "#FFFFFF",
+                "axes.facecolor": "#FFFFFF",
+                "axes.edgecolor": "#000000",
+                "axes.labelcolor": "#000000",
+                "text.color": "#000000",
+                "xtick.color": "#000000",
+                "ytick.color": "#000000",
+                "grid.color": "#000000",
+                "grid.linewidth": 0.6,
+                "axes.linewidth": 1.3,
+            },
+        },
+        "solarized-light": {
+            "base": "whitegrid",
+            "rc": {
+                "figure.facecolor": "#FDF6E3",
+                "axes.facecolor": "#FDF6E3",
+                "axes.edgecolor": "#93A1A1",
+                "axes.labelcolor": "#586E75",
+                "text.color": "#586E75",
+                "xtick.color": "#586E75",
+                "ytick.color": "#586E75",
+                "grid.color": "#EEE8D5",
+            },
+        },
+        "solarized-dark": {
+            "base": "darkgrid",
+            "rc": {
+                "figure.facecolor": "#002B36",
+                "axes.facecolor": "#002B36",
+                "axes.edgecolor": "#586E75",
+                "axes.labelcolor": "#93A1A1",
+                "text.color": "#93A1A1",
+                "xtick.color": "#93A1A1",
+                "ytick.color": "#93A1A1",
+                "grid.color": "#073642",
+            },
+        },
+        "slate": {
+            "base": "darkgrid",
+            "rc": {
+                "figure.facecolor": "#2E3440",
+                "axes.facecolor": "#2E3440",
+                "axes.edgecolor": "#8892A0",
+                "axes.labelcolor": "#D8DEE9",
+                "text.color": "#D8DEE9",
+                "xtick.color": "#D8DEE9",
+                "ytick.color": "#D8DEE9",
+                "grid.color": "#3B4252",
+            },
+        },
+        "blueprint": {
+            "base": "darkgrid",
+            "rc": {
+                "figure.facecolor": "#0B3D91",
+                "axes.facecolor": "#0B3D91",
+                "axes.edgecolor": "#9FBFEE",
+                "axes.labelcolor": "#E8F0FC",
+                "text.color": "#E8F0FC",
+                "xtick.color": "#E8F0FC",
+                "ytick.color": "#E8F0FC",
+                "grid.color": "#3E6BC4",
+            },
+        },
+        "newsprint": {
+            "base": "whitegrid",
+            "rc": {
+                "figure.facecolor": "#E7E7E2",
+                "axes.facecolor": "#E7E7E2",
+                "axes.edgecolor": "#2B2B2B",
+                "axes.labelcolor": "#1A1A1A",
+                "text.color": "#1A1A1A",
+                "xtick.color": "#1A1A1A",
+                "ytick.color": "#1A1A1A",
+                "grid.color": "#B7B7AF",
+            },
+        },
+        "chalkboard": {
+            "base": "darkgrid",
+            "rc": {
+                "figure.facecolor": "#1B2E22",
+                "axes.facecolor": "#1B2E22",
+                "axes.edgecolor": "#D9E5D9",
+                "axes.labelcolor": "#F1F1E6",
+                "text.color": "#F1F1E6",
+                "xtick.color": "#F1F1E6",
+                "ytick.color": "#F1F1E6",
+                "grid.color": "#3A5445",
+            },
+        },
+    }
+
+    # plot_style schemes whose background is dark/saturated enough that
+    # the 'colorblind multi' palette's black entry (Okabe & Ito's own
+    # 8th colour) would be invisible or near-invisible against it. Curve-
+    # colouring code checks this set and substitutes white for that one
+    # entry when the active plot_style is a member -- see palette_dict
+    # construction in each model class's plot_data(). Deliberately
+    # excludes 'dark' (seaborn darkgrid's light-grey background, against
+    # which black remains perfectly legible).
+    _DARK_BACKGROUND_STYLES = {
+        "black", "solarized-dark", "slate", "blueprint", "chalkboard",
+    }
+
+    def _apply_plot_style(self, plot_style):
+        """
+        Apply a named plot_style scheme via seaborn/matplotlib rcParams.
+
+        Shared by every plot_data()/wright_map()/plot_anchor_selection()/
+        std_residuals_hist() call across all four model classes, so a new
+        scheme only needs to be added once, here, to become available
+        everywhere. Falls back to 'white' for an unrecognised name rather
+        than raising, matching the original if/else's own silent
+        fallback behaviour.
+
+        Parameters
+        ----------
+        plot_style : str
+            One of self._PLOT_STYLE_RC's keys: 'white', 'dark', 'black',
+            'parchment', 'minimal', 'print', 'solarized-light',
+            'solarized-dark', 'slate', 'blueprint', 'newsprint', or
+            'chalkboard'.
+        """
+        scheme = self._PLOT_STYLE_RC.get(plot_style, self._PLOT_STYLE_RC["white"])
+        sns.set_style(scheme["base"], scheme["rc"])
+
     def __init__(self):
         pass
 
@@ -152,6 +319,17 @@ class Rasch:
         appear connected under the undirected view but will break
         calibrate()'s directed matrix, silently producing NaN/overflow.
 
+        Finally checks *strong* connectivity of the directed win-graph (an
+        edge i -> j whenever someone scored higher on i than j). The
+        Bradley-Terry maximum-likelihood priority vector
+        (calibrate(method='log-lik')) has a finite, unique solution if and
+        only if this digraph is strongly connected (Ford, 1957). When the
+        graph is weakly but not strongly connected, a UserWarning names the
+        strongly-connected components and points to the remedies:
+        method='cos'/'ls'/'evm', or matrix_power >= 1 to densify first, or a
+        larger smoothing constant. The other methods are unaffected — they
+        run on the powered (matrix_power=5) matrix by default.
+
         Called automatically by __init__() when validate=True.
 
         Returns
@@ -163,6 +341,9 @@ class Rasch:
             - 'directionally_isolated_items' : list — items with a
               structurally zero row or column in calibrate()'s matrix.
               These pass the undirected BFS but will break calibrate().
+            - 'strongly_connected' : bool — True if the directed win-graph is
+              strongly connected (required for a finite method='log-lik'
+              solution on an unpowered matrix).
             If disconnected, also contains:
             - 'isolated_items' : list — items forming singleton components.
             - 'all_sub_groups' : list of lists — all components.
@@ -175,6 +356,7 @@ class Rasch:
                 "isolated_items": [],
                 "all_sub_groups": [],
                 "directionally_isolated_items": [],
+                "strongly_connected": False,
             }
 
         item_names = list(self.item_names)
@@ -188,6 +370,7 @@ class Rasch:
                 "isolated_items": [],
                 "all_sub_groups": [],
                 "directionally_isolated_items": [],
+                "strongly_connected": False,
             }
 
         matrix, row_items = self._build_pairwise_matrix()
@@ -251,11 +434,54 @@ class Rasch:
 
         is_connected = len(components) == 1
 
+        # Strong connectivity of the directed win-graph (edge i -> j whenever
+        # someone scored higher on i than j), checked on the raw matrix at
+        # its native grain. The Bradley-Terry MLE extracted by
+        # calibrate(method='log-lik') is finite and unique only if this
+        # digraph is strongly connected (Ford, 1957); the other priority
+        # vector methods run on the powered matrix and are unaffected.
+        directed = np.asarray(matrix) > 0
+        np.fill_diagonal(directed, False)
+        n_scc, scc_labels = connected_components(
+            directed, directed=True, connection="strong"
+        )
+        strongly_connected = n_scc == 1
+
         if is_connected:
+            if not strongly_connected:
+                scc_groups = {}
+                for node_idx, label in enumerate(scc_labels):
+                    scc_groups.setdefault(label, set()).add(
+                        str(row_items[node_idx])
+                    )
+                scc_groups = sorted(
+                    (sorted(group) for group in scc_groups.values()), key=len
+                )
+                scc_summary = "; ".join(
+                    f"Group {i + 1} (size {len(group)}): {group[:5]}"
+                    for i, group in enumerate(scc_groups[:6])
+                )
+                if len(scc_groups) > 6:
+                    scc_summary += f"; ... and {len(scc_groups) - 6} more"
+                warnings.warn(
+                    f"The directed comparison graph is connected but not "
+                    f"*strongly* connected: it splits into {n_scc} "
+                    f"strongly-connected components ({scc_summary}). "
+                    f"calibrate(method='log-lik') runs on the raw, unpowered "
+                    f"pairwise matrix by default and has no finite "
+                    f"maximum-likelihood solution in this case (affected "
+                    f"estimates diverge and hit the iteration cap). Use "
+                    f"method='cos'/'ls'/'evm', pass matrix_power>=1 to densify "
+                    f"first, or raise the smoothing constant. The other methods "
+                    f"are unaffected.",
+                    UserWarning,
+                    stacklevel=2,
+                )
             return {
                 "connected": True,
                 "components_count": 1,
                 "directionally_isolated_items": directionally_isolated_items,
+                "strongly_connected": bool(strongly_connected),
             }
         else:
             isolated_items = [comp for comp in components if len(comp) == 1]
@@ -275,10 +501,49 @@ class Rasch:
                 "isolated_items": isolated_items,
                 "all_sub_groups": components,
                 "directionally_isolated_items": directionally_isolated_items,
+                "strongly_connected": bool(strongly_connected),
             }
 
+    @staticmethod
+    def _resolve_matrix_power(method, matrix_power):
+        """
+        Resolve the ``matrix_power=None`` sentinel used by the ``calibrate*``
+        methods.
+
+        ``None`` selects a method-dependent default: ``0`` (no powering) for
+        ``method='log-lik'`` and ``5`` for every other method. The
+        Bradley-Terry MM update consumed by ``'log-lik'`` handles an
+        incomplete comparison graph natively (unobserved pairs simply drop
+        out of the sum), and the entries of a powered matrix are transitive
+        path counts rather than Bernoulli win counts, so powering only
+        distorts its likelihood. ``'cos'``/``'ls'``/``'evm'`` instead need a
+        densified matrix. The default was 3 (arbitrary); a power sweep on
+        well-conditioned data found SLM and RSM fully plateaued by power 2-3
+        (3 vs 5 bit-identical) while PCM's wider-diameter item-threshold
+        graph keeps improving to ~power 5-6 (item RMSE -2%, recovery slope
+        closer to 1), so 5 is now the default -- free for SLM/RSM, a small
+        real gain for PCM, at the cost of two extra matrix multiplies on
+        this non-default path.
+
+        An explicit ``matrix_power=0`` is honoured for any method, but warns
+        for the non-``'log-lik'`` methods since they assume no structural
+        zeroes remain.
+        """
+        if matrix_power is None:
+            return 0 if method == "log-lik" else 5
+        if matrix_power == 0 and method != "log-lik":
+            warnings.warn(
+                f"matrix_power=0 leaves structural zeroes in the pairwise "
+                f"matrix; method={method!r} assumes a densified matrix and "
+                f"may give unstable estimates. Use method='log-lik', or "
+                f"matrix_power>=1, or a non-zero smoothing constant.",
+                UserWarning,
+                stacklevel=3,
+            )
+        return matrix_power
+
     def priority_vector(
-        self, matrix, method="cos", log_lik_tol=0.000001, pcm=False, raters=False
+        self, matrix, method="log-lik", log_lik_tol=0.000001, pcm=False, raters=False
     ):
         """
         Extract a priority vector (item location estimates) from a pairwise matrix.
@@ -292,12 +557,26 @@ class Rasch:
         ----------
         matrix : numpy.ndarray
             Square pairwise comparison matrix, shape (n, n).
-        method : str, default 'cos'
+        method : str, default 'log-lik'
             Priority vector extraction method:
-            'cos'      — cosine (geometric mean) normalisation. Fast and robust.
+            'log-lik'  — Bradley-Terry maximum likelihood (default), via the
+                         Hunter (2004) MM update warm-started from the 'cos'
+                         solution: a fixed-point iteration on the (small)
+                         pairwise matrix, not a data-scale procedure like
+                         JML/MML. Handles an incomplete comparison graph
+                         directly, so the calibrate* methods default it to an
+                         unpowered matrix (matrix_power=None -> 0). Lowest
+                         recovery RMSE of the four methods in simulation —
+                         a trivial margin on dense data, up to ~10% under
+                         sparsity. Needs a strongly connected win-graph (see
+                         check_data_connectivity); falls over otherwise, where
+                         the closed-form methods below still return an answer.
+            'cos'      — cosine maximisation method (Kou & Lin, 2014): sum of
+                         L2-normalised columns of the reciprocal matrix. Fast,
+                         robust, closed-form; least sensitive to heavy-tailed
+                         cell ratios, so no single column dominates.
             'ls'       — least squares (row mean of reciprocal matrix).
-            'log-lik'  — iterative maximum likelihood (Bradley-Terry model).
-            'evm'      — eigenvector method (Garner & Engelhard, 2002)via PCA.
+            'evm'      — eigenvector method (Garner & Engelhard, 2002) via PCA.
                          Requires scikit-learn.
         log_lik_tol : float, default 0.000001
             Convergence tolerance for the 'log-lik' method.
@@ -315,16 +594,37 @@ class Rasch:
         matrix_dim = matrix.shape[0]
 
         if pcm:
-            names = []
-            for i, item in enumerate(self.responses.columns):
-                for j in range(self.max_score_vector.iloc[i]):
-                    names.append(f"{str(item)}_{str(j + 1)}")
+            # Cache the item-threshold labels: priority_vector() is called once
+            # per bootstrap resample, and the nested f-string build is pure
+            # overhead after the first call. Keyed on the column names so a
+            # rename between calls rebuilds them.
+            cols = tuple(self.responses.columns)
+            if getattr(self, "_pcm_priority_names_key", None) != cols:
+                self._pcm_priority_names_key = cols
+                self._pcm_priority_names = [
+                    f"{str(item)}_{str(j + 1)}"
+                    for i, item in enumerate(cols)
+                    for j in range(self.max_score_vector.iloc[i])
+                ]
+            names = self._pcm_priority_names
         else:
             names = self.facet_names if raters else list(self.responses.columns)
 
         with np.errstate(divide="ignore", invalid="ignore"):
             recip_matrix = np.divide(matrix.T, matrix)
-            recip_matrix = np.nan_to_num(recip_matrix, nan=1.0, posinf=1.0, neginf=1.0)
+            # posinf/neginf fills collapse structural zeroes to "equal
+            # difficulty" (only reached on an unpowered/sparse matrix; the
+            # default powered matrix has no zero cells).
+            recip_matrix = np.nan_to_num(
+                recip_matrix, nan=1.0, posinf=1.0, neginf=1.0, copy=False
+            )
+        # Force the reciprocal-matrix diagonal to the AHP convention a_ii = 1,
+        # which 'cos', 'ls' and 'evm' (and the log-lik warm start) all assume.
+        # Done explicitly rather than relying on the 0/0 -> nan -> 1.0 route, so
+        # it still holds if the caller passes an unpowered matrix (matrix_power
+        # = 0) whose diagonal is a real zero, or a powered matrix whose diagonal
+        # is some positive path count.
+        np.fill_diagonal(recip_matrix, 1.0)
 
         if method == "evm":
             if PCA is None:
@@ -332,7 +632,8 @@ class Rasch:
                     "scikit-learn is required for the 'evm' method. "
                     "Install it with: pip install scikit-learn"
                 )
-            pca = PCA()
+            # Only the first principal axis is used, so cap the decomposition.
+            pca = PCA(n_components=1)
             try:
                 pca.fit(recip_matrix)
                 eigenvectors = np.array(pca.components_)
@@ -348,41 +649,49 @@ class Rasch:
                 return None
 
         elif method == "log-lik":
-            wins = matrix.sum(axis=1)
-            change = 1.0
-            wins_sum = wins.sum()
-            weights = (
-                wins / wins_sum if wins_sum > 0 else np.ones(matrix_dim) / matrix_dim
-            )
+            # Bradley-Terry strengths via the Hunter (2004) MM update.
+            # Warm-start from the closed-form cosine-maximisation solution,
+            # inverted: 'cos' weights track exp(difficulty) whereas BT strengths
+            # track exp(-difficulty). This starts near the optimum and typically
+            # cuts the iteration count several-fold versus a wins-proportional
+            # start.
+            col_norms = np.linalg.norm(recip_matrix, axis=0)
+            cos_weights = (recip_matrix / col_norms[np.newaxis, :]).sum(axis=1)
+            weights = 1.0 / cos_weights
+            weights /= weights.sum()
+
+            # Wins and pairwise totals both exclude the diagonal: matrix powers
+            # leave a non-zero diagonal, but i-vs-i is not a real comparison and
+            # must drop out of both the numerator and denominator of the update.
+            wins = matrix.sum(axis=1) - np.diagonal(matrix)
             matrix_sum_sym = matrix + matrix.T
+            np.fill_diagonal(matrix_sum_sym, 0.0)
 
-            while change > log_lik_tol:
-                weight_pairs = weights[:, np.newaxis] + weights[np.newaxis, :]
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    term_matrix = np.divide(
-                        matrix_sum_sym,
-                        weight_pairs,
-                        out=np.zeros_like(matrix_sum_sym),
-                        where=weight_pairs > 0,
-                    )
+            weight_pairs = np.empty((matrix_dim, matrix_dim))
+            term_matrix = np.empty((matrix_dim, matrix_dim))
+            max_iter = 1000
+            for _ in range(max_iter):
+                np.maximum(weights, 1e-12, out=weights)
+                np.add(
+                    weights[:, np.newaxis], weights[np.newaxis, :], out=weight_pairs
+                )
+                np.divide(matrix_sum_sym, weight_pairs, out=term_matrix)
                 adjustment = term_matrix.sum(axis=1)
-                self_term = np.divide(
-                    2 * np.diagonal(matrix),
-                    2 * weights,
-                    out=np.zeros(matrix_dim),
-                    where=weights > 0,
-                )
-                adjustment -= self_term
 
-                new_weights = np.divide(
-                    wins, adjustment, out=np.zeros(matrix_dim), where=adjustment > 0
-                )
-                new_weights_sum = new_weights.sum()
-                if new_weights_sum > 0:
-                    new_weights /= new_weights_sum
+                new_weights = wins / np.maximum(adjustment, 1e-12)
+                new_weights /= new_weights.sum()
 
                 change = np.max(np.abs(weights - new_weights))
                 weights = new_weights
+                if change <= log_lik_tol:
+                    break
+            else:
+                warnings.warn(
+                    f"'log-lik' priority vector did not converge within "
+                    f"{max_iter} iterations (last change={change:.2e}).",
+                    UserWarning,
+                    stacklevel=2,
+                )
 
             measures = -np.log(weights)
             measures -= np.mean(measures)
@@ -393,13 +702,7 @@ class Rasch:
                 weights = np.mean(recip_matrix, axis=1)
             else:
                 normaliser = np.linalg.norm(recip_matrix, axis=0)
-                normalised_matrix = np.divide(
-                    recip_matrix.T,
-                    normaliser[:, np.newaxis],
-                    out=np.zeros_like(recip_matrix.T),
-                    where=normaliser[:, np.newaxis] > 0,
-                )
-                weights = normalised_matrix.sum(axis=0)
+                weights = (recip_matrix / normaliser[np.newaxis, :]).sum(axis=1)
 
             measures = np.log(weights)
             measures -= np.mean(measures)
@@ -730,14 +1033,10 @@ class Rasch:
 
         with plt.rc_context(style_overrides):
 
-            # Only re-apply style sheet when caller explicitly requests a
-            # non-default style, avoiding the per-call stylesheet parse cost.
+            # Only re-apply style when caller explicitly requests a
+            # non-default scheme, avoiding the per-call cost.
             if plot_style != "white":
-                plt.style.use("seaborn-v0_8-" + plot_style)
-                if plot_style == "dark":
-                    sns.set_style("darkgrid")
-                else:
-                    sns.set_style("whitegrid")
+                self._apply_plot_style(plot_style)
 
             fig, ax = plt.subplots()
 
@@ -1342,6 +1641,7 @@ class Rasch:
             alpha=0.7,
             edgecolors="k",
             label="Selected",
+            zorder=3,
         )
         if len(dropped) > 0:
             ax.scatter(
@@ -1351,6 +1651,7 @@ class Rasch:
                 alpha=0.7,
                 edgecolors="k",
                 label="Dropped",
+                zorder=3,
             )
 
         xseq = np.linspace(xmin, xmax, 100)

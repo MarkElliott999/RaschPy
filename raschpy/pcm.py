@@ -1,6 +1,6 @@
 from math import log
 import warnings
-from scipy.stats import chi2, norm, t as t_dist
+from scipy.stats import chi2, gaussian_kde, norm, t as t_dist
 
 import numpy as np
 import pandas as pd
@@ -9,7 +9,9 @@ from sklearn.decomposition import PCA
 from matplotlib import pyplot as plt
 from matplotlib import colors as colors
 from matplotlib import cm as cmx
+from matplotlib.patches import Rectangle
 import seaborn as sns
+import matplotlib.patheffects as path_effects
 
 from raschpy.base import Rasch
 
@@ -573,6 +575,20 @@ class PCM(Rasch):
         item_2's category j) counts persons who scored category i+1 on
         item_1 and category j on item_2.
 
+        Same-item (i == j) cells are forced to zero. PAIR compares pairs of
+        distinct items; a same-item cell can never be a real comparison (a
+        person has exactly one score per item, so two different categories
+        of the same item can't both be true for them). The adjacent-category
+        cells (threshold_k vs threshold_k+1 of the same item) still end up
+        numerically populated by the row/col one-hot construction below, but
+        that's the marginal frequency of category k relabelled as a
+        pairwise cell, not a genuine comparison -- including it measurably
+        biases both item and threshold recovery upward (beta > 1 in
+        simulation) and masks real signal from mixed max_score_vector
+        designs, where it also structurally leaves the non-adjacent
+        same-item cells at zero regardless of sample size (see
+        raschpy_pcm_within_item_bias memory note).
+
         Returns
         -------
         matrix : numpy.ndarray, shape (D, D), D = sum(max_score_vector)
@@ -599,10 +615,97 @@ class PCM(Rasch):
         col_matrix = np.concatenate(col_blocks, axis=1)
         matrix = row_matrix.T @ col_matrix
 
-        return matrix, np.array(row_items)
+        row_items = np.array(row_items)
+        same_item = row_items[:, None] == row_items[None, :]
+        matrix[same_item] = 0.0
+
+        return matrix, row_items
+
+    def _pcm_two_pass_solve(self, matrix, constant, matrix_power):
+        """Shared densify-and-solve step for one pass of the two-pass rule.
+
+        `constant` may be a scalar (pass 1) or a per-pair matrix (pass 2).
+        Always densifies via matrix powering (matrix_power>=1) rather than
+        'log-lik'-style direct zero-fill -- the two-pass taper is only
+        validated, and only wins, against a densified matrix (see
+        _pcm_two_pass_matrix's docstring).
+        """
+        constant_matrix = ((matrix + matrix.T) > 0).astype(np.float64) * constant
+        mat_c = matrix + constant_matrix
+        diag_add = np.diagonal(constant) if np.ndim(constant) else constant
+        np.fill_diagonal(mat_c, mat_c.diagonal() + diag_add)
+        with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+            mat = np.linalg.matrix_power(mat_c, matrix_power)
+            mat_pow = matrix_power
+            fallback = constant if not np.ndim(constant) else np.min(constant)
+            while 0 in mat:
+                mat = mat @ mat_c
+                mat_pow += 1
+                if mat_pow == matrix_power + 5:
+                    mat = mat + fallback
+                    break
+        return mat
+
+    def _pcm_two_pass_matrix(self, matrix, matrix_power=None):
+        """
+        Two-pass smoothing for calibrate(robust=True).
+
+        Pass 1 solves at a scalar constant derived from the mean
+        co-observation count, max_score, and missing fraction. Pass 2
+        re-solves with a per-pair constant tapered down for item-threshold
+        pairs far apart in the pass-1 estimate -- the near-Guttman cross-item
+        pairs (low threshold of an easy item vs. high threshold of a hard
+        one) individually carry almost no information but collectively
+        anchor the scale; a flat large constant on them manufactures
+        spurious ties and compresses the estimated spread, so the taper lets
+        a big base constant clean up the informative near/within-item pairs
+        without that compression.
+
+        A flat constant=0.1 matches or beats this two-pass construction
+        almost everywhere once _build_pairwise_matrix() excludes same-item
+        cells (see that method's docstring) -- this is reserved for the one
+        corner it still protects: missing >= ~0.6 combined with max_score >=
+        ~5, where per-pair counts get too thin for a flat constant to serve
+        well. Both passes solve via 'cos' on a densified (matrix_power>=1)
+        matrix, not 'log-lik' -- checked directly against 'log-lik' in that
+        target corner, 'cos' wins in every condition tested, sometimes by
+        30%+ (a densified matrix apparently matters more than which
+        priority-vector method reads it, once the comparison graph is this
+        thin). calibrate()'s own `method` argument is ignored for this path.
+
+        Returns
+        -------
+        mat : numpy.ndarray
+            Pass-2 smoothed matrix, ready for priority_vector().
+        c1 : float
+            The pass-1 scalar constant (recorded as self.constant).
+        """
+        off = ~np.eye(matrix.shape[0], dtype=bool)
+        meancount = float((matrix + matrix.T)[off].mean()) if off.any() else 0.0
+        missing = float(self.responses.isna().mean().mean())
+        K = int(self.max_score_vector.max())
+        blend = float(np.clip(0.0865 * K**-1.72 * meancount * np.exp(1.27 * missing), 0.02, 60.0))
+        c1 = 2.5 * blend
+        # Densification plateaus at power 5 -- 3 captures most of the gain, 5
+        # captures the rest, 6+ is bit-identical to 5 (see the power sweep in
+        # raschpy_pcm_within_item_bias). Start at 5 rather than the usual 3.
+        mp = matrix_power if matrix_power else 5
+
+        mat1 = self._pcm_two_pass_solve(matrix, c1, mp)
+        dhat = self.priority_vector(mat1, method="cos", pcm=True)
+        dhat = dhat.to_numpy() if hasattr(dhat, "to_numpy") else np.array(dhat)
+
+        gap = np.abs(dhat[:, None] - dhat[None, :])
+        h = -max(0.6 / K, 0.1)
+        c_ab = np.maximum(c1 * (1 + h * gap), 0.02)
+
+        mat2 = self._pcm_two_pass_solve(matrix, c_ab, mp)
+
+        return mat2, c1
 
     def calibrate(
-        self, constant=0.1, method="cos", matrix_power=3, log_lik_tol=0.000001
+        self, constant=None, method="log-lik", matrix_power=None, log_lik_tol=0.000001,
+        robust=False,
     ):
         """
         Estimate item thresholds using the PAIR (Pairwise) algorithm.
@@ -620,16 +723,35 @@ class PCM(Rasch):
 
         Parameters
         ----------
-        constant : float, default 0.1
+        constant : float or None, default None
             Additive smoothing constant applied to the frequency matrix.
-            Use 0 to disable smoothing; estimation may fail if any item
-            has all-maximum or all-minimum scores.
-        method : str, default 'cos'
+            ``None`` resolves to 0.1, unless ``robust=True`` (see below). An
+            explicit value always takes precedence over ``robust``. Use 0 to
+            disable smoothing; estimation may fail if any item has
+            all-maximum or all-minimum scores.
+        method : str, default 'log-lik'
             Priority vector extraction method. See base.priority_vector().
-        matrix_power : int, default 3
+        matrix_power : int or None, default None
             Initial matrix power before checking for structural zeroes.
+            None resolves to 0 for method='log-lik' (no powering), else 5.
         log_lik_tol : float, default 0.000001
             Log-likelihood convergence tolerance for priority vector extraction.
+        robust : bool, default False
+            When ``True`` and ``constant`` is ``None``, use a two-pass
+            smoothing construction instead of the flat 0.1 default: pass 1
+            solves at a scalar constant derived from mean co-observation
+            count, max_score, and missing fraction; pass 2 re-solves with a
+            per-pair constant tapered down for item-threshold pairs far
+            apart in the pass-1 estimate (see _pcm_two_pass_matrix). A flat
+            constant=0.1 matches or beats this everywhere in simulation
+            except one corner -- missing >= ~0.6 combined with max_score >=
+            ~5 -- where per-pair counts get too thin for a flat constant;
+            two-pass is reserved for protecting that corner, not a general
+            improvement. Ignored, with a UserWarning, if ``constant`` is
+            also given. Method is fixed to 'cos' internally for this path
+            regardless of ``method`` -- checked directly against 'log-lik'
+            in the target corner, 'cos' on a densified matrix wins in every
+            condition tested, sometimes by 30%+.
 
         Attributes set
         --------------
@@ -641,6 +763,9 @@ class PCM(Rasch):
             {item: numpy.ndarray} of centred threshold offsets per item.
         threshold_list : numpy.ndarray
             Flat array of all uncentred thresholds concatenated.
+        constant : float
+            The additive smoothing constant actually used, after resolving
+            ``None`` / ``robust`` (the pass-1 scalar when ``robust=True``).
         null_persons : pandas.Index
             Persons dropped prior to calibration due to entirely missing data.
         """
@@ -653,21 +778,28 @@ class PCM(Rasch):
                 stacklevel=2,
             )
 
-        if constant == 0:
-            all_max_items = [
-                item
-                for item in self.responses.columns
-                if self.responses[item].dropna().eq(self.responses[item].max()).all()
-            ]
+        if constant is not None and robust:
+            warnings.warn(
+                f"Both `constant={constant}` and `robust=True` were passed. An "
+                f"explicit `constant` takes precedence: `constant={constant}` "
+                f"will be used and the two-pass robust rule will not be applied. "
+                f"To use the rule, pass `robust=True` with `constant=None`.",
+                UserWarning,
+                stacklevel=2,
+            )
 
-            if all_max_items:
-                warnings.warn(
-                    f"Items with all-maximum scores detected with constant=0: "
-                    f"{list(all_max_items)}. Item estimation will fail. "
-                    f"Either drop these items or use a non-zero constant.",
-                    UserWarning,
-                    stacklevel=2,
-                )
+        resolved_constant = 0.1 if constant is None else constant
+        use_two_pass = constant is None and robust
+
+        if resolved_constant == 0 and not use_two_pass:
+            # Unsmoothed PAIR: re-run the structural connectivity check on the
+            # data as it stands now (not just at __init__(validate=True)) --
+            # constant=0 removes the only thing masking a directionally
+            # isolated item or disconnected component, both of which
+            # check_data_connectivity() already detects and warns about
+            # (does not raise; 'log-lik' tolerates an incomplete comparison
+            # graph and still returns an answer for the rest of the items).
+            self.check_data_connectivity()
 
         all_null_mask = self.responses.isnull().all(axis=1)
         self.null_persons = self.responses.index[all_null_mask]
@@ -678,26 +810,43 @@ class PCM(Rasch):
         matrix, _ = self._build_pairwise_matrix()
         cum_scores = np.concatenate(([0], np.cumsum(self.max_score_vector.to_numpy())))
 
-        constant_matrix = ((matrix + matrix.T) > 0).astype(np.float64) * constant
-        matrix += constant_matrix
-        np.fill_diagonal(matrix, matrix.diagonal() + constant)
+        if use_two_pass:
+            mat, resolved_constant = self._pcm_two_pass_matrix(matrix, matrix_power=matrix_power)
+            method = "cos"
+        else:
+            constant = resolved_constant
+            matrix_power = self._resolve_matrix_power(method, matrix_power)
 
-        # Sparse/disconnected resamples can blow this up to inf/nan before the zero-check
-        # loop below terminates; not a real numerical error, so suppress the noise.
-        with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
-            mat = np.linalg.matrix_power(matrix, matrix_power)
-            mat_pow = matrix_power
-            while 0 in mat:
-                mat = mat @ matrix
-                mat_pow += 1
-                if mat_pow == matrix_power + 5:
-                    mat += constant
-                    break
+            constant_matrix = ((matrix + matrix.T) > 0).astype(np.float64) * constant
+            matrix = matrix + constant_matrix
+            np.fill_diagonal(matrix, matrix.diagonal() + constant)
+
+            # Sparse/disconnected resamples can blow this up to inf/nan before the zero-check
+            # loop below terminates; not a real numerical error, so suppress the noise.
+            with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+                if matrix_power == 0:
+                    # No powering: 'log-lik' (Bradley-Terry) consumes structural
+                    # zeroes directly. Fill remaining off-diagonal zeroes
+                    # (unobserved threshold pairs) with `constant`.
+                    mat = np.array(matrix, dtype=np.float64)
+                    if constant:
+                        off_diagonal_mask = ~np.eye(matrix.shape[0], dtype=bool)
+                        mat[off_diagonal_mask & (mat == 0)] = constant
+                else:
+                    mat = np.linalg.matrix_power(matrix, matrix_power)
+                    mat_pow = matrix_power
+                    while 0 in mat:
+                        mat = mat @ matrix
+                        mat_pow += 1
+                        if mat_pow == matrix_power + 5:
+                            mat += constant
+                            break
 
         threshold_vector = self.priority_vector(
             mat, method=method, log_lik_tol=log_lik_tol, pcm=True
         )
         self.threshold_list = threshold_vector
+        self.constant = resolved_constant
 
         split_indices = cum_scores[1:-1]
         threshold_vector_np = (
@@ -766,9 +915,10 @@ class PCM(Rasch):
         tolerance=0.00001,
         max_iters=100,
         ext_score_adjustment=0.5,
-        constant=0.1,
-        method="cos",
-        matrix_power=3,
+        constant=None,
+        method="log-lik",
+        robust=False,
+        matrix_power=None,
         log_lik_tol=0.000001,
         seed=None,
     ):
@@ -989,6 +1139,7 @@ class PCM(Rasch):
         if calibrate or not hasattr(self, "items"):
             self.calibrate(
                 constant=constant,
+                robust=robust,
                 method=method,
                 matrix_power=matrix_power,
                 log_lik_tol=log_lik_tol,
@@ -1010,6 +1161,7 @@ class PCM(Rasch):
                 self.std_errors(
                     no_of_samples=no_of_samples,
                     constant=constant,
+                    robust=robust,
                     method=method,
                     matrix_power=matrix_power,
                     log_lik_tol=log_lik_tol,
@@ -1289,9 +1441,10 @@ class PCM(Rasch):
     def std_errors(
         self,
         interval=None,
-        constant=0.1,
-        method="cos",
-        matrix_power=3,
+        constant=None,
+        method="log-lik",
+        robust=False,
+        matrix_power=None,
         log_lik_tol=0.000001,
         no_of_samples=500,
         seed=None,
@@ -1310,10 +1463,11 @@ class PCM(Rasch):
             Confidence interval width (e.g. 0.95). If None, only SEs computed.
         constant : float, default 0.1
             Additive smoothing constant for bootstrap calibrations.
-        method : str, default 'cos'
+        method : str, default 'log-lik'
             Priority vector extraction method.
-        matrix_power : int, default 3
-            Matrix power for bootstrap calibrations.
+        matrix_power : int or None, default None
+            Matrix power for bootstrap calibrations. None resolves to 0 for
+            method='log-lik' (no powering), else 5.
         log_lik_tol : float, default 0.000001
             Convergence tolerance for bootstrap calibrations.
         no_of_samples : int, default 500
@@ -1346,6 +1500,7 @@ class PCM(Rasch):
         for sample in samples:
             sample.calibrate(
                 constant=constant,
+                robust=robust,
                 method=method,
                 matrix_power=matrix_power,
                 log_lik_tol=log_lik_tol,
@@ -2195,9 +2350,10 @@ class PCM(Rasch):
         tolerance=0.00001,
         max_iters=100,
         ext_score_adjustment=0.5,
-        constant=0.1,
-        method="cos",
-        matrix_power=3,
+        constant=None,
+        method="log-lik",
+        robust=False,
+        matrix_power=None,
         log_lik_tol=0.000001,
         no_of_samples=500,
         interval=None,
@@ -2235,10 +2391,11 @@ class PCM(Rasch):
             Extreme score adjustment for person location estimation.
         constant : float, default 0.1
             Additive smoothing constant for calibration.
-        method : str, default 'cos'
+        method : str, default 'log-lik'
             Priority vector extraction method for calibration.
-        matrix_power : int, default 3
-            Matrix power for calibration.
+        matrix_power : int or None, default None
+            Matrix power for calibration. None resolves to 0 for
+            method='log-lik' (no powering), else 5.
         log_lik_tol : float, default 0.000001
             Log-likelihood tolerance for calibration.
         no_of_samples : int, default 500
@@ -2321,12 +2478,13 @@ class PCM(Rasch):
         """
 
         if not hasattr(self, "thresholds_uncentred"):
-            self.calibrate(constant=constant, method=method)
+            self.calibrate(constant=constant, method=method, robust=robust)
         if se and not hasattr(self, "threshold_se"):
             self.std_errors(
                 interval=interval,
                 no_of_samples=no_of_samples,
                 constant=constant,
+                robust=robust,
                 method=method,
                 seed=seed,
             )
@@ -2799,8 +2957,9 @@ class PCM(Rasch):
         tolerance=0.00001,
         max_iters=100,
         ext_score_adjustment=0.5,
-        constant=0.1,
-        method="cos",
+        constant=None,
+        method="log-lik",
+        robust=False,
         log_lik_tol=0.000001,
     ):
         """
@@ -2899,7 +3058,7 @@ class PCM(Rasch):
             )
 
         if not hasattr(self, "thresholds_uncentred"):
-            self.calibrate(constant=constant, method=method, log_lik_tol=log_lik_tol)
+            self.calibrate(constant=constant, method=method, robust=robust, log_lik_tol=log_lik_tol)
         if not hasattr(self, "persons"):
             self.person_estimates(
                 warm_corr=warm_corr,
@@ -2921,7 +3080,7 @@ class PCM(Rasch):
 
         # Re-estimate full model on combined subset so the LR comparison is fair
         m_full = PCM(self.responses.loc[combined_idx], self.max_score_vector)
-        m_full.calibrate(constant=constant, method=method, log_lik_tol=log_lik_tol)
+        m_full.calibrate(constant=constant, method=method, robust=robust, log_lik_tol=log_lik_tol)
         m_full.person_estimates(
             warm_corr=warm_corr,
             tolerance=tolerance,
@@ -2934,7 +3093,7 @@ class PCM(Rasch):
         group_models = {}
         for name, idx in group_idx.items():
             m = PCM(self.responses.loc[idx], self.max_score_vector)
-            m.calibrate(constant=constant, method=method, log_lik_tol=log_lik_tol)
+            m.calibrate(constant=constant, method=method, robust=robust, log_lik_tol=log_lik_tol)
             m.person_estimates(
                 warm_corr=warm_corr,
                 tolerance=tolerance,
@@ -2992,9 +3151,10 @@ class PCM(Rasch):
         tolerance=0.00001,
         max_iters=100,
         ext_score_adjustment=0.5,
-        constant=0.1,
-        method="cos",
-        matrix_power=3,
+        constant=None,
+        method="log-lik",
+        robust=False,
+        matrix_power=None,
         log_lik_tol=0.000001,
         seed=None,
     ):
@@ -3382,7 +3542,7 @@ class PCM(Rasch):
 
         ref_idx = cov_values.index[cov_values == reference]
         ref_model = PCM(self.responses.loc[ref_idx], self.max_score_vector)
-        ref_model.calibrate(constant=constant, method=method, log_lik_tol=log_lik_tol)
+        ref_model.calibrate(constant=constant, method=method, robust=robust, log_lik_tol=log_lik_tol)
         ref_model.std_errors(
             no_of_samples=no_of_samples, constant=constant, method=method,
             log_lik_tol=log_lik_tol, seed=seed,
@@ -3402,7 +3562,7 @@ class PCM(Rasch):
         for focal in focal_levels:
             focal_idx = cov_values.index[cov_values == focal]
             focal_model = PCM(self.responses.loc[focal_idx], self.max_score_vector)
-            focal_model.calibrate(constant=constant, method=method, log_lik_tol=log_lik_tol)
+            focal_model.calibrate(constant=constant, method=method, robust=robust, log_lik_tol=log_lik_tol)
             focal_model.std_errors(
                 no_of_samples=no_of_samples, constant=constant, method=method,
                 log_lik_tol=log_lik_tol, seed=seed,
@@ -3502,7 +3662,7 @@ class PCM(Rasch):
             if omnibus:
                 combined_idx = ref_idx.append(focal_idx)
                 m_full = PCM(self.responses.loc[combined_idx], self.max_score_vector)
-                m_full.calibrate(constant=constant, method=method, log_lik_tol=log_lik_tol)
+                m_full.calibrate(constant=constant, method=method, robust=robust, log_lik_tol=log_lik_tol)
                 m_full.person_estimates(**pe_kw)
                 ll_full = m_full._log_likelihood()
                 pooled_ref_persons = m_full.persons.reindex(ref_model.responses.index)
@@ -3747,8 +3907,9 @@ class PCM(Rasch):
         tolerance=0.00001,
         max_iters=100,
         ext_score_adjustment=0.5,
-        constant=0.1,
-        method="cos",
+        constant=None,
+        method="log-lik",
+        robust=False,
         log_lik_tol=0.000001,
         seed=None,
     ):
@@ -3825,7 +3986,7 @@ class PCM(Rasch):
         max_score = int(self.max_score_vector.iloc[0])
 
         if not hasattr(self, "thresholds_uncentred"):
-            self.calibrate(constant=constant, method=method, log_lik_tol=log_lik_tol)
+            self.calibrate(constant=constant, method=method, robust=robust, log_lik_tol=log_lik_tol)
         if not hasattr(self, "persons"):
             self.person_estimates(
                 warm_corr=warm_corr,
@@ -3942,9 +4103,10 @@ class PCM(Rasch):
         tolerance=0.00001,
         max_iters=100,
         ext_score_adjustment=0.5,
-        constant=0.1,
-        method="cos",
-        matrix_power=3,
+        constant=None,
+        method="log-lik",
+        robust=False,
+        matrix_power=None,
         log_lik_tol=0.000001,
         no_of_samples=500,
         interval=None,
@@ -3970,10 +4132,11 @@ class PCM(Rasch):
             Extreme score adjustment.
         constant : float, default 0.1
             Additive smoothing constant.
-        method : str, default 'cos'
+        method : str, default 'log-lik'
             Priority vector extraction method.
-        matrix_power : int, default 3
-            Matrix power for calibration.
+        matrix_power : int or None, default None
+            Matrix power for calibration. None resolves to 0 for
+            method='log-lik' (no powering), else 5.
         log_lik_tol : float, default 0.000001
             Convergence tolerance for calibration.
         no_of_samples : int, default 500
@@ -4005,6 +4168,7 @@ class PCM(Rasch):
                 max_iters=max_iters,
                 ext_score_adjustment=ext_score_adjustment,
                 constant=constant,
+                robust=robust,
                 method=method,
                 matrix_power=matrix_power,
                 log_lik_tol=log_lik_tol,
@@ -4067,9 +4231,10 @@ class PCM(Rasch):
         tolerance=0.00001,
         max_iters=100,
         ext_score_adjustment=0.5,
-        method="cos",
-        constant=0.1,
-        matrix_power=3,
+        method="log-lik",
+        constant=None,
+        robust=False,
+        matrix_power=None,
         log_lik_tol=0.000001,
         no_of_samples=500,
         interval=None,
@@ -4110,12 +4275,13 @@ class PCM(Rasch):
             Maximum Newton-Raphson iterations.
         ext_score_adjustment : float, default 0.5
             Extreme score adjustment for person location estimation.
-        method : str, default 'cos'
+        method : str, default 'log-lik'
             Priority vector extraction method for calibration.
         constant : float, default 0.1
             Additive smoothing constant for calibration.
-        matrix_power : int, default 3
-            Matrix power for calibration.
+        matrix_power : int or None, default None
+            Matrix power for calibration. None resolves to 0 for
+            method='log-lik' (no powering), else 5.
         log_lik_tol : float, default 0.000001
             Log-likelihood tolerance for calibration.
         no_of_samples : int, default 500
@@ -4159,6 +4325,7 @@ class PCM(Rasch):
                 interval=interval,
                 no_of_samples=no_of_samples,
                 constant=constant,
+                robust=robust,
                 method=method,
                 matrix_power=matrix_power,
                 log_lik_tol=log_lik_tol,
@@ -4211,8 +4378,9 @@ class PCM(Rasch):
         tolerance=0.00001,
         max_iters=100,
         ext_score_adjustment=0.5,
-        method="cos",
-        constant=0.1,
+        method="log-lik",
+        constant=None,
+        robust=False,
         no_of_samples=500,
         interval=None,
     ):
@@ -4247,7 +4415,7 @@ class PCM(Rasch):
             Maximum Newton-Raphson iterations.
         ext_score_adjustment : float, default 0.5
             Extreme score adjustment for person location estimation.
-        method : str, default 'cos'
+        method : str, default 'log-lik'
             Priority vector extraction method for calibration.
         constant : float, default 0.1
             Additive smoothing constant for calibration.
@@ -4366,9 +4534,10 @@ class PCM(Rasch):
     def category_stats_df(
         self,
         dp=3,
-        constant=0.1,
-        method="cos",
-        matrix_power=3,
+        constant=None,
+        method="log-lik",
+        robust=False,
+        matrix_power=None,
         log_lik_tol=0.000001,
         no_of_samples=500,
         interval=None,
@@ -4446,7 +4615,7 @@ class PCM(Rasch):
             clear-cut.
         """
         if not hasattr(self, "thresholds"):
-            self.calibrate(constant=constant, method=method, log_lik_tol=log_lik_tol)
+            self.calibrate(constant=constant, method=method, robust=robust, log_lik_tol=log_lik_tol)
         if not hasattr(self, "cat_width_se"):
             self.std_errors(
                 interval=interval, no_of_samples=no_of_samples,
@@ -4503,8 +4672,9 @@ class PCM(Rasch):
         tolerance=0.00001,
         max_iters=100,
         ext_score_adjustment=0.5,
-        method="cos",
-        constant=0.1,
+        method="log-lik",
+        constant=None,
+        robust=False,
     ):
         """
         Build and store the person statistics summary table.
@@ -4535,7 +4705,7 @@ class PCM(Rasch):
             Maximum Newton-Raphson iterations.
         ext_score_adjustment : float, default 0.5
             Extreme score adjustment.
-        method : str, default 'cos'
+        method : str, default 'log-lik'
             Priority vector extraction method.
         constant : float, default 0.1
             Additive smoothing constant.
@@ -4596,8 +4766,9 @@ class PCM(Rasch):
         tolerance=0.00001,
         max_iters=100,
         ext_score_adjustment=0.5,
-        method="cos",
-        constant=0.1,
+        method="log-lik",
+        constant=None,
+        robust=False,
         alpha=False,
         seed=None,
     ):
@@ -4620,7 +4791,7 @@ class PCM(Rasch):
             Maximum Newton-Raphson iterations.
         ext_score_adjustment : float, default 0.5
             Extreme score adjustment for person location estimation.
-        method : str, default 'cos'
+        method : str, default 'log-lik'
             Priority vector extraction method for calibration.
         constant : float, default 0.1
             Additive smoothing constant for calibration.
@@ -4686,8 +4857,9 @@ class PCM(Rasch):
         tolerance=0.00001,
         max_iters=100,
         ext_score_adjustment=0.5,
-        method="cos",
-        constant=0.1,
+        method="log-lik",
+        constant=None,
+        robust=False,
         no_of_samples=500,
         interval=None,
     ):
@@ -4716,7 +4888,7 @@ class PCM(Rasch):
             Maximum Newton-Raphson iterations.
         ext_score_adjustment : float, default 0.5
             Extreme score adjustment.
-        method : str, default 'cos'
+        method : str, default 'log-lik'
             Priority vector extraction method.
         constant : float, default 0.1
             Additive smoothing constant.
@@ -4811,8 +4983,9 @@ class PCM(Rasch):
         tolerance=0.00001,
         max_iters=100,
         ext_score_adjustment=0.5,
-        method="cos",
-        constant=0.1,
+        method="log-lik",
+        constant=None,
+        robust=False,
     ):
         """
         Export residual correlation analysis results to file.
@@ -4841,7 +5014,7 @@ class PCM(Rasch):
             Maximum Newton-Raphson iterations.
         ext_score_adjustment : float, default 0.5
             Extreme score adjustment.
-        method : str, default 'cos'
+        method : str, default 'log-lik'
             Priority vector extraction method.
         constant : float, default 0.1
             Additive smoothing constant.
@@ -5090,6 +5263,31 @@ class PCM(Rasch):
 
         return np.array(mean_person_locations).T, np.array(obs_props).T
 
+    def _label_height_frac(self, font, axis_font_size, figsize):
+        """
+        Fraction of the axes' own pixel height that one line of label
+        text occupies, at the given font/size/figure size -- measured
+        directly via a probe render (not guessed), so callers can
+        convert it into an exact data-unit label height for whatever
+        y-range they end up using (that height scales linearly with the
+        y-range, since the axes' pixel height itself doesn't depend on
+        the data plotted). Used to size ymax and place stacked
+        central_location labels with a small, guaranteed gap rather
+        than a fixed fraction of y_max (see feedback_plot_layout_rigor
+        -- measure, don't guess).
+        """
+        probe_fig = plt.figure(figsize=figsize)
+        probe_ax = probe_fig.add_subplot(111)
+        probe_txt = probe_ax.text(
+            0, 0, "Item_1: 0.000", fontsize=axis_font_size, fontfamily=font
+        )
+        probe_fig.canvas.draw()
+        renderer = probe_fig.canvas.get_renderer()
+        label_h_px = probe_txt.get_window_extent(renderer=renderer).height
+        ax_h_px = probe_ax.get_window_extent(renderer=renderer).height
+        plt.close(probe_fig)
+        return label_h_px / ax_h_px
+
     # ------------------------------------------------------------------
     # Plots
     # ------------------------------------------------------------------
@@ -5102,11 +5300,18 @@ class PCM(Rasch):
         x_max=5,
         y_max=0,
         items=None,
+        curve_labels=None,
+        legend_loc=None,
+        max_score_lines=None,
         obs=None,
+        obs_curve_index=None,
+        marker_border=True,
+        line_border=False,
         x_obs_data=np.array([]),
         y_obs_data=np.array([]),
         thresh_lines=False,
         central_location=False,
+        central_location_fit=False,
         score_lines_item=[None, None],
         score_lines_test=None,
         point_info_lines_item=[None, None],
@@ -5118,7 +5323,7 @@ class PCM(Rasch):
         graph_title="",
         y_label="",
         plot_style="white",
-        palette="dark blue",
+        palette="colorblind multi",
         black=False,
         figsize=(8, 6),
         font="Times New Roman",
@@ -5153,8 +5358,42 @@ class PCM(Rasch):
             Upper y-axis limit. If <= 0, auto-scaled to 110% of peak.
         items : str, list, or None
             Item(s) being plotted, for threshold/score line lookups.
+        curve_labels : list of str, or None, default None
+            One label per curve (matching y_data's columns), shown in a
+            legend. None (default) leaves curves unlabelled, as before.
+            icc() passes item names here when plotting more than one
+            item at once.
+        max_score_lines : list of float, or None, default None
+            One value per curve (matching y_data's columns) -- draws a
+            dotted horizontal line at that value, in the same colour as
+            its curve. icc() uses this to mark each item's own max score
+            when items have different ones and are plotted together (so
+            the shared y-axis, scaled to the tallest item, doesn't leave
+            shorter items' own ceilings ambiguous).
         obs : bool, list, or None
             Controls observed data overlay.
+        obs_curve_index : list of int, or None, default None
+            Only relevant when y_obs_data has more than one column
+            (multiple observed series). Maps each column position to the
+            curve index (in y_data) it belongs to, so its marker is
+            coloured to match that curve -- needed whenever the observed
+            series have been subsetted/reordered relative to the full
+            curve set (crcs()'s obs= is a list of category indices, not
+            necessarily 0..n in order). None means the identity mapping
+            (position i belongs to curve i), correct whenever the two
+            already line up.
+        marker_border : bool, default True
+            If True, observed-data markers get a black edge (matching
+            plot_anchor_selection's own marker style). If False, markers
+            are drawn with no edge.
+        line_border : bool, default False
+            If True, each curve line gets a thin contrasting stroke
+            (white on the darker plot_style schemes -- see
+            _DARK_BACKGROUND_STYLES -- black otherwise), so it stays
+            legible against a background/gridline colour close to its
+            own. Off by default; the 'colorblind multi' palette's own
+            black entry is separately swapped for white on those same
+            dark schemes regardless of this flag.
         x_obs_data, y_obs_data : array-like
             Observed data point coordinates.
         thresh_lines : bool, default False
@@ -5182,7 +5421,10 @@ class PCM(Rasch):
         y_label : str, default ''
             Y-axis label.
         plot_style : str, default 'white'
-            'white' or 'dark'.
+            One of self._PLOT_STYLE_RC's keys: 'white', 'dark', 'black',
+            'parchment', 'minimal', 'print', 'solarized-light',
+            'solarized-dark', 'slate', 'blueprint', 'newsprint', or
+            'chalkboard'.
         palette : str, default 'dark blue'
             Colour palette name.
         black : bool, default False
@@ -5211,10 +5453,7 @@ class PCM(Rasch):
         matplotlib.figure.Figure
             The rendered Figure object.
         """
-        if plot_style == "dark":
-            sns.set_style("darkgrid")
-        else:
-            sns.set_style("whitegrid")
+        self._apply_plot_style(plot_style)
 
         palette_dict = {
             "dark blue": ["dark", "royalblue"],
@@ -5227,10 +5466,21 @@ class PCM(Rasch):
             "light grey": ["light", "darkgrey"],
             "dark multi": ["dark", "dark"],
             "light multi": ["light", "muted"],
+            "colorblind multi": ["dark", "colorblind"],
         }
 
         shade, base_color = palette_dict[palette]
-        if shade == "dark":
+        if palette == "colorblind multi":
+            # Okabe & Ito (2008) -- colour-vision-deficiency-safe
+            # qualitative palette, the scientific-publishing standard.
+            # The 8th (black) entry is swapped for white on dark
+            # backgrounds, where it would otherwise be invisible.
+            color_map = [
+                "#E69F00", "#56B4E9", "#009E73", "#F0E442",
+                "#0072B2", "#D55E00", "#CC79A7",
+                "#FFFFFF" if plot_style in self._DARK_BACKGROUND_STYLES else "#000000",
+            ]
+        elif shade == "dark":
             color_map = (
                 sns.color_palette("dark", as_cmap=True)
                 if palette == "dark multi"
@@ -5251,6 +5501,18 @@ class PCM(Rasch):
             if "multi" not in palette:
                 scalarMap = cmx.ScalarMappable(norm=cNorm, cmap=color_map)
 
+            # A thin contrasting stroke around each curve line, so it stays
+            # legible on a background/gridline colour close to its own --
+            # white on the darker plot_style schemes, black otherwise.
+            line_fx = (
+                [path_effects.withStroke(
+                    linewidth=2.5,
+                    foreground="white" if plot_style in self._DARK_BACKGROUND_STYLES else "black",
+                )]
+                if line_border
+                else None
+            )
+
             for i in range(no_of_plots):
                 col = (
                     "black"
@@ -5259,7 +5521,16 @@ class PCM(Rasch):
                         scalarMap.to_rgba(i) if "multi" not in palette else color_map[i]
                     )
                 )
-                ax.plot(x_data, y_data[:, i], "", color=col, label=i + 1)
+                label = curve_labels[i] if curve_labels is not None else i + 1
+                ax.plot(
+                    x_data, y_data[:, i], "", color=col, label=label,
+                    path_effects=line_fx,
+                )
+                if max_score_lines is not None:
+                    ax.axhline(max_score_lines[i], color=col, linestyle=":", linewidth=1)
+
+            if curve_labels is not None:
+                ax.legend(loc=legend_loc if legend_loc is not None else "best")
 
             if obs is not None:
                 x_is_series = isinstance(x_obs_data, pd.Series)
@@ -5269,21 +5540,22 @@ class PCM(Rasch):
                     )
                     ax.scatter(
                         x_obs_data, y_obs_data, color=col, s=40, alpha=0.7,
-                        edgecolors="k",
+                        edgecolors="k" if marker_border else "none", zorder=3,
                     )
                 else:
                     try:
                         no_obs_cats = y_obs_data.shape[1]
                         for j in range(no_obs_cats):
+                            k = obs_curve_index[j] if obs_curve_index is not None else j
                             col = (
-                                scalarMap.to_rgba(j)
+                                scalarMap.to_rgba(k)
                                 if "multi" not in palette
-                                else color_map[j]
+                                else color_map[k]
                             )
                             xd = x_obs_data if x_is_series else x_obs_data[:, j]
                             ax.scatter(
                                 xd, y_obs_data[:, j], color=col, s=40, alpha=0.7,
-                                edgecolors="k",
+                                edgecolors="k" if marker_border else "none", zorder=3,
                             )
                     except Exception:
                         pass
@@ -5303,51 +5575,138 @@ class PCM(Rasch):
                 and isinstance(items, str)
                 and items not in ("all", "none", None)
             ):
-                for thr in self.thresholds_uncentred.loc[items].dropna():
+                item_thresholds = self.thresholds_uncentred.loc[items].dropna()
+                for idx, (thr_num, thr) in enumerate(item_thresholds.items()):
                     ax.axvline(x=thr, color="black", linestyle="--")
+                    # Staggered onto two rows near the bottom so that any
+                    # two adjacent thresholds (the only ones close enough
+                    # in x to clash) never share a row.
+                    label_y = y_max * (0.05 if idx % 2 == 0 else 0.11)
+                    ax.text(
+                        thr + (x_max - x_min) / 100,
+                        label_y,
+                        str(thr_num),
+                        color="black",
+                        va="bottom",
+                        ha="left",
+                    )
 
             if items is not None and central_location:
-                item_key = items if isinstance(items, str) else None
-                if item_key and item_key not in ("all", "none"):
-                    ax.axvline(
-                        x=np.mean(list(thresholds[item_key])),
-                        color="darkred",
-                        linestyle="--",
+                # items may be a list (one curve per item) -- draw each
+                # item's own central location, always plain darkred
+                # (colour isn't needed to disambiguate since each line
+                # is labelled with its own item name).
+                items_multi = isinstance(items, list)
+                items_list = items if items_multi else [items]
+                n_labels = len(items_list)
+                if central_location_fit and items_multi and n_labels > 0:
+                    # "Fit" style (iic): the curve's own peak sits right
+                    # at each item's central location, so labels are
+                    # stacked with a probe-measured height above that
+                    # peak -- ymax is pre-widened by the caller to fit
+                    # them exactly (measure, don't guess -- see
+                    # feedback_plot_layout_rigor).
+                    k = self._label_height_frac(font, axis_font_size, figsize)
+                    label_h_data = k * y_max
+                    gap = 0.3 * label_h_data
+                    curve_peak = float(np.nanmax(y_data))
+                for idx, it in enumerate(items_list):
+                    if it in (None, "all", "none"):
+                        continue
+                    xval = np.mean(list(self.thresholds_uncentred.loc[it].dropna()))
+                    ax.axvline(x=xval, color="darkred", linestyle="--")
+                    label = (
+                        f"{it}: {round(xval, 2)}" if items_multi else str(round(xval, 2))
+                    )
+                    if central_location_fit and items_multi:
+                        label_y = curve_peak + gap + label_h_data * (n_labels - idx - 0.5)
+                        label_x = xval - (x_max - x_min) / 100
+                        ha = "right"
+                    elif items_multi:
+                        # "Top" style (icc): the curve is an ogive, near
+                        # its ceiling by the time it nears max score, so
+                        # labels just stack near the top of the fixed
+                        # y_max instead -- placed to the *left* of each
+                        # line (curves rise left-to-right, so that side
+                        # stays clear of the curve even close to the
+                        # ceiling) rather than boosting y_max past its
+                        # own meaningful value.
+                        label_y = y_max * 0.95 - idx * y_max * 0.05
+                        label_x = xval - (x_max - x_min) / 100
+                        ha = "right"
+                    else:
+                        label_y = y_max * 0.95
+                        label_x = xval + (x_max - x_min) / 100
+                        ha = "left"
+                        label = f"Central location: {round(xval, 2)}"
+                    ax.text(
+                        label_x,
+                        label_y,
+                        label,
+                        color="black",
+                        va="center",
+                        ha=ha,
                     )
 
             if score_lines_item[1] is not None:
-                item = score_lines_item[0]
+                # score_lines_item[0] may be a list (one curve per item)
+                # -- draw each item's own score lines in that item's own
+                # curve colour. Single-item calls keep the original plain
+                # black lines.
+                items_arg = score_lines_item[0]
+                items_multi = isinstance(items_arg, list)
+                items_list = items_arg if items_multi else [items_arg]
                 valid = all(s > 0 for s in score_lines_item[1]) and all(
-                    s < self.max_score_vector[item] for s in score_lines_item[1]
+                    s < self.max_score_vector[it]
+                    for it in items_list
+                    for s in score_lines_item[1]
                 )
                 if valid:
-                    for s in score_lines_item[1]:
-                        estimate = self.score_lookup(
-                            s, items=list(thresholds.keys()), warm_corr=False
-                        )
-                        ax.vlines(
-                            x=estimate,
-                            ymin=-100,
-                            ymax=s,
-                            color="black",
-                            linestyles="dashed",
-                        )
-                        ax.hlines(
-                            y=s,
-                            xmin=-100,
-                            xmax=estimate,
-                            color="black",
-                            linestyles="dashed",
-                        )
-                        if score_labels:
-                            ax.text(
-                                estimate + (x_max - x_min) / 100,
-                                y_max / 50,
-                                str(round(estimate, 2)),
+                    for idx, it in enumerate(items_list):
+                        colorVal = (
+                            "black"
+                            if black or not items_multi
+                            else (
+                                scalarMap.to_rgba(idx)
+                                if "multi" not in palette
+                                else color_map[idx]
                             )
-                            ax.text(
-                                x_min + (x_max - x_min) / 100, s + y_max / 50, str(s)
+                        )
+                        for s in score_lines_item[1]:
+                            estimate = self.score_lookup(s, items=[it], warm_corr=False)
+                            ax.vlines(
+                                x=estimate,
+                                ymin=-100,
+                                ymax=s,
+                                color=colorVal,
+                                linestyles="dashed",
                             )
+                            ax.hlines(
+                                y=s,
+                                xmin=-100,
+                                xmax=estimate,
+                                color=colorVal,
+                                linestyles="dashed",
+                            )
+                            if score_labels:
+                                # Stagger each item's estimate label a bit
+                                # higher up than the last, so nearby
+                                # curves' labels don't overwrite each
+                                # other -- single-item calls keep the
+                                # original fixed height.
+                                label_y = y_max / 50 + (
+                                    idx * y_max * 0.05 if items_multi else 0
+                                )
+                                ax.text(
+                                    estimate + (x_max - x_min) / 100,
+                                    label_y,
+                                    str(round(estimate, 2)),
+                                    color=colorVal,
+                                )
+                                ax.text(
+                                    x_min + (x_max - x_min) / 100, s + y_max / 50, str(s),
+                                    color=colorVal,
+                                )
                 else:
                     warnings.warn(
                         "Invalid score for score line: values must be "
@@ -5402,36 +5761,60 @@ class PCM(Rasch):
                     )
 
             if point_info_lines_item[1] is not None:
-                item = point_info_lines_item[0]
-                for estimate in point_info_lines_item[1]:
-                    info = self.variance_uncentred(
-                        estimate, self.thresholds_uncentred.loc[item].dropna()
-                    )
-                    ax.vlines(
-                        x=estimate,
-                        ymin=-100,
-                        ymax=info,
-                        color="black",
-                        linestyles="dashed",
-                    )
-                    ax.hlines(
-                        y=info,
-                        xmin=-100,
-                        xmax=estimate,
-                        color="black",
-                        linestyles="dashed",
-                    )
-                    if score_labels:
-                        ax.text(
-                            estimate + (x_max - x_min) / 100,
-                            y_max / 50,
-                            str(round(estimate, 2)),
+                # items may be a list (one curve per item) -- for a
+                # given location, every item's own information value is
+                # genuinely different (that's the whole point of
+                # comparing them), so each gets its own "item: info"
+                # label at its own natural height, nudged sideways per
+                # item so close values don't collide. Single-item calls
+                # keep the original separate location/info label pair.
+                items_arg = point_info_lines_item[0]
+                items_multi = isinstance(items_arg, list)
+                items_list = items_arg if items_multi else [items_arg]
+                for idx, it in enumerate(items_list):
+                    colorVal = (
+                        "black"
+                        if black or not items_multi
+                        else (
+                            scalarMap.to_rgba(idx)
+                            if "multi" not in palette
+                            else color_map[idx]
                         )
-                        ax.text(
-                            x_min + (x_max - x_min) / 100,
-                            info + y_max / 50,
-                            str(round(info, 3)),
+                    )
+                    for estimate in point_info_lines_item[1]:
+                        info = self.variance_uncentred(
+                            estimate, self.thresholds_uncentred.loc[it].dropna()
                         )
+                        ax.vlines(
+                            x=estimate, ymin=-100, ymax=info, color=colorVal,
+                            linestyles="dashed",
+                        )
+                        ax.hlines(
+                            y=info, xmin=-100, xmax=estimate, color=colorVal,
+                            linestyles="dashed",
+                        )
+                        if score_labels:
+                            if items_multi:
+                                label_x = (
+                                    x_min
+                                    + (x_max - x_min) / 100
+                                    + idx * (x_max - x_min) * 0.03
+                                )
+                                ax.text(
+                                    label_x, info + y_max / 50,
+                                    f"{it}: {round(info, 3)}", color=colorVal,
+                                )
+                            else:
+                                ax.text(
+                                    estimate + (x_max - x_min) / 100,
+                                    y_max / 50,
+                                    str(round(estimate, 2)),
+                                )
+                                ax.text(
+                                    x_min + (x_max - x_min) / 100,
+                                    info + y_max / 50,
+                                    str(round(info, 3)),
+                                )
 
             if point_info_lines_test is not None:
                 item_keys = self.responses.columns if items is None else items
@@ -5579,8 +5962,10 @@ class PCM(Rasch):
         xmin=-5,
         xmax=5,
         plot_style="white",
-        palette="dark blue",
+        palette="colorblind multi",
         black=False,
+        marker_border=True,
+        line_border=False,
         font="Times New Roman",
         title_font_size=15,
         axis_font_size=12,
@@ -5590,31 +5975,55 @@ class PCM(Rasch):
         dpi=300,
     ):
         """
-        Plot the Item Characteristic Curve (ICC) for a single item.
+        Plot the Item Characteristic Curve (ICC) for one item, or several
+        overlaid on the same axes.
 
         Displays modelled expected score as a function of person location.
-        Optionally overlays observed class-interval mean scores.
+        Optionally overlays observed class-interval mean scores -- single-item
+        only, see item below.
 
         Parameters
         ----------
-        item : str
-            Item identifier.
+        item : str or list of str
+            Item identifier(s). A single name draws one curve, as before.
+            A list overlays one curve per item (in the given order), each
+            in its own colour with a legend keyed by item name.
+            thresh_lines/cat_highlight only make sense for one item's
+            own location, so they just silently no-op with several
+            plotted at once rather than erroring. obs, central_location,
+            and score_lines all work fine with a list -- each item's own
+            point(s)/line(s) are drawn in that item's own curve colour,
+            so they stay distinguishable. Items can have different
+            max_score_vector values; the y-axis is scaled to the largest
+            among the plotted items.
         obs : bool, default False
-            If True, overlays observed class-interval mean scores.
+            If True, overlays observed class-interval mean scores. Works
+            with a list of items too -- one column of observed points
+            per item, in that item's own curve colour (class intervals
+            are the same person-location quantile groups for every item,
+            computed from self.persons, so the same x-axis positions are
+            shared).
         no_of_classes : int, default 5
             Number of class intervals for the observed overlay.
         title : str or None, default None
             Plot title.
         thresh_lines : bool, default False
-            Draw vertical lines at each threshold.
+            Draw vertical lines at each threshold. Single item only --
+            silently ignored if item is a list.
         central_location : bool, default False
-            Draw a line at the central item location.
+            Draw a line at the central item location, labelled with the
+            value (and item name, when item is a list -- staggered
+            downward from the top, one step per item, so nearby curves'
+            labels don't overwrite each other). Works with a list of
+            items too.
         score_lines : list or None, default None
-            Raw scores at which to draw reference lines.
+            Raw scores at which to draw reference lines. Works with a
+            list of items too.
         score_labels : bool, default False
             Annotate score line intersections.
         cat_highlight : int or None, default None
-            Category to shade.
+            Category to shade. Single item only -- silently ignored if
+            item is a list.
         xmin, xmax : float
             Person-location axis limits.
         plot_style : str, default 'white'
@@ -5638,27 +6047,71 @@ class PCM(Rasch):
         -------
         matplotlib.figure.Figure
         """
+        multi = isinstance(item, list)
+        if multi:
+            # thresh_lines/cat_highlight each only make sense for a single
+            # item's own location -- silently no-op with several items
+            # plotted at once rather than erroring, since they'd just be
+            # visual clutter with no obvious single "right" item anyway.
+            thresh_lines = False
+            cat_highlight = None
+
         # BUG FIX: variable name typo in original; now self.persons
         if obs and not hasattr(self, "persons"):
             self.person_estimates(warm_corr=False)
 
         xobsdata = yobsdata = np.array(np.nan)
         if obs:
-            mean_person_locations, obs_means = self.class_intervals(
-                items=item, person_locations=self.persons, no_of_classes=no_of_classes
-            )
-            xobsdata = pd.Series(mean_person_locations)
-            yobsdata = np.array(obs_means).reshape(-1, 1)
+            if multi:
+                # Same person-location class intervals for every item
+                # (quantile groups come from self.persons, the overall
+                # ability estimate, not an item-specific one -- so they
+                # line up across items with complete data; the first
+                # item's own x values are reused for the rest). One
+                # observed mean-score column per item, in that item's
+                # own curve colour.
+                xobsdata = None
+                yobs_cols = []
+                for it in item:
+                    mpl, om = self.class_intervals(
+                        items=[it], person_locations=self.persons,
+                        no_of_classes=no_of_classes,
+                    )
+                    if xobsdata is None:
+                        xobsdata = pd.Series(mpl)
+                    yobs_cols.append(np.array(om))
+                yobsdata = np.column_stack(yobs_cols)
+            else:
+                mean_person_locations, obs_means = self.class_intervals(
+                    items=item, person_locations=self.persons, no_of_classes=no_of_classes
+                )
+                xobsdata = pd.Series(mean_person_locations)
+                yobsdata = np.array(obs_means).reshape(-1, 1)
 
         estimates = np.arange(-20, 20, 0.1)
-        y = np.array(
-            [
-                self.exp_score_uncentred(
-                    a, self.thresholds_uncentred.loc[item].dropna()
-                )
-                for a in estimates
-            ]
-        ).reshape(-1, 1)
+        if multi:
+            y = np.column_stack(
+                [
+                    [
+                        self.exp_score_uncentred(
+                            a, self.thresholds_uncentred.loc[it].dropna()
+                        )
+                        for a in estimates
+                    ]
+                    for it in item
+                ]
+            )
+            y_max = max(self.max_score_vector[it] for it in item)
+        else:
+            y = np.array(
+                [
+                    self.exp_score_uncentred(
+                        a, self.thresholds_uncentred.loc[item].dropna()
+                    )
+                    for a in estimates
+                ]
+            ).reshape(-1, 1)
+            y_max = self.max_score_vector[item]
 
         return self.plot_data(
             x_data=estimates,
@@ -5667,11 +6120,18 @@ class PCM(Rasch):
             y_obs_data=yobsdata,
             x_min=xmin,
             x_max=xmax,
-            y_max=self.max_score_vector[item],
+            y_max=y_max,
             items=item,
+            curve_labels=item if multi else None,
+            legend_loc="upper left" if score_lines is not None else "lower right",
+            max_score_lines=(
+                [self.max_score_vector[it] for it in item] if multi else None
+            ),
             graph_title=title or "",
             y_label="Expected score",
             obs=obs,
+            marker_border=marker_border,
+            line_border=line_border,
             thresh_lines=thresh_lines,
             central_location=central_location,
             score_lines_item=[item, score_lines],
@@ -5701,8 +6161,10 @@ class PCM(Rasch):
         xmin=-5,
         xmax=5,
         plot_style="white",
-        palette="dark blue",
+        palette="colorblind multi",
         black=False,
+        marker_border=True,
+        line_border=False,
         font="Times New Roman",
         title_font_size=15,
         axis_font_size=12,
@@ -5758,6 +6220,7 @@ class PCM(Rasch):
             item = None
 
         xobsdata = yobsdata = np.array(np.nan)
+        obs_curve_index = None
         if obs is not None:
             mean_person_locations, obs_props = self.class_intervals_cats(
                 item=item, no_of_classes=no_of_classes
@@ -5775,6 +6238,7 @@ class PCM(Rasch):
                     )
                     return
                 yobsdata = yobsdata[:, obs]
+                obs_curve_index = list(obs)
 
         estimates = np.arange(-20, 20, 0.1)
         y = np.array(
@@ -5798,9 +6262,15 @@ class PCM(Rasch):
             x_obs_data=xobsdata,
             y_obs_data=yobsdata,
             items=item,
+            curve_labels=[
+                f"Category {c}" for c in range(self.max_score_vector[item] + 1)
+            ],
             graph_title=title or "",
             y_label="Probability",
             obs=obs,
+            obs_curve_index=obs_curve_index,
+            marker_border=marker_border,
+            line_border=line_border,
             thresh_lines=thresh_lines,
             central_location=central_location,
             cat_highlight=cat_highlight,
@@ -5828,8 +6298,10 @@ class PCM(Rasch):
         xmin=-5,
         xmax=5,
         plot_style="white",
-        palette="dark blue",
+        palette="colorblind multi",
         black=False,
+        marker_border=True,
+        line_border=False,
         font="Times New Roman",
         title_font_size=15,
         axis_font_size=12,
@@ -5881,6 +6353,7 @@ class PCM(Rasch):
             self.person_estimates(warm_corr=False)
 
         xobsdata = yobsdata = np.array(np.nan)
+        obs_curve_index = None
         if obs is not None:
             mean_person_locations, obs_props = self.class_intervals_thresholds(
                 item, no_of_classes=no_of_classes
@@ -5900,14 +6373,13 @@ class PCM(Rasch):
                 obs_idx = [o - 1 for o in obs]
                 xobsdata = xobsdata[:, obs_idx]
                 yobsdata = yobsdata[:, obs_idx]
+                obs_curve_index = obs_idx
 
         estimates = np.arange(-20, 20, 0.1)
+        item_thresholds = self.thresholds_uncentred.loc[item].dropna()
         y = np.array(
             [
-                [
-                    1.0 / (1.0 + np.exp(thr - a))
-                    for thr in self.thresholds_uncentred.loc[item].dropna()
-                ]
+                [1.0 / (1.0 + np.exp(thr - a)) for thr in item_thresholds]
                 for a in estimates
             ]
         )
@@ -5919,11 +6391,15 @@ class PCM(Rasch):
             x_min=xmin,
             x_max=xmax,
             items=item,
+            curve_labels=[f"Threshold {t}" for t in item_thresholds.index],
             x_obs_data=xobsdata,
             y_obs_data=yobsdata,
             graph_title=title or "",
             y_label="Probability",
             obs=obs,
+            obs_curve_index=obs_curve_index,
+            marker_border=marker_border,
+            line_border=line_border,
             thresh_lines=thresh_lines,
             central_location=central_location,
             cat_highlight=cat_highlight,
@@ -5952,7 +6428,7 @@ class PCM(Rasch):
         xmin=-5,
         xmax=5,
         plot_style="white",
-        palette="dark blue",
+        palette="colorblind multi",
         black=False,
         font="Times New Roman",
         title_font_size=15,
@@ -5963,27 +6439,43 @@ class PCM(Rasch):
         dpi=300,
     ):
         """
-        Plot the Item Information Curve (IIC) for a single item.
+        Plot the Item Information Curve (IIC) for one item, or several
+        overlaid on the same axes.
 
         Displays Fisher information (item variance) as a function of person location
         using uncentred threshold parameterisation.
 
         Parameters
         ----------
-        item : str
-            Item identifier.
+        item : str or list of str
+            Item identifier(s). A single name draws one curve, as before.
+            A list overlays one curve per item (in the given order), each
+            in its own colour with a legend keyed by item name.
+            thresh_lines/cat_highlight only make sense for one item's
+            own location, so they just silently no-op with several
+            plotted at once rather than erroring. central_location and
+            point_info_lines both work fine with a list -- central_location
+            draws each item's own line, labelled with its value (and
+            name); point_info_lines draws every item's own information
+            value at each requested location, labelled "item: info",
+            since that comparison across items at a shared location is
+            the point.
         ymax : float or None, default None
             Upper y-axis limit. Auto-scaled if None.
         thresh_lines : bool, default False
-            Draw vertical lines at each threshold.
+            Draw vertical lines at each threshold. Single item only --
+            silently ignored if item is a list.
         central_location : bool, default False
-            Draw a line at the central location.
+            Draw a line at the central location. Works with a list of
+            items too.
         point_info_lines : list or None, default None
             Person location values at which to draw information reference lines.
+            Works with a list of items too.
         point_info_labels : bool, default False
             Annotate information line intersections.
         cat_highlight : int or None, default None
-            Category to shade.
+            Category to shade. Single item only -- silently ignored if
+            item is a list.
         title : str or None, default None
             Plot title.
         xmin, xmax : float
@@ -6002,15 +6494,53 @@ class PCM(Rasch):
         -------
         matplotlib.figure.Figure
         """
+        multi = isinstance(item, list)
+        if multi:
+            # thresh_lines/cat_highlight each only make sense for a
+            # single item's own location -- silently no-op with several
+            # items plotted at once rather than erroring, since they'd
+            # just be visual clutter with no obvious single "right" item
+            # anyway.
+            thresh_lines = False
+            cat_highlight = None
+
         estimates = np.arange(-20, 20, 0.1)
-        y = np.array(
-            [
-                self.variance_uncentred(a, self.thresholds_uncentred.loc[item].dropna())
-                for a in estimates
-            ]
-        ).reshape(-1, 1)
+        if multi:
+            y = np.column_stack(
+                [
+                    [
+                        self.variance_uncentred(
+                            a, self.thresholds_uncentred.loc[it].dropna()
+                        )
+                        for a in estimates
+                    ]
+                    for it in item
+                ]
+            )
+        else:
+            y = np.array(
+                [
+                    self.variance_uncentred(a, self.thresholds_uncentred.loc[item].dropna())
+                    for a in estimates
+                ]
+            ).reshape(-1, 1)
         if ymax is None:
             ymax = float(y.max()) * 1.1
+            if central_location and multi and len(item) > 0:
+                # central_location's labels stack above the curve's own
+                # peak (which sits right at each item's own central
+                # location -- exactly where those labels are), so widen
+                # ymax by exactly the measured label-stack height plus a
+                # small gap, rather than guessing a fixed fraction (see
+                # _label_height_frac / feedback_plot_layout_rigor --
+                # measure, don't guess). Labels are then placed using
+                # this same y.max()/k/gap_frac relationship in plot_data,
+                # so the fit is exact, not approximate.
+                n_labels = len(item)
+                k = self._label_height_frac(font, axis_font_size, (8, 6))
+                gap_frac = 0.3
+                denom = max(1 - k * (n_labels + 2 * gap_frac), 0.1)
+                ymax = max(ymax, float(y.max()) / denom)
 
         return self.plot_data(
             x_data=estimates,
@@ -6020,7 +6550,9 @@ class PCM(Rasch):
             y_max=ymax,
             thresh_lines=thresh_lines,
             items=item,
+            curve_labels=item if multi else None,
             central_location=central_location,
+            central_location_fit=True,
             point_info_lines_item=[item, point_info_lines],
             score_labels=point_info_labels,
             cat_highlight=cat_highlight,
@@ -6050,8 +6582,10 @@ class PCM(Rasch):
         score_labels=False,
         warm=True,
         plot_style="white",
-        palette="dark blue",
+        palette="colorblind multi",
         black=False,
+        marker_border=True,
+        line_border=False,
         font="Times New Roman",
         title_font_size=15,
         axis_font_size=12,
@@ -6145,6 +6679,8 @@ class PCM(Rasch):
             graph_title=title or "",
             y_label="Expected score",
             obs=obs,
+            marker_border=marker_border,
+            line_border=line_border,
             plot_style=plot_style,
             palette=palette,
             black=black,
@@ -6167,7 +6703,7 @@ class PCM(Rasch):
         ymax=None,
         title=None,
         plot_style="white",
-        palette="dark blue",
+        palette="colorblind multi",
         black=False,
         font="Times New Roman",
         title_font_size=15,
@@ -6263,7 +6799,7 @@ class PCM(Rasch):
         ymax=5,
         title=None,
         plot_style="white",
-        palette="dark blue",
+        palette="colorblind multi",
         black=False,
         font="Times New Roman",
         title_font_size=15,
@@ -6358,6 +6894,7 @@ class PCM(Rasch):
         normal=False,
         title=None,
         plot_style="white",
+        black=False,
         font="Times New Roman",
         title_font_size=15,
         axis_font_size=12,
@@ -6392,6 +6929,8 @@ class PCM(Rasch):
             Plot title.
         plot_style : str, default 'white'
             Background style.
+        black : bool, default False
+            If True, renders the histogram in black.
         font : str, default 'Times New Roman'
             Font family.
         title_font_size, axis_font_size, labelsize : int
@@ -6425,6 +6964,7 @@ class PCM(Rasch):
             normal=normal,
             title=title,
             plot_style=plot_style,
+            black=black,
             font=font,
             title_font_size=title_font_size,
             axis_font_size=axis_font_size,
@@ -6433,3 +6973,2230 @@ class PCM(Rasch):
             file_format=file_format,
             plot_density=plot_density,
         )
+
+    def wright_map(
+        self,
+        person_names=None,
+        item_names=None,
+        item_level="items",
+        orientation="vertical",
+        map_type="hist",
+        item_labels=False,
+        item_strip=False,
+        item_distribution=False,
+        strip_thickness=2.0,
+        strip_alpha=0.3,
+        sort="location",
+        palette="colorblind multi",
+        neutral_extremes=False,
+        item_row_height=None,
+        narrow_font=False,
+        edge_padding=0.5,
+        distribution_markers=False,
+        group_by=None,
+        group_colors=None,
+        stack=True,
+        blend=False,
+        prop=False,
+        person_lim=None,
+        item_lim=None,
+        person_scaling=1,
+        no_of_bins=20,
+        pad=False,
+        plot_range=None,
+        kde_points=500,
+        bw_method="scott",
+        line_width=1,
+        figsize=None,
+        title=None,
+        plot_style="white",
+        edge_color="black",
+        person_color="skyblue",
+        item_color="salmon",
+        person_line_color="black",
+        item_line_color="black",
+        marker_color="darkred",
+        alpha=0.6,
+        black=False,
+        font="Times New Roman",
+        title_font_size=15,
+        axis_font_size=12,
+        labelsize=12,
+        item_label_size=8,
+        tick_interval=1,
+        filename=None,
+        file_format="png",
+        dpi=300,
+    ):
+        """
+        Plot a Wright map showing person and item location distributions.
+
+        Displays the distribution of person locations alongside item
+        difficulties on the same logit scale. Items can either mirror the
+        person distribution on the opposite side of a zero baseline (as
+        back-to-back histograms or KDE curves), or be listed by name in a
+        dedicated panel, Winsteps-style, aligned to the same location axis.
+
+        Parameters
+        ----------
+        person_names : str, list, or None, default None
+            Person subset to include. None uses all persons.
+        item_names : str, list, or None, default None
+            Item subset to include. None uses all items.
+        item_level : str, default 'items'
+            'items' plots one point per item at its central location.
+            'thresholds' plots one point per Rasch-Andrich threshold
+            instead (RSM: delta_i + tau_k; PCM: thresholds_uncentred),
+            flattened across all items. Ignored when item_strip=True,
+            which always needs each item's full threshold set regardless
+            of this setting.
+        orientation : str, default 'vertical'
+            'vertical' places location on the x-axis, persons above the
+            baseline. 'horizontal' places location on the y-axis, persons
+            to the left of the baseline.
+        map_type : str, default 'hist'
+            'hist' plots (back-to-back, when item_labels=False) histograms.
+            'kde' plots smoothed kernel density estimate curves instead.
+            Only governs the person side once item_labels=True, since the
+            item side becomes a label panel rather than a distribution.
+        item_labels : bool, default False
+            If True, items are listed by name in a dedicated panel next to
+            the person distribution (grouped into no_of_bins location bins,
+            stacked as rows within a bin, ordered by location) rather than
+            mirrored as a second distribution sharing the same axis.
+        item_strip : bool, default False
+            If True, draws each item as a Winsteps-style divided strip --
+            one row per item, spanning its own threshold range, divided
+            into coloured category segments with a boundary line at each
+            threshold. Implies item_labels=True.
+        item_distribution : bool, default False
+            If True, adds a third panel -- a plain (non-mirrored) hist or
+            KDE of item (or threshold, per item_level) locations -- between
+            the person panel and the item_labels panel. Implies
+            item_labels=True.
+        strip_thickness : float, default 2.0
+            Multiplier on the physical height (vertical orientation) or
+            width (horizontal orientation) of each item's strip row. Only
+            used when item_strip=True.
+        strip_alpha : float, default 0.3
+            Fill transparency for the strip's category segments. Only used
+            when item_strip=True.
+        sort : str, default 'location'
+            Ordering of item strip rows. 'location' sorts by each item's
+            lowest threshold. 'order' preserves self.items' own index
+            order. Only used when item_strip=True.
+        palette : str or None, default 'dark multi'
+            Named colour palette for the strip's category segments,
+            reusing the same palette_dict convention as plot_data(). None
+            uses a flat item_color fill with no per-category distinction.
+            Only used when item_strip=True.
+        neutral_extremes : bool, default False
+            The strip's open (unbounded) top and bottom categories always
+            draw out to the location axis limits (there's no real boundary
+            to stop short at). If True, they fade from a neutral cream
+            colour toward the real threshold instead of using a flat fill
+            in the category palette -- de-emphasising the open-ended
+            extremes rather than drawing the viewer's eye to an arbitrary
+            width. Only used when item_strip=True.
+        item_row_height : float or None, default None
+            Physical height, in inches, allocated per stacked item-label
+            row. If None, measured automatically from the longest item
+            name at the given font size. Only used when item_labels=True.
+        narrow_font : bool, default False
+            If True, item labels (and, with item_strip=True, the row
+            labels beside the strip) are set in 'Arial Narrow' instead of
+            font. A condensed font renders each name shorter, so it needs
+            less stacked row height -- useful when item names are long
+            and many end up sharing a bin or crowding the strip. Falls
+            back to matplotlib's usual font substitution if 'Arial
+            Narrow' isn't installed. Only affects item_labels=True;
+            everything else (axis text, legend, title) still uses font.
+        edge_padding : float, default 0.5
+            Extra padding, in inches, added around the item-label margin
+            (left of the axes in vertical orientation, below the axes in
+            horizontal orientation) beyond what's needed to fit the
+            longest item name. The same value produces matching-looking
+            margins in both orientations. Only used when item_labels=True.
+        distribution_markers : bool, default False
+            If True, overlays mean/+-1SD/+-2SD reference marks (labelled
+            mu, mu+-sigma, mu+-2sigma) for persons and items, in their
+            respective colours.
+        group_by : pandas.Series or None, default None
+            Person-level grouping (e.g. a DIF group), indexed like
+            self.persons, used to split the person distribution into one
+            sub-distribution per unique value. None plots persons as a
+            single series.
+        group_colors : dict or None, default None
+            Mapping from each group_by value to a colour. If None, colours
+            are drawn from the 'tab10' colormap in sorted group order.
+        stack : bool, default True
+            When group_by is set: for map_type='hist', True draws one
+            segmented column per bin (each group's count stacked within
+            the bar); False draws separate columns per group (dodged, or
+            alpha-blended if blend=True). For map_type='kde', True draws
+            curves cumulatively stacked (streamgraph-style); False overlays
+            each group's curve from zero.
+        blend : bool, default False
+            Only relevant when group_by is set, map_type='hist', and
+            stack=False. If True, draws each group as full-height,
+            alpha-blended overlapping bars instead of dodged (side-by-side)
+            bars.
+        prop : bool, default False
+            If True, normalises each distribution to proportions/density
+            rather than raw counts.
+        person_lim : float or None, default None
+            One-sided magnitude for persons' own Count/Density axis (e.g.
+            person_lim=30 shows 0 to 30). If None, chosen automatically
+            from persons' own natural peak, independently of items' own
+            scale. Persons' own panel always keeps its full physical
+            size regardless of this value -- items' own panel (when
+            item_distribution=True) is sized proportionally against it,
+            so a given Count/Density value reads at the same physical
+            scale in both.
+        item_lim : float or None, default None
+            One-sided magnitude for items' own Count/Density axis. Same
+            semantics as person_lim, for whichever panel items end up in
+            (mirrored onto the same axis as persons when
+            item_labels=False, or their own item_distribution panel).
+        person_scaling : float, default 1
+            Deliberately breaks the "same Count/Density value reads at
+            the same physical scale" property that item_distribution's
+            panel sizing otherwise guarantees, in favour of giving that
+            panel more usable room -- useful when there are far more
+            persons than items, which otherwise leaves the item panel's
+            own real variation looking like a flat, uninformative
+            squiggle at persons' own scale. person_scaling=10 makes the
+            item panel 10x larger than a strict equal-scale match would
+            give it (so persons' own axis effectively reads 10x coarser
+            than items') -- persons' and items' own displayed axis
+            values are unaffected either way, only how much physical
+            space item_distribution's panel gets. Only has an effect
+            when item_distribution=True (the only case this panel-size
+            matching applies to for RSM/PCM).
+        no_of_bins : int, default 20
+            Number of histogram bins spanning the location range. Also
+            defines the location-binning grid used for item_labels=True.
+        pad : bool, default False
+            If True, adds 5% padding to either end of the location axis
+            limits. If False, the location axis is bounded exactly to the
+            plotted range.
+        plot_range : tuple of (float, float) or None, default None
+            (lo, hi) limits for the location axis. If None, uses the floor
+            of the combined minimum and the ceiling of the combined maximum
+            of persons and items.
+        kde_points : int, default 500
+            Number of points at which each KDE curve is evaluated. Only
+            used when map_type='kde'.
+        bw_method : str, scalar, or callable, default 'scott'
+            Bandwidth selection method passed to scipy.stats.gaussian_kde.
+            Only used when map_type='kde'.
+        line_width : float, default 1
+            Line width of the KDE curves. Only used when map_type='kde'.
+        figsize : tuple of (float, float) or None, default None
+            Base figure size in inches for the person distribution. If
+            None, defaults to (8, 6) for orientation='vertical' or (4, 8)
+            for orientation='horizontal'. When item_labels=True, the person
+            panel gets half of this (matching how much space it occupied
+            in the original mirrored layout), and the figure grows further
+            to fit however many stacked item rows are needed -- the person
+            distribution's own size is never reduced to make room.
+        title : str or None, default None
+            Plot title. If None, no title is shown.
+        plot_style : str, default 'white'
+            Plot background style: 'white' or 'dark'.
+        edge_color : str, default 'black'
+            Edge colour of the histogram bars. Only used when
+            map_type='hist' and group_by is None.
+        person_color : str, default 'skyblue'
+            Fill colour for the person distribution. Ignored when group_by
+            is set (each group uses group_colors instead). Overridden by a
+            grey shade when black=True.
+        item_color : str, default 'salmon'
+            Fill colour for the item distribution. Only used when
+            item_labels=False. Overridden by a grey shade when black=True.
+        person_line_color : str, default 'black'
+            Line colour for the person KDE curve. Only used when
+            map_type='kde' and group_by is None.
+        item_line_color : str, default 'black'
+            Colour for item labels (item_labels=True) or the item KDE
+            curve line (item_labels=False, map_type='kde').
+        marker_color : str, default 'darkred'
+            Colour of the tick marks and labels drawn when
+            distribution_markers=True. Only used for the single-series
+            (group_by=None) case -- grouped marks use each group's own
+            colour instead, to stay identifiable against its distribution.
+        alpha : float, default 0.6
+            Fill transparency for the distributions.
+        black : bool, default False
+            If True, renders person_color/item_color as grey shades
+            instead. Has no effect on group_by colours.
+        font : str, default 'Times New Roman'
+            Font family for all plot text.
+        title_font_size : int, default 15
+            Title font size in points.
+        axis_font_size : int, default 12
+            Axis label font size in points.
+        labelsize : int, default 12
+            Tick label font size in points.
+        item_label_size : int, default 8
+            Font size, in points, for item names in the item_labels
+            panel.
+        tick_interval : float, default 1
+            Spacing between Location axis ticks. Ticks are evenly spaced
+            at multiples of this value across the plotted range, rather
+            than using matplotlib's own automatic tick choice (which can
+            land on an irregular spacing once the exact data min/max are
+            also forced in as ticks).
+        filename : str or None, default None
+            If provided, saves the plot to this path. No file extension
+            needed.
+        file_format : str, default 'png'
+            Output file format.
+        dpi : int, default 300
+            Output resolution in dots per inch.
+
+        Returns
+        -------
+        None
+            Displays and closes the figure. Use filename to save.
+        """
+
+        if black:
+            person_color = "lightgray"
+            item_color = "darkgray"
+
+        if not hasattr(self, "persons"):
+            self.person_estimates()
+
+        persons = (
+            self.persons if person_names is None else self.persons.loc[person_names]
+        )
+
+        # a strip needs every item's full threshold set regardless of
+        # item_level (it draws the whole operating range, not one point),
+        # so it also implies item_labels -- friendlier than raising when
+        # someone passes item_strip=True on its own
+        if item_strip:
+            item_labels = True
+
+        # a plain item/threshold hist or KDE panel only makes sense as a
+        # third panel alongside the labelled one -- on its own it's just
+        # the old mirrored mode with item_labels=False
+        if item_distribution:
+            item_labels = True
+
+        base_items = self.items if item_names is None else self.items.loc[item_names]
+
+        if item_level == "items" and not item_strip:
+            items = base_items
+        else:
+            # one entry per Rasch-Andrich threshold rather than one per item.
+            # RSM shares a single threshold set (self.thresholds is a Series
+            # of step values tau_k): delta_i + tau_k as one outer-sum matrix.
+            # PCM has its own threshold set per item, already on the shared
+            # absolute scale -- but as thresholds_uncentred, not
+            # self.thresholds (which is centred *within* each item, so its
+            # row means are ~0 and aren't comparable to self.items/persons
+            # at all). Either way the result is a wide (item x threshold
+            # number) frame.
+            if isinstance(self.thresholds, pd.Series):
+                matrix = pd.DataFrame(
+                    base_items.values[:, None] + self.thresholds.values[None, :],
+                    index=base_items.index,
+                    columns=self.thresholds.index,
+                )
+            else:
+                matrix = self.thresholds_uncentred.loc[base_items.index]
+
+            # pandas' stack() stopped dropping NaN by default as of the
+            # 2.1+ implementation, so drop the short items' padding NaNs
+            # explicitly rather than relying on stack()'s own default
+            stacked = matrix.stack().dropna()
+            items = stacked.set_axis(
+                [f"{item} (τ{k})" for item, k in stacked.index]
+            )
+
+            if item_strip:
+                # kept grouped by item (not flattened) for the strip
+                # renderer, which needs each item's own ordered threshold
+                # list rather than one independent point per threshold.
+                # Segments are the item's own *most probable category*
+                # map -- the theta interval where each category actually
+                # has the highest response probability -- rather than
+                # just the interval between two raw threshold values.
+                # Category k's (unnormalised) log-response-odds relative
+                # to category 0 is S_k(theta) = k*theta - T_k, a straight
+                # line in theta (T_k = the cumulative sum of thresholds
+                # 1..k in their own natural, possibly disordered, order);
+                # "most probable category" is exactly whichever line is
+                # highest, so the segments are the upper envelope of
+                # these lines. For ordered thresholds this reduces to
+                # exactly the interval between adjacent thresholds (each
+                # category's own probability curve is a single unimodal
+                # "bump" peaking between its neighbours' crossings); when
+                # disordered, a category whose bump never rises above its
+                # neighbours' is correctly dropped from the envelope
+                # entirely, rather than drawn as a spurious sliver.
+                def _most_probable_category_segments(thresholds_natural):
+                    m = len(thresholds_natural)
+                    T = np.concatenate([[0.0], np.cumsum(thresholds_natural)])
+                    hull = []
+
+                    def redundant(l1, l2, l3):
+                        m1, b1 = l1
+                        m2, b2 = l2
+                        m3, b3 = l3
+                        return (b3 - b1) * (m1 - m2) <= (b2 - b1) * (m1 - m3)
+
+                    # slopes (category numbers 0..m) are already sorted
+                    # ascending regardless of threshold order, which is
+                    # what lets this single-pass stack (the sorted-slope
+                    # convex-hull trick) work without re-sorting anything
+                    for h in range(m + 1):
+                        line = (h, -T[h])
+                        while len(hull) >= 2 and redundant(hull[-2], hull[-1], line):
+                            hull.pop()
+                        hull.append(line)
+                    segs = []
+                    for i, (slope, intercept) in enumerate(hull):
+                        seg_lo = (
+                            None
+                            if i == 0
+                            else (intercept - hull[i - 1][1])
+                            / (hull[i - 1][0] - slope)
+                        )
+                        seg_hi = (
+                            None
+                            if i == len(hull) - 1
+                            else (hull[i + 1][1] - intercept)
+                            / (slope - hull[i + 1][0])
+                        )
+                        segs.append((seg_lo, seg_hi, slope))
+                    return segs
+
+                item_thresholds_natural = {
+                    item: row.dropna().values for item, row in matrix.iterrows()
+                }
+                item_segments = {
+                    item: _most_probable_category_segments(t)
+                    for item, t in item_thresholds_natural.items()
+                }
+                # a category missing from its item's segments never has
+                # the highest response probability anywhere -- exactly
+                # what disordered Rasch-Andrich thresholds mean
+                # geometrically (its own probability "bump" never rises
+                # above its neighbours')
+                item_missing_categories = {
+                    item: sorted(
+                        set(range(len(t) + 1))
+                        - {lab for _, _, lab in item_segments[item]}
+                    )
+                    for item, t in item_thresholds_natural.items()
+                }
+                disordered_items = [
+                    item
+                    for item, missing in item_missing_categories.items()
+                    if missing
+                ]
+                if disordered_items:
+                    warnings.warn(
+                        "Disordered thresholds for item(s) "
+                        f"{', '.join(str(i) for i in disordered_items)}. "
+                        "Only categories that are most probable for some "
+                        "range of the trait shown. For more detailed "
+                        "inspection of threshold structure, run self.crcs() "
+                        "plot and/or self.threshold_stats_df()."
+                    )
+
+        no_of_items = len(items)
+
+        if group_by is not None:
+            group_by = group_by.reindex(persons.index)
+            person_group_values = sorted(group_by.dropna().unique(), key=str)
+            if group_colors is None:
+                cmap = plt.get_cmap("tab10")
+                group_colors = {
+                    g: cmap(i % 10) for i, g in enumerate(person_group_values)
+                }
+
+        if plot_range is None:
+            combined = np.concatenate([persons.values, items.values])
+            span_lo, span_hi = float(combined.min()), float(combined.max())
+            if distribution_markers:
+                # the μ±2σ ticks (and their rotated labels) are drawn at
+                # mean ± 2·SD of each plotted distribution and can fall
+                # outside its raw data extent when that distribution is
+                # wide or heavy-tailed — fold them into the range so they
+                # stay on-canvas rather than being clipped at the spine
+                marker_values = [items.values]
+                if group_by is not None:
+                    marker_values += [
+                        persons.values[group_by.values == g]
+                        for g in person_group_values
+                    ]
+                else:
+                    marker_values.append(persons.values)
+                for mv in marker_values:
+                    if len(mv):
+                        mv_mean, mv_sd = float(np.mean(mv)), float(np.std(mv))
+                        span_lo = min(span_lo, mv_mean - 2 * mv_sd)
+                        span_hi = max(span_hi, mv_mean + 2 * mv_sd)
+            lo = np.floor(span_lo)
+            hi = np.ceil(span_hi)
+        else:
+            lo, hi = plot_range[0], plot_range[1]
+
+        bins = np.linspace(lo, hi, no_of_bins + 1)
+
+        # each distribution's own natural peak, computed analytically (no
+        # plotting needed) so panel sizing/axis ranges can be resolved
+        # before the figure is even built. Computed independently per
+        # distribution -- deliberately NOT sharing a single "widest"
+        # value across persons/items, since a small item set with a very
+        # different natural scale would otherwise force persons' own
+        # well-populated distribution onto a needlessly inflated (or
+        # cramped) scale
+        def _natural_max(values, n):
+            if map_type == "hist":
+                counts, _ = np.histogram(values, bins=bins)
+                peak = counts.max() if len(counts) else 0
+                return peak / n if prop else peak
+            kde_vals = gaussian_kde(values, bw_method=bw_method)(
+                np.linspace(lo, hi, kde_points)
+            )
+            peak = kde_vals.max() if len(kde_vals) else 0
+            return peak if prop else peak * n
+
+        person_natural_max = _natural_max(persons.values, len(persons))
+        item_natural_max = _natural_max(items.values, no_of_items)
+
+        # rounds a natural peak up to a "neat" ceiling -- 1/1.5/2/2.5/3/
+        # 4/5/6/8/10 x a power of 10 -- and picks a tick step that
+        # divides it exactly, from a matching per-fraction divisor,
+        # rather than leaving the step to a separately-chosen locator
+        # that has no reason to land on a divisor of this specific
+        # ceiling (which previously left the axis's own true top edge
+        # short of its last drawn tick, e.g. ticks 0..28 against a
+        # ceiling of 30). The 10% pad before searching guarantees the
+        # chosen ceiling sits visibly above the true peak even when that
+        # peak already IS a neat number itself (a small integer count,
+        # for instance) -- without it, the tallest bar/curve would land
+        # flush against the axis's own edge, with no headroom at all.
+        _nice_fractions = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10]
+        _nice_divisors = {1: 4, 1.5: 3, 2: 4, 2.5: 5, 3: 3, 4: 4, 5: 5, 6: 3, 8: 4, 10: 5}
+
+        def _nice_ceil_and_step(x, integer):
+            if x <= 0:
+                return 0, (1 if integer else 0.1)
+            x = x * 1.1
+            exponent = np.floor(np.log10(x))
+            fraction = x / 10**exponent
+            nice_fraction = next(f for f in _nice_fractions if f >= fraction - 1e-9)
+            ceiling = nice_fraction * 10**exponent
+            step = ceiling / _nice_divisors[nice_fraction]
+            if integer:
+                step = max(1, round(step))
+                ceiling = step * np.ceil(x / step)
+            return ceiling, step
+
+        def _nice_step_for(ceiling, integer):
+            # an explicit *_lim is used exactly as given (the ceiling
+            # itself isn't adjusted), but still gets a step matched to
+            # whichever known "nice" fraction it's closest to, so it at
+            # least *usually* divides evenly -- an arbitrary user value
+            # isn't guaranteed to, the way an auto-computed ceiling is
+            if ceiling <= 0:
+                return 1 if integer else 0.1
+            exponent = np.floor(np.log10(ceiling))
+            fraction = ceiling / 10**exponent
+            nice_fraction = min(_nice_fractions, key=lambda f: abs(f - fraction))
+            step = ceiling / _nice_divisors[nice_fraction]
+            if integer:
+                step = max(1, round(step))
+            return step
+
+        _integer_counts = map_type == "hist" and not prop
+
+        if person_lim is not None:
+            person_range = person_lim
+            person_step = _nice_step_for(person_lim, _integer_counts)
+        else:
+            person_range, person_step = _nice_ceil_and_step(
+                person_natural_max, _integer_counts
+            )
+        if item_lim is not None:
+            item_range = item_lim
+            item_step = _nice_step_for(item_lim, _integer_counts)
+        else:
+            item_range, item_step = _nice_ceil_and_step(item_natural_max, _integer_counts)
+
+        # breathing room reserved before row 0 of the item panel (used for
+        # both the boundary_margin below and, when distribution_markers
+        # draws a tick alongside each item-side mark, for keeping that
+        # tick inside the margin and clear of row 0's own text -- shared
+        # so the two stay consistent if this value ever changes)
+        item_row_margin = 0.45
+
+        # shared physical sizing for distribution_markers' ticks: a fixed
+        # gap (inches) between a tick and its own label, and a fixed tick
+        # length (rows) on the item side -- both fixed in real inches
+        # rather than a fraction of whatever data range is being plotted,
+        # so the two sides (persons' count-axis-based scale vs items'
+        # row-based scale) end up visually consistent instead of drifting
+        # apart depending on the dataset
+        mark_gap_in = 0.065
+        mark_tick_rows = 0.15
+        # physical breathing room (inches) between the widest mark's own
+        # label and where item names start -- separate from the +0.5-row
+        # collision buffer below (that one exists purely to stop an
+        # item's own centred text reaching back into the mark's text; this
+        # one is just visual spacing between the two blocks of text)
+        item_label_gap_in = 0.08
+
+        # when item_labels shows a dedicated item panel (rather than
+        # item_distribution's separate histogram/KDE), distribution_markers'
+        # item-side marks are drawn straight into that panel's own row
+        # grid, all at row 0 -- items then start uniformly at row 1,
+        # regardless of which bin(s) the marks themselves land in. Every
+        # mark sitting at the same row is what keeps their own starting
+        # point aligned with each other (not just with the items); if two
+        # marks happened to share a bin and got stacked into different
+        # rows instead, their own gap to the boundary would no longer
+        # match, even though items would still be fine. Only meaningful
+        # for the binned (non-strip) item panel -- item_strip rows are
+        # one-per-item already, not shared with anything.
+        item_mark_rows = {}
+        mark_row_depth = 0
+        if distribution_markers and item_labels and not item_distribution and not item_strip:
+            item_mean = items.mean()
+            item_sd = items.std()
+            for mark_label, mark_loc in (
+                ("μ", item_mean),
+                ("μ−σ", item_mean - item_sd),
+                ("μ+σ", item_mean + item_sd),
+                ("μ−2σ", item_mean - 2 * item_sd),
+                ("μ+2σ", item_mean + 2 * item_sd),
+            ):
+                item_mark_rows[mark_label] = mark_loc
+            mark_row_depth = 1
+
+        if figsize is None:
+            base_w, base_h = (8, 6) if orientation == "vertical" else (4, 8)
+        else:
+            base_w, base_h = figsize
+
+        style_overrides = {"font.family": font, "font.size": axis_font_size}
+
+        with plt.rc_context(style_overrides):
+
+            if plot_style != "white":
+                self._apply_plot_style(plot_style)
+
+            label_margin_in = 0.0
+            item_font = "Arial Narrow" if narrow_font else font
+
+            if item_labels and item_strip:
+                # divided-strip layout: each item is one row spanning its
+                # own threshold range. Row labels are drawn once per row,
+                # like a tick label, so each item always gets its own row
+                # (no packing) to keep that labelling unambiguous.
+                strip_ext = (hi - lo) * 0.03
+
+                def _draw_bounds(segs):
+                    # extend the open top/bottom categories by the width
+                    # of the adjacent *bounded* segment (falling back to
+                    # the small strip_ext buffer when there's only the
+                    # pair of extreme segments to work with -- either a
+                    # genuinely single-threshold item, or one where every
+                    # intermediate category has been dropped as
+                    # disordered, leaving nothing to borrow a width from)
+                    if len(segs) >= 3:
+                        return (
+                            segs[0][1] - (segs[1][1] - segs[1][0]),
+                            segs[-1][0] + (segs[-2][1] - segs[-2][0]),
+                        )
+                    return segs[0][1] - strip_ext, segs[-1][0] + strip_ext
+
+                item_spans = {
+                    name: _draw_bounds(segs) for name, segs in item_segments.items()
+                }
+
+                if sort == "location":
+                    ordered_names = sorted(item_spans, key=lambda name: item_spans[name][0])
+                else:
+                    ordered_names = list(item_thresholds_natural.keys())
+
+                item_rows = {name: i for i, name in enumerate(ordered_names)}
+                max_depth = len(ordered_names)
+
+                # names are labelled like axis ticks -- one label per row,
+                # at a fixed position outside the plot area, rather than
+                # inline after each item's own (variably-positioned) bar.
+                row_names = {}
+                for name in ordered_names:
+                    row_names.setdefault(item_rows[name], []).append(name)
+                row_labels = {row: ", ".join(names) for row, names in row_names.items()}
+
+                widest_label = max(row_labels.values(), key=len)
+                probe_fig = plt.figure()
+                probe_ax = probe_fig.add_subplot(111)
+                label_rotation = 0 if orientation == "vertical" else 90
+                probe_text = probe_ax.text(
+                    0,
+                    0,
+                    widest_label,
+                    fontsize=labelsize,
+                    fontfamily=item_font,
+                    rotation=label_rotation,
+                    rotation_mode="anchor",
+                )
+                probe_fig.canvas.draw()
+                bbox = probe_text.get_window_extent(
+                    renderer=probe_fig.canvas.get_renderer()
+                )
+                label_dim = bbox.width if orientation == "vertical" else bbox.height
+                label_margin_in = label_dim / probe_fig.dpi + edge_padding
+                plt.close(probe_fig)
+
+                if item_row_height is None:
+                    # strip rows use horizontal (unrotated) text, so row
+                    # height only depends on font line-height, not on how
+                    # long any given item name is
+                    probe_fig = plt.figure()
+                    probe_ax = probe_fig.add_subplot(111)
+                    probe_text = probe_ax.text(
+                        0, 0, "Ag", fontsize=labelsize, fontfamily=item_font
+                    )
+                    probe_fig.canvas.draw()
+                    bbox = probe_text.get_window_extent(
+                        renderer=probe_fig.canvas.get_renderer()
+                    )
+                    # row spacing/bar_half stay fixed in data-units; giving
+                    # each row more physical inches (via strip_thickness)
+                    # is what actually makes the bar thicker on screen --
+                    # scaling bar_half instead would just repartition the
+                    # same physical row into a bigger bar/smaller gap, with
+                    # no net change to how thick it looks
+                    row_height_in = bbox.height / probe_fig.dpi * 1.6 * strip_thickness
+                    plt.close(probe_fig)
+                else:
+                    row_height_in = item_row_height * strip_thickness
+
+                # the axis itself later spans (max_depth + 0.1 +
+                # boundary_margin) row-units, not just max_depth -- sizing
+                # the panel to only max_depth*row_height_in would leave
+                # every row rendered slightly smaller than row_height_in
+                # actually intended, quietly eating into the buffer built
+                # into row_height_in's own measurement
+                item_panel_in = (
+                    max_depth + 0.1 + (0.7 if distribution_markers else 0.45)
+                ) * row_height_in
+
+            elif item_labels:
+                # Winsteps-style: bin items onto the histogram grid and
+                # stack names as rows within each occupied bin. Figuring
+                # out how many rows are needed happens up front, before any
+                # figure is created, so the item panel can be sized in real
+                # inches rather than measured and solved for after the fact
+                # -- no circular dependency, and it scales to any number of
+                # items.
+                bin_idx = np.clip(
+                    np.digitize(items.values, bins) - 1, 0, no_of_bins - 1
+                )
+                bin_centers = (bins[:-1] + bins[1:]) / 2
+                item_groups = {}
+                for (name, loc), b in zip(items.items(), bin_idx):
+                    item_groups.setdefault(b, []).append((loc, name))
+
+                if item_row_height is None:
+                    # a rotated string's rendered length depends on how
+                    # many characters it has -- measure the longest name
+                    # once, on a throwaway probe figure using the same font
+                    # context, entirely separate from the real figure, so
+                    # there's no risk of the measurement going stale when
+                    # the real figure's size is set afterward
+                    longest_name = max((str(n) for n in items.index), key=len)
+                    probe_fig = plt.figure()
+                    probe_ax = probe_fig.add_subplot(111)
+                    probe_text = probe_ax.text(
+                        0,
+                        0,
+                        longest_name,
+                        rotation=90,
+                        fontsize=item_label_size,
+                        fontfamily=item_font,
+                        rotation_mode="anchor",
+                    )
+                    probe_fig.canvas.draw()
+                    bbox = probe_text.get_window_extent(
+                        renderer=probe_fig.canvas.get_renderer()
+                    )
+                    row_height_in = bbox.height / probe_fig.dpi * 1.3
+                    plt.close(probe_fig)
+                else:
+                    row_height_in = item_row_height
+
+                if item_mark_rows:
+                    # marks are now left/top-anchored at row 0 (see the
+                    # distribution_markers block below) rather than
+                    # centred, so the widest one ("mu+2sigma") reaches a
+                    # full row_height_in-equivalent into row-space, not
+                    # just half of it -- mark_row_depth has to cover that
+                    # full reach, rounded up to a whole row, or a long
+                    # mark's own label can run into row 1's item text.
+                    # Item names are themselves centred on their own row
+                    # (below), reaching back up to half a row from their
+                    # centre, so padding by that same half-row is what
+                    # actually keeps the two apart, not just the mark's
+                    # own raw length.
+                    probe_fig = plt.figure()
+                    probe_ax = probe_fig.add_subplot(111)
+                    probe_text = probe_ax.text(
+                        0, 0, "μ+2σ", rotation=90, fontsize=labelsize,
+                        rotation_mode="anchor",
+                    )
+                    probe_fig.canvas.draw()
+                    bbox = probe_text.get_window_extent(
+                        renderer=probe_fig.canvas.get_renderer()
+                    )
+                    mark_label_in = bbox.height / probe_fig.dpi
+                    plt.close(probe_fig)
+                    # marks' own text starts right after their tick (which
+                    # sits flush with the panel's outer edge at
+                    # -item_row_margin, plus its own length and a fixed
+                    # physical gap converted to rows) -- not at row 0;
+                    # row 0 is only where item names start stacking. See
+                    # mark_gap_in/mark_tick_rows above and the drawing
+                    # code below, which both need this same value. Left
+                    # as a float (not rounded up to a whole row): items
+                    # stack in whole-row steps relative to *each other*
+                    # via i + mark_row_depth, which works just as well
+                    # from a fractional starting depth, and rounding up
+                    # here only wastes up to a full row of empty space
+                    # that was never actually needed
+                    mark_gap_rows = mark_gap_in / row_height_in
+                    mark_text_row = -item_row_margin + mark_tick_rows + mark_gap_rows
+                    # item_label_gap_in is purely visual spacing on top of
+                    # the collision buffer -- without it, the buffer alone
+                    # can leave the mark's text and the item names
+                    # touching with no breathing room
+                    mark_row_depth = max(
+                        1.0,
+                        mark_text_row
+                        + mark_label_in / row_height_in
+                        + item_label_gap_in / row_height_in
+                        + 0.5,
+                    )
+                else:
+                    # exact same formula as mark_text_row above with the
+                    # mark-specific terms (mark_tick_rows, mark_gap_rows,
+                    # the mark's own text reach) zeroed out, since there's
+                    # no mark here to reach past -- the earlier version of
+                    # this branch dropped the leading -item_row_margin
+                    # entirely, which mark_text_row always includes, so it
+                    # was measuring the gap from row 0 rather than from
+                    # the actual boundary and came out several times too
+                    # big. Same +0.5 collision buffer as above, for the
+                    # same reason (an item's own centred text reaching
+                    # back half a row from its centre)
+                    mark_row_depth = (
+                        -item_row_margin + item_label_gap_in / row_height_in + 0.5
+                    )
+
+                # every bin's items start after the same mark_row_depth
+                # band (see above), so the deepest bin sets the panel's
+                # depth regardless of which specific bin(s) hold marks
+                max_depth = max(
+                    max((len(v) for v in item_groups.values()), default=0)
+                    + mark_row_depth,
+                    1,
+                )
+                # the axis itself later spans (max_depth + 0.1 +
+                # item_row_margin) row-units, not just max_depth -- sizing
+                # the panel to only max_depth*row_height_in would leave
+                # every row rendered slightly smaller than row_height_in
+                # actually intended, quietly eating into the buffer built
+                # into row_height_in's own measurement (most visible on
+                # whichever item lands in the last row, right against the
+                # panel's outer edge)
+                item_panel_in = (max_depth + 0.1 + item_row_margin) * row_height_in
+            else:
+                item_panel_in = 0
+
+            # figsize originally described the whole mirrored plot (persons
+            # above, items below, sharing base_h/base_w). Now that items
+            # get their own panel, persons only need the half of that
+            # budget they used to occupy -- and persons' own panel always
+            # gets that full share regardless of person_range, per the
+            # docstring's promise that it never shrinks to make room.
+            # item_distribution's panel (always alongside a one-sided ax,
+            # since item_distribution implies item_labels=True) is sized
+            # proportionally to item_range vs person_range, so a given
+            # Count/Density value ends up at the same physical scale in
+            # both -- e.g. an item panel needing half of persons' own
+            # range gets half of persons' own physical size, not a fixed
+            # fraction of the whole figure regardless of what it needs.
+            person_panel_h = base_h / 2 if item_labels else base_h
+            person_panel_w = base_w / 2 if item_labels else base_w
+            item_dist_panel_h = (
+                person_panel_h * (item_range / person_range) * person_scaling
+                if item_distribution and person_range > 0
+                else (person_panel_h if item_distribution else 0)
+            )
+            item_dist_panel_w = (
+                person_panel_w * (item_range / person_range) * person_scaling
+                if item_distribution and person_range > 0
+                else (person_panel_w if item_distribution else 0)
+            )
+
+            # The persons panel always gets its full intended size -- adding
+            # the item panel(s) grows the figure, it never shrinks the
+            # distribution's own space. height_ratios/width_ratios alone
+            # only fix the *ratio* between panels within whatever plottable
+            # area matplotlib's default margins leave -- they don't pin
+            # absolute inches, so pinning top/bottom (or left/right)
+            # margins in inches is needed to make the split exact.
+            if not item_labels:
+                fig, ax = plt.subplots(figsize=(base_w, base_h))
+                ax_items = None
+                ax_item_dist = None
+            elif orientation == "vertical":
+                # extra top margin makes room for the duplicate Location
+                # tick row now drawn on ax's own top edge, alongside the
+                # title, plus a bit more breathing room below the title
+                # itself. Sized (empirically, against the horizontal
+                # branch's own margin below) so the title-to-content gap
+                # matches horizontal's despite the tick row eating into
+                # this orientation's margin budget that horizontal doesn't
+                # have to spend.
+                margin_top_in, margin_bottom_in = 1.0, 0.6
+                # right edge gets the same plain edge_padding as any other
+                # side with nothing to fit -- without an explicit value
+                # here, matplotlib's own default leftover-space margin
+                # takes over and is usually much bigger than the other
+                # three sides
+                margin_right_in = edge_padding
+                fig_w = base_w + label_margin_in + margin_right_in
+                fig_h = (
+                    person_panel_h
+                    + item_dist_panel_h
+                    + item_panel_in
+                    + margin_top_in
+                    + margin_bottom_in
+                )
+                fig = plt.figure(figsize=(fig_w, fig_h))
+                if item_distribution:
+                    nrows = 3
+                    height_ratios = [person_panel_h, item_dist_panel_h, item_panel_in]
+                else:
+                    nrows = 2
+                    height_ratios = [person_panel_h, item_panel_in]
+                gridspec_kwargs = dict(
+                    height_ratios=height_ratios,
+                    hspace=0,
+                    top=1 - margin_top_in / fig_h,
+                    bottom=margin_bottom_in / fig_h,
+                    right=1 - margin_right_in / fig_w,
+                )
+                if label_margin_in:
+                    # room for the strip's row labels, drawn just left of
+                    # the axes like a column of y-tick labels
+                    gridspec_kwargs["left"] = label_margin_in / fig_w
+                gs = fig.add_gridspec(nrows, 1, **gridspec_kwargs)
+                ax = fig.add_subplot(gs[0])
+                if item_distribution:
+                    ax_item_dist = fig.add_subplot(gs[1], sharex=ax)
+                    ax_items = fig.add_subplot(gs[2], sharex=ax)
+                else:
+                    ax_item_dist = None
+                    ax_items = fig.add_subplot(gs[1], sharex=ax)
+            else:
+                # right margin matches left: ax_items' Location scale (ticks
+                # + title) now lives on its outer (right) edge, mirroring
+                # ax's own Location scale on the left, so it needs the same
+                # amount of room
+                margin_left_in, margin_right_in = 0.7, 0.7
+                # top margin was previously unreserved -- fine while the
+                # title sat on ax's own axes, but now that it's a
+                # figure-wide suptitle (see below, so it centres over the
+                # whole figure rather than just the persons panel) it
+                # needs real room. Sized for a 50% bigger title-to-plot
+                # gap than the original unreserved default gave.
+                margin_top_in = 0.67
+                fig_w = (
+                    person_panel_w
+                    + item_dist_panel_w
+                    + item_panel_in
+                    + margin_left_in
+                    + margin_right_in
+                )
+                fig_h = base_h + label_margin_in + margin_top_in
+                fig = plt.figure(figsize=(fig_w, fig_h))
+                if item_distribution:
+                    ncols = 3
+                    width_ratios = [person_panel_w, item_dist_panel_w, item_panel_in]
+                else:
+                    ncols = 2
+                    width_ratios = [person_panel_w, item_panel_in]
+                gridspec_kwargs = dict(
+                    width_ratios=width_ratios,
+                    wspace=0,
+                    left=margin_left_in / fig_w,
+                    right=1 - margin_right_in / fig_w,
+                    top=1 - margin_top_in / fig_h,
+                )
+                if label_margin_in:
+                    # room for the strip's row labels, drawn just below
+                    # the axes like a row of x-tick labels. Same formula as
+                    # vertical's left margin below -- both are driven
+                    # purely by label_margin_in (text width/height plus
+                    # edge_padding), so the two orientations' edge gaps
+                    # match rather than horizontal getting an extra fixed
+                    # 0.3in on top.
+                    gridspec_kwargs["bottom"] = label_margin_in / fig_h
+                gs = fig.add_gridspec(1, ncols, **gridspec_kwargs)
+                ax = fig.add_subplot(gs[0])
+                if item_distribution:
+                    ax_item_dist = fig.add_subplot(gs[1], sharey=ax)
+                    ax_items = fig.add_subplot(gs[2], sharey=ax)
+                else:
+                    ax_item_dist = None
+                    ax_items = fig.add_subplot(gs[1], sharey=ax)
+
+            # Persons always plot using the same back-to-back convention,
+            # whether or not there's a dedicated item panel: zero-at-
+            # boundary, bulk growing away from it. In horizontal
+            # orientation the boundary with any item panel (item_labels or
+            # item_distribution) sits on persons' right, so unflipped
+            # (sign=+1) would put persons' zero at its own outer-left edge
+            # instead -- the opposite of the back-to-back look. Flipping
+            # (sign=-1) puts persons' zero at the boundary, matching item
+            # panels and back-to-back histograms alike. Vertical orientation
+            # never needs this: persons' natural zero-at-bottom already
+            # sits at its boundary with any panel below.
+            person_sign = 1 if orientation == "vertical" else -1
+
+            # items draw on their own axis in two cases: the old mirrored
+            # single-axes mode (item_labels=False), or the new
+            # item_distribution panel -- both flip the sign the same way
+            # (downward for vertical, rightward for horizontal) so the
+            # item_distribution panel reads as the same "flipped" shape as
+            # the old SLM-style mirrored map, just moved into its own
+            # panel instead of sharing ax with persons. Otherwise
+            # (item_labels=True, item_distribution=False) there's no item
+            # hist/kde at all -- just the labelled panel below.
+            item_sign = -1 if orientation == "vertical" else 1
+            if not item_labels:
+                item_ax = ax
+            elif item_distribution:
+                item_ax = ax_item_dist
+            else:
+                item_ax = None
+                item_sign = None
+
+            if map_type == "kde":
+                x_grid = np.linspace(lo, hi, kde_points)
+
+            if group_by is None:
+                person_groups = [("Persons", persons, person_color, person_line_color)]
+            else:
+                person_groups = [
+                    (str(g), persons[group_by == g], group_colors[g], group_colors[g])
+                    for g in person_group_values
+                ]
+
+            if map_type == "hist":
+                if stack or group_by is None:
+                    # single series, or one segmented column per bin
+                    data = [sub for _, sub, _, _ in person_groups]
+                    weights = [
+                        person_sign * np.ones_like(sub) / (len(sub) if prop else 1)
+                        for sub in data
+                    ]
+                    bar_colors = [c for _, _, c, _ in person_groups]
+                    group_labels = [label for label, _, _, _ in person_groups]
+
+                    ax.hist(
+                        data,
+                        weights=weights,
+                        bins=bins,
+                        color=bar_colors,
+                        edgecolor=edge_color,
+                        label=group_labels,
+                        alpha=alpha,
+                        orientation=orientation,
+                        stacked=True,
+                    )
+
+                elif not blend:
+                    # dodged: matplotlib's native side-by-side bars for
+                    # multiple datasets in one hist() call -- each group
+                    # gets its own slice of the bin width, no colour
+                    # blending to interpret
+                    data = [sub for _, sub, _, _ in person_groups]
+                    weights = [
+                        person_sign * np.ones_like(sub) / (len(sub) if prop else 1)
+                        for sub in data
+                    ]
+                    bar_colors = [c for _, _, c, _ in person_groups]
+                    group_labels = [label for label, _, _, _ in person_groups]
+
+                    ax.hist(
+                        data,
+                        weights=weights,
+                        bins=bins,
+                        color=bar_colors,
+                        edgecolor=edge_color,
+                        label=group_labels,
+                        alpha=alpha,
+                        orientation=orientation,
+                        stacked=False,
+                    )
+
+                else:
+                    # blend: each group's own full-height bars,
+                    # alpha-blended on top of each other rather than
+                    # dodged or stacked
+                    for label, sub, fill_color, line_color in person_groups:
+                        weights = person_sign * np.ones_like(sub)
+                        if prop:
+                            weights = weights / len(sub)
+
+                        ax.hist(
+                            sub,
+                            weights=weights,
+                            bins=bins,
+                            color=fill_color,
+                            edgecolor=edge_color,
+                            label=label,
+                            alpha=alpha,
+                            orientation=orientation,
+                        )
+
+            else:
+                cumulative = np.zeros_like(x_grid)
+                for label, sub, fill_color, line_color in person_groups:
+                    n_sub = len(sub)
+                    kde_sub = gaussian_kde(sub, bw_method=bw_method)(x_grid)
+                    curve = person_sign * (kde_sub if prop else kde_sub * n_sub)
+
+                    if stack:
+                        # streamgraph-style: each group's fill runs from the
+                        # running total up to running total + its own
+                        # curve, rather than every curve overlaying from
+                        # zero
+                        base, top = cumulative, cumulative + curve
+                        cumulative = top
+                    else:
+                        base, top = np.zeros_like(x_grid), curve
+
+                    if orientation == "vertical":
+                        ax.plot(x_grid, top, color=line_color, linewidth=line_width)
+                        ax.fill_between(
+                            x_grid,
+                            base,
+                            top,
+                            color=fill_color,
+                            alpha=alpha,
+                            edgecolor=line_color,
+                            linewidth=line_width,
+                            label=label,
+                        )
+                    else:
+                        ax.plot(top, x_grid, color=line_color, linewidth=line_width)
+                        ax.fill_betweenx(
+                            x_grid,
+                            base,
+                            top,
+                            color=fill_color,
+                            alpha=alpha,
+                            edgecolor=line_color,
+                            linewidth=line_width,
+                            label=label,
+                        )
+
+            # --- items: a hist/kde on their own axis (either the old
+            # mirrored ax, sign-flipped, or the new item_distribution
+            # panel, unflipped), or labelled rows in a dedicated panel, or
+            # both at once ---
+            if item_ax is not None:
+                if map_type == "hist":
+                    item_weights = item_sign * np.ones_like(items)
+                    if prop:
+                        item_weights = item_weights / no_of_items
+
+                    item_ax.hist(
+                        items,
+                        weights=item_weights,
+                        bins=bins,
+                        color=item_color,
+                        edgecolor=edge_color,
+                        label="Items",
+                        alpha=alpha,
+                        orientation=orientation,
+                    )
+
+                else:
+                    kde_items = gaussian_kde(items, bw_method=bw_method)(x_grid)
+                    item_curve = item_sign * (
+                        kde_items if prop else kde_items * no_of_items
+                    )
+
+                    if orientation == "vertical":
+                        item_ax.plot(
+                            x_grid,
+                            item_curve,
+                            color=item_line_color,
+                            linewidth=line_width,
+                        )
+                        item_ax.fill_between(
+                            x_grid,
+                            0,
+                            item_curve,
+                            color=item_color,
+                            alpha=alpha,
+                            edgecolor=item_line_color,
+                            linewidth=line_width,
+                            label="Items",
+                        )
+                    else:
+                        item_ax.plot(
+                            item_curve,
+                            x_grid,
+                            color=item_line_color,
+                            linewidth=line_width,
+                        )
+                        item_ax.fill_betweenx(
+                            x_grid,
+                            0,
+                            item_curve,
+                            color=item_color,
+                            alpha=alpha,
+                            edgecolor=item_line_color,
+                            linewidth=line_width,
+                            label="Items",
+                        )
+
+            if item_distribution:
+                # item_dist sits between the persons panel above and the
+                # labelled panel below -- drop its near-side spine (facing
+                # ax) for the same reason ax_items drops its own further
+                # down, and hide its shared location-axis tick labels since
+                # the bottom-most panel (ax_items) is the one that shows
+                # them
+                if orientation == "vertical":
+                    ax_item_dist.spines["top"].set_visible(False)
+                    ax_item_dist.tick_params(labelbottom=False)
+                else:
+                    ax_item_dist.spines["left"].set_visible(False)
+                    ax_item_dist.tick_params(labelleft=False)
+
+            # the labelled panel is independent of whether item_ax drew a
+            # hist/kde above -- item_distribution can add that panel on
+            # top of either labelling style, so this is its own if/elif
+            # rather than chained onto the item_ax branch above
+            if item_labels and item_strip:
+                # row 0 sits nearest the boundary with the persons panel,
+                # deeper rows move further away. Widened when
+                # distribution_markers=True so row 0 doesn't crowd the
+                # item mu/sigma marks overhanging from the persons panel
+                # just above.
+                boundary_margin = 0.7 if distribution_markers else 0.45
+                if orientation == "vertical":
+                    ax_items.set_ylim(max_depth + 0.1, -boundary_margin)
+                else:
+                    ax_items.set_xlim(-boundary_margin, max_depth + 0.1)
+
+                # palette=None: flat fill, no per-category distinction
+                # beyond the divider lines. palette=<name>: reuse the exact
+                # same named-palette -> colormap mechanism plot_data() uses
+                # for category response curves elsewhere in RaschPy, so a
+                # given palette name looks the same on this plot as on a
+                # crcs()/icc() plot.
+                if palette is not None:
+                    palette_dict = {
+                        "dark blue": ["dark", "royalblue"],
+                        "light blue": ["light", "cornflowerblue"],
+                        "dark red": ["dark", "firebrick"],
+                        "light red": ["light", "indianred"],
+                        "dark green": ["dark", "forestgreen"],
+                        "light green": ["light", "mediumseagreen"],
+                        "dark grey": ["dark", "dimgrey"],
+                        "light grey": ["light", "darkgrey"],
+                        "dark multi": ["dark", "dark"],
+                        "light multi": ["light", "muted"],
+                        "colorblind multi": ["dark", "colorblind"],
+                    }
+                    shade, base_color = palette_dict[palette]
+                    if palette == "colorblind multi":
+                        # Okabe & Ito (2008) -- colour-vision-deficiency-safe
+                        # qualitative palette, the scientific-publishing standard.
+                        # The 8th (black) entry is swapped for white on dark
+                        # backgrounds, where it would otherwise be invisible.
+                        color_map = [
+                            "#E69F00", "#56B4E9", "#009E73", "#F0E442",
+                            "#0072B2", "#D55E00", "#CC79A7",
+                            "#FFFFFF" if plot_style in self._DARK_BACKGROUND_STYLES else "#000000",
+                        ]
+                    elif shade == "dark":
+                        color_map = (
+                            sns.color_palette("dark", as_cmap=True)
+                            if palette == "dark multi"
+                            else sns.dark_palette(base_color, reverse=True, as_cmap=True)
+                        )
+                    else:
+                        color_map = (
+                            sns.color_palette("muted", as_cmap=True)
+                            if palette == "light multi"
+                            else sns.light_palette(
+                                base_color, reverse=True, as_cmap=True
+                            )
+                        )
+                    max_categories = (
+                        max(len(t) for t in item_thresholds_natural.values()) + 1
+                    )
+                    cNorm = colors.Normalize(vmin=0, vmax=max_categories + 2)
+                    if "multi" not in palette:
+                        scalar_map = cmx.ScalarMappable(norm=cNorm, cmap=color_map)
+
+                    def category_color(k):
+                        return (
+                            scalar_map.to_rgba(k)
+                            if "multi" not in palette
+                            else color_map[k]
+                        )
+
+                else:
+
+                    def category_color(k):
+                        return item_color
+
+                bar_half = 0.3
+                min_label_width = (hi - lo) * 0.02
+
+                for name, segs in item_segments.items():
+                    row = item_rows[name]
+                    # the open (unbounded) top/bottom categories always draw
+                    # out to the panel edge -- there's no real boundary to
+                    # stop at, so stopping partway (at item_spans' own
+                    # adjacent-width bound) just left an unexplained gap of
+                    # blank background between the strip and the axis edge.
+                    # neutral_extremes only controls whether that edge fill
+                    # is a flat block in the category colour (False) or
+                    # fades to a neutral colour (True), not whether it
+                    # reaches the edge at all.
+                    edge_lo, edge_hi = lo, hi
+
+                    n_segs = len(segs)
+                    for i, (seg_lo, seg_hi, k) in enumerate(segs):
+                        x0 = edge_lo if seg_lo is None else seg_lo
+                        x1 = edge_hi if seg_hi is None else seg_hi
+                        is_extreme = neutral_extremes and (i == 0 or i == n_segs - 1)
+
+                        if is_extreme:
+                            # fade a neutral colour in from the open (outer)
+                            # edge toward the real threshold it borders,
+                            # rather than a flat opaque block -- reads as
+                            # "this category has no far boundary" instead
+                            # of asserting a hard edge that isn't real
+                            fade_steps = 8
+                            neutral_color = "#EDE6D6"
+                            slice_width = (x1 - x0) / fade_steps
+                            for s in range(fade_steps):
+                                sx0 = x0 + s * slice_width
+                                sx1 = sx0 + slice_width
+                                frac = (
+                                    (s + 1) / fade_steps
+                                    if k == 0
+                                    else (fade_steps - s) / fade_steps
+                                )
+                                slice_alpha = strip_alpha * frac
+                                if orientation == "vertical":
+                                    ax_items.add_patch(
+                                        Rectangle(
+                                            (sx0, row - bar_half),
+                                            sx1 - sx0,
+                                            2 * bar_half,
+                                            facecolor=neutral_color,
+                                            alpha=slice_alpha,
+                                            edgecolor="none",
+                                        )
+                                    )
+                                else:
+                                    ax_items.add_patch(
+                                        Rectangle(
+                                            (row - bar_half, sx0),
+                                            2 * bar_half,
+                                            sx1 - sx0,
+                                            facecolor=neutral_color,
+                                            alpha=slice_alpha,
+                                            edgecolor="none",
+                                        )
+                                    )
+                            # one clean outline over the whole segment,
+                            # since the faded slices have none of their own
+                            if orientation == "vertical":
+                                ax_items.add_patch(
+                                    Rectangle(
+                                        (x0, row - bar_half),
+                                        x1 - x0,
+                                        2 * bar_half,
+                                        facecolor="none",
+                                        edgecolor="black",
+                                        linewidth=0.5,
+                                        alpha=strip_alpha,
+                                    )
+                                )
+                            else:
+                                ax_items.add_patch(
+                                    Rectangle(
+                                        (row - bar_half, x0),
+                                        2 * bar_half,
+                                        x1 - x0,
+                                        facecolor="none",
+                                        edgecolor="black",
+                                        linewidth=0.5,
+                                        alpha=strip_alpha,
+                                    )
+                                )
+                        else:
+                            color = category_color(k)
+                            if orientation == "vertical":
+                                ax_items.add_patch(
+                                    Rectangle(
+                                        (x0, row - bar_half),
+                                        x1 - x0,
+                                        2 * bar_half,
+                                        facecolor=color,
+                                        alpha=strip_alpha,
+                                        edgecolor="black",
+                                        linewidth=0.5,
+                                    )
+                                )
+                            else:
+                                ax_items.add_patch(
+                                    Rectangle(
+                                        (row - bar_half, x0),
+                                        2 * bar_half,
+                                        x1 - x0,
+                                        facecolor=color,
+                                        alpha=strip_alpha,
+                                        edgecolor="black",
+                                        linewidth=0.5,
+                                    )
+                                )
+
+                        label_color = "dimgrey" if is_extreme else "black"
+                        seg_center = (x0 + x1) / 2
+
+                        if x1 - x0 > min_label_width:
+                            if orientation == "vertical":
+                                ax_items.text(
+                                    seg_center,
+                                    row,
+                                    str(k),
+                                    ha="center",
+                                    va="center",
+                                    fontsize=labelsize,
+                                    fontweight="bold",
+                                    color=label_color,
+                                )
+                            else:
+                                # unrotated (unlike the item name labels,
+                                # which run along the column) -- these sit
+                                # inside a narrow column but read better
+                                # upright than sideways. center_baseline
+                                # (rather than center) reads as properly
+                                # centred for digit-only text, which has no
+                                # descenders for "center" to allow for.
+                                ax_items.text(
+                                    row,
+                                    seg_center,
+                                    str(k),
+                                    ha="center",
+                                    va="center_baseline",
+                                    fontsize=labelsize,
+                                    fontweight="bold",
+                                    color=label_color,
+                                )
+                        else:
+                            # too narrow for the number to sit inside its
+                            # own segment -- draw it just outside instead,
+                            # with a short leader connecting it back, using
+                            # the inter-row gap so it doesn't intrude on
+                            # the neighbouring row
+                            # starts a third of the way into the bar
+                            # itself (rather than right at its edge) so
+                            # the leader visibly originates from the
+                            # segment it's labelling
+                            leader_len = bar_half * 0.35
+                            leader_start = row + bar_half / 3
+                            leader_end = row + bar_half + leader_len
+                            if orientation == "vertical":
+                                ax_items.plot(
+                                    [seg_center, seg_center],
+                                    [leader_start, leader_end],
+                                    color=label_color,
+                                    linewidth=0.6,
+                                )
+                                ax_items.text(
+                                    seg_center,
+                                    leader_end,
+                                    str(k),
+                                    ha="center",
+                                    va="top",
+                                    fontsize=labelsize * 0.75,
+                                    fontweight="bold",
+                                    color=label_color,
+                                )
+                            else:
+                                ax_items.plot(
+                                    [leader_start, leader_end],
+                                    [seg_center, seg_center],
+                                    color=label_color,
+                                    linewidth=0.6,
+                                )
+                                ax_items.text(
+                                    leader_end,
+                                    seg_center,
+                                    str(k),
+                                    ha="left",
+                                    va="center_baseline",
+                                    fontsize=labelsize * 0.75,
+                                    fontweight="bold",
+                                    color=label_color,
+                                )
+
+                # one label per packed row, positioned like a tick label
+                # just outside the axes, rather than inline after each
+                # item's own bar (which put labels at wildly different
+                # positions depending on where that item's own range fell)
+                for label_row, label_text in row_labels.items():
+                    row_disordered = any(
+                        n in disordered_items for n in row_names[label_row]
+                    )
+                    label_kwargs = (
+                        {"color": "firebrick", "fontweight": "bold"}
+                        if row_disordered
+                        else {"color": item_line_color}
+                    )
+                    if orientation == "vertical":
+                        ax_items.text(
+                            -0.015,
+                            label_row,
+                            f"{label_text} ",
+                            transform=ax_items.get_yaxis_transform(),
+                            ha="right",
+                            va="center",
+                            fontsize=labelsize,
+                            fontfamily=item_font,
+                            clip_on=False,
+                            **label_kwargs,
+                        )
+                    else:
+                        ax_items.text(
+                            label_row,
+                            -0.015,
+                            f"{label_text} ",
+                            transform=ax_items.get_xaxis_transform(),
+                            ha="right",
+                            va="center",
+                            fontsize=labelsize,
+                            fontfamily=item_font,
+                            rotation=90,
+                            rotation_mode="anchor",
+                            clip_on=False,
+                            **label_kwargs,
+                        )
+
+                if orientation == "vertical":
+                    ax_items.spines["top"].set_visible(False)
+                    ax_items.set_yticks([])
+                    # ax's own bottom edge is an interior boundary (touches
+                    # item_dist or ax_items), not a useful place for
+                    # Location labels -- show a duplicate scale on ax's
+                    # outer (top) edge instead, so a tall figure has
+                    # Location ticks to read at both ends
+                    ax.tick_params(
+                        axis="x", bottom=False, top=True, labelbottom=False, labeltop=True
+                    )
+                else:
+                    ax_items.spines["left"].set_visible(False)
+                    ax_items.set_xticks([])
+                    # ax is the leftmost panel here, so its default (left)
+                    # tick side is already the figure's outer edge -- no
+                    # repositioning needed, just leave it showing
+
+            elif item_labels:
+                # row 0 sits nearest the boundary with the persons panel,
+                # deeper rows move further away -- inverted ylim for
+                # vertical (row 0 at the top, closest to the persons panel
+                # above) achieves that directly. Asymmetric margins: a
+                # little breathing room near the x-axis boundary
+                # (item_row_margin), and just enough at the panel's outer
+                # edge (0.1) to keep the last row off the border.
+                boundary_margin = item_row_margin
+                if orientation == "vertical":
+                    ax_items.set_ylim(max_depth + 0.1, -boundary_margin)
+                else:
+                    ax_items.set_xlim(-boundary_margin, max_depth + 0.1)
+
+                for b, entries in item_groups.items():
+                    x = bin_centers[b]
+                    # sort by actual location, not name -- a real map
+                    # orders items by where they fall
+                    for i, (loc, name) in enumerate(sorted(entries)):
+                        # rows 0..mark_row_depth-1 are the marks' own
+                        # reserved band (see item_mark_rows) -- every
+                        # item starts stacking uniformly above it
+                        level = i + mark_row_depth
+                        if orientation == "vertical":
+                            # va='top' (not 'center') anchors every
+                            # item's own near edge at its row, matching
+                            # ha='left' below for horizontal -- centring
+                            # let a short name like "Item_2" sit with a
+                            # different-looking start than a long one
+                            # like "Item_19" even at the identical row,
+                            # since centring keeps the middle fixed while
+                            # the two ends move with the string's length
+                            ax_items.text(
+                                x,
+                                level,
+                                str(name),
+                                color=item_line_color,
+                                rotation=90,
+                                ha="center",
+                                va="top",
+                                fontsize=item_label_size,
+                                fontfamily=item_font,
+                            )
+                        else:
+                            # ha='left' (not 'center') anchors every
+                            # item's own near edge at its row, rather
+                            # than its centre -- see the vertical branch
+                            # above for why
+                            ax_items.text(
+                                level,
+                                x,
+                                str(name),
+                                color=item_line_color,
+                                ha="left",
+                                va="center",
+                                fontsize=item_label_size,
+                                fontfamily=item_font,
+                            )
+
+                # the item panel is a label area, not a real data axis --
+                # strip its own ticks (no meaningful scale to read off),
+                # and keep three of its four spines. The panel sits flush
+                # against the persons panel (hspace/wspace=0), so its
+                # near-side spine (top for vertical, left for horizontal)
+                # would stack directly on top of the persons panel's own
+                # boundary spine and the explicit axhline/axvline -- three
+                # overlapping lines reading as one heavy, slightly blurred
+                # one. Dropping the item panel's near-side spine leaves a
+                # single clean boundary while still closing the other
+                # three sides.
+                if orientation == "vertical":
+                    ax_items.spines["top"].set_visible(False)
+                    ax_items.set_yticks([])
+                    # ax's own bottom edge is an interior boundary (touches
+                    # item_dist or ax_items), not a useful place for
+                    # Location labels -- show a duplicate scale on ax's
+                    # outer (top) edge instead, so a tall figure has
+                    # Location ticks to read at both ends
+                    ax.tick_params(
+                        axis="x", bottom=False, top=True, labelbottom=False, labeltop=True
+                    )
+                else:
+                    ax_items.spines["left"].set_visible(False)
+                    ax_items.set_xticks([])
+                    # ax is the leftmost panel here, so its default (left)
+                    # tick side is already the figure's outer edge -- no
+                    # repositioning needed, just leave it showing
+
+            if distribution_markers:
+
+                # freeze ax's own count-axis limits before drawing
+                # anything into it, pre-expanded to match the "nice"
+                # round tick matplotlib's own locator will pick for this
+                # range -- that expansion normally happens much later
+                # (the set_xticks call below, which snaps the outer edge
+                # out to the locator's outermost tick, e.g. -77.7 -> -80)
+                # well after this block has already computed and drawn
+                # the marks. Replicating it here first means _in_per_unit
+                # sees the axis's true final scale instead of a
+                # provisional one that's about to change size under it --
+                # marks are also, like any other artist, still their own
+                # small source of autoscale drift once drawn (clip_on=
+                # False), which this same freeze heads off
+                if orientation == "vertical":
+                    y0, y1 = ax.get_ylim()
+                    nice_ticks = ax.get_yticks()
+                    if len(nice_ticks):
+                        y1 = max(y1, max(nice_ticks))
+                    ax.set_ylim(y0, y1)
+                else:
+                    x0, x1 = ax.get_xlim()
+                    nice_ticks = ax.get_xticks()
+                    if len(nice_ticks):
+                        x0 = min(x0, min(nice_ticks))
+                    ax.set_xlim(x0, x1)
+
+                def _mark_len(target_ax):
+                    if orientation == "vertical":
+                        _, y1 = target_ax.get_ylim()
+                        return 0.015 * y1
+                    else:
+                        x0, _ = target_ax.get_xlim()
+                        return 0.015 * abs(x0)
+
+                # same size as the axis tick labels
+                marker_fontsize = labelsize
+
+                def _in_per_unit(target_ax):
+                    # exact data-unit -> inch conversion for this axis.
+                    # Built from the axes' own pixel bbox (fixed by the
+                    # gridspec layout, stable regardless of xlim/ylim)
+                    # together with x0/y1 -- the *stable* side of this
+                    # axis's own extent, the same side _mark_len already
+                    # reads. The other side (the boundary shared with the
+                    # item panel) still gets pinned to exactly 0 further
+                    # below, after distribution_markers runs, to correct
+                    # for autoscale drift the marks' own overhang causes
+                    # -- reading it here, before that pin, would use a
+                    # transform that's about to change and mismatch
+                    # whatever the item side's tick actually renders at
+                    bbox = target_ax.get_window_extent(
+                        renderer=fig.canvas.get_renderer()
+                    )
+                    if orientation == "vertical":
+                        _, y1 = target_ax.get_ylim()
+                        return (bbox.height / fig.dpi) / y1
+                    else:
+                        x0, _ = target_ax.get_xlim()
+                        return (bbox.width / fig.dpi) / abs(x0)
+
+                def add_distribution_markers(values, sign, color, target_ax, mark_len):
+                    mean = values.mean()
+                    sd = values.std()
+                    marks = [
+                        ("μ", mean),
+                        ("μ−σ", mean - sd),
+                        ("μ+σ", mean + sd),
+                        ("μ−2σ", mean - 2 * sd),
+                        ("μ+2σ", mean + 2 * sd),
+                    ]
+                    # fixed physical gap between the tick's own end and
+                    # its label, matching the item side's mark_gap_in
+                    # instead of a fraction of mark_len -- mark_len itself
+                    # already varies with the count axis's own range, so
+                    # multiplying it wouldn't give a gap of consistent
+                    # physical size
+                    gap = mark_gap_in / _in_per_unit(target_ax)
+                    text_offset = sign * (mark_len + gap)
+
+                    for label, loc in marks:
+                        if orientation == "vertical":
+                            target_ax.plot(
+                                [loc, loc],
+                                [0, sign * mark_len],
+                                color=color,
+                                linewidth=1,
+                                # matplotlib's default line cap
+                                # ("projecting") extends a line by half
+                                # its own width past each endpoint -- with
+                                # this tick's zorder placing it above the
+                                # boundary line, that projection is what
+                                # was visibly poking through to the other
+                                # side, not the tick's own coordinates
+                                solid_capstyle="butt",
+                                clip_on=False,
+                                zorder=6,
+                            )
+                            target_ax.text(
+                                loc,
+                                text_offset,
+                                label,
+                                color=color,
+                                ha="center",
+                                va="bottom" if sign > 0 else "top",
+                                fontsize=marker_fontsize,
+                                clip_on=False,
+                                zorder=6,
+                            )
+                        else:
+                            target_ax.plot(
+                                [0, sign * mark_len],
+                                [loc, loc],
+                                color=color,
+                                linewidth=1,
+                                solid_capstyle="butt",
+                                clip_on=False,
+                                zorder=6,
+                            )
+                            target_ax.text(
+                                text_offset,
+                                loc,
+                                label,
+                                color=color,
+                                ha="left" if sign > 0 else "right",
+                                va="center",
+                                fontsize=marker_fontsize,
+                                clip_on=False,
+                                zorder=6,
+                            )
+
+                # match the item side's own fixed physical tick length
+                # when there's an item panel to match -- _mark_len's
+                # fraction-of-count-range formula varies with whatever
+                # dataset is plotted, so left alone it drifts arbitrarily
+                # far from the item side's fixed length instead of
+                # tracking it
+                if item_mark_rows:
+                    # matched to ax_items' own *realized* inches-per-row
+                    # -- not row_height_in, since ax_items' actual
+                    # xlim/ylim span is max_depth + 0.1 + item_row_margin,
+                    # not just max_depth, so row_height_in alone slightly
+                    # overstates how many inches one row really occupies.
+                    # Uses the panel's full span (not _in_per_unit's
+                    # stable-side-only logic -- that assumes an axis
+                    # anchored at 0, which ax_items isn't); ax_items' own
+                    # xlim/ylim is already final at this point, so there's
+                    # no pending-pin instability to work around here
+                    items_bbox = ax_items.get_window_extent(
+                        renderer=fig.canvas.get_renderer()
+                    )
+                    if orientation == "vertical":
+                        y0i, y1i = ax_items.get_ylim()
+                        items_in_per_row = (items_bbox.height / fig.dpi) / abs(
+                            y1i - y0i
+                        )
+                    else:
+                        x0i, x1i = ax_items.get_xlim()
+                        items_in_per_row = (items_bbox.width / fig.dpi) / abs(
+                            x1i - x0i
+                        )
+                    person_mark_len = (
+                        mark_tick_rows * items_in_per_row
+                    ) / _in_per_unit(ax)
+                else:
+                    person_mark_len = _mark_len(ax)
+                if group_by is None:
+                    add_distribution_markers(
+                        persons, person_sign, marker_color, ax, person_mark_len
+                    )
+                else:
+                    # each group gets its own mean/SD marks in its own
+                    # colour -- a single overall mark wouldn't mean much
+                    # once the distribution's been split
+                    for label, sub, fill_color, line_color in person_groups:
+                        add_distribution_markers(
+                            sub, person_sign, line_color, ax, person_mark_len
+                        )
+
+                # with its own item_distribution panel, item marks belong
+                # on that panel's own scale (still flipped, matching the
+                # hist/kde bars there) rather than overhanging into the
+                # persons panel's boundary
+                if item_distribution:
+                    add_distribution_markers(
+                        items,
+                        item_sign,
+                        marker_color,
+                        ax_item_dist,
+                        _mark_len(ax_item_dist),
+                    )
+                elif item_labels and not item_strip:
+                    # drawn directly into the item panel's own row grid,
+                    # all at row 0 (see item_mark_rows) -- rather than
+                    # reaching in from ax's own count-axis scale. No item
+                    # can ever share row 0, by construction, and every
+                    # mark's own tick+label sits at exactly the same
+                    # depth as every other, rather than varying with
+                    # whatever bin it happens to land in. The tick itself
+                    # is flush with the boundary shared with the persons
+                    # panel (tick_near sits exactly at -item_row_margin,
+                    # the item panel's own edge), matching the persons
+                    # side's tick, which is flush with that same boundary
+                    # from its own side.
+                    tick_near = -item_row_margin
+                    tick_far = tick_near + mark_tick_rows
+                    for mark_label, mark_loc in item_mark_rows.items():
+                        if orientation == "vertical":
+                            ax_items.plot(
+                                [mark_loc, mark_loc],
+                                [tick_near, tick_far],
+                                color=marker_color,
+                                linewidth=1,
+                                solid_capstyle="butt",
+                                zorder=6,
+                            )
+                            # va='top' (not 'center') anchors every
+                            # label's own near edge at mark_text_row,
+                            # matching ha='left' below for horizontal --
+                            # centring would let a short label like "mu"
+                            # sit with more of a gap after the tick than
+                            # a long one like "mu+2sigma"
+                            ax_items.text(
+                                mark_loc,
+                                mark_text_row,
+                                mark_label,
+                                color=marker_color,
+                                rotation=90,
+                                ha="center",
+                                va="top",
+                                fontsize=marker_fontsize,
+                            )
+                        else:
+                            ax_items.plot(
+                                [tick_near, tick_far],
+                                [mark_loc, mark_loc],
+                                color=marker_color,
+                                linewidth=1,
+                                solid_capstyle="butt",
+                                zorder=6,
+                            )
+                            # ha='left' (not 'center') anchors every
+                            # label's own near edge at mark_text_row,
+                            # rather than its centre -- centring would
+                            # let a short label like "mu" sit with more
+                            # of a gap after the tick than a long one
+                            # like "mu+2sigma", which is exactly the
+                            # inconsistent-looking start this is fixing
+                            ax_items.text(
+                                mark_text_row,
+                                mark_loc,
+                                mark_label,
+                                color=marker_color,
+                                ha="left",
+                                va="center",
+                                fontsize=marker_fontsize,
+                            )
+                else:
+                    add_distribution_markers(
+                        items,
+                        -person_sign if item_labels else item_sign,
+                        marker_color,
+                        ax,
+                        person_mark_len,
+                    )
+
+            # ax's and ax_item_dist's own Count/Density limits are set
+            # explicitly further below (from person_range/item_range),
+            # which fully supersedes pinning just one side of each to 0
+            # here.
+
+            padding = (hi - lo) * 0.05 if pad else 0
+            loc_axis = ax_items if (item_labels and orientation == "vertical") else ax
+            loc_axis_h = (
+                ax_items if (item_labels and orientation == "horizontal") else ax
+            )
+
+            if item_labels and orientation == "horizontal":
+                # ax_items is the rightmost panel, but a y-axis's ticks
+                # default to its own left side -- an interior boundary
+                # here, not the figure's outer edge. Move them (and the
+                # "Location" title) to the right so the primary scale
+                # lands at the outer edge, mirroring how ax_items' bottom
+                # edge is already the outer edge in vertical orientation.
+                ax_items.yaxis.set_ticks_position("right")
+                ax_items.yaxis.set_label_position("right")
+
+            # evenly spaced at tick_interval across the plotted range --
+            # matplotlib's own automatic tick choice, unioned with the
+            # exact data min/max (the previous approach), could land the
+            # min/max on an irregular in-between spacing rather than the
+            # regular grid the rest of the ticks follow
+            def _regular_loc_ticks(axis_lo, axis_hi):
+                start = np.ceil(axis_lo / tick_interval) * tick_interval
+                n = int(np.floor((axis_hi - start) / tick_interval + 1e-9)) + 1
+                return [start + i * tick_interval for i in range(max(n, 0))]
+
+            if orientation == "vertical":
+                ax.set_xlim(lo - padding, hi + padding)
+                loc_ticks = _regular_loc_ticks(lo - padding, hi + padding)
+                loc_axis.set_xticks(loc_ticks)
+                if item_distribution:
+                    # keeps this panel's gridlines aligned with the other
+                    # two, even though its own tick labels stay hidden
+                    ax_item_dist.set_xticks(loc_ticks)
+            else:
+                ax.set_ylim(lo - padding, hi + padding)
+                loc_ticks = _regular_loc_ticks(lo - padding, hi + padding)
+                loc_axis_h.set_yticks(loc_ticks)
+                if item_distribution:
+                    ax_item_dist.set_yticks(loc_ticks)
+
+            if item_labels:
+                # ax's own boundary spine is redundant with the explicit
+                # axhline/axvline drawn further below -- both nominally
+                # sit at data 0, but as different Artist types (Spine vs
+                # Line2D) they can each round to a very slightly
+                # different sub-pixel position even at the identical
+                # data coordinate, leaving a faint second line just next
+                # to the axhline/axvline rather than exactly under it.
+                # Hiding the spine outright, rather than trying to
+                # position it to coincide, removes that mismatch instead
+                # of chasing sub-pixel alignment. Persons is always
+                # flipped in horizontal orientation now, so the boundary
+                # is always ax's right spine, never left.
+                if orientation == "vertical":
+                    ax.spines["bottom"].set_visible(False)
+                else:
+                    ax.spines["right"].set_visible(False)
+
+            is_vertical = orientation == "vertical"
+
+            # each panel's own (lo, hi) limits, set directly from
+            # person_range/item_range (an explicit *_lim override, or
+            # each distribution's own natural peak, resolved earlier)
+            # rather than left to independent autoscale -- this is also
+            # exactly what panel sizing above already assumed, so the
+            # rendered axis and the physical space allocated for it
+            # always agree. When persons and items still mirror onto the
+            # same ax (item_labels=False), each of its own two sides
+            # gets its own real range rather than a shared one.
+            if item_labels:
+                ax_lo = -person_range if person_sign < 0 else 0
+                ax_hi = person_range if person_sign > 0 else 0
+            else:
+                ax_lo = -(person_range if person_sign < 0 else item_range)
+                ax_hi = person_range if person_sign > 0 else item_range
+            if is_vertical:
+                ax.set_ylim(ax_lo, ax_hi)
+            else:
+                ax.set_xlim(ax_lo, ax_hi)
+
+            if item_distribution:
+                dist_lo = -item_range if item_sign < 0 else 0
+                dist_hi = item_range if item_sign > 0 else 0
+                if is_vertical:
+                    ax_item_dist.set_ylim(dist_lo, dist_hi)
+                else:
+                    ax_item_dist.set_xlim(dist_lo, dist_hi)
+
+            def _side_ticks(reach, step):
+                # evenly spaced ticks from 0 to reach inclusive, using
+                # exactly the step already resolved (together with
+                # reach itself) to divide it evenly -- generated
+                # explicitly rather than left to a locator, which has no
+                # reason to land on a divisor of this specific ceiling
+                if reach <= 0 or step <= 0:
+                    return [0.0]
+                n = int(round(reach / step))
+                return [i * step for i in range(n + 1)]
+
+            def _relabel(ax_obj, pos_reach, pos_step, neg_reach, neg_step, drop_zero=False):
+                ticks = sorted(
+                    set(_side_ticks(pos_reach, pos_step))
+                    | {-t for t in _side_ticks(neg_reach, neg_step)}
+                )
+                # item_dist's own zero always sits exactly at the
+                # boundary shared with persons -- in horizontal
+                # orientation that boundary is a narrow vertical seam
+                # with both panels' own "0" label sitting right next to
+                # it, close enough to visually collide. Dropping
+                # item_dist's own redundant zero (ax's own stays) avoids
+                # that; not an issue in vertical orientation, where the
+                # seam is horizontal and the two labels don't compete
+                # for the same space.
+                if drop_zero and not is_vertical:
+                    ticks = [t for t in ticks if t != 0]
+                labels = (
+                    [f"{abs(t):.2f}" for t in ticks]
+                    if prop
+                    else [str(int(round(abs(t)))) for t in ticks]
+                )
+                if is_vertical:
+                    ax_obj.set_yticks(ticks)
+                    ax_obj.set_yticklabels(labels, fontsize=labelsize)
+                else:
+                    ax_obj.set_xticks(ticks)
+                    ax_obj.set_xticklabels(labels, fontsize=labelsize)
+
+            if item_labels:
+                if person_sign > 0:
+                    _relabel(ax, person_range, person_step, 0, 1)
+                else:
+                    _relabel(ax, 0, 1, person_range, person_step)
+            elif person_sign > 0:
+                _relabel(ax, person_range, person_step, item_range, item_step)
+            else:
+                _relabel(ax, item_range, item_step, person_range, person_step)
+
+            if item_distribution:
+                if item_sign > 0:
+                    _relabel(ax_item_dist, item_range, item_step, 0, 1, drop_zero=True)
+                else:
+                    _relabel(ax_item_dist, 0, 1, item_range, item_step, drop_zero=True)
+
+            # explicit boundary line at 0, replacing (not just visually
+            # stacked on top of) the regular gridline that would
+            # otherwise also be drawn there -- relying on this line's own
+            # width/zorder to fully cover that gridline was fragile: as
+            # two separately-rendered Line2D objects, sub-pixel rounding
+            # can put them at very slightly different pixel positions
+            # even at the same data coordinate 0, leaving a faint grey
+            # sliver just next to the black line rather than under it.
+            # Both this and the "hide the gridline that would otherwise
+            # sit right under it" cleanup need the *final* tick set from
+            # _relabel above -- doing this earlier (against whatever
+            # ticks autoscale had chosen before the real limits were
+            # even set) hid whichever gridline happened to occupy that
+            # position in the stale tick list, not necessarily the one
+            # actually at 0.
+            if orientation == "vertical":
+                ax.axhline(0, color="black", linewidth=1.3, zorder=5)
+                for tick, gridline in zip(ax.get_yticks(), ax.yaxis.get_gridlines()):
+                    if tick == 0:
+                        gridline.set_visible(False)
+                # ax's own axhline is clipped to ax's own box, so its
+                # rendered width only ever eats into the persons side --
+                # the item panel's side of that same boundary is left
+                # with no black pixels to reach into at all, which is
+                # what actually made the two sides look asymmetric (one
+                # side's tick visibly "covers" part of the boundary,
+                # the other's just abuts a boundary that was never
+                # there on its side to begin with), even though both
+                # ticks are the same true length. Mirroring the line on
+                # ax_items, clipped to *its* own box, gives the item
+                # side an equal, equally-covered sliver instead
+                if item_labels:
+                    ax_items.axhline(
+                        -item_row_margin, color="black", linewidth=1.3, zorder=5
+                    )
+            else:
+                ax.axvline(0, color="black", linewidth=1.3, zorder=5)
+                if item_labels:
+                    ax_items.axvline(
+                        -item_row_margin, color="black", linewidth=1.3, zorder=5
+                    )
+                for tick, gridline in zip(ax.get_xticks(), ax.xaxis.get_gridlines()):
+                    if tick == 0:
+                        gridline.set_visible(False)
+
+            if orientation == "vertical":
+                loc_axis.set_xlabel(
+                    "Location", fontsize=axis_font_size, fontweight="bold"
+                )
+                ax.set_ylabel(
+                    "Density" if prop else "Count",
+                    fontsize=axis_font_size,
+                    fontweight="bold",
+                )
+                if item_distribution:
+                    # one shared "Count"/"Density" label instead of one per
+                    # panel -- re-centre ax's own label (rather than also
+                    # labelling ax_item_dist) across both panels' combined
+                    # span, computed in ax's own axes-fraction coordinates
+                    # since item_dist sits directly below it. The x offset
+                    # has to clear whichever panel's tick labels are wider.
+                    # Measuring the tick labels' own rendered extent
+                    # directly (rather than reading label.get_position()
+                    # after a draw, which returns a display-space value
+                    # from matplotlib's internal auto-layout transform,
+                    # not a reusable axes-fraction one) and converting
+                    # that through transAxes is what actually round-trips
+                    # correctly into set_label_coords.
+                    fig.canvas.draw()
+                    renderer = fig.canvas.get_renderer()
+
+                    def _leftmost_tick_x(target_ax):
+                        return min(
+                            t.get_window_extent(renderer=renderer).x0
+                            for t in target_ax.yaxis.get_ticklabels()
+                            if t.get_text()
+                        )
+
+                    left_px = min(_leftmost_tick_x(ax), _leftmost_tick_x(ax_item_dist))
+                    label_x = ax.transAxes.inverted().transform((left_px, 0))[0]
+                    # a little further out again, in axes-fraction, so the
+                    # label doesn't sit flush against the tick numbers
+                    label_x -= 0.03 * 0.6
+                    mid_y = 0.5 * (1 - item_dist_panel_h / person_panel_h)
+                    ax.yaxis.set_label_coords(label_x, mid_y)
+            else:
+                loc_axis_h.set_ylabel(
+                    "Location", fontsize=axis_font_size, fontweight="bold"
+                )
+                ax.set_xlabel(
+                    "Density" if prop else "Count",
+                    fontsize=axis_font_size,
+                    fontweight="bold",
+                )
+                if item_distribution:
+                    # one shared "Count"/"Density" label instead of one per
+                    # panel -- re-centre ax's own label across both panels'
+                    # combined span (in ax's own axes-fraction coordinates,
+                    # since item_dist sits directly to its right) instead
+                    # of also labelling ax_item_dist. Measured the same way
+                    # as the vertical case above, for the same reason:
+                    # label.get_position() after a draw returns a display-
+                    # space value from matplotlib's internal auto-layout
+                    # transform, not one set_label_coords can reuse.
+                    fig.canvas.draw()
+                    renderer = fig.canvas.get_renderer()
+
+                    def _bottommost_tick_y(target_ax):
+                        return min(
+                            t.get_window_extent(renderer=renderer).y0
+                            for t in target_ax.xaxis.get_ticklabels()
+                            if t.get_text()
+                        )
+
+                    bottom_px = min(_bottommost_tick_y(ax), _bottommost_tick_y(ax_item_dist))
+                    label_y = ax.transAxes.inverted().transform((0, bottom_px))[1]
+                    label_y -= 0.05 * 0.6
+                    mid_x = 0.5 * (1 + item_dist_panel_w / person_panel_w)
+                    ax.xaxis.set_label_coords(mid_x, label_y)
+
+            ax.tick_params(axis="x", labelsize=labelsize)
+            ax.tick_params(axis="y", labelsize=labelsize)
+            if item_labels:
+                loc_axis.tick_params(axis="x", labelsize=labelsize)
+                loc_axis_h.tick_params(axis="y", labelsize=labelsize)
+            if item_distribution:
+                ax_item_dist.tick_params(axis="x", labelsize=labelsize)
+                ax_item_dist.tick_params(axis="y", labelsize=labelsize)
+
+            if title is not None:
+                if item_labels:
+                    # ax.set_title() centres over just the persons panel,
+                    # which is only part of the figure width in horizontal
+                    # orientation (reading as left-aligned) -- a figure-
+                    # level suptitle centres over the whole figure instead,
+                    # giving consistent placement in both orientations.
+                    # Pulling y down from its 0.4-of-the-margin default
+                    # leaves clearance below the title before the axes.
+                    title_y = 1 - (margin_top_in * 0.4) / fig_h
+                    fig.suptitle(
+                        title, fontsize=title_font_size, fontweight="bold", y=title_y
+                    )
+                else:
+                    ax.set_title(title, fontsize=title_font_size, fontweight="bold")
+
+            # a legend can show handles from any axes, not just its own --
+            # pooling persons' and item_dist's handles onto one legend
+            # drawn on ax keeps a single legend box in the persons panel
+            # instead of a second one competing for space (and fighting
+            # "best" placement) inside item_dist
+            legend_handles, legend_labels = ax.get_legend_handles_labels()
+            if item_distribution:
+                dist_handles, dist_labels = ax_item_dist.get_legend_handles_labels()
+                legend_handles += dist_handles
+                legend_labels += dist_labels
+            # low-count locations sit near whichever side person_sign's
+            # baseline is on -- normally that's the left (unflipped), so
+            # "upper right" is clear. Flipped (horizontal + item_distribution)
+            # puts the baseline on the right instead, so the empty corner
+            # swaps to upper left.
+            legend_loc = "upper left" if person_sign < 0 else "upper right"
+            ax.legend(legend_handles, legend_labels, loc=legend_loc)
+
+            if filename is not None:
+                fig.savefig(filename + f".{file_format}", dpi=dpi)
+
+            plt.show(block=False)
+            plt.pause(0.001)
+            plt.close(fig)

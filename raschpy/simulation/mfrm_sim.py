@@ -46,7 +46,7 @@ class MFRM_Sim(Rasch_Sim):
     threshold_facet_range : float, default 1
         model='bivector' only. Total spread of per-(facet_element, threshold)
         facet_effect effects across the full facet_element x threshold matrix in logits.
-    category_base : float, default 1
+    category_base : float, default 2
         Base width of each rating category. Larger values produce wider,
         more ordered categories.
     person_sd : float, default 1.5
@@ -107,10 +107,18 @@ class MFRM_Sim(Rasch_Sim):
     facet_effects : pandas.Series or dict
         True facet_element effect parameters. Structure depends on model.
     item_effects : pandas.DataFrame
-        model='bivector' only. True per-(facet_element, item) facet_effect effects.
+        model='bivector' only. True per-(facet_element, item) facet_effect
+        effects. Zero-mean per item across facet_elements; the per-facet_element
+        mean is free and carries that facet_element's overall level (including
+        any level folded in from ``threshold_effects`` during canonicalisation).
     threshold_effects : pandas.DataFrame
         model='bivector' only. True per-(facet_element, threshold) facet_effect
-        effects, zero-mean per threshold across facet_elements.
+        effects. Zero-sum per facet_element (shape only) *and* zero-mean per
+        threshold across facet_elements -- the exact representation the bivector
+        estimator identifies, so recovered and generating tables are directly
+        comparable. ``full[r,i,k] = item_effects[r,i] + threshold_effects[r,k]``
+        is invariant to the per-facet_element gauge shift this pins down, so the
+        sampled responses do not depend on it.
     cat_probs : dict
         {cat: DataFrame} of category probabilities used for simulation.
     person_names : list of str
@@ -134,7 +142,7 @@ class MFRM_Sim(Rasch_Sim):
         facet_range=2,
         item_facet_range=2,
         threshold_facet_range=1,
-        category_base=1,
+        category_base=2,
         person_sd=1.5,
         max_disorder=0,
         offset=0,
@@ -528,10 +536,9 @@ class MFRM_Sim(Rasch_Sim):
                 raw -= raw.mean(axis=0, keepdims=True)
                 item_effects = pd.DataFrame(raw, index=self.facet_names, columns=self.item_names)
 
-            # Threshold effects — (R, K): zero-sum per facet_element, centred per threshold
-            # across facet_elements — matching the "matrix" branch's per-cell centring
-            # above, otherwise a nonzero true per-threshold mean shows up as a constant
-            # bias against the (correctly zero-centred) estimates.
+            # Threshold effects — (R, K). Generated with per-threshold (axis 0)
+            # centring, then canonicalised below to the exact representation the
+            # bivector estimator identifies.
             if manual_threshold_effects is not None:
                 assert (
                     len(manual_threshold_effects) == self.no_of_facet_elements
@@ -549,6 +556,22 @@ class MFRM_Sim(Rasch_Sim):
                 threshold_effects = pd.DataFrame(
                     raw, index=self.facet_names, columns=range(1, self.max_score + 1)
                 )
+
+            # Canonicalise to the identified bivector representation: the split
+            # full[r,i,k] = item_effect[r,i] + threshold_effect[r,k] has a
+            # per-facet_element gauge freedom (add c_r to a rater's item-effect
+            # row, subtract it from its threshold-effect row -> same full), which
+            # the estimator pins by forcing threshold_effect to sum to zero
+            # within each facet_element and letting the item-effect row carry the
+            # per-facet_element level. Match that here, so recovered and
+            # generating parameters are directly comparable, table for table.
+            # full is unchanged, so the sampled responses are identical.
+            if isinstance(item_effects, pd.DataFrame) and isinstance(
+                threshold_effects, pd.DataFrame
+            ):
+                per_element_level = threshold_effects.mean(axis=1)
+                threshold_effects = threshold_effects.sub(per_element_level, axis=0)
+                item_effects = item_effects.add(per_element_level, axis=0)
 
             self.item_effects = item_effects
             self.threshold_effects = threshold_effects

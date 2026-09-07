@@ -23,7 +23,7 @@ class RSM_Sim(Rasch_Sim):
         Maximum possible score per item (number of categories minus 1).
     item_range : float, default 3
         Total spread of item difficulties in logits.
-    category_base : float, default 1
+    category_base : float, default 2
         Base width of each rating category. Larger values produce wider,
         more ordered categories.
     person_sd : float, default 1.5
@@ -82,7 +82,7 @@ class RSM_Sim(Rasch_Sim):
         no_of_persons,
         max_score,
         item_range=3,
-        category_base=1,
+        category_base=2,
         person_sd=1.5,
         max_disorder=0,
         offset=0,
