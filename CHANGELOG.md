@@ -2,6 +2,17 @@
 
 All notable changes to RaschPy are documented in this file.
 
+## [1.3.1] - 2026-09-08
+
+### Fixed
+- **`wright_map(person_scaling=...)` was a no-op in the mirrored map** (`item_labels=False`, the default layout) for `RSM` and `PCM`. The argument is documented as rebalancing the item distribution against the person distribution, but it only ever resized the separate `item_distribution=True` panel — the back-to-back mirrored histogram/KDE ignored it entirely. `MFRM` handled the same case differently again, silently promoting the mirrored map to a dedicated scale-matched item panel (changing the whole layout) whenever `person_scaling != 1`. All four model classes now behave consistently: in the mirrored map the zero baseline shifts so the item side (and, for `MFRM`, a facet overlaid on it) reads `person_scaling`× larger per Count/Density unit, at unchanged figure size (the person side is compressed to make room); tick **labels** stay at their true counts. The dedicated `item_distribution` panel still grows the figure to match, as before. `person_scaling=1` output is unchanged on every model class.
+- **`MFRM.wright_map` drew the item and facet-element (rater) panels at different per-count physical scales when `person_scaling != 1`** — the separate facet panel's height was sized against `person_range + item_range`, ignoring that the shared axis's item side had been stretched by `person_scaling`, so a rater count and an item count rendered at visibly different heights. The facet panel is now sized against `person_range + item_range·person_scaling`, so the two match; `facet_scaling` still overrides. `person_scaling=1` output is unchanged.
+- **`wright_map` legend labelled the item histogram/KDE "Items" regardless of `item_level`.** With `item_level='thresholds'` (or `item_strip=True`, which forces the per-threshold flattening) the mirrored / `item_distribution` distribution is of Rasch–Andrich thresholds, not item central locations; its legend entry now reads "Thresholds" in those cases, across `RSM`/`PCM`/`MFRM`. `MFRM` keeps its separate facet ("raters") entry alongside.
+
+### Added
+- **`SLM.wright_map` gains `person_scaling`, `person_lim` and `item_lim`**, matching `RSM`/`PCM`, and its count/density axis is brought onto the same machinery as the other three model classes — `_nice_ceil_and_step` "neat" ceilings with an evenly-dividing tick step, explicit axis limits set from the resolved `person_range`/`item_range` rather than left to autoscale, and the shared `_relabel` tick routine (which also removes a latent quirk where a sparse mirrored item axis could pick up an over-scaled phantom tick from the autoscale locator). `SLM.wright_map` at default arguments is visually unchanged apart from its count-axis tick ceilings now quantising the same way as `RSM`/`PCM`/`MFRM`; no numeric output is affected. `Examples/Model classes/SLM` wright-map image differs on regeneration.
+- `tests/run_smoke_tests.py` gains `wright_map` coverage in every model's plot list and a `run_wright_map_scaling` runner asserting the mirrored-map `person_scaling` contract (item side ×k, person side and figure size unchanged, tick labels stay true counts) across all four model classes.
+
 ## [1.3.0] - 2026-09-06
 
 ### Added

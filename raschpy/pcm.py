@@ -7159,20 +7159,22 @@ class PCM(Rasch):
             (mirrored onto the same axis as persons when
             item_labels=False, or their own item_distribution panel).
         person_scaling : float, default 1
-            Deliberately breaks the "same Count/Density value reads at
-            the same physical scale" property that item_distribution's
-            panel sizing otherwise guarantees, in favour of giving that
-            panel more usable room -- useful when there are far more
-            persons than items, which otherwise leaves the item panel's
-            own real variation looking like a flat, uninformative
-            squiggle at persons' own scale. person_scaling=10 makes the
-            item panel 10x larger than a strict equal-scale match would
-            give it (so persons' own axis effectively reads 10x coarser
-            than items') -- persons' and items' own displayed axis
-            values are unaffected either way, only how much physical
-            space item_distribution's panel gets. Only has an effect
-            when item_distribution=True (the only case this panel-size
-            matching applies to for RSM/PCM).
+            Rebalances the item distribution against the person
+            distribution: with person_scaling=10 the item side reads 10x
+            larger per Count/Density unit than the person side, so the
+            item distribution takes 10x more of the plot. Useful when far
+            more persons than items otherwise leave the item distribution
+            a flat, uninformative squiggle at the persons' scale. Both
+            sides keep their true tick-label values either way. Applies
+            wherever both distributions are drawn as hist/KDE. In the
+            mirrored single-axis map (item_labels=False) the zero
+            baseline simply shifts to give the item side more of the
+            shared axis, at the same figure size -- the person side is
+            compressed to make room. With a dedicated item_distribution
+            panel (item_distribution=True) that panel is instead grown to
+            match, enlarging the figure. No effect when items are shown
+            only as labels (item_labels=True, item_distribution=False),
+            where there is no item distribution to rebalance against.
         no_of_bins : int, default 20
             Number of histogram bins spanning the location range. Also
             defines the location-binning grid used for item_labels=True.
@@ -7286,6 +7288,14 @@ class PCM(Rasch):
             item_labels = True
 
         base_items = self.items if item_names is None else self.items.loc[item_names]
+
+        # the mirrored / item_distribution hist/KDE draws Rasch-Andrich
+        # thresholds rather than item central locations whenever item_level
+        # asks for them (or item_strip forces the per-threshold
+        # flattening) -- label its legend entry to match.
+        item_dist_label = (
+            "Thresholds" if (item_level == "thresholds" or item_strip) else "Items"
+        )
 
         if item_level == "items" and not item_strip:
             items = base_items
@@ -7529,6 +7539,16 @@ class PCM(Rasch):
             item_step = _nice_step_for(item_lim, _integer_counts)
         else:
             item_range, item_step = _nice_ceil_and_step(item_natural_max, _integer_counts)
+
+        # In the mirrored single-axis map (item_labels=False) persons and
+        # items share one count axis, so person_scaling has no separate
+        # panel to resize the way it does with item_distribution=True.
+        # Instead it enlarges the item side of that shared axis by this
+        # factor: the item distribution ends up person_scaling x larger
+        # relative to persons, with the figure size unchanged (the person
+        # side is compressed to make room). 1 elsewhere, so the
+        # item_labels / item_distribution paths are untouched.
+        mirror_item_scale = person_scaling if not item_labels else 1
 
         # breathing room reserved before row 0 of the item panel (used for
         # both the boundary_margin below and, when distribution_markers
@@ -8121,7 +8141,7 @@ class PCM(Rasch):
             # both at once ---
             if item_ax is not None:
                 if map_type == "hist":
-                    item_weights = item_sign * np.ones_like(items)
+                    item_weights = item_sign * mirror_item_scale * np.ones_like(items)
                     if prop:
                         item_weights = item_weights / no_of_items
 
@@ -8131,14 +8151,14 @@ class PCM(Rasch):
                         bins=bins,
                         color=item_color,
                         edgecolor=edge_color,
-                        label="Items",
+                        label=item_dist_label,
                         alpha=alpha,
                         orientation=orientation,
                     )
 
                 else:
                     kde_items = gaussian_kde(items, bw_method=bw_method)(x_grid)
-                    item_curve = item_sign * (
+                    item_curve = item_sign * mirror_item_scale * (
                         kde_items if prop else kde_items * no_of_items
                     )
 
@@ -8157,7 +8177,7 @@ class PCM(Rasch):
                             alpha=alpha,
                             edgecolor=item_line_color,
                             linewidth=line_width,
-                            label="Items",
+                            label=item_dist_label,
                         )
                     else:
                         item_ax.plot(
@@ -8174,7 +8194,7 @@ class PCM(Rasch):
                             alpha=alpha,
                             edgecolor=item_line_color,
                             linewidth=line_width,
-                            label="Items",
+                            label=item_dist_label,
                         )
 
             if item_distribution:
@@ -8961,8 +8981,9 @@ class PCM(Rasch):
                 ax_lo = -person_range if person_sign < 0 else 0
                 ax_hi = person_range if person_sign > 0 else 0
             else:
-                ax_lo = -(person_range if person_sign < 0 else item_range)
-                ax_hi = person_range if person_sign > 0 else item_range
+                item_extent = item_range * mirror_item_scale
+                ax_lo = -(person_range if person_sign < 0 else item_extent)
+                ax_hi = person_range if person_sign > 0 else item_extent
             if is_vertical:
                 ax.set_ylim(ax_lo, ax_hi)
             else:
@@ -8987,11 +9008,23 @@ class PCM(Rasch):
                 n = int(round(reach / step))
                 return [i * step for i in range(n + 1)]
 
-            def _relabel(ax_obj, pos_reach, pos_step, neg_reach, neg_step, drop_zero=False):
-                ticks = sorted(
-                    set(_side_ticks(pos_reach, pos_step))
-                    | {-t for t in _side_ticks(neg_reach, neg_step)}
-                )
+            def _relabel(
+                ax_obj,
+                pos_reach,
+                pos_step,
+                neg_reach,
+                neg_step,
+                drop_zero=False,
+                pos_scale=1.0,
+                neg_scale=1.0,
+            ):
+                # (tick position, label value) pairs: a side whose count
+                # axis was stretched by mirror_item_scale keeps its tick
+                # *labels* at the true counts, only spaced further apart
+                # (pos_scale / neg_scale = 1 everywhere else).
+                pairs = {(t * pos_scale, t) for t in _side_ticks(pos_reach, pos_step)}
+                pairs |= {(-t * neg_scale, -t) for t in _side_ticks(neg_reach, neg_step)}
+                pairs = sorted(pairs)
                 # item_dist's own zero always sits exactly at the
                 # boundary shared with persons -- in horizontal
                 # orientation that boundary is a narrow vertical seam
@@ -9002,17 +9035,18 @@ class PCM(Rasch):
                 # seam is horizontal and the two labels don't compete
                 # for the same space.
                 if drop_zero and not is_vertical:
-                    ticks = [t for t in ticks if t != 0]
+                    pairs = [pl for pl in pairs if pl[0] != 0]
+                positions = [p for p, _ in pairs]
                 labels = (
-                    [f"{abs(t):.2f}" for t in ticks]
+                    [f"{abs(v):.2f}" for _, v in pairs]
                     if prop
-                    else [str(int(round(abs(t)))) for t in ticks]
+                    else [str(int(round(abs(v)))) for _, v in pairs]
                 )
                 if is_vertical:
-                    ax_obj.set_yticks(ticks)
+                    ax_obj.set_yticks(positions)
                     ax_obj.set_yticklabels(labels, fontsize=labelsize)
                 else:
-                    ax_obj.set_xticks(ticks)
+                    ax_obj.set_xticks(positions)
                     ax_obj.set_xticklabels(labels, fontsize=labelsize)
 
             if item_labels:
@@ -9021,9 +9055,25 @@ class PCM(Rasch):
                 else:
                     _relabel(ax, 0, 1, person_range, person_step)
             elif person_sign > 0:
-                _relabel(ax, person_range, person_step, item_range, item_step)
+                # vertical: items are the negative side of the shared axis
+                _relabel(
+                    ax,
+                    person_range,
+                    person_step,
+                    item_range,
+                    item_step,
+                    neg_scale=mirror_item_scale,
+                )
             else:
-                _relabel(ax, item_range, item_step, person_range, person_step)
+                # horizontal: items are the positive side of the shared axis
+                _relabel(
+                    ax,
+                    item_range,
+                    item_step,
+                    person_range,
+                    person_step,
+                    pos_scale=mirror_item_scale,
+                )
 
             if item_distribution:
                 if item_sign > 0:

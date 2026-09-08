@@ -5114,6 +5114,9 @@ class SLM(Rasch):
         map_type="hist",
         item_labels=False,
         item_distribution=False,
+        person_lim=None,
+        item_lim=None,
+        person_scaling=1,
         item_row_height=None,
         narrow_font=False,
         edge_padding=0.5,
@@ -5183,6 +5186,36 @@ class SLM(Rasch):
             If True, adds a third panel -- a plain (non-mirrored) hist or
             KDE of item locations -- between the person panel and the
             item_labels panel. Implies item_labels=True.
+        person_lim : float or None, default None
+            One-sided magnitude for persons' own Count/Density axis (e.g.
+            person_lim=30 shows 0 to 30). If None, chosen automatically
+            from persons' own natural peak, independently of items' own
+            scale. Persons' own panel always keeps its full physical
+            size regardless of this value -- items' own panel (when
+            item_distribution=True) is sized proportionally against it,
+            so a given Count/Density value reads at the same physical
+            scale in both.
+        item_lim : float or None, default None
+            One-sided magnitude for items' own Count/Density axis. Same
+            semantics as person_lim, for whichever panel items end up in
+            (mirrored onto the same axis as persons when
+            item_labels=False, or their own item_distribution panel).
+        person_scaling : float, default 1
+            Rebalances the item distribution against the person
+            distribution: with person_scaling=10 the item side reads 10x
+            larger per Count/Density unit than the person side, so the
+            item distribution takes 10x more of the plot. Useful when far
+            more persons than items otherwise leave the item distribution
+            a flat, uninformative squiggle at the persons' scale. Both
+            sides keep their true tick-label values either way. In the
+            mirrored single-axis map (item_labels=False) the zero
+            baseline simply shifts to give the item side more of the
+            shared axis, at the same figure size -- the person side is
+            compressed to make room. With a dedicated item_distribution
+            panel (item_distribution=True) that panel is instead grown to
+            match, enlarging the figure. No effect when items are shown
+            only as labels (item_labels=True, item_distribution=False),
+            where there is no item distribution to rebalance against.
         item_row_height : float or None, default None
             Physical height, in inches, allocated per stacked item-label
             row. If None, measured automatically from the longest item
@@ -5374,6 +5407,96 @@ class SLM(Rasch):
 
         bins = np.linspace(lo, hi, no_of_bins + 1)
 
+        # --- count/density axis scale ---------------------------------------
+        # Each distribution's own natural peak (histogram bar height or KDE
+        # ordinate), used to pick a "neat" one-sided ceiling for its count
+        # axis before the figure is even built. Computed independently per
+        # distribution -- deliberately NOT sharing a single "widest" value
+        # across persons/items, since a small item set with a very
+        # different natural scale would otherwise force persons' own
+        # well-populated distribution onto a needlessly inflated (or
+        # cramped) scale.
+        def _natural_max(values, n):
+            if map_type == "hist":
+                counts, _ = np.histogram(values, bins=bins)
+                peak = counts.max() if len(counts) else 0
+                return peak / n if prop else peak
+            kde_vals = gaussian_kde(values, bw_method=bw_method)(
+                np.linspace(lo, hi, kde_points)
+            )
+            peak = kde_vals.max() if len(kde_vals) else 0
+            return peak if prop else peak * n
+
+        person_natural_max = _natural_max(persons.values, len(persons))
+        item_natural_max = _natural_max(items.values, no_of_items)
+
+        # rounds a natural peak up to a "neat" ceiling -- 1/1.5/2/2.5/3/
+        # 4/5/6/8/10 x a power of 10 -- and picks a tick step that divides
+        # it exactly, from a matching per-fraction divisor, rather than
+        # leaving the step to a separately-chosen locator that has no
+        # reason to land on a divisor of this specific ceiling. The 10%
+        # pad before searching guarantees the chosen ceiling sits visibly
+        # above the true peak even when that peak already IS a neat number
+        # itself -- without it the tallest bar/curve would land flush
+        # against the axis's own edge, with no headroom at all.
+        _nice_fractions = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10]
+        _nice_divisors = {1: 4, 1.5: 3, 2: 4, 2.5: 5, 3: 3, 4: 4, 5: 5, 6: 3, 8: 4, 10: 5}
+
+        def _nice_ceil_and_step(x, integer):
+            if x <= 0:
+                return 0, (1 if integer else 0.1)
+            x = x * 1.1
+            exponent = np.floor(np.log10(x))
+            fraction = x / 10**exponent
+            nice_fraction = next(f for f in _nice_fractions if f >= fraction - 1e-9)
+            ceiling = nice_fraction * 10**exponent
+            step = ceiling / _nice_divisors[nice_fraction]
+            if integer:
+                step = max(1, round(step))
+                ceiling = step * np.ceil(x / step)
+            return ceiling, step
+
+        def _nice_step_for(ceiling, integer):
+            # an explicit *_lim is used exactly as given (the ceiling
+            # itself isn't adjusted), but still gets a step matched to
+            # whichever known "nice" fraction it's closest to
+            if ceiling <= 0:
+                return 1 if integer else 0.1
+            exponent = np.floor(np.log10(ceiling))
+            fraction = ceiling / 10**exponent
+            nice_fraction = min(_nice_fractions, key=lambda f: abs(f - fraction))
+            step = ceiling / _nice_divisors[nice_fraction]
+            if integer:
+                step = max(1, round(step))
+            return step
+
+        _integer_counts = map_type == "hist" and not prop
+
+        if person_lim is not None:
+            person_range = person_lim
+            person_step = _nice_step_for(person_lim, _integer_counts)
+        else:
+            person_range, person_step = _nice_ceil_and_step(
+                person_natural_max, _integer_counts
+            )
+        if item_lim is not None:
+            item_range = item_lim
+            item_step = _nice_step_for(item_lim, _integer_counts)
+        else:
+            item_range, item_step = _nice_ceil_and_step(
+                item_natural_max, _integer_counts
+            )
+
+        # In the mirrored single-axis map (item_labels=False) persons and
+        # items share one count axis, so person_scaling has no separate
+        # panel to resize the way it does with item_distribution=True.
+        # Instead it enlarges the item side of that shared axis by this
+        # factor: the item distribution ends up person_scaling x larger
+        # relative to persons, with the figure size unchanged (the person
+        # side is compressed to make room). 1 elsewhere, so the
+        # item_labels / item_distribution paths are untouched.
+        mirror_item_scale = person_scaling if not item_labels else 1
+
         # breathing room reserved before row 0 of the item panel (used for
         # both the boundary_margin below and, when distribution_markers
         # draws a tick alongside each item-side mark, for keeping that
@@ -5561,13 +5684,23 @@ class SLM(Rasch):
             # figsize originally described the whole mirrored plot (persons
             # above, items below, sharing base_h/base_w). Now that items
             # get their own panel, persons only need the half of that
-            # budget they used to occupy. The optional item_distribution
-            # panel (a plain, non-mirrored item hist or KDE) gets a
-            # smaller supporting share of that same budget.
+            # budget they used to occupy -- and persons' own panel always
+            # gets that full share regardless of person_range. The
+            # item_distribution panel is sized proportionally to item_range
+            # vs person_range (times person_scaling), so a given
+            # Count/Density value reads at the same physical scale in both.
             person_panel_h = base_h / 2 if item_labels else base_h
             person_panel_w = base_w / 2 if item_labels else base_w
-            item_dist_panel_h = base_h / 3 if item_distribution else 0
-            item_dist_panel_w = base_w / 3 if item_distribution else 0
+            item_dist_panel_h = (
+                person_panel_h * (item_range / person_range) * person_scaling
+                if item_distribution and person_range > 0
+                else (person_panel_h if item_distribution else 0)
+            )
+            item_dist_panel_w = (
+                person_panel_w * (item_range / person_range) * person_scaling
+                if item_distribution and person_range > 0
+                else (person_panel_w if item_distribution else 0)
+            )
 
             # The persons panel always gets its full intended size -- adding
             # the item panel(s) grows the figure, it never shrinks the
@@ -5840,7 +5973,7 @@ class SLM(Rasch):
             # both at once ---
             if item_ax is not None:
                 if map_type == "hist":
-                    item_weights = item_sign * np.ones_like(items)
+                    item_weights = item_sign * mirror_item_scale * np.ones_like(items)
                     if prop:
                         item_weights = item_weights / no_of_items
 
@@ -5857,7 +5990,7 @@ class SLM(Rasch):
 
                 else:
                     kde_items = gaussian_kde(items, bw_method=bw_method)(x_grid)
-                    item_curve = item_sign * (
+                    item_curve = item_sign * mirror_item_scale * (
                         kde_items if prop else kde_items * no_of_items
                     )
 
@@ -6265,32 +6398,37 @@ class SLM(Rasch):
                         items, item_sign, marker_color, ax, person_mark_len
                     )
 
+            is_vertical = orientation == "vertical"
+
+            # each panel's own count/density (lo, hi) limits, set directly
+            # from person_range/item_range (an explicit *_lim override, or
+            # each distribution's own natural peak, resolved earlier)
+            # rather than left to independent autoscale -- this is also
+            # exactly what panel sizing above already assumed, so the
+            # rendered axis and the physical space allocated for it always
+            # agree. When persons and items still mirror onto the same ax
+            # (item_labels=False), each of its own two sides gets its own
+            # real range -- the item side stretched by mirror_item_scale
+            # for person_scaling.
             if item_labels:
-                # hist bars get a free "sticky edge" at their own baseline,
-                # so autoscale never pads beyond it -- fill_between (kde)
-                # has no such stickiness, and distribution_markers' own
-                # item/person marks (drawn with clip_on=False so they
-                # aren't clipped at their own panel's edge) still feed
-                # autoscale like any other data, regardless of clip_on.
-                # Left unpinned, either one pushes this boundary away from
-                # 0 -- widening ax's own box on the far side instead of
-                # letting the overhang bleed across into the item panel as
-                # intended, so it ends up clipped at ax's own, now
-                # relocated, edge instead. Pinning this boundary back to
-                # exactly 0 (and only this side, leaving the outer side's
-                # margin alone) keeps the panel boundary where it belongs
-                # regardless of what fed autoscale.
-                if orientation == "vertical":
-                    ax.set_ylim(bottom=0)
-                else:
-                    if person_sign < 0:
-                        ax.set_xlim(right=0)
+                ax_lo = -person_range if person_sign < 0 else 0
+                ax_hi = person_range if person_sign > 0 else 0
+            else:
+                item_extent = item_range * mirror_item_scale
+                ax_lo = -(person_range if person_sign < 0 else item_extent)
+                ax_hi = person_range if person_sign > 0 else item_extent
+            if is_vertical:
+                ax.set_ylim(ax_lo, ax_hi)
+            else:
+                ax.set_xlim(ax_lo, ax_hi)
 
             if item_distribution:
-                if orientation == "vertical":
-                    ax_item_dist.set_ylim(top=0)
+                dist_lo = -item_range if item_sign < 0 else 0
+                dist_hi = item_range if item_sign > 0 else 0
+                if is_vertical:
+                    ax_item_dist.set_ylim(dist_lo, dist_hi)
                 else:
-                    ax_item_dist.set_xlim(left=0)
+                    ax_item_dist.set_xlim(dist_lo, dist_hi)
 
             padding = (hi - lo) * 0.05 if pad else 0
             loc_axis = ax_items if (item_labels and orientation == "vertical") else ax
@@ -6333,14 +6471,96 @@ class SLM(Rasch):
                 if item_distribution:
                     ax_item_dist.set_yticks(loc_ticks)
 
+            def _side_ticks(reach, step):
+                # evenly spaced ticks from 0 to reach inclusive, using
+                # exactly the step already resolved (together with reach
+                # itself) to divide it evenly -- generated explicitly
+                # rather than left to a locator, which has no reason to
+                # land on a divisor of this specific ceiling
+                if reach <= 0 or step <= 0:
+                    return [0.0]
+                n = int(round(reach / step))
+                return [i * step for i in range(n + 1)]
+
+            def _relabel(
+                ax_obj,
+                pos_reach,
+                pos_step,
+                neg_reach,
+                neg_step,
+                drop_zero=False,
+                pos_scale=1.0,
+                neg_scale=1.0,
+            ):
+                # (tick position, label value) pairs: a side whose count
+                # axis was stretched by mirror_item_scale keeps its tick
+                # *labels* at the true counts, only spaced further apart
+                # (pos_scale / neg_scale = 1 everywhere else).
+                pairs = {(t * pos_scale, t) for t in _side_ticks(pos_reach, pos_step)}
+                pairs |= {(-t * neg_scale, -t) for t in _side_ticks(neg_reach, neg_step)}
+                pairs = sorted(pairs)
+                # a secondary panel's own zero sits exactly at the boundary
+                # shared with persons -- in horizontal orientation that
+                # boundary is a narrow vertical seam with both panels' own
+                # "0" label sitting right next to it, close enough to
+                # visually collide. Dropping the secondary panel's own
+                # redundant zero (ax's own stays) avoids that; not an
+                # issue in vertical orientation, where the seam is
+                # horizontal and the two labels don't compete for space.
+                if drop_zero and not is_vertical:
+                    pairs = [pl for pl in pairs if pl[0] != 0]
+                positions = [p for p, _ in pairs]
+                labels = (
+                    [f"{abs(v):.2f}" for _, v in pairs]
+                    if prop
+                    else [str(int(round(abs(v)))) for _, v in pairs]
+                )
+                if is_vertical:
+                    ax_obj.set_yticks(positions)
+                    ax_obj.set_yticklabels(labels, fontsize=labelsize)
+                else:
+                    ax_obj.set_xticks(positions)
+                    ax_obj.set_xticklabels(labels, fontsize=labelsize)
+
+            if item_labels:
+                if person_sign > 0:
+                    _relabel(ax, person_range, person_step, 0, 1)
+                else:
+                    _relabel(ax, 0, 1, person_range, person_step)
+            elif person_sign > 0:
+                # vertical: items are the negative side of the shared axis
+                _relabel(
+                    ax,
+                    person_range,
+                    person_step,
+                    item_range,
+                    item_step,
+                    neg_scale=mirror_item_scale,
+                )
+            else:
+                # horizontal: items are the positive side of the shared axis
+                _relabel(
+                    ax,
+                    item_range,
+                    item_step,
+                    person_range,
+                    person_step,
+                    pos_scale=mirror_item_scale,
+                )
+
+            if item_distribution:
+                if item_sign > 0:
+                    _relabel(ax_item_dist, item_range, item_step, 0, 1, drop_zero=True)
+                else:
+                    _relabel(ax_item_dist, 0, 1, item_range, item_step, drop_zero=True)
+
             # explicit boundary line at 0, replacing (not just visually
-            # stacked on top of) the regular gridline that would
-            # otherwise also be drawn there -- relying on this line's own
-            # width/zorder to fully cover that gridline was fragile: as
-            # two separately-rendered Line2D objects, sub-pixel rounding
-            # can put them at very slightly different pixel positions
-            # even at the same data coordinate 0, leaving a faint grey
-            # sliver just next to the black line rather than under it
+            # stacked on top of) the regular gridline that would otherwise
+            # also be drawn there -- as two separately-rendered Line2D
+            # objects, sub-pixel rounding can put them at very slightly
+            # different pixel positions even at the same data coordinate 0,
+            # leaving a faint grey sliver next to the black line. Needs the
+            # *final* tick set from _relabel above, so it runs after it.
             if orientation == "vertical":
                 ax.axhline(0, color="black", linewidth=1.3, zorder=5)
                 for tick, gridline in zip(ax.get_yticks(), ax.yaxis.get_gridlines()):
@@ -6348,15 +6568,8 @@ class SLM(Rasch):
                         gridline.set_visible(False)
                 # ax's own axhline is clipped to ax's own box, so its
                 # rendered width only ever eats into the persons side --
-                # the item panel's side of that same boundary is left
-                # with no black pixels to reach into at all, which is
-                # what actually made the two sides look asymmetric (one
-                # side's tick visibly "covers" part of the boundary,
-                # the other's just abuts a boundary that was never
-                # there on its side to begin with), even though both
-                # ticks are the same true length. Mirroring the line on
-                # ax_items, clipped to *its* own box, gives the item
-                # side an equal, equally-covered sliver instead
+                # mirroring the line on ax_items, clipped to *its* own box,
+                # gives the item side an equal, equally-covered sliver
                 if item_labels:
                     ax_items.axhline(
                         -item_row_margin, color="black", linewidth=1.3, zorder=5
@@ -6373,55 +6586,16 @@ class SLM(Rasch):
 
             if item_labels:
                 # ax's own boundary spine is redundant with the explicit
-                # axhline/axvline above -- both nominally sit at data 0,
-                # but as different Artist types (Spine vs Line2D) they
-                # can each round to a very slightly different sub-pixel
-                # position even at the identical data coordinate, leaving
-                # a faint second line just next to the axhline/axvline
-                # rather than exactly under it (the same issue as the
-                # coincident gridline above). Hiding the spine outright,
-                # rather than trying to position it to coincide, removes
-                # that mismatch instead of chasing sub-pixel alignment.
-                # Persons is always flipped in horizontal orientation
-                # now, so the boundary is always ax's right spine, never
-                # left.
+                # axhline/axvline above -- hiding it outright removes the
+                # sub-pixel Spine-vs-Line2D mismatch. Persons is always
+                # flipped in horizontal orientation now, so the boundary is
+                # always ax's right spine, never left.
                 if orientation == "vertical":
                     ax.spines["bottom"].set_visible(False)
                 else:
                     ax.spines["right"].set_visible(False)
 
-            # with a dedicated item panel, persons plot one-sided -- any
-            # tick on the *opposite* side of zero from person_sign is just
-            # autoscale reacting to the small item marker overhang, not a
-            # real count/density value, so it shouldn't be labelled (unlike
-            # the old mirrored single-axes mode, where both signs genuinely
-            # meant something and needed the abs() relabelling). Which side
-            # counts as "opposite" depends on person_sign, since horizontal
-            # item_distribution flips persons negative to stay back-to-back
-            # with item_dist.
             if orientation == "vertical":
-                ticks = ax.get_yticks()
-                if item_labels:
-                    ticks = [
-                        t for t in ticks if t == 0 or (t >= 0) == (person_sign >= 0)
-                    ]
-                ax.set_yticks(ticks)
-            else:
-                ticks = ax.get_xticks()
-                if item_labels:
-                    ticks = [
-                        t for t in ticks if t == 0 or (t >= 0) == (person_sign >= 0)
-                    ]
-                ax.set_xticks(ticks)
-
-            labels = (
-                [f"{abs(t):.2f}" for t in ticks]
-                if prop
-                else [str(int(abs(t))) for t in ticks]
-            )
-
-            if orientation == "vertical":
-                ax.set_yticklabels(labels, fontsize=labelsize)
                 loc_axis.set_xlabel(
                     "Location", fontsize=axis_font_size, fontweight="bold"
                 )
@@ -6431,18 +6605,6 @@ class SLM(Rasch):
                     fontweight="bold",
                 )
                 if item_distribution:
-                    # vertical flips item_sign negative, so its ticks read
-                    # negative too even though they're really magnitudes --
-                    # abs() them back to plain counts, same as ax does for
-                    # the old mirrored mode
-                    dist_ticks = ax_item_dist.get_yticks()
-                    dist_labels = (
-                        [f"{abs(t):.2f}" for t in dist_ticks]
-                        if prop
-                        else [str(int(abs(t))) for t in dist_ticks]
-                    )
-                    ax_item_dist.set_yticks(dist_ticks)
-                    ax_item_dist.set_yticklabels(dist_labels, fontsize=labelsize)
                     # one shared "Count"/"Density" label instead of one per
                     # panel -- re-centre ax's own label (rather than also
                     # labelling ax_item_dist) across both panels' combined
@@ -6474,7 +6636,6 @@ class SLM(Rasch):
                     mid_y = 0.5 * (1 - item_dist_panel_h / person_panel_h)
                     ax.yaxis.set_label_coords(label_x, mid_y)
             else:
-                ax.set_xticklabels(labels, fontsize=labelsize)
                 loc_axis_h.set_ylabel(
                     "Location", fontsize=axis_font_size, fontweight="bold"
                 )
@@ -6484,13 +6645,6 @@ class SLM(Rasch):
                     fontweight="bold",
                 )
                 if item_distribution:
-                    # item_dist's own 0 sits right at the boundary with
-                    # persons, so its label would otherwise collide with
-                    # persons' own max-count label at that same spot --
-                    # drop it rather than introduce a gap between the two
-                    # panels (0 is self-evident for a hist/kde baseline)
-                    dist_xticks = [t for t in ax_item_dist.get_xticks() if t != 0]
-                    ax_item_dist.set_xticks(dist_xticks)
                     # one shared "Count"/"Density" label instead of one per
                     # panel -- re-centre ax's own label across both panels'
                     # combined span (in ax's own axes-fraction coordinates,

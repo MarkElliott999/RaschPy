@@ -225,6 +225,12 @@ def run_slm(verbose=False):
         ('test_info',          lambda: m.test_info()),
         ('test_csem',          lambda: m.test_csem()),
         ('std_residuals_plot', lambda: m.std_residuals_plot()),
+        ('wright_map',                   lambda: m.wright_map()),
+        ('wright_map/person_scaling',    lambda: m.wright_map(person_scaling=5)),
+        ('wright_map/prop+scaling',      lambda: m.wright_map(prop=True, person_scaling=3)),
+        ('wright_map/horiz+scaling',     lambda: m.wright_map(orientation='horizontal', person_scaling=5)),
+        ('wright_map/item_labels',       lambda: m.wright_map(item_labels=True, person_scaling=5)),
+        ('wright_map/item_distribution', lambda: m.wright_map(item_distribution=True, person_scaling=5)),
     ]:
         try:
             call(); plt.close('all')
@@ -358,6 +364,12 @@ def run_pcm(verbose=False):
         ('test_info',          lambda: m.test_info()),
         ('test_csem',          lambda: m.test_csem()),
         ('std_residuals_plot', lambda: m.std_residuals_plot()),
+        ('wright_map',                   lambda: m.wright_map()),
+        ('wright_map/person_scaling',    lambda: m.wright_map(person_scaling=5)),
+        ('wright_map/prop+scaling',      lambda: m.wright_map(prop=True, person_scaling=3)),
+        ('wright_map/horiz+scaling',     lambda: m.wright_map(orientation='horizontal', person_scaling=5)),
+        ('wright_map/item_labels',       lambda: m.wright_map(item_labels=True, person_scaling=5)),
+        ('wright_map/item_distribution', lambda: m.wright_map(item_distribution=True, person_scaling=5)),
     ]:
         try:
             call(); plt.close('all')
@@ -482,6 +494,12 @@ def run_rsm(verbose=False):
         ('test_info',          lambda: m.test_info()),
         ('test_csem',          lambda: m.test_csem()),
         ('std_residuals_plot', lambda: m.std_residuals_plot()),
+        ('wright_map',                   lambda: m.wright_map()),
+        ('wright_map/person_scaling',    lambda: m.wright_map(person_scaling=5)),
+        ('wright_map/prop+scaling',      lambda: m.wright_map(prop=True, person_scaling=3)),
+        ('wright_map/horiz+scaling',     lambda: m.wright_map(orientation='horizontal', person_scaling=5)),
+        ('wright_map/item_labels',       lambda: m.wright_map(item_labels=True, person_scaling=5)),
+        ('wright_map/item_distribution', lambda: m.wright_map(item_distribution=True, person_scaling=5)),
     ]:
         try:
             call(); plt.close('all')
@@ -668,6 +686,11 @@ def run_mfrm_model(label, model_name, sim_cls, verbose=False):
         ('test_info',          lambda: m.test_info()),
         ('test_csem',          lambda: m.test_csem()),
         ('std_residuals_plot', lambda: m.std_residuals_plot()),
+        ('wright_map',                  lambda: m.wright_map(model_name)),
+        ('wright_map/person_scaling',   lambda: m.wright_map(model_name, person_scaling=5)),
+        ('wright_map/overlay+scaling',  lambda: m.wright_map(model_name, overlay_facet=True, person_scaling=5)),
+        ('wright_map/prop+scaling',     lambda: m.wright_map(model_name, prop=True, person_scaling=3)),
+        ('wright_map/item_labels',      lambda: m.wright_map(model_name, item_labels=True, person_scaling=5)),
     ]:
         try:
             with warnings.catch_warnings():
@@ -915,6 +938,9 @@ def run_bivector(verbose=False):
         ('test_info',    lambda: m.test_info(model='bivector')),
         ('test_csem',    lambda: m.test_csem(model='bivector')),
         ('std_residuals_plot', lambda: m.std_residuals_plot(model='bivector')),
+        ('wright_map',                 lambda: m.wright_map('bivector')),
+        ('wright_map/person_scaling',  lambda: m.wright_map('bivector', person_scaling=5)),
+        ('wright_map/overlay+scaling', lambda: m.wright_map('bivector', overlay_facet=True, person_scaling=5)),
     ]:
         try:
             call()
@@ -925,6 +951,138 @@ def run_bivector(verbose=False):
             plt.close('all')
 
 
+# ── wright_map person_scaling behaviour ──────────────────────────────────────
+
+def run_wright_map_scaling(verbose=False):
+    """
+    person_scaling must enlarge the item side of the mirrored (item_labels=
+    False) wright map by exactly that factor, leave the person side and the
+    figure size untouched, and never change the item-side tick *labels*.
+    """
+    section('wright_map / person_scaling')
+    tag = 'wright_map'
+
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    def _capture(make_plot):
+        """Return dict of figure/axis metrics for one mirrored wright map.
+
+        Reads ax.dataLim (the raw data extent, before autoscale margins) so
+        the person-side max and item-side min are directly comparable across
+        person_scaling values regardless of how each model sets its limits.
+        """
+        grabbed = {}
+        real_close = plt.close
+
+        def spy(fig=None):
+            f = fig if hasattr(fig, 'get_size_inches') else plt.gcf()
+            if 'size' not in grabbed and getattr(f, 'axes', None):
+                ax0 = f.axes[0]
+                dl = ax0.dataLim
+                grabbed['size'] = tuple(round(v, 4) for v in f.get_size_inches())
+                grabbed['data_lo'] = round(dl.y0, 6)   # item side (negative)
+                grabbed['data_hi'] = round(dl.y1, 6)   # person side (positive)
+                # largest labelled value on the item side (negative ticks) --
+                # must stay a TRUE count, never the person_scaling-inflated one
+                item_vals = []
+                for pos, lab in zip(ax0.get_yticks(), ax0.get_yticklabels()):
+                    txt = lab.get_text().replace('−', '-').strip()
+                    if pos < -1e-9 and txt:
+                        try:
+                            item_vals.append(abs(float(txt)))
+                        except ValueError:
+                            pass
+                grabbed['item_label_max'] = max(item_vals) if item_vals else 0.0
+            return real_close(fig)
+
+        plt.close = spy
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                make_plot()
+        finally:
+            plt.close = real_close
+            real_close('all')
+        return grabbed
+
+    K = 4
+
+    builders = []
+    try:
+        np.random.seed(SIM_SEED)
+        s = rp.SLM(SLM_Sim(no_of_items=N_ITEMS, no_of_persons=N_PERSONS).responses)
+        s.calibrate()
+        builders.append(('SLM', lambda ps: s.wright_map(person_scaling=ps)))
+    except Exception:
+        check(f'{tag} SLM setup', False, traceback.format_exc(), verbose)
+
+    try:
+        np.random.seed(SIM_SEED)
+        max_score_vec = [MAX_SCORE] * N_ITEMS
+        p = rp.PCM(PCM_Sim(no_of_items=N_ITEMS, no_of_persons=N_PERSONS,
+                           max_score_vector=max_score_vec).responses,
+                   max_score_vector=max_score_vec)
+        p.calibrate()
+        builders.append(('PCM', lambda ps: p.wright_map(person_scaling=ps)))
+    except Exception:
+        check(f'{tag} PCM setup', False, traceback.format_exc(), verbose)
+
+    try:
+        np.random.seed(SIM_SEED)
+        r = rp.RSM(RSM_Sim(no_of_items=N_ITEMS, no_of_persons=N_PERSONS,
+                           max_score=MAX_SCORE).responses, max_score=MAX_SCORE)
+        r.calibrate()
+        builders.append(('RSM', lambda ps: r.wright_map(person_scaling=ps)))
+    except Exception:
+        check(f'{tag} RSM setup', False, traceback.format_exc(), verbose)
+
+    try:
+        np.random.seed(SIM_SEED)
+        mm = rp.MFRM(MFRM_Sim_Global(no_of_items=N_ITEMS, no_of_persons=N_PERSONS,
+                                     no_of_facet_elements=N_RATERS,
+                                     max_score=MAX_SCORE).responses,
+                     max_score=MAX_SCORE)
+        mm.calibrate(model='global')
+        builders.append(('MFRM', lambda ps: mm.wright_map('global', overlay_facet=True,
+                                                          person_scaling=ps)))
+    except Exception:
+        check(f'{tag} MFRM setup', False, traceback.format_exc(), verbose)
+
+    for name, build in builders:
+        try:
+            base = _capture(lambda: build(1))
+            scaled = _capture(lambda: build(K))
+
+            # person side (max person count) untouched by person_scaling
+            check(f'{tag} {name} person side unchanged',
+                  abs(base['data_hi'] - scaled['data_hi']) < 1e-4,
+                  f"{base['data_hi']} vs {scaled['data_hi']}", verbose)
+
+            # item side (max item count, drawn negative) stretched by K
+            ratio = scaled['data_lo'] / base['data_lo']
+            check(f'{tag} {name} item side x{K}',
+                  abs(ratio - K) < 1e-3, f'ratio={ratio:.4f}', verbose)
+
+            # figure size unchanged (mirrored map never grows)
+            check(f'{tag} {name} figure size unchanged',
+                  base['size'] == scaled['size'],
+                  f"{base['size']} vs {scaled['size']}", verbose)
+
+            # item-side tick labels stay TRUE counts: even though the item
+            # side is drawn x{K} larger, its largest label must NOT grow
+            # with K -- it stays ~the same true-count ceiling as at ps=1
+            check(f'{tag} {name} item tick labels stay true counts',
+                  scaled['item_label_max'] >= 1
+                  and scaled['item_label_max'] <= base['item_label_max'] * 1.5 + 0.5,
+                  f"max item label {base['item_label_max']} (ps=1) -> "
+                  f"{scaled['item_label_max']} (ps={K})", verbose)
+        except Exception:
+            check(f'{tag} {name} person_scaling behaviour', False,
+                  traceback.format_exc(), verbose)
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 RUNNERS = {
@@ -933,6 +1091,7 @@ RUNNERS = {
     'rsm':      run_rsm,
     'mfrm':     run_mfrm,
     'bivector': run_bivector,
+    'wright_map': run_wright_map_scaling,
 }
 
 

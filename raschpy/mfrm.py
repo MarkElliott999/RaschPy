@@ -12515,23 +12515,22 @@ class MFRM(Rasch):
             own dedicated panel). Only used when the facet is shown as a
             distribution rather than facet_labels.
         person_scaling : float, default 1
-            Deliberately breaks the "same Count/Proportion value reads
-            at the same physical scale" property that item_distribution/
-            facet panel sizing otherwise guarantees, in favour of giving
-            those panels more usable room -- useful when there are far
-            more persons than items/facet elements, which otherwise
-            leaves the item/facet panel's own real variation looking
-            like a flat, uninformative squiggle at persons' own scale.
-            person_scaling=10 makes items'/the facet's own panel(s) 10x
-            larger than a strict equal-scale match would give them (so
-            persons' own axis effectively reads 10x coarser than theirs)
-            -- persons' and items'/the facet's own displayed axis values
-            are unaffected either way, only how much physical space
-            item_distribution's and/or the facet's own panel gets. Only
-            has an effect where panel sizing is already proportionally
-            matched to begin with (i.e. whenever ax itself is one-sided
-            -- item_labels=True); see person_lim above for why that
-            comparison isn't otherwise well-defined.
+            Rebalances the item (and facet) distribution against the
+            person distribution: with person_scaling=10 they read 10x
+            larger per Count/Proportion unit than the person side, so
+            they take 10x more of the plot. Useful when far more persons
+            than items/facet elements otherwise leave those distributions
+            a flat, uninformative squiggle at the persons' scale. All
+            sides keep their true tick-label values. When items (and, not
+            overlaid, the facet) have their own panel -- item_labels=True
+            or item_distribution=True -- that panel is grown to match,
+            enlarging the figure. In the mirrored single-axis map
+            (item_labels=False) the zero baseline instead shifts to give
+            the item side (and an overlaid facet) more of the shared
+            axis, at the same figure size -- the person side is
+            compressed to make room. See person_lim for why the
+            comparison isn't well-defined when items are shown only as
+            labels with no distribution.
         facet_scaling : float, default 1
             Reduces the facet panel's own physical size by this factor,
             on top of person_scaling -- independent of it, so the facet
@@ -12676,15 +12675,21 @@ class MFRM(Rasch):
         if item_labels or facet_labels:
             overlay_facet = False
 
-        # items get a genuine, separate, scale-matched panel whenever
-        # explicitly requested (item_distribution=True) or, even without
-        # item_labels, whenever person_scaling deliberately rebalances
-        # panel sizes -- the old mirrored mode (item_labels=False,
-        # person_scaling=1) is otherwise uninformative once persons
-        # vastly outnumber items, since items are then squeezed onto the
-        # same shared axis as persons' own much larger range, with no
-        # way to give them more visual room on that shared axis
-        item_dist_panel = item_distribution or (not item_labels and person_scaling != 1)
+        # items get a genuine, separate, scale-matched panel only when
+        # explicitly requested (item_distribution=True, which also forces
+        # item_labels=True above).
+        item_dist_panel = item_distribution
+
+        # In the mirrored single-axis map (item_labels=False) persons and
+        # items -- and an overlaid facet -- share one count axis, so
+        # person_scaling has no separate panel to resize. Instead, exactly
+        # as for SLM/RSM/PCM, it enlarges the item side of that shared
+        # axis by this factor: the item distribution (and any overlaid
+        # facet) ends up person_scaling x larger relative to persons, with
+        # the figure size unchanged (the person side is compressed to make
+        # room). 1 whenever items have their own panel, so the panel-
+        # sizing use of person_scaling below is untouched.
+        mirror_item_scale = person_scaling if not item_labels else 1
 
         base_items = self.items if item_names is None else self.items.loc[item_names]
 
@@ -12776,6 +12781,14 @@ class MFRM(Rasch):
                 _filter_by_rater(getattr(self, f"facet_effects_{model}"))
             )
         facet_label = self.facets.capitalize()
+
+        # the mirrored / item_distribution hist/KDE draws Rasch-Andrich
+        # thresholds rather than item central locations whenever item_level
+        # asks for them (or item_strip forces the per-threshold
+        # flattening) -- label its legend entry to match.
+        item_dist_label = (
+            "Thresholds" if (item_level == "thresholds" or item_strip) else "Items"
+        )
 
         if item_level == "items" and not item_strip:
             items = base_items
@@ -13304,17 +13317,17 @@ class MFRM(Rasch):
             #
             # The facet panel always matches items' own effective scale.
             # When items have their own panel (item_labels=True, or
-            # item_dist_panel even without item_labels), that's the same
-            # person_panel_h/person_range reference item_dist_panel_h
-            # itself uses below. When persons and items still mirror
-            # onto the *same* ax instead (item_labels=False,
-            # item_dist_panel=False -- which, per item_dist_panel's own
-            # definition above, only happens when person_scaling=1),
-            # items' effective scale IS ax's own: a single physical axis
-            # has one px-per-unit throughout, regardless of the two
-            # sides showing different data values, so ax's own combined
-            # span (person_range + item_range) against its own physical
-            # size gives that same reference directly.
+            # item_distribution=True), that's the same person_panel_h/
+            # person_range reference item_dist_panel_h itself uses below.
+            # When persons and items still mirror onto the *same* ax
+            # instead (item_labels=False), items' effective scale IS ax's
+            # own: a single physical axis has one px-per-unit throughout,
+            # regardless of the two sides showing different data values,
+            # so ax's own combined span (person_range + item_range)
+            # against its own physical size gives that same reference
+            # directly -- and person_scaling then stretches the item side
+            # of that span by mirror_item_scale (the facet panel picking
+            # up the same factor, below).
             person_panel_h = base_h / 2 if item_labels else base_h
             person_panel_w = base_w / 2 if item_labels else base_w
             item_dist_panel_h = (
@@ -13337,10 +13350,22 @@ class MFRM(Rasch):
                         * person_scaling
                         / facet_scaling
                     )
-                elif person_range + item_range > 0:
+                elif person_range + item_range * mirror_item_scale > 0:
+                    # mirrored map: persons and items share ax, whose total
+                    # span is (person_range + item_range * mirror_item_scale)
+                    # -- the item side stretched by mirror_item_scale (==
+                    # person_scaling here, 1 otherwise). Size the facet's own
+                    # panel so a facet count reads at the SAME physical
+                    # per-count scale as an item count on that stretched item
+                    # side: facet_panel_in / facet_range must equal
+                    # mirror_item_scale * person_panel / total_span. (Reduces
+                    # to the plain facet_range/(person_range+item_range) at
+                    # mirror_item_scale=1; facet_scaling still overrides.)
                     facet_panel_in = (
                         (person_panel_h if orientation == "vertical" else person_panel_w)
-                        * (facet_range / (person_range + item_range))
+                        * mirror_item_scale
+                        * facet_range
+                        / (person_range + item_range * mirror_item_scale)
                         / facet_scaling
                     )
                 else:
@@ -13608,7 +13633,7 @@ class MFRM(Rasch):
             # unflipped), or labelled rows in a dedicated panel, or both ---
             if item_ax is not None:
                 if map_type == "hist":
-                    item_weights = item_sign * np.ones_like(items)
+                    item_weights = item_sign * mirror_item_scale * np.ones_like(items)
                     if prop:
                         item_weights = item_weights / no_of_items
 
@@ -13618,14 +13643,14 @@ class MFRM(Rasch):
                         bins=bins,
                         color=item_color,
                         edgecolor=edge_color,
-                        label="Items",
+                        label=item_dist_label,
                         alpha=alpha,
                         orientation=orientation,
                     )
 
                 else:
                     kde_items = gaussian_kde(items, bw_method=bw_method)(x_grid)
-                    item_curve = item_sign * (
+                    item_curve = item_sign * mirror_item_scale * (
                         kde_items if prop else kde_items * no_of_items
                     )
 
@@ -13644,7 +13669,7 @@ class MFRM(Rasch):
                             alpha=alpha,
                             edgecolor=item_line_color,
                             linewidth=line_width,
-                            label="Items",
+                            label=item_dist_label,
                         )
                     else:
                         item_ax.plot(
@@ -13661,7 +13686,7 @@ class MFRM(Rasch):
                             alpha=alpha,
                             edgecolor=item_line_color,
                             linewidth=line_width,
-                            label="Items",
+                            label=item_dist_label,
                         )
 
             if item_dist_panel:
@@ -13672,9 +13697,13 @@ class MFRM(Rasch):
 
             # --- facets: hist/kde (own panel or overlaid onto items), or
             # labelled rows in a dedicated panel ---
+            # an overlaid facet shares the mirrored ax's item side, so it
+            # takes the same person_scaling stretch as items; a facet in
+            # its own panel does not (that panel has its own extent).
+            facet_mirror_scale = mirror_item_scale if facet_dist_ax is ax else 1
             if facet_dist_ax is not None:
                 if map_type == "hist":
-                    facet_weights = facet_sign * np.ones_like(facets)
+                    facet_weights = facet_sign * facet_mirror_scale * np.ones_like(facets)
                     if prop:
                         facet_weights = facet_weights / no_of_facets
 
@@ -13693,7 +13722,7 @@ class MFRM(Rasch):
 
                 else:
                     kde_facets = gaussian_kde(facets, bw_method=bw_method)(x_grid)
-                    facet_curve = facet_sign * (
+                    facet_curve = facet_sign * facet_mirror_scale * (
                         kde_facets if prop else kde_facets * no_of_facets
                     )
 
@@ -14354,18 +14383,19 @@ class MFRM(Rasch):
             # autoscale -- this is also exactly what panel sizing above
             # already assumed, so the rendered axis and the physical
             # space allocated for it always agree. ax is one-sided
-            # (persons only) whenever items have moved off it into their
-            # own panel -- either the item_labels row panel, or (even
-            # without item_labels) item_dist_panel's own scale-matched
-            # one; only when neither applies do persons and items still
-            # mirror onto the same ax, each of its own two sides getting
-            # its own real range rather than a shared one.
+            # (persons only) whenever items have their own panel
+            # (item_labels row panel and/or item_distribution's scale-
+            # matched one); otherwise persons and items mirror onto the
+            # same ax, each of its own two sides getting its own real
+            # range (the item side stretched by mirror_item_scale when
+            # person_scaling rebalances them).
             if item_labels or item_dist_panel:
                 ax_lo = -person_range if person_sign < 0 else 0
                 ax_hi = person_range if person_sign > 0 else 0
             else:
-                ax_lo = -(person_range if person_sign < 0 else item_range)
-                ax_hi = person_range if person_sign > 0 else item_range
+                item_extent = item_range * mirror_item_scale
+                ax_lo = -(person_range if person_sign < 0 else item_extent)
+                ax_hi = person_range if person_sign > 0 else item_extent
             if is_vertical:
                 ax.set_ylim(ax_lo, ax_hi)
             else:
@@ -14398,11 +14428,23 @@ class MFRM(Rasch):
                 n = int(round(reach / step))
                 return [i * step for i in range(n + 1)]
 
-            def _relabel(ax_obj, pos_reach, pos_step, neg_reach, neg_step, drop_zero=False):
-                ticks = sorted(
-                    set(_side_ticks(pos_reach, pos_step))
-                    | {-t for t in _side_ticks(neg_reach, neg_step)}
-                )
+            def _relabel(
+                ax_obj,
+                pos_reach,
+                pos_step,
+                neg_reach,
+                neg_step,
+                drop_zero=False,
+                pos_scale=1.0,
+                neg_scale=1.0,
+            ):
+                # (tick position, label value) pairs: a side whose count
+                # axis was stretched by mirror_item_scale keeps its tick
+                # *labels* at the true counts, only spaced further apart
+                # (pos_scale / neg_scale = 1 everywhere else).
+                pairs = {(t * pos_scale, t) for t in _side_ticks(pos_reach, pos_step)}
+                pairs |= {(-t * neg_scale, -t) for t in _side_ticks(neg_reach, neg_step)}
+                pairs = sorted(pairs)
                 # item_dist's/facet's own zero always sits exactly at the
                 # boundary shared with its neighbour -- in horizontal
                 # orientation that boundary is a narrow vertical seam
@@ -14413,17 +14455,18 @@ class MFRM(Rasch):
                 # where the seam is horizontal and the two labels don't
                 # compete for the same space.
                 if drop_zero and not is_vertical:
-                    ticks = [t for t in ticks if t != 0]
+                    pairs = [pl for pl in pairs if pl[0] != 0]
+                positions = [p for p, _ in pairs]
                 labels = (
-                    [f"{abs(t):.2f}" for t in ticks]
+                    [f"{abs(v):.2f}" for _, v in pairs]
                     if prop
-                    else [str(int(round(abs(t)))) for t in ticks]
+                    else [str(int(round(abs(v)))) for _, v in pairs]
                 )
                 if is_vertical:
-                    ax_obj.set_yticks(ticks)
+                    ax_obj.set_yticks(positions)
                     ax_obj.set_yticklabels(labels, fontsize=labelsize)
                 else:
-                    ax_obj.set_xticks(ticks)
+                    ax_obj.set_xticks(positions)
                     ax_obj.set_xticklabels(labels, fontsize=labelsize)
 
             if item_labels or item_dist_panel:
@@ -14432,9 +14475,25 @@ class MFRM(Rasch):
                 else:
                     _relabel(ax, 0, 1, person_range, person_step)
             elif person_sign > 0:
-                _relabel(ax, person_range, person_step, item_range, item_step)
+                # vertical: items are the negative side of the shared axis
+                _relabel(
+                    ax,
+                    person_range,
+                    person_step,
+                    item_range,
+                    item_step,
+                    neg_scale=mirror_item_scale,
+                )
             else:
-                _relabel(ax, item_range, item_step, person_range, person_step)
+                # horizontal: items are the positive side of the shared axis
+                _relabel(
+                    ax,
+                    item_range,
+                    item_step,
+                    person_range,
+                    person_step,
+                    pos_scale=mirror_item_scale,
+                )
 
             if item_dist_panel:
                 if item_sign > 0:
