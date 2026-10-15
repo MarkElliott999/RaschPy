@@ -11,9 +11,13 @@ _RaschPy_ has a parent class `Rasch` for analysis, with the following child clas
 ## Analysis
 To analyse data, create an object in the appropriate class, passing a pandas DataFrame of response data as an argument along with other arguments relevant to the chosen Rasch model, such as the maximum score for `RSM` or `MFRM`, or a vector of maximum scores for `PCM`. At the time of writing, the `RSM` and `MFRM` classes only support a single response group (i.e. all items must have the same threshold structure), and the `MFRM` class only supports one additional facet for rater severity. Parameter estimation uses variants of PAIR (Choppin 1968, 1985), the eigenvector method (Garner & Engelhard 2002, 2009) and CPAT (Elliott & Buttery 2022a, 2022b).
 
-Each model follows the same workflow: instantiate → calibrate → fit statistics → output tables → plots. All major results are stored as attributes on the model object after each step.
+**Estimation for `RSM` and `MFRM`.** By default (`estimation='cp-full-rcl'`), item locations, category widths and (for `MFRM`) rater parameters are estimated jointly by regularised composite likelihood (RCL): every pair of response patterns (k, l) and (k−1, l+1) on two items (or two raters) with the same total is a comparison in which the person cancels, and all of them are fitted at once, with additive smoothing on CPAT's comparisons and ridge penalties on the rater parameters, by Newton–Raphson. In simulation (194 random `RSM` designs; 155 random `MFRM` `global` designs), median threshold RMSE was on a par with conditional maximum likelihood for `RSM` (paired ratio 1.02) and better than TAM's MML for `MFRM` (0.88), with facet element effects on a par (1.01) and lighter error tails than either. `estimation='cpat-rcl'` restricts the fit to CPAT's comparisons (the v1.4.0 development default). This removes the compression of item locations and thresholds that pooling comparisons over raters causes in the extended `MFRM` parameterisations. `estimation='pair-cpat'` runs the published separate stages instead (items, then thresholds, then raters; v1.3 behaviour, apart from an adjusted `MFRM` threshold stage): its point estimates are faster to compute on very large designs, but less accurate in the extended parameterisations, and its `MFRM` standard errors come from the bootstrap rather than the analytic sandwich. The `MFRM` penalties can be set with `ridge=` (default 0.3, rater parameters of the non-stretch models), `interaction_ridge=` (default 3, the `matrix` model's interactions, shrinking it towards `bivector`) and `stretch_ridge=` (default 1, on `omega − 1` in the stretch models).
 
-`calibrate()` uses simulation-tuned additive-smoothing constants by default; for sparse or heavily-missing data, pass `robust=True` (`SLM`, `PCM`, `MFRM`) for a data-adaptive smoothing rule, or set `constant=` (and, for `RSM`/`MFRM`, `threshold_constant=`) to override directly.
+Each model follows the same workflow: instantiate → calibrate → fit statistics → output tables → plots. All major results are stored as attributes on the model object after each step. The stats-table methods (`item_stats_df()`, `person_stats_df()` etc.) also return their table, and take `filename=` to save it at the same time, e.g. `slm.item_stats_df(full=True, filename='slm_item_stats')`.
+
+`calibrate()` uses simulation-tuned additive-smoothing constants by default. On `SLM` the default is data-adaptive, `min(1, 0.548 · I^(−0.2 · log10 N))` for `N` persons and `I` items; on `PCM` it is `0.1 · N^0.15 · (1 − missing)^0.75 · K^−1.4` for maximum score `K`, applied per item pair as `(K_a · K_b)^−0.7` when maximum scores differ. On both, `robust=` is deprecated (it has no effect and raises a `FutureWarning`). For sparse or heavily-missing data on `MFRM` with `estimation='pair-cpat'`, pass `robust=True` for a data-adaptive smoothing rule (it does not apply to the RCL methods). On any class, set `constant=` (and, for `RSM`/`MFRM`, `threshold_constant=`) to override the default directly.
+
+> **Known issue (v1.4.0, fix planned for 1.4.1):** results computed earlier (standard errors, fit statistics, person estimates) are not refreshed if you recalibrate the same object with different settings. When changing calibration settings, create a new model object. See `CHANGELOG.md` for the full list of known issues.
 
 ## Examples
 
@@ -230,6 +234,18 @@ print(mfrm.rater_stats_items)  # Per-item severity table
 
 Persons with entirely missing data are always removed at instantiation and stored in `m.invalid_responses`. Persons with extreme scores (all-zero or perfect) are removed only when `extreme_persons=False` is passed to the constructor, and are stored in `m.extreme_persons`.
 
+**Empty, thin and extreme raters**
+
+On creation, `MFRM` removes raters with no responses (with a warning), and warns about raters that scored fewer than `min_persons` persons (default 3; listed in `m.thin_raters`) and raters who used only the lowest or highest score category (`m.extreme_raters`; as with an extreme-scoring person, location is not identifiable from the data). Remove them on creation with `drop_facet_elements='thin'` or `'extreme'` (or a list of names), or afterwards:
+
+```python
+mfrm = MFRM(responses)
+mfrm.drop_raters('thin')            # alias of drop_facet_elements(); also 'extreme' or a list
+print(mfrm.dropped_raters)
+```
+
+The same method is available for `MFRM_Sim` classes. When raters fall into groups never compared with each other, `calibrate()` warns that the groups' relative locations are not identified.
+
 ---
 
 ### Many-Facet Rasch Model — Bivector formulation
@@ -303,7 +319,7 @@ print(mfrm.rater_stats_pseudo_halo.columns.get_level_values(0).unique())  # ['Gl
 mfrm.save_stats(model='centrality', filename='mfrm_centrality_results', format='xlsx', alias=True)
 ```
 
-Pass `divergence_test='wald'` or `'t'` to run an item-by-item (or threshold-by-threshold) divergence test comparing the free vector model's own per-element estimates (`'items'` for `pseudo_halo`, `'thresholds'` for `centrality`) against the reconstructed vector from the stretch model , flagging elements where the stretch representation diverges significantly from what the vector model estimates – a graded, localised complement to the aggregate `lambda`/`omega` summary and to the discrete `model_selection()`/`per_rater_model_selection()` ladder. The SE is derived from a single, paired bootstrap: each bootstrap resample produces estimates for both the stretch model and its corresponding vector model, so for a given resample, the free and stretch estimates are produced from the same resampled dataset. The difference is calculated directly per resample before taking the SD, rather than combining two independently-bootstrapped SEs via `sqrt(se1**2+se2**2)`; this correctly accounts for the correlation between the two sets of estimates. Off by default (`divergence_test=None`) since it requires `store_bootstrap=True`, a larger bootstrap-object footprint:
+Pass `divergence_test='wald'` or `'t'` to test, for each item (`pseudo_halo`) or threshold (`centrality`), whether the stretch model's reconstructed value differs from the free vector model's estimate (`'items'` or `'thresholds'`), with standard errors from a paired bootstrap: each resample fits both models, and the difference is taken within each resample. Off by default (`divergence_test=None`):
 
 ```python
 mfrm.rater_stats_df(model='pseudo_halo', divergence_test='wald', correction='bh')
@@ -313,7 +329,7 @@ mfrm.rater_stats_df(model='centrality', full=True, divergence_test='wald')
 print(mfrm.rater_stats_centrality_full_vector['Threshold 1'])  # now has a 'Flagged' column too
 ```
 
-`'wald'` references the test statistic against the standard normal distribution. `'t'` instead uses a plain Student's t-distribution with `no_of_samples - 1` degrees of freedom for small numbers of bootstraps run for speed; this is not a paired t-test since this would require nested bootstrapping at high cost; since the t-test converges to the Wald result once `no_of_samples` is a few hundred (at `n=300`, p-values near `alpha=0.05` differ by ~2%), if speed is less important, run `'wald'` with a larger `no_of_samples` instead, which improves the SE estimate itself rather than just widening the reference distribution around it.
+`'wald'` uses the standard normal distribution; `'t'` uses a t-distribution with `no_of_samples - 1` degrees of freedom. The two agree once `no_of_samples` is a few hundred.
 
 `full=True` gives two more ways to see which elements were flagged, alongside the `'Flagged items'`/`'Flagged categories'` count still shown in the primary table: one plain True/False column per item and/or threshold is added to the primary table itself, directly after that count, for scanning flagged status across all elements at a glance – and `rater_stats_{model}_full_vector` separately gets a per-element `'Flagged'` column added to each item/threshold's own `Estimate`/`SE`/CI block, for the same information alongside that element's own detail:
 
@@ -455,6 +471,8 @@ print(mfrm.rater_stats_mixed)
 mfrm.per_rater_model_selection(test='LR', models=['global', 'items', 'thresholds', 'bivector'])
 ```
 
+Which parameterisation describes a rater depends on the frame of reference: by default each rater is compared with the average rater, so pass `anchors=` (a set of raters known to be well behaved) to compare with them instead. Where the design makes two parameterisations the same model (e.g. `centrality` and `thresholds` when `max_score=2`), both `model_selection()` and `per_rater_model_selection()` leave the later one out, with a warning; for dichotomous data only `global`, `items` and `pseudo_halo` are compared. `min_effect` is optional and a matter of taste: the tests alone classify well in simulation, and 0.43 and 0.64 mirror the ETS DIF category boundaries if a practical-importance gate is wanted.
+
 ---
 
 ### Category width statistics
@@ -473,7 +491,7 @@ print(mfrm.category_stats_global)
 
 ### Differential Item Functioning (DIF) and invariance testing
 
-`dif_test()` splits persons by an exogenous covariate (e.g. Gender, L1), calibrates each group independently, purifies them onto a common scale (so genuine DIF items can't distort the scale used to detect DIF), and tests every item for DIF against a chosen reference group — supporting covariates with any number of levels, each tested individually against the reference:
+`dif_test()` splits persons by an exogenous variable (e.g. Gender, L1), calibrates each group independently, purifies them onto a common scale (so genuine DIF items can't distort the scale used to detect DIF), and tests every item for DIF against a chosen reference group — supporting covariates with any number of levels, each tested individually against the reference:
 
 ```python
 import pandas as pd
@@ -487,14 +505,31 @@ print(slm.dif_table)          # per-item, per-focal-group DIF statistics
 print(slm.dif_omnibus_table)  # Andersen-style joint test per focal group
 ```
 
-For a simpler two-group check (a single Andersen likelihood-ratio test rather than the full anchor-purification workflow), use `andersen_lr_test(split_by='exogenous')` — note `split_by='person_location'`/`'score'` is disabled as a general model-fit test (found to have no power in simulation), so this is exogenous-covariate-only:
+For a single global test of invariance between two groups of persons (rather than the per-item anchor-purification workflow), use `global_fit()` (`SLM`, `PCM`, `RSM`): each group is calibrated separately and their estimates compared by a Wald test with sandwich covariances (Kauermann–Carroll small-sample correction by default). Split by an exogenous variable for DIF, or by score (the default) for discrimination differences:
 
 ```python
-slm.andersen_lr_test(split_by='exogenous', covariate='Gender')
-print(slm.andersen_lr, slm.andersen_df, slm.andersen_p)
+slm.global_fit(split='exogenous', covariate='Gender')
+print(slm.global_fit_summary)   # statistic, df, p-value, decision
+print(slm.global_fit_table)     # per-parameter differences, SEs and z
 ```
 
-`dif_test()` is available on `SLM`, `PCM`, and `RSM` — it is not yet implemented for `MFRM`. `andersen_lr_test()` is available on all four, with per-parameterisation variants on `MFRM` (e.g. `andersen_lr_test_global`).
+`dif_test()` is available on all four model classes, including `MFRM`. (`andersen_lr_test()` is deprecated: with PAIR/CPAT estimates, Andersen's likelihood-ratio test was not calibrated in simulation; it is reserved for conditional maximum likelihood estimates in a later version.)
+
+On `PCM`, `RSM`, and `MFRM`, `dif_test()` also tests **differential category functioning (DCF)**: whether the category widths differ by group, via `threshold_dif_table`, alongside the item-location `dif_table`. `size_adjust=True` inflates standard errors at very large N so that trivially small differences are not flagged: item-location SEs are scaled to `reference_n`, and category-width SEs are capped by `dcf_cap` (in information-weight units on `PCM`/`RSM`, in persons on `MFRM`).
+
+`MFRM` additionally supports `model=` on `dif_test()`, selecting which of the 8 rater parameterisations each group is calibrated under; and a separate `drf_test()` for **Differential Rater Functioning (DRF)**, the rater-location analogue of DIF:
+
+```python
+mfrm.dif_test(covariate='Gender', model='global')
+print(mfrm.dif_table)             # item-location DIF, per focal group
+print(mfrm.threshold_dif_table)   # DCF
+print(mfrm.dif_omnibus_table)     # omnibus test of items
+
+mfrm.drf_test(covariate='Gender', model='global')
+print(mfrm.drf_table)             # per-rater DRF, raters scored in both groups
+```
+
+`drf_test()`'s functioning depend on `model`: one Wald test per rater for `global`; a separate test of each rater's effect on each item or threshold for `items`/`thresholds`/`bivector`/`matrix`; and one joint test of each rater's shift and stretch parameters for `centrality`/`pseudo_halo`/`bistretch`. Only raters who scored at least `min_persons_per_group` persons in each group are tested.
 
 ---
 
@@ -554,12 +589,51 @@ print(mfrm.raters_global)             # Estimated rater locations
 
 ---
 
-### Bootstrap standard errors and confidence intervals
+### Parameter recovery diagnostics (`recovery_stats()`)
 
-Standard errors are computed by bootstrap resampling. They are triggered automatically inside `fit_statistics()`, or can be run explicitly to request confidence intervals:
+When a model object is constructed directly from a simulation (see above, `m.generating` present), `recovery_stats()` compares every recovered parameter against its true generating value, storing the results (a per-parameter table and a summary) under `m.recovery`:
 
 ```python
-model.std_errors(no_of_samples=200, interval=0.95)
+sim = RSM_Sim(no_of_items=8, no_of_persons=300, max_score=4)
+rsm = RSM(sim)
+rsm.calibrate()
+
+rsm.recovery_stats()
+print(rsm.recovery.items.table)         # generating, estimated, SE, error, z, p, p_corrected, Flagged, Flagged_corrected
+print(rsm.recovery.items.summary)       # RMSE, MAE, bias, r, SD_ratio, OLS/Huber slope+intercept, Divergence_flag, Prop_flagged
+print(rsm.recovery.thresholds.summary)
+print(rsm.recovery.category_widths.summary)
+print(rsm.recovery.persons.summary)
+```
+
+Person estimates are compared against *pseudo-estimates* (Elliott & Buttery, 2022b): the person estimate from the same responses using the true generating item/threshold/(rater) parameters. The error (recovered estimate − pseudo-estimate) combines parameter estimation error and model misspecification, and `rsm.recovery.persons.table['generating']` holds the pseudo-estimate.
+
+`recovery_stats()` is a no-op (with a warning, returning `None`) unless `m.generating` exists, but otherwise does not require an exact model match — person recovery works across any appropriate model pairing (e.g. an `RSM` object built from `PCM_Sim`-generated data), and `SLM`/`PCM`/`RSM` items are always comparable regardless of threshold structure. The `RSM`↔`PCM` (and `SLM`↔either) pairing has a stricter gate for thresholds/category widths specifically: no-op unless every max score matches. Pass `anchor=True` to compare against anchored estimates (`calibrate_anchor()` must have been run) — note SLM/PCM/RSM only have anchored item locations, so `anchor=True` leaves thresholds/persons unaffected on those three classes; MFRM has the full set (items/thresholds/persons/rater effects).
+
+On `MFRM`, `recovery_stats()` also accepts `model=` (which of the 8 rater sub-models to recover; defaults to the simulation model, but a simpler one may be passed to measure the effect of misspecification, as in Elliott & Buttery, 2022a) and `groups=` for person-level breakdowns, including `groups='rater'`, which re-estimates persons from each rater's responses separately:
+
+```python
+mfrm = MFRM(sim)  # sim generated under, say, MFRM_Sim_Centrality
+mfrm.calibrate(model='centrality')
+
+mfrm.recovery_stats(model='global')          # deliberate misspecification study
+print(mfrm.recovery.raters.summary)          # broadcast (rater, item, category) grid comparison, no SE
+
+mfrm.recovery_stats(groups='rater', rater_subset=['Rater_1', 'Rater_2'])
+print(mfrm.recovery.persons.summary)         # 'Overall' column plus one column per rater
+```
+
+Set `plot=False` to skip the accompanying recovery plots (identity line, OLS and Huber fits), or pass the usual plotting kwargs (`filename`, `plot_style`, `font`, `figsize`, etc.) through to them.
+
+---
+
+### Standard errors and confidence intervals
+
+Standard errors are computed analytically where possible, by a sandwich (robust, Huber–White) covariance (Huber, 1967) with persons as the independent units: for `SLM` and `PCM`, and for `RSM` and `MFRM` under the default RCL estimation (`'cp-full-rcl'` or `'cpat-rcl'`). The bootstrap (resampling persons and recalibrating) is used when the sandwich cannot be computer — for example when there is an unused score category, calibration did not converge, estimates not identified, `MFRM` with `estimation='pair-cpat'`, or when the resamples are needed later (`store_bootstrap=True`, e.g. for DIF) — with a warning giving the reason, so standard errors are always produced by one of the two methods. `model.se_method` records which method was used; pass `se_method='bootstrap'` or `'sandwich'` to choose. Standard errors are triggered automatically inside `fit_statistics()`, or can be run explicitly to request confidence intervals:
+
+```python
+model.std_errors(interval=0.95)                                        # sandwich where it applies
+model.std_errors(se_method='bootstrap', no_of_samples=200, interval=0.95)
 model.item_stats_df(interval=0.95)  # adds 2.5% and 97.5% columns
 ```
 

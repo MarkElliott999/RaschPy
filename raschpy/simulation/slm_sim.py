@@ -39,6 +39,18 @@ class SLM_Sim(Rasch_Sim):
     seed : int or None, default None
         Seed for the random number generator. Pass an int for a fully
         reproducible simulation; None (default) draws fresh entropy each run.
+        This seed only affects this simulation's own local random generator
+        (numpy.random.default_rng(seed)), not the global numpy.random.seed()
+        state -- a prior call to numpy.random.seed(N) has no effect on this
+        simulation's output. Always pass seed= directly here for a
+        reproducible run.
+    missing_method : {'bernoulli', 'exact'}, default 'bernoulli'
+        How `missing` is applied. 'bernoulli' makes each response missing
+        independently with probability `missing`, so the realised proportion
+        varies around it. 'exact' makes exactly round(missing * cells)
+        responses missing. Both use the same random draws, so observed scores
+        are identical and the missing patterns differ only in the few cells
+        nearest the cut-off; seeded results are reproducible either way.
 
     Attributes set
     --------------
@@ -74,6 +86,7 @@ class SLM_Sim(Rasch_Sim):
         manual_person_names=None,
         manual_item_names=None,
         seed=None,
+        missing_method="bernoulli",
     ):
         """
         Instantiate and run an SLM simulation.
@@ -84,12 +97,14 @@ class SLM_Sim(Rasch_Sim):
         """
 
         self._rng = np.random.default_rng(seed)
+        self.model = "SLM"
         self.no_of_items = int(no_of_items)
         self.no_of_persons = int(no_of_persons)
         self.item_range = item_range
         self.person_sd = person_sd
         self.offset = offset
         self.missing = missing
+        self._check_missing_method(missing_method)
         self.persons = manual_persons
         self.items = manual_items
         self.person_names = manual_person_names
@@ -152,22 +167,36 @@ class SLM_Sim(Rasch_Sim):
         self.items = {item: diff for item, diff in zip(self.item_names, self.items)}
         self.items = pd.Series(self.items)
 
-        # Calculate probability of a correct response for each person on each item
-
-        self.probs = {item: self.items[item] - self.persons for item in self.item_names}
-        self.probs = pd.DataFrame(
-            self.probs, columns=self.item_names, index=self.person_names
-        )
-        self.probs = 1 / (1 + np.exp(self.probs))
-
         # Calculate scores and apply missing data
 
-        scoring_randoms = pd.DataFrame(
-            self.randoms(), columns=self.item_names, index=self.person_names
-        )
-        self.responses = (scoring_randoms <= self.probs).astype(int)
+        self._theta = self.persons.to_numpy()
+        self._delta = self.items.to_numpy()
+        self._prob_labels = (list(self.person_names), list(self.item_names))
+        self._probs = None
 
-        missing_randoms = pd.DataFrame(
-            self.randoms(), columns=self.item_names, index=self.person_names
+        scores = np.empty((self.no_of_persons, self.no_of_items), dtype=np.int64)
+        for start, stop in self._row_chunks(self.no_of_persons):
+            u = self._rng.random((stop - start, self.no_of_items))
+            scores[start:stop] = u <= self._prob_rows(start, stop)
+
+        self.responses = self._responses_frame(
+            scores, self._missing_mask(), self.person_names
         )
-        self.responses[missing_randoms < self.missing] = np.nan
+
+    def _prob_rows(self, start, stop):
+        """Probability of a correct response for persons start:stop."""
+        return 1 / (1 + np.exp(self._delta[None, :] - self._theta[start:stop, None]))
+
+    @property
+    def probs(self):
+        """Probability of a correct response for each person-item combination (computed on first access)."""
+        if self._probs is None:
+            index, columns = self._prob_labels
+            self._probs = pd.DataFrame(
+                self._prob_rows(0, self.no_of_persons), index=index, columns=columns
+            )
+        return self._probs
+
+    @probs.setter
+    def probs(self, value):
+        self._probs = value

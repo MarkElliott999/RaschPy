@@ -1,0 +1,389 @@
+"""
+Item 14 benchmark orchestrator: RaschPy vs eRm (CML) / TAM (MML, JML,
+MFR) / pairwise (Choppin), ground-truth recovery across the 33-condition
+grid (see conditions.py and the project_raschpy_benchmark_scope memory
+file for the full design).
+
+Per (model, condition, rep):
+  1. Simulate data at known generating parameters (RaschPy's own *_Sim
+     classes, deterministic seed from condition_seed()).
+  2. Calibrate with RaschPy itself (calibrate() directly -- NOT
+     recovery_stats(), which auto-triggers an unused 500-resample
+     bootstrap; see run_one()'s own comment for the ~11.5s/rep this cost
+     before being caught), then compute RMSE/r/r_squared/SD_ratio/
+     OLS_slope/parameter_estimation_residual directly via
+     _parameter_recovery_table()/_parameter_estimation_residual().
+  3. Write the response data to a scratch CSV, shell out to the
+     appropriate R script(s) for this model, parse their item-location
+     estimates.
+  4. Re-centre every package's item locations to zero-mean before
+     computing origin-sensitive metrics (RMSE/OLS_slope/SD_ratio) --
+     neutralises cross-package identification-convention differences
+     (confirmed eRm's own "sum0" default does NOT zero-mean the derived
+     item-location summary the way RaschPy/pairwise do).
+  5. Also compute the parameter-estimation residual for each R package's
+     estimates, reusing RaschPy's own shared
+     Rasch._parameter_estimation_residual() with the R package's
+     item/threshold values substituted in for "estimated".
+
+Results are NOT persisted per-replication (1650+ raw datasets would
+bloat the repo pointlessly, and are trivially regenerable from
+condition_seed()) -- only the aggregated per-condition-per-algorithm
+metric rows are written to results.csv.
+
+Raw simulated data is generated on the fly in a scratch temp dir, not
+committed anywhere.
+"""
+
+import argparse
+import os
+import subprocess
+import sys
+import tempfile
+import time
+import warnings
+
+import numpy as np
+import pandas as pd
+
+warnings.filterwarnings("ignore")
+
+_SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.abspath(os.path.join(_SCRIPTS_DIR, "..", "..", "..", ".."))
+sys.path.insert(0, _REPO_ROOT)
+
+import raschpy as rp  # noqa: E402
+from raschpy.simulation import MFRM_Sim, PCM_Sim, RSM_Sim, SLM_Sim  # noqa: E402
+
+from conditions import ALGORITHMS, CONDITIONS, REPS, condition_seed  # noqa: E402
+
+_SIM_CLASSES = {"slm": SLM_Sim, "pcm": PCM_Sim, "rsm": RSM_Sim, "mfrm": MFRM_Sim}
+
+
+def _recentre(series):
+    return series - series.mean()
+
+
+def _item_metrics(generating, estimated):
+    """RMSE/r/r_squared/SD_ratio/OLS_slope on zero-mean-recentred item locations."""
+    g = _recentre(generating.astype(float))
+    e = _recentre(estimated.reindex(generating.index).astype(float))
+    valid = g.notna() & e.notna()
+    g, e = g[valid].values, e[valid].values
+    if len(g) < 3 or np.std(g) < 0.05:
+        return dict(RMSE=np.nan, r=np.nan, r_squared=np.nan, SD_ratio=np.nan, OLS_slope=np.nan)
+    r = float(np.corrcoef(g, e)[0, 1])
+    ols_slope, _ = np.polyfit(g, e, 1)
+    return dict(
+        RMSE=float(np.sqrt(np.mean((e - g) ** 2))), r=r, r_squared=r ** 2,
+        SD_ratio=float(np.std(e) / np.std(g)), OLS_slope=float(ols_slope),
+    )
+
+
+def _build_sim(model, cond, seed):
+    kwargs = {
+        k: v for k, v in cond.items()
+        if k not in ("label", "missing_prop", "mixed_k")
+    }
+    if model == "pcm" and "mixed_k" in cond:
+        kwargs = dict(kwargs)
+        kwargs["max_score_vector"] = cond["mixed_k"]
+        kwargs.pop("max_score", None)
+    elif model == "pcm":
+        kwargs = dict(kwargs)
+        kwargs["max_score_vector"] = [kwargs.pop("max_score")] * kwargs["no_of_items"]
+    kwargs["item_range"] = 2
+    kwargs["seed"] = seed
+    return _SIM_CLASSES[model](**kwargs)
+
+
+def _apply_missingness(sim, missing_prop, seed):
+    """Mutates sim.responses in place -- matches the pattern already
+    validated this session (passing the sim object directly to a model
+    constructor auto-attaches .generating and reads max_score(_vector)
+    correctly; a separately-tracked responses variable was NOT confirmed
+    to propagate the same way, so this avoids relying on that)."""
+    if missing_prop <= 0:
+        return
+    rng = np.random.default_rng(seed)
+    mask = rng.random(sim.responses.shape) < missing_prop
+    sim.responses = sim.responses.mask(mask)
+
+
+def _make_model(model, sim):
+    if model == "slm":
+        m = rp.SLM(sim)
+        m.calibrate()
+    elif model == "pcm":
+        m = rp.PCM(sim)
+        m.calibrate()
+    elif model == "rsm":
+        m = rp.RSM(sim)
+        m.calibrate()
+    elif model == "mfrm":
+        m = rp.MFRM(sim)
+        m.calibrate(model="global")
+    return m
+
+
+def _run_r_script(args_list):
+    result = subprocess.run(
+        ["Rscript"] + args_list, capture_output=True, text=True, timeout=300,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"R script failed: {' '.join(args_list)}\n{result.stderr}")
+
+
+def _external_item_estimate(model, algorithm, responses_csv, max_score_list, tmp_dir):
+    prefix = os.path.join(tmp_dir, f"ext_{algorithm}")
+    if algorithm == "erm_cml":
+        _run_r_script([
+            os.path.join(_SCRIPTS_DIR, "fit_erm.R"), model, responses_csv, prefix,
+        ])
+        if model == "slm":
+            df = pd.read_csv(f"{prefix}_items.csv")
+            return df.set_index("item")["location"]
+        df = pd.read_csv(f"{prefix}_items_thresholds.csv")
+        return df.set_index("item")["Location"]
+    elif algorithm in ("tam_mml", "tam_jml"):
+        estimator = "mml" if algorithm == "tam_mml" else "jml"
+        _run_r_script([
+            os.path.join(_SCRIPTS_DIR, "fit_tam.R"), estimator, model, responses_csv, prefix,
+        ])
+        df = pd.read_csv(f"{prefix}_items.csv")
+        return df.set_index("item")["location"]
+    elif algorithm == "pairwise":
+        max_score_arg = ",".join(str(k) for k in max_score_list)
+        _run_r_script([
+            os.path.join(_SCRIPTS_DIR, "fit_pairwise.R"), model, responses_csv,
+            max_score_arg, prefix,
+        ])
+        df = pd.read_csv(f"{prefix}_items.csv")
+        return df.set_index("item")["location"]
+    elif algorithm == "tam_mfr":
+        _run_r_script([
+            os.path.join(_SCRIPTS_DIR, "fit_tam.R"), "mfr", "global", responses_csv, prefix,
+        ])
+        df = pd.read_csv(f"{prefix}_items.csv")
+        return df.set_index("item")["location"]
+    elif algorithm == "psychotools_cml":
+        _run_r_script([
+            os.path.join(_SCRIPTS_DIR, "fit_psychotools.R"), model, responses_csv, prefix,
+        ])
+        df = pd.read_csv(f"{prefix}_items.csv")
+        return df.set_index("item")["location"]
+    elif algorithm == "mirt_mml":
+        _run_r_script([
+            os.path.join(_SCRIPTS_DIR, "fit_mirt.R"), model, responses_csv, prefix,
+        ])
+        df = pd.read_csv(f"{prefix}_items.csv")
+        return df.set_index("item")["location"]
+    else:
+        raise ValueError(f"Unknown algorithm: {algorithm}")
+
+
+def run_one(model, cond, rep, tmp_dir, algorithms=None):
+    seed = condition_seed(model, cond["label"], rep)
+    sim = _build_sim(model, cond, seed)
+    _apply_missingness(sim, cond.get("missing_prop", 0.0), seed)
+
+    rows = []
+
+    # RaschPy's own fit, wrapped in the SAME try/except pattern as every
+    # external package below -- failure-rate comparison is a first-class
+    # metric here (not just accuracy-when-successful), so RaschPy's own
+    # path must be symmetric with the others, not silently assumed to
+    # always succeed. Previously this call wasn't guarded at all, which
+    # would have crashed the whole overnight run on a single pathological
+    # seed rather than recording one failed row and continuing.
+    #
+    # Deliberately does NOT call recovery_stats() -- that convenience
+    # wrapper auto-triggers a 500-resample bootstrap (std_errors() /
+    # fit_statistics()) to populate the z/p/Flagged columns, which this
+    # benchmark never uses (only RMSE/r/r_squared/SD_ratio/OLS_slope,
+    # computed straight from the generating/estimated arrays, no SE
+    # needed). Measured directly: calibrate() alone is ~0.01s on a
+    # moderate PCM condition (closed-form PAIR/CPAT, as expected) but
+    # the unused bootstrap cost ~11.5s on top of it -- almost the entire
+    # per-rep runtime was this avoidable step, not RaschPy's own
+    # estimation. _parameter_recovery_table/_parameter_estimation_residual
+    # are called directly instead, se=None, bypassing the bootstrap
+    # entirely.
+    try:
+        t0 = time.perf_counter()
+        m = _make_model(model, sim)
+        elapsed = time.perf_counter() - t0
+
+        items_table, items_summary = m._parameter_recovery_table(
+            sim.items, m.items, se=None,
+        )
+        raschpy_summary = items_summary["Overall"]
+        pe_residual = m._parameter_estimation_residual(
+            sim.persons,
+            lambda theta, item: m.exp_score(theta, sim.items[item])
+            if model == "slm" else np.nan,
+            lambda theta, item: m.exp_score(theta, m.items[item])
+            if model == "slm" else np.nan,
+        ) if model == "slm" else np.nan
+
+        rows.append(dict(
+            model=model, condition=cond["label"], rep=rep, algorithm="raschpy",
+            converged=True, error=None, time_seconds=elapsed,
+            RMSE=raschpy_summary.get("RMSE"), r=raschpy_summary.get("r"),
+            r_squared=raschpy_summary.get("r_squared"), SD_ratio=raschpy_summary.get("SD_ratio"),
+            OLS_slope=raschpy_summary.get("OLS_slope"),
+            parameter_estimation_residual=pe_residual,
+        ))
+    except Exception as exc:  # noqa: BLE001
+        rows.append(dict(
+            model=model, condition=cond["label"], rep=rep, algorithm="raschpy",
+            converged=False, error=str(exc)[:200], time_seconds=np.nan,
+            RMSE=np.nan, r=np.nan, r_squared=np.nan, SD_ratio=np.nan,
+            OLS_slope=np.nan, parameter_estimation_residual=np.nan,
+        ))
+        # RaschPy's own fit failing means there's no self.items to compare
+        # external packages against either -- nothing further to do for
+        # this (model, condition, rep).
+        return rows
+
+    responses_csv = os.path.join(tmp_dir, "responses.csv")
+    if model == "mfrm":
+        # MFRM's own responses is (rater, person)-MultiIndex-wide -- the
+        # R side (fit_tam.R's mfr branch) expects long format instead:
+        # one row per (rater, person), pid/rater columns plus one column
+        # per item. Confirmed this exact layout against a toy MFRM_Sim
+        # dataset before relying on it (see the R-side validation notes).
+        long = sim.responses.reset_index()
+        long.columns = ["rater", "pid"] + list(long.columns[2:])
+        long.to_csv(responses_csv, index=False)
+    else:
+        sim.responses.to_csv(responses_csv)
+
+    # Per-item max_score, as a list -- PCM allows a different max_score
+    # per item (the whole point of the mixed-K condition), so a single
+    # scalar is wrong in general; RSM/SLM just get a uniform list.
+    # getattr(sim, "max_score", 1) was the original (buggy) approach --
+    # PCM_Sim has no .max_score attribute at all (only
+    # .max_score_vector), so it silently fell back to 1 for every PCM
+    # condition, corrupting fit_pairwise.R's category count. Caught via
+    # a real "R script failed" error on every PCM condition, not
+    # anticipated in advance.
+    if model == "pcm":
+        max_score_list = list(sim.max_score_vector)
+    elif model in ("rsm", "mfrm"):
+        max_score_list = [sim.max_score] * sim.no_of_items
+    else:
+        max_score_list = [1] * sim.no_of_items
+
+    for algorithm in (algorithms if algorithms is not None else ALGORITHMS[model]):
+        try:
+            t0 = time.perf_counter()
+            est_items = _external_item_estimate(
+                model, algorithm, responses_csv, max_score_list, tmp_dir,
+            )
+            elapsed = time.perf_counter() - t0
+            # A package can fail to converge WITHOUT raising (e.g. eRm's
+            # RSM() hit a singular Hessian on one seed -- crashed outright
+            # with se=TRUE, but even se=FALSE just silently returned
+            # wildly divergent point estimates, thousands of logits off).
+            # No real Rasch item location is ever remotely this large --
+            # treat it as a non-convergent run (NaN), not a genuine
+            # 2500-logit RMSE that would corrupt the aggregate stats for
+            # this condition. Found via a real eRm crash on RSM baseline
+            # rep 2, not anticipated in advance.
+            if not np.isfinite(est_items.astype(float)).all() or est_items.astype(float).abs().max() > 50:
+                raise RuntimeError(
+                    f"{algorithm} produced non-finite or implausible "
+                    f"(|value| > 50) estimates -- treated as non-convergent."
+                )
+        except Exception as exc:  # noqa: BLE001
+            rows.append(dict(
+                model=model, condition=cond["label"], rep=rep, algorithm=algorithm,
+                converged=False, error=str(exc)[:200],
+                time_seconds=time.perf_counter() - t0,
+                RMSE=np.nan, r=np.nan, r_squared=np.nan, SD_ratio=np.nan,
+                OLS_slope=np.nan, parameter_estimation_residual=np.nan,
+            ))
+            continue
+
+        metrics = _item_metrics(sim.items, est_items)
+
+        # Parameter-estimation residual against this package's estimate,
+        # reusing RaschPy's own shared helper with the external item
+        # vector substituted in place of self.items. Item-location-only
+        # (no threshold substitution) -- deliberately matches this
+        # benchmark's item-location-focused scope; a separate
+        # threshold-level comparison is not attempted here given each
+        # package's own threshold output shape differs non-trivially.
+        #
+        # exp_score() is a NONLINEAR function of item location, unlike
+        # the RMSE/SD_ratio/OLS_slope comparison above (which is origin-
+        # shift-invariant by construction via symmetric de-meaning on
+        # both sides) -- an uncorrected identification-convention offset
+        # here would genuinely distort the residual, not just cancel
+        # out. Re-centre this package's item locations onto the
+        # generating scale's own actual mean (NOT assumed to be exactly
+        # 0 -- confirmed empirically it isn't, for PCM's mixed-K
+        # condition specifically) before using them.
+        gen_items_ = sim.items
+        est_recentred = est_items - est_items.mean() + gen_items_.mean()
+
+        def _exp_score_est(theta, item, _est=est_recentred):
+            loc = _est.get(item, np.nan)
+            if pd.isna(loc):
+                return np.nan
+            if model == "slm":
+                return m.exp_score(theta, loc)
+            return np.nan  # threshold-dependent models: item-location-only proxy not meaningful
+
+        if model == "slm":
+            pe_residual = m._parameter_estimation_residual(
+                sim.persons,
+                lambda theta, item: m.exp_score(theta, gen_items_[item]),
+                _exp_score_est,
+            )
+        else:
+            pe_residual = np.nan
+
+        rows.append(dict(
+            model=model, condition=cond["label"], rep=rep, algorithm=algorithm,
+            converged=True, error=None, time_seconds=elapsed,
+            **metrics, parameter_estimation_residual=pe_residual,
+        ))
+
+    return rows
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--models", nargs="+", default=list(CONDITIONS))
+    parser.add_argument("--reps", type=int, default=REPS)
+    parser.add_argument("--conditions", nargs="+", default=None)
+    parser.add_argument(
+        "--algorithms", nargs="+", default=None,
+        help="Restrict to these external algorithms only (RaschPy's own "
+             "row is always computed). Use when adding a single new "
+             "algorithm to an existing results.csv without recomputing "
+             "everything else already in it.",
+    )
+    parser.add_argument("--out", default=os.path.join(_SCRIPTS_DIR, "..", "results.csv"))
+    args = parser.parse_args()
+
+    all_rows = []
+    with tempfile.TemporaryDirectory(prefix="raschpy_benchmark_") as tmp_dir:
+        for model in args.models:
+            conds = CONDITIONS[model]
+            if args.conditions:
+                conds = [c for c in conds if c["label"] in args.conditions]
+            for cond in conds:
+                for rep in range(1, args.reps + 1):
+                    print(f"{model} / {cond['label']} / rep {rep}")
+                    rows = run_one(model, cond, rep, tmp_dir, algorithms=args.algorithms)
+                    all_rows.extend(rows)
+                    pd.DataFrame(all_rows).to_csv(args.out, index=False)
+
+    print(f"Done. Results written to {args.out}")
+
+
+if __name__ == "__main__":
+    main()

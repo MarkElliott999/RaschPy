@@ -28,7 +28,7 @@ class MFRM_Sim(Rasch_Sim):
     max_score : int
         Maximum possible score per item (number of categories minus 1).
     model : str, default 'global'
-        Rater facet_effect parameterisation. One of:
+        Facet element (e.g. rater) effect parameterisation. One of:
         'global'     — single scalar facet_effect per facet_element;
         'items'      — separate facet_effect per (facet_element, item);
         'thresholds' — separate facet_effect per (facet_element, threshold);
@@ -87,9 +87,30 @@ class MFRM_Sim(Rasch_Sim):
         Custom item labels. If None, labels are 'Item_1', 'Item_2', etc.
     manual_facet_names : list of str or None, default None
         Custom facet_element labels. If None, labels are '{Facet}_1', '{Facet}_2', etc. where Facet is the capitalised facet name.
+    facet : str or None, default None
+        Name of the facet (e.g. 'rater', 'judge'), used in generated names
+        ('{Facet}_1', ...), attribute aliases and messages. If None, names and
+        aliases use 'rater' (Rater_1, ...) as before, and messages say
+        "facet element(s)", with "(e.g. rater)" at first mention.
+    facet_plural : str or None, default None
+        Plural of facet, if not facet + 's'.
     seed : int or None, default None
         Seed for the random number generator. Pass an int for a fully
         reproducible simulation; None (default) draws fresh entropy each run.
+        This seed only affects this simulation's own local random generator
+        (numpy.random.default_rng(seed)), not the global numpy.random.seed()
+        state -- a prior call to numpy.random.seed(N) has no effect on this
+        simulation's output. Always pass seed= directly here for a
+        reproducible run.
+    missing_method : {'bernoulli', 'exact'}, default 'bernoulli'
+        How `missing` is applied. 'bernoulli' makes each response missing
+        independently with probability `missing`, so the realised proportion
+        varies around it. 'exact' makes exactly round(missing * cells)
+        responses missing, per facet_element when shared_missing=False, or
+        in the one shared pattern when shared_missing=True. Both use the same
+        random draws, so observed scores are identical and the missing
+        patterns differ only in the few cells nearest the cut-off; seeded
+        results are reproducible either way.
 
     Attributes set
     --------------
@@ -126,9 +147,9 @@ class MFRM_Sim(Rasch_Sim):
     item_names : list of str
         Item labels.
     rater_names : list of str
-        Rater labels.
+        Facet element labels.
     model : str
-        Rater parameterisation used for simulation.
+        Facet element parameterisation used for simulation.
     """
 
     def __init__(
@@ -158,9 +179,11 @@ class MFRM_Sim(Rasch_Sim):
         manual_person_names=None,
         manual_item_names=None,
         manual_facet_names=None,
-        facet="rater",
+        facet=None,
         facet_plural=None,
         seed=None,
+        missing_method="bernoulli",
+        _params_only=False,
     ):
         """
         Instantiate and run an MFRM simulation.
@@ -198,9 +221,26 @@ class MFRM_Sim(Rasch_Sim):
             # Conversion to manual_facet_effects is deferred until after item_names are set.
 
         self.no_of_facet_elements = int(no_of_facet_elements)
+        # Facet name: messages say "facet element(s)" (glossed "(e.g. rater)" at
+        # first mention) unless a name was passed;
+        # generated names (Rater_1, ...) and attribute aliases keep 'rater'
+        # when none was, so seeded output is unchanged.
+        if facet is None:
+            facet = "rater"
+            self.facet_label, self.facets_label = "facet element", "facet elements"
+            self.facet_label_eg = "facet element (e.g. rater)"
+            self.facets_label_eg = "facet elements (e.g. raters)"
+        else:
+            self.facet_label = facet
+            self.facets_label = facet_plural if facet_plural is not None else facet + "s"
+            self.facet_label_eg, self.facets_label_eg = self.facet_label, self.facets_label
         self.facet = facet
         self.facets = facet_plural if facet_plural is not None else facet + "s"
         setattr(self, f"no_of_{self.facets}", self.no_of_facet_elements)
+        self.dropped_facet_elements = []
+        setattr(self, f"dropped_{self.facets}", self.dropped_facet_elements)
+        if self.facets != "facet_elements":
+            setattr(self, f"drop_{self.facets}", self.drop_facet_elements)
         self.max_score = max_score
         self.item_range = item_range
         self.facet_range = facet_range
@@ -209,6 +249,7 @@ class MFRM_Sim(Rasch_Sim):
         self.max_disorder = max_disorder
         self.offset = offset
         self.missing = missing
+        self._check_missing_method(missing_method)
         self.shared_missing = shared_missing
 
         # ------------------------------------------------------------------
@@ -376,50 +417,20 @@ class MFRM_Sim(Rasch_Sim):
         )
         setattr(self, f"{self.facets}_effects", self.facet_effects)
 
-        # ------------------------------------------------------------------
-        # Category probabilities
-        # ------------------------------------------------------------------
-        self.cat_probs = self._compute_cat_probs()
+        if _params_only:
+            # Parameters only (the stretch-model wrappers' preliminary sims):
+            # no category probabilities or responses.
+            return
 
         # ------------------------------------------------------------------
-        # Scores + missing data
+        # Scores + missing data. Rows are stacked (facet_element, person),
+        # facet_element-major.
         # ------------------------------------------------------------------
-        scoring_randoms = {
-            facet_element: pd.DataFrame(
-                self.randoms(), columns=self.item_names, index=self.person_names
-            )
-            for facet_element in self.facet_names
-        }
-        scoring_randoms = pd.concat(
-            scoring_randoms.values(), keys=scoring_randoms.keys()
-        )
-
-        self.responses = sum(
-            scoring_randoms
-            < sum(self.cat_probs[cat] for cat in range(c, self.max_score + 1))
-            for c in range(1, self.max_score + 1)
-        )
-
-        if shared_missing:
-            missing_randoms = pd.DataFrame(
-                self.randoms(), columns=self.item_names, index=self.person_names
-            )
-            missing_randoms = pd.concat(
-                {facet_element: missing_randoms for facet_element in self.facet_names},
-                keys=self.facet_names,
-            )
-        else:
-            missing_randoms = pd.concat(
-                {
-                    facet_element: pd.DataFrame(
-                        self.randoms(), columns=self.item_names, index=self.person_names
-                    )
-                    for facet_element in self.facet_names
-                },
-                keys=self.facet_names,
-            )
-
-        self.responses[missing_randoms < self.missing] = np.nan
+        self._prepare_cat_probs()
+        R = self.no_of_facet_elements
+        scores = self._draw_scores(R * self.no_of_persons, self._cat_prob_rows)
+        mask = self._missing_mask(n_blocks=R, shared=shared_missing)
+        self.responses = self._responses_frame(scores, mask, self._row_index)
 
     # ------------------------------------------------------------------
     # Facet effect generation
@@ -602,93 +613,159 @@ class MFRM_Sim(Rasch_Sim):
     # Category probability computation
     # ------------------------------------------------------------------
 
-    def _compute_cat_probs(self):
-        """Compute category probability DataFrames for all facet_elements and categories."""
+    def _prepare_cat_probs(self):
+        """Cache the arrays and labels behind the category probabilities."""
+        R, I, K = self.no_of_facet_elements, self.no_of_items, self.max_score
+        self._theta = self.persons.to_numpy()
+        self._delta = self.items.to_numpy()
+        self._tau_sums = [self.thresholds.iloc[:cat].sum() for cat in range(K + 1)]
+        # the stretch-model wrappers relabel self.model afterwards
+        self._prob_model = self.model
 
+        effects = self.facet_effects
         if self.model == "global":
-            c_p_df = pd.DataFrame(
-                {item: self.persons - self.items[item] for item in self.item_names}
-            )
-            cat_probs = {
-                cat: {
-                    facet_element: (
-                        cat * (c_p_df - self.facet_effects.loc[facet_element])
-                        - self.thresholds.iloc[:cat].sum()
-                    )
-                    for facet_element in self.facet_names
-                }
-                for cat in range(self.max_score + 1)
-            }
-
+            self._effects = effects.loc[self.facet_names].to_numpy()  # (R,)
         elif self.model == "items":
-            c_p_df = {
-                facet_element: pd.DataFrame(
-                    {
-                        item: self.persons
-                        - self.items[item]
-                        - self.facet_effects.loc[facet_element, item]
-                        for item in self.item_names
-                    }
+            self._effects = effects.loc[self.facet_names, self.item_names].to_numpy()  # (R, I)
+        else:
+            if self.model == "thresholds":
+                arr = effects.loc[self.facet_names].to_numpy()  # (R, K)
+            else:  # matrix, bivector
+                mi = pd.MultiIndex.from_product([self.facet_names, self.item_names])
+                arr = effects.loc[mi].to_numpy().reshape(R, I, K)
+            # sums of each facet_element's first `cat` threshold effects; row-major
+            # so each sum adds in the same order as a 1-D (pandas) row sum
+            arr = np.ascontiguousarray(arr)
+            self._effects = np.stack(
+                [arr[..., :cat].sum(axis=-1) for cat in range(K + 1)], axis=-1
+            )
+
+        self._row_index = pd.concat(
+            [pd.DataFrame(index=self.persons.index) for _ in self.facet_names],
+            keys=self.facet_names,
+        ).index
+        self._prob_labels = (self._row_index, list(self.item_names))
+        self._cat_probs = None
+
+    def _logits(self, r, c_p, cat):
+        """Category-`cat` numerator logits for facet_element r; c_p = person - item."""
+        tau_sum = self._tau_sums[cat]
+        if self._prob_model == "global":
+            return cat * (c_p - self._effects[r]) - tau_sum
+        if self._prob_model == "items":
+            return cat * (c_p - self._effects[r][None, :]) - tau_sum
+        if self._prob_model == "thresholds":
+            return cat * c_p - tau_sum - self._effects[r, cat]
+        return (cat * c_p - tau_sum) - self._effects[r, :, cat][None, :]
+
+    def _cat_prob_rows(self, start, stop):
+        """Category probabilities [P(X=0), ..., P(X=K)] for stacked rows start:stop."""
+        N = self.no_of_persons
+        num = [
+            np.empty((stop - start, self.no_of_items)) for _ in range(self.max_score + 1)
+        ]
+        for r in range(start // N, (stop - 1) // N + 1):
+            a, b = max(start, r * N), min(stop, (r + 1) * N)
+            c_p = self._theta[a - r * N : b - r * N, None] - self._delta[None, :]
+            for cat, x in enumerate(num):
+                x[a - start : b - start] = self._logits(r, c_p, cat)
+        for x in num:
+            np.exp(x, out=x)
+        den = num[0].copy()
+        for x in num[1:]:
+            den += x
+        return [x / den for x in num]
+
+    @property
+    def cat_probs(self):
+        """{cat: DataFrame} of category probabilities (computed on first access)."""
+        if self._cat_probs is None:
+            index, columns = self._prob_labels
+            probs = self._cat_prob_rows(0, self.no_of_facet_elements * self.no_of_persons)
+            self._cat_probs = {
+                cat: pd.DataFrame(p, index=index, columns=columns)
+                for cat, p in enumerate(probs)
+            }
+        return self._cat_probs
+
+    @cat_probs.setter
+    def cat_probs(self, value):
+        self._cat_probs = value
+
+    # ------------------------------------------------------------------
+    # Dropping facet elements
+    # ------------------------------------------------------------------
+
+    def drop_facet_elements(self, which, min_persons=3):
+        """
+        Remove facet elements (e.g. raters) from the simulation: their
+        responses and their generating parameters (facet_effects, plus
+        item_effects/threshold_effects for bivector and lambda_/omega
+        parameters for the stretch models). Aliased as
+        drop_{facet_plural}() (e.g. drop_raters()). Responses of the other
+        facet elements, and all item, threshold and person parameters, are
+        unchanged.
+
+        Parameters
+        ----------
+        which : 'thin', 'extreme' or list
+            'thin' removes facet elements that rated fewer than min_persons
+            persons (including those with no responses); 'extreme' removes
+            those that used only the lowest or only the highest score
+            category; a list removes the named ones.
+        min_persons : int, default 3
+            Threshold for 'thin'.
+
+        Attributes set
+        --------------
+        dropped_facet_elements : list
+            All facet elements removed so far.
+        """
+        if isinstance(which, str):
+            if which not in ("thin", "extreme"):
+                raise ValueError(
+                    f"which must be 'thin', 'extreme' or a list of {self.facet_label_eg} names."
                 )
-                for facet_element in self.facet_names
-            }
-            cat_probs = {
-                cat: {
-                    facet_element: (
-                        cat * c_p_df[facet_element] - self.thresholds.iloc[:cat].sum()
-                    )
-                    for facet_element in self.facet_names
-                }
-                for cat in range(self.max_score + 1)
-            }
-
-        elif self.model == "thresholds":
-            c_p_df = pd.DataFrame(
-                {item: self.persons - self.items[item] for item in self.item_names}
-            )
-            cat_probs = {
-                cat: {
-                    facet_element: (
-                        cat * c_p_df
-                        - self.thresholds.iloc[:cat].sum()
-                        - self.facet_effects.loc[facet_element].iloc[:cat].sum()
-                    )
-                    for facet_element in self.facet_names
-                }
-                for cat in range(self.max_score + 1)
-            }
-
-        elif self.model in ("matrix", "bivector"):
-            c_p_df = pd.DataFrame(
-                {item: self.persons - self.items[item] for item in self.item_names}
-            )
-            cat_probs = {
-                cat: {
-                    facet_element: (cat * c_p_df - self.thresholds.iloc[:cat].sum())
-                    for facet_element in self.facet_names
-                }
-                for cat in range(self.max_score + 1)
-            }
-            # Apply per-(facet_element, item, threshold) facet_effect
-            for cat in range(self.max_score + 1):
-                for facet_element in self.facet_names:
-                    for item in self.item_names:
-                        cat_probs[cat][facet_element][item] -= (
-                            self.facet_effects.loc[facet_element, item].iloc[:cat].sum()
-                        )
-
-        # Concatenate across facet_elements, exponentiate, normalise
-        for cat in range(self.max_score + 1):
-            cat_probs[cat] = pd.concat(
-                cat_probs[cat].values(), keys=cat_probs[cat].keys()
-            )
-            cat_probs[cat] = np.exp(cat_probs[cat])
-
-        den = sum(cat_probs[cat] for cat in range(self.max_score + 1))
-        for cat in range(self.max_score + 1):
-            cat_probs[cat] /= den
-
-        return cat_probs
+            if which == "thin":
+                rated = self.responses.notna().any(axis=1).groupby(level=0, sort=False).sum()
+                which = [fe for fe in self.facet_names if rated.get(fe, 0) < min_persons]
+            else:
+                lo = self.responses.min(axis=1).groupby(level=0, sort=False).min()
+                hi = self.responses.max(axis=1).groupby(level=0, sort=False).max()
+                which = [fe for fe in self.facet_names if hi.get(fe) == 0 or lo.get(fe) == self.max_score]
+        else:
+            which = list(which)
+            unknown = [fe for fe in which if fe not in self.facet_names]
+            if unknown:
+                raise ValueError(f"Names not in the data: {unknown}.")
+        if not which:
+            return
+        keep_pos = [i for i, fe in enumerate(self.facet_names) if fe not in which]
+        keep = [fe for fe in self.facet_names if fe not in which]
+        for name in self._FACET_PARAMS:
+            obj = getattr(self, name, None)
+            if isinstance(obj, (pd.Series, pd.DataFrame)):
+                setattr(self, name, obj.loc[keep])
+        setattr(self, f"{self.facets}_effects", self.facet_effects)
+        self.responses = self.responses[~self.responses.index.get_level_values(0).isin(which)]
+        self.facet_names = [fe for fe in self.facet_names if fe not in which]
+        self.rater_names = self.facet_names  # alias for default facet
+        self.facet_ids = self.facet_names
+        self.rater_ids = self.facet_names  # alias for default facet
+        self.no_of_facet_elements = len(self.facet_names)
+        setattr(self, f"no_of_{self.facets}", self.no_of_facet_elements)
+        if hasattr(self, "_effects"):
+            self._effects = self._effects[keep_pos]
+            self._row_index = pd.concat(
+                [pd.DataFrame(index=self.persons.index) for _ in self.facet_names],
+                keys=self.facet_names,
+            ).index
+            self._prob_labels = (self._row_index, list(self.item_names))
+            self._cat_probs = None
+        self.dropped_facet_elements = self.dropped_facet_elements + which
+        setattr(self, f"dropped_{self.facets}", self.dropped_facet_elements)
+        warnings.warn(f"{len(which)} {self.facet_label_eg if len(which) == 1 else self.facets_label_eg} "
+                      f"removed: {which}.", UserWarning, stacklevel=2)
 
     # ------------------------------------------------------------------
     # Rename utilities
@@ -696,141 +773,37 @@ class MFRM_Sim(Rasch_Sim):
 
     def rename_rater(self, old, new):
         """
-        Rename a single facet_element in the simulated responses DataFrame.
+        Rename a single facet element (e.g. rater) in the simulation: in the
+        responses and in the generating parameters, so recovery comparisons
+        stay aligned.
 
         Parameters
         ----------
         old : str
-            Current facet_element name.
+            Current facet element name.
         new : str
-            Desired new facet_element name.
+            Desired new facet element name.
         """
-
-        if old == new:
-            warnings.warn(
-                "New facet_element name is the same as the old facet_element name.",
-                UserWarning,
-                stacklevel=2,
-            )
-        elif new in self.facet_names:
-            warnings.warn(
-                "New facet_element name is a duplicate of an existing facet_element name.",
-                UserWarning,
-                stacklevel=2,
-            )
-        if old not in self.facet_names:
-            warnings.warn(
-                f"Old facet_element name {old!r} not found in data.",
-                UserWarning,
-                stacklevel=2,
-            )
-        elif not isinstance(new, str):
-            warnings.warn("Rater names must be strings.", UserWarning, stacklevel=2)
-        else:
-            new_names = [new if r == old else r for r in self.facet_names]
-            self.rename_raters_all(new_names)
+        if self._check_rename(self.facet_label_eg, list(self.facet_names), old, new):
+            self._relabel("facet", {old: new})
 
     def rename_raters_all(self, new_names):
         """
-        Rename all facet_elements at once.
+        Rename all facet elements (e.g. raters) at once, in the responses and
+        in the generating parameters.
 
         Parameters
         ----------
         new_names : list of str
-            New facet_element names in the same order as self.facet_names.
+            New facet element names in the same order as self.facet_names.
         """
+        if self._check_rename_all(
+            self.facet_label_eg, self.facets_label, list(self.facet_names), new_names
+        ):
+            self._relabel("facet", dict(zip(self.facet_names, new_names)))
 
-        if len(new_names) != len(set(new_names)):
-            warnings.warn(
-                "List of new facet_element names contains duplicates.",
-                UserWarning,
-                stacklevel=2,
-            )
-        elif len(new_names) != self.no_of_facet_elements:
-            warnings.warn(
-                f"Incorrect number of facet_element names: {len(new_names)} provided, "
-                f"{self.no_of_facet_elements} facet_elements in data.",
-                UserWarning,
-                stacklevel=2,
-            )
-        elif not all(isinstance(n, str) for n in new_names):
-            warnings.warn("Rater names must be strings.", UserWarning, stacklevel=2)
-        else:
-            df_dict = {
-                new: self.responses.xs(old)
-                for old, new in zip(self.facet_names, new_names)
-            }
-            self.responses = pd.concat(df_dict.values(), keys=df_dict.keys())
-        self.facet_names = self.responses.index.get_level_values(0).unique().tolist()
-        self.rater_names = self.facet_names  # alias for default facet
-        self.facet_ids = self.facet_names
-        self.rater_ids = self.facet_names  # alias for default facet
-
-    def rename_person(self, old, new):
-        """
-        Rename a single person in the simulated responses DataFrame.
-
-        Parameters
-        ----------
-        old : str
-            Current person name.
-        new : str
-            Desired new person name.
-        """
-
-        if old == new:
-            warnings.warn(
-                "New person name is the same as the old person name.",
-                UserWarning,
-                stacklevel=2,
-            )
-        elif new in self.responses.index.get_level_values(1):
-            warnings.warn(
-                "New person name is a duplicate of an existing person name.",
-                UserWarning,
-                stacklevel=2,
-            )
-        if old not in self.responses.index.get_level_values(1):
-            warnings.warn(
-                f"Old person name {old!r} not found in data.", UserWarning, stacklevel=2
-            )
-        elif not isinstance(new, str):
-            warnings.warn("Person names must be strings.", UserWarning, stacklevel=2)
-        else:
-            self.responses.rename(index={old: new}, inplace=True)
-        self.person_names = self.responses.index.get_level_values(1).unique().tolist()
-
-    def rename_persons_all(self, new_names):
-        """
-        Rename all persons at once.
-
-        Parameters
-        ----------
-        new_names : list of str
-            New person names in the same order as self.person_names.
-        """
-
-        old_names = self.responses.index.get_level_values(1)
-        if len(new_names) != len(set(new_names)):
-            warnings.warn(
-                "List of new person names contains duplicates.",
-                UserWarning,
-                stacklevel=2,
-            )
-        elif len(new_names) != self.no_of_persons:
-            warnings.warn(
-                f"Incorrect number of person names: {len(new_names)} provided, "
-                f"{self.no_of_persons} persons in data.",
-                UserWarning,
-                stacklevel=2,
-            )
-        elif not all(isinstance(n, str) for n in new_names):
-            warnings.warn("Person names must be strings.", UserWarning, stacklevel=2)
-        else:
-            self.responses.rename(
-                index={old: new for old, new in zip(old_names, new_names)}, inplace=True
-            )
-        self.person_names = self.responses.index.get_level_values(1).unique().tolist()
+    _FACET_PARAMS = ("facet_effects", "item_effects", "threshold_effects",
+                     "lambda_", "omega", "omega_items", "omega_thresholds")
 
 
 # ------------------------------------------------------------------
@@ -1000,23 +973,23 @@ class MFRM_Sim_Bivector(MFRM_Sim):
 
 class MFRM_Sim_Centrality(MFRM_Sim):
     """
-    MFRM simulation -- Jin & Wang (2018)-style rater centrality/extremity
-    parameterisation (2 true parameters per rater: severity shift lambda_r,
+    MFRM simulation -- Jin & Wang (2018)-style facet element (e.g. rater) centrality/extremity
+    parameterisation (2 true parameters per facet element: location shift lambda_r,
     threshold-stretch omega_r), restricting the fully-free 'thresholds'
     parameterisation. omega_r is Jin & Wang's own notation for this
     threshold-stretch coefficient.
 
     Thin wrapper: generates a preliminary MFRM_Sim(model='thresholds') to
     get realistic item locations/thresholds/persons, draws true
-    lambda_r/omega_r per rater, computes the implied full (rater x threshold)
-    severity table via lambda_rk = lambda_r + (omega_r - 1) * tau_k, then
+    lambda_r/omega_r per facet element, computes the implied full (facet element x threshold)
+    location table via lambda_rk = lambda_r + (omega_r - 1) * tau_k, then
     delegates to the full MFRM_Sim(model='thresholds', manual_raters=...)
     machinery (fixed to the same item/threshold/person values as the
     preliminary sim) for everything else -- category probabilities and
     response sampling. All the actual generative machinery is reused
-    unchanged; only lambda_r/omega_r and their implied severity table are new.
+    unchanged; only lambda_r/omega_r and their implied location table are new.
 
-    omega_r > 1 spreads reference thresholds apart for that rater
+    omega_r > 1 spreads reference thresholds apart for that facet element
     ("central"); 0 < omega_r < 1 compresses them ("extreme"); omega_r == 1
     is neutral. See MFRM._derive_stretch_model / MFRM.calibrate_centrality
     for the corresponding closed-form estimation side.
@@ -1024,11 +997,11 @@ class MFRM_Sim_Centrality(MFRM_Sim):
     Parameters
     ----------
     global_range : float, default 2
-        Total spread (maximum - minimum) of true lambda_r (severity
-        shift) values across raters. Renamed from MFRM_Sim's own
+        Total spread (maximum - minimum) of true lambda_r (location
+        shift) values across facet elements. Renamed from MFRM_Sim's own
         facet_range for this and the other two stretch models -- lambda_r
         is the parameter that collapses this representation to 'global'
-        when every rater's omega_r == 1, and 'global_range' pairs
+        when every facet element's omega_r == 1, and 'global_range' pairs
         directly with 'stretch_range' below, matching the global_/stretch
         attribute alias naming (see MFRM._PARAM_ALIASES).
     stretch_range : float, default 1
@@ -1037,7 +1010,7 @@ class MFRM_Sim_Centrality(MFRM_Sim):
         omega_r roughly in [0.5, 1.5].
     manual_lambda : array-like or None, default None
         Custom true lambda_r values, length no_of_facet_elements. If None,
-        drawn the same way MFRM_Sim's own facet_range scales severities.
+        drawn the same way MFRM_Sim's own facet_range scales locations.
     manual_omega : array-like or None, default None
         Custom true omega_r values, length no_of_facet_elements. If None,
         drawn as 1 + a stretch_range-scaled, zero-mean deviation.
@@ -1045,6 +1018,9 @@ class MFRM_Sim_Centrality(MFRM_Sim):
         Seed for both lambda_r/omega_r generation and everything else
         (persons/items/thresholds/response sampling, via the preliminary
         and final MFRM_Sim calls). Pass an int for full reproducibility.
+        This seed only affects this simulation's own local random generator,
+        not the global numpy.random.seed() state -- a prior call to
+        numpy.random.seed(N) has no effect on this simulation's output.
 
     See MFRM_Sim for all other parameter docs (item_range, person_sd,
     missing, manual_items, manual_thresholds, manual_persons, etc. --
@@ -1055,9 +1031,9 @@ class MFRM_Sim_Centrality(MFRM_Sim):
     Attributes set (in addition to the usual MFRM_Sim attributes)
     ---------------------------------------------------------------
     lambda_ : pandas.Series
-        True generating lambda_r (severity shift) per rater.
+        True generating lambda_r (location shift) per facet element.
     omega : pandas.Series
-        True generating omega_r (threshold stretch) per rater.
+        True generating omega_r (threshold stretch) per facet element.
     """
 
     def __init__(
@@ -1088,6 +1064,7 @@ class MFRM_Sim_Centrality(MFRM_Sim):
             max_score=max_score,
             model="thresholds",
             seed=seed,
+            _params_only=True,
             **kw,
         )
 
@@ -1172,22 +1149,22 @@ class MFRM_Sim_PseudoHalo(MFRM_Sim):
     """
     MFRM simulation -- (pseudo-)halo-effect parameterisation, the
     item-facet analogue of MFRM_Sim_Centrality (2 true parameters per
-    rater: severity shift lambda_r, item-difficulty stretch omega_r),
+    facet element (e.g. rater): location shift lambda_r, item-difficulty stretch omega_r),
     restricting the fully-free 'items' parameterisation.
 
     Thin wrapper: generates a preliminary MFRM_Sim(model='items') to get
     realistic item locations/thresholds/persons, draws true
-    lambda_r/omega_r per rater, computes the implied full (rater x item)
-    severity table via mu_ri = lambda_r + (omega_r - 1) * delta_i, then
+    lambda_r/omega_r per facet element, computes the implied full (facet element x item)
+    location table via mu_ri = lambda_r + (omega_r - 1) * delta_i, then
     delegates to the full MFRM_Sim(model='items', manual_raters=...)
     machinery (fixed to the same item/threshold/person values as the
     preliminary sim) for everything else. All the actual generative
     machinery is reused unchanged; only lambda_r/omega_r and their implied
-    severity table are new.
+    location table are new.
 
     omega_r < 1 compresses the spread of reference item locations toward
-    zero for that rater (the pseudo-halo signature -- items look more
-    similar in difficulty to that rater than they really are); omega_r > 1
+    zero for that facet element (the pseudo-halo signature -- items look more
+    similar in difficulty to that facet element than they really are); omega_r > 1
     exaggerates real item-difficulty differences; omega_r == 1 is neutral.
     See MFRM._derive_stretch_model / MFRM.calibrate_pseudo_halo for the
     corresponding closed-form estimation side.
@@ -1195,11 +1172,11 @@ class MFRM_Sim_PseudoHalo(MFRM_Sim):
     Parameters
     ----------
     global_range : float, default 2
-        Total spread (maximum - minimum) of true lambda_r (severity
-        shift) values across raters. Renamed from MFRM_Sim's own
+        Total spread (maximum - minimum) of true lambda_r (location
+        shift) values across facet elements. Renamed from MFRM_Sim's own
         facet_range for this and the other two stretch models -- lambda_r
         is the parameter that collapses this representation to 'global'
-        when every rater's omega_r == 1, and 'global_range' pairs
+        when every facet element's omega_r == 1, and 'global_range' pairs
         directly with 'stretch_range' below, matching the global_/stretch
         attribute alias naming (see MFRM._PARAM_ALIASES).
     stretch_range : float, default 1
@@ -1207,14 +1184,17 @@ class MFRM_Sim_PseudoHalo(MFRM_Sim):
         global_range for lambda_r).
     manual_lambda : array-like or None, default None
         Custom true lambda_r values, length no_of_facet_elements. If None,
-        drawn the same way MFRM_Sim's own facet_range scales severities.
+        drawn the same way MFRM_Sim's own facet_range scales locations.
     manual_omega : array-like or None, default None
         Custom true omega_r values, length no_of_facet_elements. If None,
         drawn as 1 + a stretch_range-scaled, zero-mean deviation.
     seed : int or None, default None
         Seed for both lambda_r/omega_r generation and everything else, via
         the preliminary and final MFRM_Sim calls. Pass an int for full
-        reproducibility.
+        reproducibility. This seed only affects this simulation's own local
+        random generator, not the global numpy.random.seed() state -- a
+        prior call to numpy.random.seed(N) has no effect on this
+        simulation's output.
 
     See MFRM_Sim for all other parameter docs -- all forwarded unchanged
     to both the preliminary and final sims.
@@ -1222,9 +1202,9 @@ class MFRM_Sim_PseudoHalo(MFRM_Sim):
     Attributes set (in addition to the usual MFRM_Sim attributes)
     ---------------------------------------------------------------
     lambda_ : pandas.Series
-        True generating lambda_r (severity shift) per rater.
+        True generating lambda_r (location shift) per facet element.
     omega : pandas.Series
-        True generating omega_r (item-difficulty stretch) per rater.
+        True generating omega_r (item-difficulty stretch) per facet element.
     """
 
     def __init__(
@@ -1255,6 +1235,7 @@ class MFRM_Sim_PseudoHalo(MFRM_Sim):
             max_score=max_score,
             model="items",
             seed=seed,
+            _params_only=True,
             **kw,
         )
 
@@ -1341,7 +1322,7 @@ class MFRM_Sim_PseudoHalo(MFRM_Sim):
 class MFRM_Sim_Bistretch(MFRM_Sim):
     """
     MFRM simulation -- "bistretch" parameterisation, a 3-parameter
-    (severity shift lambda_r, item-stretch omega_items_r, threshold-stretch
+    (location shift lambda_r, item-stretch omega_items_r, threshold-stretch
     omega_thresholds_r) restriction of the fully-free 'bivector'
     parameterisation -- combines MFRM_Sim_PseudoHalo's item-stretch axis
     and MFRM_Sim_Centrality's threshold-stretch axis into a single
@@ -1349,7 +1330,7 @@ class MFRM_Sim_Bistretch(MFRM_Sim):
 
     Thin wrapper: generates a preliminary MFRM_Sim(model='bivector') to
     get realistic item locations/thresholds/persons, draws true
-    lambda_r/omega_items_r/omega_thresholds_r per rater, computes the
+    lambda_r/omega_items_r/omega_thresholds_r per facet element (e.g. rater), computes the
     implied item_effects table via mu_ri = lambda_r + (omega_items_r - 1)
     * delta_i (bivector's item axis carries the facet_element's overall
     level, exactly as in MFRM_Sim_PseudoHalo) and the implied
@@ -1371,11 +1352,11 @@ class MFRM_Sim_Bistretch(MFRM_Sim):
     Parameters
     ----------
     global_range : float, default 2
-        Total spread (maximum - minimum) of true lambda_r (severity
-        shift) values across raters. Renamed from MFRM_Sim's own
+        Total spread (maximum - minimum) of true lambda_r (location
+        shift) values across facet elements. Renamed from MFRM_Sim's own
         facet_range for this and the other two stretch models -- lambda_r
         is the parameter that collapses this representation to 'global'
-        when every rater's omega_items_r == omega_thresholds_r == 1, and
+        when every facet element's omega_items_r == omega_thresholds_r == 1, and
         'global_range' pairs directly with 'stretch_range' below,
         matching the global_/stretch_items/stretch_thresholds attribute
         alias naming (see MFRM._PARAM_ALIASES).
@@ -1385,7 +1366,7 @@ class MFRM_Sim_Bistretch(MFRM_Sim):
         axes unless overridden individually.
     manual_lambda : array-like or None, default None
         Custom true lambda_r values, length no_of_facet_elements. If None,
-        drawn the same way MFRM_Sim's own facet_range scales severities.
+        drawn the same way MFRM_Sim's own facet_range scales locations.
     manual_omega_items : array-like or None, default None
         Custom true omega_items_r values, length no_of_facet_elements. If
         None, drawn as 1 + a stretch_range-scaled, zero-mean deviation.
@@ -1396,7 +1377,10 @@ class MFRM_Sim_Bistretch(MFRM_Sim):
     seed : int or None, default None
         Seed for lambda_r/omega_items_r/omega_thresholds_r generation and
         everything else, via the preliminary and final MFRM_Sim calls.
-        Pass an int for full reproducibility.
+        Pass an int for full reproducibility. This seed only affects this
+        simulation's own local random generator, not the global
+        numpy.random.seed() state -- a prior call to numpy.random.seed(N)
+        has no effect on this simulation's output.
 
     See MFRM_Sim for all other parameter docs (item_range, person_sd,
     missing, manual_items, manual_thresholds, manual_persons, etc. --
@@ -1405,11 +1389,11 @@ class MFRM_Sim_Bistretch(MFRM_Sim):
     Attributes set (in addition to the usual MFRM_Sim attributes)
     ---------------------------------------------------------------
     lambda_ : pandas.Series
-        True generating lambda_r (severity shift) per rater.
+        True generating lambda_r (location shift) per facet element.
     omega_items : pandas.Series
-        True generating omega_items_r (item-difficulty stretch) per rater.
+        True generating omega_items_r (item-difficulty stretch) per facet element.
     omega_thresholds : pandas.Series
-        True generating omega_thresholds_r (threshold stretch) per rater.
+        True generating omega_thresholds_r (threshold stretch) per facet element.
     """
 
     def __init__(
@@ -1441,6 +1425,7 @@ class MFRM_Sim_Bistretch(MFRM_Sim):
             max_score=max_score,
             model="bivector",
             seed=seed,
+            _params_only=True,
             **kw,
         )
 

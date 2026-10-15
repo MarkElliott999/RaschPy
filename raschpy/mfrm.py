@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import chi2, gaussian_kde, norm
 from scipy.stats import t as t_dist
+from scipy.optimize import brentq
 from sklearn.decomposition import PCA
 from sklearn.linear_model import HuberRegressor
 from matplotlib import pyplot as plt
@@ -14,7 +15,7 @@ from matplotlib.patches import Rectangle
 import seaborn as sns
 import matplotlib.patheffects as path_effects
 
-from raschpy.base import Rasch
+from raschpy.base import Rasch, _BootstrapWarnings, _save_table
 
 
 class MFRM(Rasch):
@@ -149,9 +150,9 @@ class MFRM(Rasch):
 
     def _sev_attr(self, model, anchor=False):
         """
-        Attribute name holding the full reconstructed severity matrix
+        Attribute name holding the full reconstructed location matrix
         for the given model (same shape as facet_effects_items/
-        facet_effects_thresholds -- one row per rater, one column per
+        facet_effects_thresholds -- one row per facet element (e.g. rater), one column per
         item/threshold/cell). For centrality/pseudo_halo/bistretch this
         is facet_effects_{model}_full_vector: facet_effects_{model}
         itself holds the compact (lambda, plus omega -- or omega_items
@@ -166,7 +167,7 @@ class MFRM(Rasch):
         """
         Return (item_locations, thresholds, facet_effects) for the requested model.
         Auto-triggers calibration if not yet run. facet_effects is always
-        the full reconstructed severity matrix -- see _sev_attr.
+        the full reconstructed location matrix -- see _sev_attr.
         """
         sev_attr = self._sev_attr(model, anchor=anchor)
         if anchor:
@@ -177,7 +178,7 @@ class MFRM(Rasch):
                     raise AttributeError(
                         "No anchor_facet_effects_mixed yet -- 'mixed' has "
                         "no calibrate_anchor() of its own (it's always "
-                        "derived by restricting a 'matrix' fit per rater). "
+                        f"derived by restricting a 'matrix' fit per {self.facet_label_eg}). "
                         "Run self.per_rater_model_selection(anchors=...) "
                         "first."
                     )
@@ -193,19 +194,52 @@ class MFRM(Rasch):
                     raise AttributeError(
                         "No facet_effects_mixed yet -- 'mixed' has no "
                         "calibration of its own (it's always derived by "
-                        "restricting a 'matrix' fit per rater). Run "
+                        f"restricting a 'matrix' fit per {self.facet_label_eg}). Run "
                         "self.per_rater_model_selection() first."
                     )
                 self.calibrate(model=model)
-        return (
-            getattr(self, diff_attr),
-            getattr(self, thr_attr),
-            getattr(self, sev_attr),
-        )
+        if anchor:
+            return (
+                getattr(self, diff_attr),
+                getattr(self, thr_attr),
+                getattr(self, sev_attr),
+            )
+        return self._items_for(model), self._thresholds_for(model), getattr(self, sev_attr)
+
+    def _items_for(self, model, anchor=False):
+        """Item locations from the given sub-model's calibration. With
+        estimation='cp-full-rcl' (or 'cpat-rcl') each sub-model's joint fit gives its own item
+        locations (items_{model}); 'mixed' is derived from 'matrix'. Falls
+        back to self.items (the latest calibration) when no per-model value
+        is stored."""
+        if anchor:
+            return getattr(self, f"anchor_items_{model}")
+        key = "matrix" if model == "mixed" else model
+        return getattr(self, f"items_{key}", self.items)
+
+    def _thresholds_for(self, model, anchor=False):
+        """Thresholds from the given sub-model's calibration; see _items_for()."""
+        if anchor:
+            return getattr(self, f"anchor_thresholds_{model}")
+        key = "matrix" if model == "mixed" else model
+        return getattr(self, f"thresholds_{key}", self.thresholds)
+
+    def _item_se_for(self, model, kind="se", anchor=False):
+        """Item standard errors (kind='se') or interval bounds ('low'/'high')
+        for the given sub-model; falls back to the unsuffixed (latest)
+        attribute. None if absent."""
+        prefix = "anchor_" if anchor else ""
+        key = "matrix" if model == "mixed" else model
+        return getattr(self, f"{prefix}item_{kind}_{key}", getattr(self, f"{prefix}item_{kind}", None))
+
+    def _facet_n(self, n, count=True):
+        """'{n} facet element(s) (e.g. rater(s))' for messages, at first mention."""
+        label = self.facet_label_eg if n == 1 else self.facets_label_eg
+        return f"{n} {label}" if count else label
 
     def _severity_grid(self, model):
         """
-        Full (rater, item, category) severity grid for `model`'s ACTUAL
+        Full (facet element (e.g. rater), item, category) location grid for `model`'s ACTUAL
         fitted facet_effects, broadcasting each model's natural
         representation (scalar/per-item/per-threshold/per-cell) up to a
         common shape. Used only for model_selection's min_effect gate.
@@ -234,9 +268,83 @@ class MFRM(Rasch):
         mi = pd.MultiIndex.from_product([self.facet_names, self.item_names])
         return facet_effects.reindex(mi).to_numpy().reshape(R, I, m)
 
+    def _generating_severity_grid(self, gen_model):
+        """
+        Full (facet element (e.g. rater), item, category) location grid for the TRUE generating
+        facet effects under gen_model (self.generating.model), broadcasting
+        up to a common shape exactly like _severity_grid does for the
+        estimated side. Used by recovery_stats() so facet-effect
+        recovery can compare across ANY pair of MFRM submodels (e.g.
+        estimating 'items' against data generated under 'thresholds'),
+        not just a matching pair -- self.generating.facet_effects already
+        holds the right shape for every submodel (confirmed empirically:
+        Series for global, (R,K) for centrality/thresholds-shaped models,
+        (R,I) for pseudo_halo/items-shaped models, (R*I,K) MultiIndex for
+        bivector/bistretch/matrix-shaped models), so this is a direct
+        mirror of _severity_grid's own branching, just reading from
+        self.generating instead of self._get_params(model).
+        """
+        facet_effects = self.generating.facet_effects
+        R, I, m = self.no_of_facet_elements, self.no_of_items, self.max_score
+        if gen_model == "global":
+            vals = facet_effects.reindex(self.facet_names).to_numpy()
+            return np.broadcast_to(vals[:, None, None], (R, I, m))
+        if gen_model in ("items", "pseudo_halo"):
+            vals = facet_effects.reindex(index=self.facet_names, columns=self.item_names).to_numpy()
+            return np.broadcast_to(vals[:, :, None], (R, I, m))
+        if gen_model in ("thresholds", "centrality"):
+            vals = facet_effects.reindex(index=self.facet_names, columns=range(1, m + 1)).to_numpy()
+            return np.broadcast_to(vals[:, None, :], (R, I, m))
+        mi = pd.MultiIndex.from_product([self.facet_names, self.item_names])
+        return facet_effects.reindex(mi).to_numpy().reshape(R, I, m)
+
     def _model_effect(self, simple, complex_):
-        """max|severity grid difference| between two nested models -- see _severity_grid."""
+        """max|location grid difference| between two nested models -- see _severity_grid."""
         return float(np.max(np.abs(self._severity_grid(complex_) - self._severity_grid(simple))))
+
+    def _drop_equivalent_models(self, active_models, where):
+        """
+        Remove sub-models that, for this design, are the same model as another
+        active sub-model, keeping the first in _MODELS (ladder) order:
+        max_score = 1: thresholds, centrality == global; bivector, matrix ==
+        items; bistretch == pseudo_halo. max_score = 2: centrality ==
+        thresholds. 2 items: pseudo_halo == items, and with max_score = 2
+        also bistretch == bivector. Warns once. Returns the same container type.
+        """
+        I, m = self.no_of_items, self.max_score
+        same = {}
+        if m == 1:
+            same.update(thresholds="global", centrality="global", bivector="items", matrix="items",
+                        bistretch="pseudo_halo")
+        if m == 2:
+            same["centrality"] = "thresholds"
+        if I == 2:
+            same["pseudo_halo"] = "items"
+            if m == 2:
+                same["bistretch"] = "bivector"
+
+        def canon(mod):
+            while mod in same:
+                mod = same[mod]
+            return mod
+        groups = {}
+        for mod in self._MODELS:
+            if mod in active_models:
+                groups.setdefault(canon(mod), []).append(mod)
+        groups = [g for g in groups.values() if len(g) > 1]
+        if not groups:
+            return active_models
+        design = " and ".join(([f"max_score={m}"] if m <= 2 else []) + ([f"{I} items"] if I == 2 else []))
+        msg = "; ".join(" and ".join(f"'{d}'" for d in g[1:])
+                        + (" is the same model as '{}' and has" if len(g) == 2
+                           else " are the same model as '{}' and have").format(g[0])
+                        + " been left out" for g in groups)
+        warnings.warn(f"{where}: with {design}, {msg}. All other comparisons still run.",
+                      UserWarning, stacklevel=3)
+        gone = {d for g in groups for d in g[1:]}
+        if isinstance(active_models, set):
+            return active_models - gone
+        return [mod for mod in active_models if mod not in gone]
 
     def _walk_back_effect(self, selected, active_set, min_effect):
         """
@@ -287,9 +395,13 @@ class MFRM(Rasch):
         max_score=0,
         extreme_persons=True,
         no_of_classes=5,
-        facet="rater",
+        facet=None,
         facet_plural=None,
         validate=True,
+        exogenous=None,
+        drop_facet_elements=None,
+        min_persons=3,
+        _keep_empty=False,
     ):
         """
         Initialise a Many-Facet Rasch Model (MFRM) object.
@@ -318,12 +430,45 @@ class MFRM(Rasch):
             or perfect total scores.
         no_of_classes : int, default 5
             Number of class intervals for observed-data overlays on plots.
+        facet : str or None, default None
+            Name of the facet (e.g. 'rater', 'judge', 'marker'). If given, it
+            is used in messages and in attribute aliases (e.g. judge_names,
+            judges_global). If None, messages say "facet element(s)", with
+            "(e.g. rater)" at first mention, and the aliases use 'rater'
+            (e.g. rater_names), as before.
+        facet_plural : str or None, default None
+            Plural of facet, if not facet + 's'.
         validate : bool, default True
             If True, checks whether the item response network is fully
             connected (i.e. all items are linked via common facet_element
             comparisons). Issues a UserWarning if the data is split into
             disconnected sub-networks, which makes item locations
             incomparable across sub-groups.
+        exogenous : pandas.DataFrame or None, default None
+            Optional person-level covariates (e.g. Gender, Nationality or
+            Age) for differential item/facet_element functioning (DIF/DRF)
+            analysis, indexed by person identifier. Values are kept as raw
+            category labels. Persons in responses without a matching
+            exogenous record (and vice versa) are allowed — such gaps are
+            common when exogenous data is optional (e.g. for GDPR reasons)
+            — and are reported via UserWarning plus the attributes
+            no_exogenous_persons and exogenous_only_persons, rather than
+            raising. Matches SLM/PCM/RSM's exogenous= exactly.
+        drop_facet_elements : None, 'thin', 'extreme' or list, default None
+            Facet elements (e.g. raters) to remove from the data before
+            anything else is done. 'thin' removes those that rated fewer than
+            min_persons persons; 'extreme' removes those that used only the
+            lowest or only the highest category; a list removes the named
+            ones. Facet elements with no responses are always removed, with a
+            UserWarning. Thin and extreme facet elements that are kept are
+            reported via UserWarning, with the call that would remove them
+            (see also drop_facet_elements()).
+        min_persons : int, default 3
+            Facet elements that rated at least one but fewer than this many
+            persons are reported as thin. In simulation (stretch sub-models,
+            1,470 datasets), facet elements that rated 1-2 persons were the main
+            source of badly wrong estimates; from 3 persons upwards the rate
+            fell to a few percent.
 
         Attributes set
         --------------
@@ -341,10 +486,26 @@ class MFRM(Rasch):
             Number of unique facet_elements.
         no_of_classes : int
             Number of class intervals for plots.
+        facet_element_person_counts : pandas.Series
+            Number of persons each facet element rated, before any removal.
+        empty_facet_elements : list
+            Facet elements with no responses (always removed).
+        thin_facet_elements : list
+            Facet elements that rated fewer than min_persons persons (but at
+            least one), whether or not they were removed.
+        extreme_facet_elements : list
+            Facet elements that used only the lowest or only the highest
+            score category, whether or not they were removed. Their location
+            is not identified by the data (like a person with an extreme
+            score); the reported value comes from the smoothing constants,
+            and the other estimates are unaffected.
+        dropped_facet_elements : list
+            Facet elements removed: those with no responses, plus any
+            removed via drop_facet_elements.
         items : pandas.Index
             Item identifiers (column names).
         facet_elements : pandas.Index
-            Rater identifiers.
+            Facet element identifiers.
         persons : pandas.Index
             Person identifiers.
         anchor_rater_names_{model} : list
@@ -355,6 +516,19 @@ class MFRM(Rasch):
             validate=True. Always contains at least 'connected' (bool)
             and 'components_count' (int).
         """
+
+        # 'which of the 4 top-level classes is this' -- unrelated to, and
+        # never compared against, self.generating.model (which holds the
+        # rater sub-parameterisation string, e.g. 'centrality', copied
+        # verbatim from the sim object below -- see recovery_stats()).
+        self.model = "MFRM"
+
+        # Constructor settings, reused by drop_facet_elements() to rebuild.
+        self._init_kwargs = dict(
+            extreme_persons=extreme_persons, no_of_classes=no_of_classes,
+            facet=facet, facet_plural=facet_plural, validate=validate,
+            exogenous=exogenous, min_persons=min_persons,
+        )
 
         # Sim-aware instantiation: store sim attributes in self.generating namespace
         from raschpy.simulation.mfrm_sim import MFRM_Sim, MFRM_Sim_Bivector
@@ -391,6 +565,101 @@ class MFRM(Rasch):
                 f"max_score={self.max_score} exceeds the maximum observed score "
                 f"({observed_max}) in the data. Some score categories may be unobserved."
             )
+
+        # Facet name: messages say "facet element(s)" unless a name was passed,
+        # glossed "(e.g. rater)" at first mention; attribute aliases keep the
+        # 'rater' names when none was (backward compatibility).
+        if facet is None:
+            facet = "rater"
+            self.facet_label, self.facets_label = "facet element", "facet elements"
+            self.facet_label_eg = "facet element (e.g. rater)"
+            self.facets_label_eg = "facet elements (e.g. raters)"
+        else:
+            self.facet_label = facet
+            self.facets_label = facet_plural if facet_plural is not None else facet + "s"
+            self.facet_label_eg, self.facets_label_eg = self.facet_label, self.facets_label
+
+        # Facet elements with no responses, or responses for very few persons:
+        # their parameters are not (or barely) identified, and in the extended
+        # sub-models they can distort other facet elements' estimates through
+        # the identification constraints.
+        _n_persons = responses.notna().any(axis=1).groupby(level=0, sort=False).sum()
+        empty = _n_persons.index[_n_persons == 0].tolist()
+        thin = _n_persons.index[(_n_persons > 0) & (_n_persons < min_persons)].tolist()
+        # Facet elements that used only the lowest, or only the highest,
+        # category: like a person with an extreme score, their location is not
+        # identified by the data.
+        _lo = responses.min(axis=1).groupby(level=0, sort=False).min()
+        _hi = responses.max(axis=1).groupby(level=0, sort=False).max()
+        extreme = [fe for fe in _n_persons.index
+                   if _n_persons[fe] > 0 and (_hi[fe] == 0 or _lo[fe] == self.max_score)]
+        # Facet elements with no responses are always removed: nothing can be
+        # estimated for them and they distort the other estimates.
+        if drop_facet_elements is None:
+            requested = []
+        elif isinstance(drop_facet_elements, str):
+            if drop_facet_elements not in ("thin", "extreme"):
+                raise ValueError("drop_facet_elements must be None, 'thin', 'extreme' or a list of names.")
+            requested = list(thin if drop_facet_elements == "thin" else extreme)
+        else:
+            requested = list(drop_facet_elements)
+            unknown = [fe for fe in requested if fe not in _n_persons.index]
+            if unknown:
+                raise ValueError(f"drop_facet_elements contains names not in the data: {unknown}.")
+        self._resample = bool(_keep_empty)
+        if _keep_empty:
+            # internal (bootstrap resamples): keep the facet element set fixed
+            empty = []
+        requested = [fe for fe in requested if fe not in empty]
+        dropped = empty + requested
+        if dropped:
+            responses = responses[~responses.index.get_level_values(0).isin(dropped)]
+        if empty:
+            warnings.warn(
+                f"{self._facet_n(len(empty))} {'has' if len(empty) == 1 else 'have'} no responses and "
+                f"{'was' if len(empty) == 1 else 'were'} removed: {empty}. Nothing can be "
+                f"estimated for them, and keeping them would distort the other "
+                f"{self.facets_label}' estimates.",
+                UserWarning,
+                stacklevel=2,
+            )
+        if requested:
+            warnings.warn(
+                f"{self._facet_n(len(requested))} removed: {requested}.", UserWarning, stacklevel=2
+            )
+        kept_thin = [fe for fe in thin if fe not in dropped]
+        if kept_thin:
+            counts = {fe: int(_n_persons[fe]) for fe in kept_thin}
+            warnings.warn(
+                f"{self._facet_n(len(kept_thin))} rated fewer than {min_persons} persons "
+                f"(persons rated: {counts}). Their parameters are poorly determined "
+                f"and, in the extended sub-models, can distort other {self.facets_label}' "
+                f"estimates. To remove them, call drop_{self._facets_name(facet, facet_plural)}('thin') "
+                f"(also removes {self.facets_label} with no responses) or pass a list of "
+                f"names, or create the object with drop_facet_elements='thin'.",
+                UserWarning,
+                stacklevel=2,
+            )
+        kept_extreme = [fe for fe in extreme if fe not in dropped]
+        if kept_extreme:
+            which_end = {fe: "lowest" if _hi[fe] == 0 else "highest" for fe in kept_extreme}
+            warnings.warn(
+                f"{self._facet_n(len(kept_extreme))} used only the lowest or only the highest score "
+                f"category ({', '.join(f'{fe}: {e}' for fe, e in which_end.items())}). Like a person "
+                f"with an extreme score, {'its' if len(kept_extreme) == 1 else 'their'} location is not "
+                f"identified by the data: the reported value comes from the smoothing constants. "
+                f"The other estimates are unaffected. To remove "
+                f"{'it' if len(kept_extreme) == 1 else 'them'}, call "
+                f"drop_{self._facets_name(facet, facet_plural)}('extreme') or create the object with "
+                f"drop_facet_elements='extreme'.",
+                UserWarning,
+                stacklevel=2,
+            )
+        self.facet_element_person_counts = _n_persons
+        self.empty_facet_elements = empty
+        self.thin_facet_elements = thin
+        self.extreme_facet_elements = extreme
+        self.dropped_facet_elements = dropped
 
         unstacked_df = responses.unstack(level=0)
 
@@ -450,15 +719,56 @@ class MFRM(Rasch):
         )
         self.responses.index.names = _index_names
 
+        # Optional person-level covariates for DIF/DRF (e.g. Gender, Nationality, Age)
+        if exogenous is not None:
+            self.no_exogenous_persons = self.person_names[
+                ~self.person_names.isin(exogenous.index)
+            ]
+            self.exogenous_only_persons = exogenous.index[
+                ~exogenous.index.isin(self.person_names)
+            ]
+            self.exogenous = exogenous.reindex(self.person_names)
+
+            if len(self.no_exogenous_persons) > 0:
+                warnings.warn(
+                    f"{len(self.no_exogenous_persons)} person(s) in the response data "
+                    f"have no matching exogenous record (exogenous data is often "
+                    f"optional, e.g. for GDPR reasons). See no_exogenous_persons for "
+                    f"the full list. These persons will be excluded from any DIF/DRF "
+                    f"grouping that relies on the missing covariate(s).",
+                    UserWarning,
+                    stacklevel=2,
+                )
+
+            if len(self.exogenous_only_persons) > 0:
+                warnings.warn(
+                    f"{len(self.exogenous_only_persons)} person(s) in the exogenous "
+                    f"data are not present in the response data and will be ignored. "
+                    f"See exogenous_only_persons for the full list.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+        else:
+            self.exogenous = None
+            self.no_exogenous_persons = pd.Index([])
+            self.exogenous_only_persons = pd.Index([])
+
         # Facet name aliases (e.g. self.judge_names, self.judges)
         setattr(self, f"{self.facet}_names", self.facet_names)
         setattr(self, self.facets, self.facet_names)
+        setattr(self, f"empty_{self.facets}", self.empty_facet_elements)
+        setattr(self, f"thin_{self.facets}", self.thin_facet_elements)
+        setattr(self, f"extreme_{self.facets}", self.extreme_facet_elements)
+        setattr(self, f"{self.facet}_person_counts", self.facet_element_person_counts)
+        setattr(self, f"dropped_{self.facets}", self.dropped_facet_elements)
+        if self.facets != "facet_elements":
+            setattr(self, f"drop_{self.facets}", self.drop_facet_elements)
 
         # Anchor facet_element tracking per model
         for model in self._MODELS:
             setattr(self, f"anchor_rater_names_{model}", [])
 
-        # Dynamic method aliases for facet-named stats and res_corr (Phase 4)
+        # Dynamic method aliases for facet-named stats and res_corr
         for model in self._MODELS:
             setattr(
                 self,
@@ -475,37 +785,8 @@ class MFRM(Rasch):
         if validate:
             self.connectivity_status = self.check_data_connectivity()
 
-            # THROW SYSTEM WARNING WITH MATHEMATICAL DETAILS IF DISCONNECTED
-            if not self.connectivity_status["connected"]:
-                warnings.warn(
-                    f"\n"
-                    f"⚠️  CRITICAL DATA INTEGRITY WARNING: The response data is disconnected into "
-                    f"{self.connectivity_status['components_count']} separate sub-networks.\n"
-                    f"Item location estimates will be problematic because there are no empirical "
-                    f"comparisons spanning across these isolated groups, the item parameter "
-                    f"estimates for each independent subset will separately sum to zero. This means items "
-                    f"belonging to different subsets cannot be compared or calibrated onto a single scale.",
-                    category=UserWarning,
-                    stacklevel=2,
-                )
-
-            # THROW SYSTEM WARNING FOR "FAKE CONNECTIVITY" — ITEMS THAT PASS THE
-            # STANDARD CHECK BUT WILL STILL BREAK CALIBRATE()'S DIRECTED MATRIX
-            directionally_isolated = self.connectivity_status.get(
-                "directionally_isolated_items", []
-            )
-            if directionally_isolated:
-                warnings.warn(
-                    f"\n"
-                    f"⚠️  DATA INTEGRITY WARNING: {len(directionally_isolated)} item(s) have a "
-                    f"structurally unresolvable zero in calibrate()'s directed pairwise matrix: "
-                    f"{directionally_isolated}.\n"
-                    f"This can silently corrupt calibration (NaN/overflow) even when the item(s) "
-                    f"otherwise appear connected. Consider dropping these items or gathering more "
-                    f"responses before calibrating.",
-                    category=UserWarning,
-                    stacklevel=2,
-                )
+            # check_data_connectivity() itself warns about disconnection,
+            # structural zeros and weak connectivity (one warning per problem).
 
     # ------------------------------------------------------------------
     # Rename utilities
@@ -572,6 +853,60 @@ class MFRM(Rasch):
                 self, f"{prefix}{self.facet}_stats_{model}", getattr(self, stats_attr)
             )
 
+    @staticmethod
+    def _facets_name(facet, facet_plural):
+        """Plural facet name used in attribute/method aliases ('raters' by default)."""
+        facet = "rater" if facet is None else facet
+        return facet_plural if facet_plural is not None else facet + "s"
+
+    def drop_facet_elements(self, which):
+        """
+        Remove facet elements (e.g. raters) from the object, e.g. after the
+        warning on creation about facet elements that rated very few persons, or to exclude a facet element whose
+        rating behaviour is erratic. Aliased as drop_{facet_plural}() (e.g.
+        drop_raters()).
+
+        The object is rebuilt from its current responses with the same
+        constructor settings (max_score, extreme_persons, no_of_classes,
+        facet, facet_plural, validate, exogenous, min_persons), so all
+        calibrations and other results are cleared; self.generating (for
+        objects created from a simulation) and renamed facet elements and
+        persons are kept. Persons left with no responses are removed as
+        invalid, as on creation.
+
+        Parameters
+        ----------
+        which : 'thin', 'extreme' or list
+            'thin' removes facet elements that rated fewer than min_persons
+            persons; 'extreme' removes those that used only the lowest or
+            only the highest score category; a list removes the named ones.
+
+        Attributes set
+        --------------
+        dropped_facet_elements : list
+            All facet elements removed so far, on creation and by this method.
+        """
+        if isinstance(which, str) and which not in ("thin", "extreme"):
+            raise ValueError(
+                f"which must be 'thin', 'extreme' or a list of {self.facet_label_eg} names."
+            )
+        if not isinstance(which, str):
+            which = list(which)
+            unknown = [fe for fe in which if fe not in self.facet_names]
+            if unknown:
+                raise ValueError(f"Names not in the data: {unknown}.")
+        source = pd.concat([self.responses, self.extreme_persons])
+        source = source[~source.index.duplicated()]
+        kwargs = dict(self._init_kwargs, max_score=self.max_score)
+        generating = getattr(self, "generating", None)
+        previously_dropped = list(self.dropped_facet_elements)
+        self.__dict__.clear()
+        self.__init__(source, drop_facet_elements=which, **kwargs)
+        if generating is not None:
+            self.generating = generating
+        self.dropped_facet_elements = previously_dropped + self.dropped_facet_elements
+        setattr(self, f"dropped_{self.facets}", self.dropped_facet_elements)
+
     def rename_facet_element(self, old, new):
         """
         Rename a single facet_element in the responses.
@@ -590,24 +925,24 @@ class MFRM(Rasch):
 
         if old == new:
             warnings.warn(
-                "New facet_element name is the same as the old facet_element name.",
+                f"New {self.facet_label_eg} name is the same as the old {self.facet_label} name.",
                 UserWarning,
                 stacklevel=2,
             )
         elif new in self.facet_names:
             warnings.warn(
-                "New facet_element name is a duplicate of an existing facet_element name.",
+                f"New {self.facet_label_eg} name is a duplicate of an existing {self.facet_label} name.",
                 UserWarning,
                 stacklevel=2,
             )
         if old not in self.facet_names:
             warnings.warn(
-                f"Old facet_element name {old!r} not found in data.",
+                f"Old {self.facet_label_eg} name {old!r} not found in data.",
                 UserWarning,
                 stacklevel=2,
             )
         elif not isinstance(new, str):
-            warnings.warn("Rater names must be strings.", UserWarning, stacklevel=2)
+            warnings.warn(f"{self.facet_label_eg.capitalize()} names must be strings.", UserWarning, stacklevel=2)
         else:
             new_names = [new if r == old else r for r in self.facet_names]
             self.rename_facet_elements_all(new_names)
@@ -627,25 +962,27 @@ class MFRM(Rasch):
 
         if len(new_names) != len(set(new_names)):
             warnings.warn(
-                "List of new facet_element names contains duplicates.",
+                f"List of new {self.facet_label_eg} names contains duplicates.",
                 UserWarning,
                 stacklevel=2,
             )
         elif len(new_names) != self.no_of_facet_elements:
             warnings.warn(
-                f"Incorrect number of facet_element names: {len(new_names)} provided, "
-                f"{self.no_of_facet_elements} facet_elements in data.",
+                f"Incorrect number of {self.facet_label_eg} names: {len(new_names)} provided, "
+                f"{self.no_of_facet_elements} {self.facets_label} in data.",
                 UserWarning,
                 stacklevel=2,
             )
         elif not all(isinstance(n, str) for n in new_names):
-            warnings.warn("Rater names must be strings.", UserWarning, stacklevel=2)
+            warnings.warn(f"{self.facet_label_eg.capitalize()} names must be strings.", UserWarning, stacklevel=2)
         else:
             df_dict = {
                 new: self.responses.xs(old)
                 for old, new in zip(self.facet_names, new_names)
             }
             self.responses = pd.concat(df_dict.values(), keys=df_dict.keys())
+            mapping = dict(zip(self.facet_names, new_names))
+            self.extreme_persons = self.extreme_persons.rename(index=mapping, level=0)
             self.facet_names = self.responses.index.get_level_values(0).unique()
             self.rater_names = self.facet_names  # keep alias in sync
             setattr(self, f"{self.facet}_names", self.facet_names)
@@ -751,9 +1088,9 @@ class MFRM(Rasch):
         item_locations : pandas.Series
             Item item_location estimates indexed by item name.
         facet_element : str
-            Rater identifier.
+            Facet element (e.g. rater) identifier.
         facet_effects : Series or dict
-            Rater facet_effect parameters. Structure depends on model:
+            Facet element effect parameters. Structure depends on model:
             global — Series indexed by facet_element;
             items  — dict of Series {facet_element: Series(items)};
             thresholds — dict of arrays {facet_element: array(thresholds)};
@@ -763,7 +1100,7 @@ class MFRM(Rasch):
         thresholds : array-like
             Rasch-Andrich threshold vector, length max_score+1, thresholds[0]=0.
         model : str, default 'global'
-            Rater parameterisation: 'global', 'items', 'thresholds', or 'matrix'.
+            Facet element parameterisation: 'global', 'items', 'thresholds', or 'matrix'.
 
         Returns
         -------
@@ -816,13 +1153,13 @@ class MFRM(Rasch):
         item_locations : pandas.Series
             Item item_location estimates.
         facet_element : str
-            Rater identifier.
+            Facet element (e.g. rater) identifier.
         facet_effects : Series or dict
-            Rater facet_effect parameters (structure depends on model).
+            Facet element effect parameters (structure depends on model).
         thresholds : array-like
             Rasch-Andrich threshold vector, length max_score+1.
         model : str, default 'global'
-            Rater parameterisation.
+            Facet element parameterisation.
 
         Returns
         -------
@@ -873,13 +1210,13 @@ class MFRM(Rasch):
         item_locations : pandas.Series
             Item item_location estimates.
         facet_element : str
-            Rater identifier.
+            Facet element (e.g. rater) identifier.
         facet_effects : Series or dict
-            Rater facet_effect parameters.
+            Facet element effect parameters.
         thresholds : array-like
             Rasch-Andrich threshold vector.
         model : str, default 'global'
-            Rater parameterisation.
+            Facet element parameterisation.
 
         Returns
         -------
@@ -931,13 +1268,13 @@ class MFRM(Rasch):
         item_locations : pandas.Series
             Item item_location estimates.
         facet_element : str
-            Rater identifier.
+            Facet element (e.g. rater) identifier.
         facet_effects : Series or dict
-            Rater facet_effect parameters.
+            Facet element effect parameters.
         thresholds : array-like
             Rasch-Andrich threshold vector.
         model : str, default 'global'
-            Rater parameterisation.
+            Facet element parameterisation.
 
         Returns
         -------
@@ -1012,7 +1349,7 @@ class MFRM(Rasch):
     def _bivector_severity(self, facet_item_effects, facet_threshold_effects, facet_element, item):
         """
         Combine decomposed (facet_item_effects, facet_threshold_effects) into the
-        per-threshold severity array for one (facet_element, item) pair:
+        per-threshold location array for one (facet_element, item) pair:
         λ'_rik = λ_ri. + λ_r.k. Mirrors the reconstruction in _estimate_raters_bivector.
         """
         ie = (
@@ -1054,7 +1391,7 @@ class MFRM(Rasch):
         """
         Shared closed-form stretch substitution: lambda_r + (scale_r - 1) *
         reference_value -- the same formula _derive_stretch_model uses to
-        reconstruct centrality/pseudo_halo/bistretch's full severity vector
+        reconstruct centrality/pseudo_halo/bistretch's full location vector
         from their own raw (lambda_r, omega_r) parameters. Factored out here
         so the cat_prob_X/exp_score_X/variance_X/kurtosis_X convenience
         methods for these three models build the same reconstruction from a
@@ -1063,17 +1400,17 @@ class MFRM(Rasch):
         return lambda_r + (scale_r - 1.0) * reference_value
 
     def _centrality_severity(self, facet_element, lambda_r, omega_r, thresholds):
-        """centrality's thresholds-shaped severity vector, reconstructed from its own (lambda_r, omega_r), ready for cat_prob(model='centrality')."""
+        """centrality's thresholds-shaped location vector, reconstructed from its own (lambda_r, omega_r), ready for cat_prob(model='centrality')."""
         lam_rt = self._stretch_value(lambda_r, omega_r, np.asarray(thresholds, dtype=float))
         return pd.DataFrame([lam_rt], index=[facet_element])
 
     def _pseudo_halo_severity(self, facet_element, item, lambda_r, omega_r, item_locations):
-        """pseudo_halo's items-shaped severity value, reconstructed from its own (lambda_r, omega_r), ready for cat_prob(model='pseudo_halo')."""
+        """pseudo_halo's items-shaped location value, reconstructed from its own (lambda_r, omega_r), ready for cat_prob(model='pseudo_halo')."""
         mu_ri = self._stretch_value(lambda_r, omega_r, item_locations.loc[item])
         return pd.DataFrame({item: [mu_ri]}, index=[facet_element])
 
     def _bistretch_severity(self, facet_element, item, lambda_r, omega_items_r, omega_thresholds_r, item_locations, thresholds):
-        """bistretch's matrix-shaped severity vector for one (rater, item), reconstructed from its own (lambda_r, omega_items_r, omega_thresholds_r), ready for cat_prob(model='bistretch')."""
+        """bistretch's matrix-shaped location vector for one (facet element (e.g. rater), item), reconstructed from its own (lambda_r, omega_items_r, omega_thresholds_r), ready for cat_prob(model='bistretch')."""
         item_component = self._stretch_value(lambda_r, omega_items_r, item_locations.loc[item])
         threshold_component = self._stretch_value(0.0, omega_thresholds_r, np.asarray(thresholds, dtype=float))
         lam_rit = item_component + threshold_component
@@ -1083,7 +1420,7 @@ class MFRM(Rasch):
     def cat_prob_centrality(self, person_location, item, item_locations, facet_element, lambda_r, omega_r, category, thresholds):
         """
         Category probability for the closed-form 'centrality' restriction,
-        taking the rater's own raw parameters (severity shift lambda_r,
+        taking the facet element's (e.g. rater's) own raw parameters (location shift lambda_r,
         threshold-stretch omega_r) directly, rather than the reconstructed
         'thresholds'-shaped vector cat_prob(model='centrality') itself
         expects. See cat_prob for the underlying formula.
@@ -1093,7 +1430,7 @@ class MFRM(Rasch):
     def cat_prob_pseudo_halo(self, person_location, item, item_locations, facet_element, lambda_r, omega_r, category, thresholds):
         """
         Category probability for the closed-form 'pseudo_halo' restriction,
-        taking the rater's own raw parameters (severity shift lambda_r,
+        taking the facet element's (e.g. rater's) own raw parameters (location shift lambda_r,
         item-difficulty-stretch omega_r) directly, rather than the
         reconstructed 'items'-shaped vector cat_prob(model='pseudo_halo')
         itself expects. See cat_prob for the underlying formula.
@@ -1103,7 +1440,7 @@ class MFRM(Rasch):
     def cat_prob_bistretch(self, person_location, item, item_locations, facet_element, lambda_r, omega_items_r, omega_thresholds_r, category, thresholds):
         """
         Category probability for the closed-form 'bistretch' restriction,
-        taking the rater's own raw parameters (severity shift lambda_r,
+        taking the facet element's (e.g. rater's) own raw parameters (location shift lambda_r,
         item-difficulty-stretch omega_items_r, threshold-stretch
         omega_thresholds_r) directly, rather than the reconstructed
         'matrix'/'bivector'-shaped vector cat_prob(model='bistretch') itself
@@ -1149,15 +1486,15 @@ class MFRM(Rasch):
         )
         return (cats * probs).sum()
     def exp_score_centrality(self, person_location, item, item_locations, facet_element, lambda_r, omega_r, thresholds):
-        """Expected score for 'centrality', taking the rater's own raw (lambda_r, omega_r) directly. See cat_prob_centrality/exp_score for details."""
+        """Expected score for 'centrality', taking the facet element's (e.g. rater's) own raw (lambda_r, omega_r) directly. See cat_prob_centrality/exp_score for details."""
         facet_effects = self._centrality_severity(facet_element, lambda_r, omega_r, thresholds)
         return self.exp_score(person_location, item, item_locations, facet_element, facet_effects, thresholds, "centrality")
     def exp_score_pseudo_halo(self, person_location, item, item_locations, facet_element, lambda_r, omega_r, thresholds):
-        """Expected score for 'pseudo_halo', taking the rater's own raw (lambda_r, omega_r) directly. See cat_prob_pseudo_halo/exp_score for details."""
+        """Expected score for 'pseudo_halo', taking the facet element's (e.g. rater's) own raw (lambda_r, omega_r) directly. See cat_prob_pseudo_halo/exp_score for details."""
         facet_effects = self._pseudo_halo_severity(facet_element, item, lambda_r, omega_r, item_locations)
         return self.exp_score(person_location, item, item_locations, facet_element, facet_effects, thresholds, "pseudo_halo")
     def exp_score_bistretch(self, person_location, item, item_locations, facet_element, lambda_r, omega_items_r, omega_thresholds_r, thresholds):
-        """Expected score for 'bistretch', taking the rater's own raw (lambda_r, omega_items_r, omega_thresholds_r) directly. See cat_prob_bistretch/exp_score for details."""
+        """Expected score for 'bistretch', taking the facet element's (e.g. rater's) own raw (lambda_r, omega_items_r, omega_thresholds_r) directly. See cat_prob_bistretch/exp_score for details."""
         facet_effects = self._bistretch_severity(facet_element, item, lambda_r, omega_items_r, omega_thresholds_r, item_locations, thresholds)
         return self.exp_score(person_location, item, item_locations, facet_element, facet_effects, thresholds, "bistretch")
 
@@ -1199,15 +1536,15 @@ class MFRM(Rasch):
         exp = (cats * probs).sum()
         return ((cats - exp) ** 2 * probs).sum()
     def variance_centrality(self, person_location, item, item_locations, facet_element, lambda_r, omega_r, thresholds):
-        """Variance for 'centrality', taking the rater's own raw (lambda_r, omega_r) directly. See cat_prob_centrality/variance for details."""
+        """Variance for 'centrality', taking the facet element's (e.g. rater's) own raw (lambda_r, omega_r) directly. See cat_prob_centrality/variance for details."""
         facet_effects = self._centrality_severity(facet_element, lambda_r, omega_r, thresholds)
         return self.variance(person_location, item, item_locations, facet_element, facet_effects, thresholds, "centrality")
     def variance_pseudo_halo(self, person_location, item, item_locations, facet_element, lambda_r, omega_r, thresholds):
-        """Variance for 'pseudo_halo', taking the rater's own raw (lambda_r, omega_r) directly. See cat_prob_pseudo_halo/variance for details."""
+        """Variance for 'pseudo_halo', taking the facet element's (e.g. rater's) own raw (lambda_r, omega_r) directly. See cat_prob_pseudo_halo/variance for details."""
         facet_effects = self._pseudo_halo_severity(facet_element, item, lambda_r, omega_r, item_locations)
         return self.variance(person_location, item, item_locations, facet_element, facet_effects, thresholds, "pseudo_halo")
     def variance_bistretch(self, person_location, item, item_locations, facet_element, lambda_r, omega_items_r, omega_thresholds_r, thresholds):
-        """Variance for 'bistretch', taking the rater's own raw (lambda_r, omega_items_r, omega_thresholds_r) directly. See cat_prob_bistretch/variance for details."""
+        """Variance for 'bistretch', taking the facet element's (e.g. rater's) own raw (lambda_r, omega_items_r, omega_thresholds_r) directly. See cat_prob_bistretch/variance for details."""
         facet_effects = self._bistretch_severity(facet_element, item, lambda_r, omega_items_r, omega_thresholds_r, item_locations, thresholds)
         return self.variance(person_location, item, item_locations, facet_element, facet_effects, thresholds, "bistretch")
 
@@ -1253,20 +1590,21 @@ class MFRM(Rasch):
     # Vectorised probability engine
     # ------------------------------------------------------------------
     def kurtosis_centrality(self, person_location, item, item_locations, facet_element, lambda_r, omega_r, thresholds):
-        """Kurtosis for 'centrality', taking the rater's own raw (lambda_r, omega_r) directly. See cat_prob_centrality/kurtosis for details."""
+        """Kurtosis for 'centrality', taking the facet element's (e.g. rater's) own raw (lambda_r, omega_r) directly. See cat_prob_centrality/kurtosis for details."""
         facet_effects = self._centrality_severity(facet_element, lambda_r, omega_r, thresholds)
         return self.kurtosis(person_location, item, item_locations, facet_element, facet_effects, thresholds, "centrality")
     def kurtosis_pseudo_halo(self, person_location, item, item_locations, facet_element, lambda_r, omega_r, thresholds):
-        """Kurtosis for 'pseudo_halo', taking the rater's own raw (lambda_r, omega_r) directly. See cat_prob_pseudo_halo/kurtosis for details."""
+        """Kurtosis for 'pseudo_halo', taking the facet element's (e.g. rater's) own raw (lambda_r, omega_r) directly. See cat_prob_pseudo_halo/kurtosis for details."""
         facet_effects = self._pseudo_halo_severity(facet_element, item, lambda_r, omega_r, item_locations)
         return self.kurtosis(person_location, item, item_locations, facet_element, facet_effects, thresholds, "pseudo_halo")
     def kurtosis_bistretch(self, person_location, item, item_locations, facet_element, lambda_r, omega_items_r, omega_thresholds_r, thresholds):
-        """Kurtosis for 'bistretch', taking the rater's own raw (lambda_r, omega_items_r, omega_thresholds_r) directly. See cat_prob_bistretch/kurtosis for details."""
+        """Kurtosis for 'bistretch', taking the facet element's (e.g. rater's) own raw (lambda_r, omega_items_r, omega_thresholds_r) directly. See cat_prob_bistretch/kurtosis for details."""
         facet_effects = self._bistretch_severity(facet_element, item, lambda_r, omega_items_r, omega_thresholds_r, item_locations, thresholds)
         return self.kurtosis(person_location, item, item_locations, facet_element, facet_effects, thresholds, "bistretch")
 
     def _cat_probs_mfrm(
-        self, person_locations, items, facet_elements, thresholds, model, facet_effects
+        self, person_locations, items, facet_elements, thresholds, model, facet_effects,
+        item_locations=None,
     ):
         """
         Vectorised MFRM category probability engine.
@@ -1278,11 +1616,22 @@ class MFRM(Rasch):
           items:      k*(θ_n − δ_i − λ_{r,i}) − Σ τ_k
           thresholds: k*(θ_n − δ_i) − Σ(τ_k + λ_{r,k})
           matrix:     k*(θ_n − δ_i) − Σ(τ_k + λ_{r,i,k})
+
+        item_locations : pandas.Series or None, default None
+            Item-difficulty values to use instead of the sub-model's own
+            (_items_for(model)) -- lets a
+            caller evaluate this facet_element's/model's category
+            probabilities against an EXTERNALLY supplied item scale (e.g.
+            a pooled/combined-group model's own items), the same pattern
+            `facet_effects` already supports by being passed in explicitly
+            rather than read from self. Used by _log_likelihood's own
+            items= override (see there for why -- axis-isolated DIF/DRF
+            omnibus tests).
         """
         cats = np.arange(len(thresholds) + 1, dtype=float)  # (K+1,)
         cumtau = np.concatenate([[0.0], np.cumsum(thresholds)])  # (K+1,)
         ab = np.asarray(person_locations, dtype=float)  # (N,)
-        diff_arr = self.items.loc[items].values  # (I,)
+        diff_arr = (self._items_for(model) if item_locations is None else item_locations).loc[items].values  # (I,)
         n_items = len(items)
 
         result = {}
@@ -1418,26 +1767,150 @@ class MFRM(Rasch):
 
     def _threshold_distance(self, threshold, item_locations, constant=0.1):
         """
-        CPAT threshold distance estimate for MFRM — sums counts across facet_elements.
-        Vectorised via indicator matrix multiplication.
+        CPAT threshold distance estimate for MFRM (estimation='pair-cpat';
+        Elliott & Buttery, 2022; thesis eq. 4.54). For each pair of
+        different items (i, j), the log-ratio of the persons a
+        facet_element scored k on both items to those it scored k-1 on i
+        and k+1 on j is taken for each facet_element with any such patterns
+        (smoothing constant added per facet_element cell), and averaged over
+        those facet_elements -- the facet_element terms cancel in the
+        average, as in eq. 4.54 -- plus the item difference. The item pairs
+        are then combined, weighted by their harmonic-mean information
+        2 n d / (n + d) from the counts summed over facet_elements.
 
-        A cell (pair of items) with no adjacent-category co-occurrence at all
-        (num == den == 0) carries no information and is dropped — same as
-        always. At ``constant=0`` a cell where only ONE side was observed
-        (num == 0 xor den == 0) must ALSO be dropped: its log-ratio is
-        undefined without smoothing, and leaving that in would let
-        ``log(0) = -inf`` survive multiplication by its own (correctly) zero
-        weight (0 * -inf = nan in IEEE754), silently poisoning the whole
-        weighted average even though the offending cell was meant to
-        contribute nothing. For ``constant > 0`` this is a no-op: `num_s`/
-        `den_s` are always > 0 wherever the pair is otherwise valid, so
-        nothing is dropped that wasn't already.
+        Before v1.4.0 the counts were summed over facet_elements before
+        taking the log -- the log of sums rather than the sum of logs that
+        eq. 4.54 specifies -- which attenuates the distance when facet
+        elements differ (logit non-collapsibility), compressing the
+        threshold scale.
 
-        If every cell for this threshold ends up dropped — no item pair
-        anywhere has any adjacent-category co-occurrence — there is no
-        information in the data to estimate it, and this raises rather than
-        returning a silent NaN that would otherwise propagate into
-        ``self.thresholds`` and every downstream calibration.
+        An item pair with no adjacent-category co-occurrence for any
+        facet_element carries no information and is dropped. At
+        ``constant=0`` a facet_element cell with only one side observed is
+        dropped from its pair's average (its log-ratio is undefined without
+        smoothing). If every item pair is dropped, there is no information
+        in the data to estimate the distance, and this raises rather than
+        returning a silent NaN.
+        """
+        R, I = self.no_of_facet_elements, self.no_of_items
+        X = self.responses.to_numpy(dtype=np.float64).reshape(R, -1, I)   # (R, P, I)
+        at_k = np.nan_to_num(X == threshold).astype(np.float64)
+        at_km1 = np.nan_to_num(X == threshold - 1).astype(np.float64)
+        at_kp1 = np.nan_to_num(X == threshold + 1).astype(np.float64)
+        num = np.matmul(at_k.transpose(0, 2, 1), at_k)        # (R, I, I); BLAS, not einsum
+        den = np.matmul(at_km1.transpose(0, 2, 1), at_kp1)
+        # CPAT compares two DIFFERENT items (i != j); same-item cells are not
+        # comparisons and must not enter the sums.
+        idx = np.arange(I)
+        num[:, idx, idx] = 0.0
+        den[:, idx, idx] = 0.0
+
+        # per facet_element cell log-ratios, averaged over the facet_elements
+        # with any patterns for the pair
+        seen = (num + den) > 0
+        usable = seen & (num + constant > 0) & (den + constant > 0)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            cell_lr = np.where(usable, np.log(np.where(usable, num + constant, 1.0))
+                               - np.log(np.where(usable, den + constant, 1.0)), 0.0)
+        n_used = usable.sum(axis=0)
+        pair_lr = np.where(n_used > 0, cell_lr.sum(axis=0) / np.maximum(n_used, 1), 0.0)
+
+        # pairs weighted by their information, from the summed counts
+        N, D = num.sum(axis=0), den.sum(axis=0)
+        weight = np.where(n_used > 0, 2.0 * (N + constant) * (D + constant) / (N + D + 2 * constant), 0.0)
+        np.fill_diagonal(weight, 0.0)
+
+        total_weight = weight.sum()
+        if total_weight == 0:
+            raise ValueError(
+                f"CPAT threshold distance for threshold {threshold} could not be "
+                f"estimated: no pair of different items has any person scoring "
+                f"{threshold} on both, or {threshold - 1} on one and "
+                f"{threshold + 1} on the other, so the data contain no "
+                f"information on the distance between thresholds {threshold} and "
+                f"{threshold + 1}. The smoothing constant cannot supply it; a larger "
+                f"or better-targeted sample is needed."
+            )
+        diffs = item_locations.reindex(self.responses.columns).values.astype(float)
+        diff_matrix = diffs[:, None] - diffs[None, :]
+        return float((weight * (pair_lr + diff_matrix)).sum() / total_weight)
+
+    def ra_thresholds(self, item_locations, constant=0.1):
+        """CPAT threshold set estimation.
+
+        A distance with no information at all (no pair of different items
+        with either comparison pattern) is set to the mean of the other
+        distances (0 if there are none), with a UserWarning, as RSM does by
+        default.
+        """
+        distances, no_information = [], []
+        for k in range(1, self.max_score):
+            try:
+                distances.append(self._threshold_distance(k, item_locations, constant))
+            except ValueError:
+                distances.append(np.nan)
+                no_information.append(k)
+        distances = np.array(distances, dtype=float)
+        if no_information:
+            ok = np.isfinite(distances)
+            distances[~ok] = distances[ok].mean() if ok.any() else 0.0
+            self._warn_no_information(no_information, stacklevel=4)
+        thresholds = np.concatenate([[0.0], np.cumsum(distances)])
+        thresholds -= thresholds.mean()
+        return thresholds
+
+    def _warn_no_information(self, no_information, stacklevel=3):
+        """Warn that the distances in no_information (k: between thresholds k
+        and k+1) have no comparison patterns and were set to a placeholder."""
+        if no_information:
+            many = len(no_information) > 1
+            pairs = ", ".join(f"{k}-{k + 1}" for k in no_information)
+            warnings.warn(
+                f"The data contain no information on the distance{'s' if many else ''} "
+                f"between thresholds {pairs}: no pair of different items has any person "
+                f"scoring k on both, or k-1 on one and k+1 on the other. The "
+                f"distance{'s have' if many else ' has'} been set to the mean of the "
+                f"other distances (0 if there are none), as a placeholder; the thresholds "
+                f"involved are not estimated by the data. Options: collapse "
+                f"sparsely used categories, or collect a larger or better-"
+                f"targeted sample.",
+                UserWarning,
+                stacklevel=stacklevel,
+            )
+
+    def _threshold_total_weights(self, constant=0.1):
+        """
+        CPAT's own total_weight (the harmonic-mean information weight
+        _threshold_distance() sums over item pairs), for every threshold
+        1..max_score-1 -- the MFRM analogue of RSM's
+        _threshold_total_weights (MFRM shares RSM's single shared-vector
+        threshold formulation), used as the effective sample size for
+        dif_test's DCF dynamic SE cap (dcf_cap). Mirrors
+        _threshold_distance's own weight computation exactly (not the
+        distance/diff_matrix term), including its facet_element-aware
+        reshape (weight is summed across facet_elements AND persons, same
+        as the distance itself), so this is cheap relative to a full
+        calibrate() and doesn't need item locations.
+
+        Not yet separately simulation-calibrated for MFRM the way
+        dcf_cap's default (80000, borrowed from RSM) was for RSM itself --
+        MFRM's total_weight additionally pools across facet_elements, so
+        its scale relative to RSM's at matched person N is not yet known.
+        Treat dcf_cap as a reasonable starting point for MFRM, not a
+        validated one, pending its own dynamic-N calibration study (see
+        raschpy_dynamic_n_calibration project notes).
+
+        Parameters
+        ----------
+        constant : float, default 0.1
+            Additive smoothing constant, matching threshold_constant from
+            calibrate()/std_errors() for internal consistency.
+
+        Returns
+        -------
+        pandas.Series
+            total_weight per threshold, indexed 1..max_score-1 (matching
+            cat_width_se_{model}'s own indexing convention).
         """
         data = (
             self.responses.values.reshape(
@@ -1446,58 +1919,35 @@ class MFRM(Rasch):
             .swapaxes(1, 2)
             .transpose((1, 0, 2))
         )  # (I, R, P)
-
-        # Sum count matrices across facet_elements: fold (R, P) into one axis
-        # so the sum over raters and persons collapses into a single matmul.
         flat = data.reshape(self.no_of_items, -1)
-        at_k = (flat == threshold).astype(np.float64)
-        at_km1 = (flat == threshold - 1).astype(np.float64)
-        at_kp1 = (flat == threshold + 1).astype(np.float64)
-        num_matrix = at_k @ at_k.T
-        den_matrix = at_km1 @ at_kp1.T
-
-        valid = (num_matrix + den_matrix) > 0
-        num_s = np.where(valid, num_matrix + constant, 0.0)
-        den_s = np.where(valid, den_matrix + constant, 0.0)
-        finite = valid & (num_s > 0) & (den_s > 0)
-
-        diffs = item_locations.values
-        diff_matrix = diffs[:, None] - diffs[None, :]
-
-        with np.errstate(divide="ignore", invalid="ignore"):
-            safe_num = np.where(finite, num_s, 1.0)
-            safe_den = np.where(finite, den_s, 1.0)
-            log_ratio = np.log(safe_num) - np.log(safe_den)
+        weights = {}
+        for threshold in range(1, self.max_score):
+            at_k = (flat == threshold).astype(np.float64)
+            at_km1 = (flat == threshold - 1).astype(np.float64)
+            at_kp1 = (flat == threshold + 1).astype(np.float64)
+            with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+                num_matrix = at_k @ at_k.T
+                den_matrix = at_km1 @ at_kp1.T
+                # CPAT compares two DIFFERENT items (i != j); same-item cells are not
+                # comparisons (den_ii is structurally 0) and must not enter the sums.
+                np.fill_diagonal(num_matrix, 0.0)
+                np.fill_diagonal(den_matrix, 0.0)
+            valid = (num_matrix + den_matrix) > 0
+            num_s = np.where(valid, num_matrix + constant, 0.0)
+            den_s = np.where(valid, den_matrix + constant, 0.0)
+            finite = valid & (num_s > 0) & (den_s > 0)
             weight_matrix = np.where(finite, 2.0 * num_s * den_s / (num_s + den_s), 0.0)
-
-        total_weight = weight_matrix.sum()
-        if total_weight == 0:
-            raise ValueError(
-                f"CPAT threshold distance for threshold {threshold} could not be "
-                f"estimated: no pair of items has any adjacent-category "
-                f"co-occurrence at constant={constant}. Use a larger sample, "
-                f"a non-zero `constant`, or drop this threshold from the data."
-            )
-        return (weight_matrix * (log_ratio + diff_matrix)).sum() / total_weight
-
-    def ra_thresholds(self, item_locations, constant=0.1):
-        """CPAT threshold set estimation."""
-        distances = [
-            self._threshold_distance(k, item_locations, constant)
-            for k in range(1, self.max_score)
-        ]
-        thresholds = np.array([sum(distances[:t]) for t in range(self.max_score)])
-        thresholds -= thresholds.mean()
-        return thresholds
+            weights[threshold] = weight_matrix.sum()
+        return pd.Series(weights)
 
     # ------------------------------------------------------------------
     # Rater facet_effect estimation
     # ------------------------------------------------------------------
 
-    def _warn_isolated_raters(self, matrix):
+    def _warn_isolated_raters(self, matrix, where=None):
         """
-        Warn (do not raise) when a facet_element has zero PAIR comparisons
-        with any other facet_element in `matrix`, checked BEFORE smoothing is
+        Record (or warn about) facet_elements with zero PAIR comparisons with
+        any other facet_element in `matrix`, checked BEFORE smoothing is
         added. The log-lik (Bradley-Terry) update excludes the diagonal from
         both wins and comparisons, so a structurally zero off-diagonal
         row/column is unidentified regardless of `constant` — the smoothing
@@ -1505,29 +1955,56 @@ class MFRM(Rasch):
         so it cannot rescue a facet_element with no comparisons at all (worst
         at constant=0, where the estimate is entirely undefined for it).
 
-        Deliberately does not raise: 'log-lik' tolerates an incomplete
-        comparison graph and still returns a usable answer for every other
-        facet_element (mirrors check_data_connectivity()'s item-level
-        equivalent, which also warns rather than raises). Python's default
-        warning filter collapses repeats of an identical message, so this is
-        safe to call from a per-item/per-threshold loop without flooding.
+        where labels the slice (an item, a threshold) the matrix belongs to,
+        None for the whole data. During calibrate() the findings are
+        collected across slices and reported in one warning
+        (_emit_isolated_raters); otherwise this warns directly. Deliberately
+        does not raise: 'log-lik' tolerates an incomplete comparison graph
+        and still returns a usable answer for every other facet_element.
         """
         off_diag_row = matrix.sum(axis=1) - np.diagonal(matrix)
         off_diag_col = matrix.sum(axis=0) - np.diagonal(matrix)
         isolated = (off_diag_row == 0) & (off_diag_col == 0)
-        if isolated.any():
-            names = sorted(np.array(self.facet_names)[isolated].tolist())
-            warnings.warn(
-                f"{len(names)} facet_element(s) have zero PAIR comparisons "
-                f"with any other facet_element: {names}. Their estimate is "
-                f"unidentified from the data (undefined at constant=0; "
-                f"otherwise driven entirely by the smoothing constant). "
-                f"Consider dropping them or gathering more responses.",
-                UserWarning,
-                stacklevel=3,
-            )
+        if not isolated.any():
+            return
+        names = sorted(np.array(self.facet_names)[isolated].tolist())
+        log = getattr(self, "_isolated_log", None)
+        if log is not None:
+            for name in names:
+                log.setdefault(name, []).append(where)
+            return
+        self._isolated_log = {name: [where] for name in names}
+        self._emit_isolated_raters(stacklevel=4)
 
-    def _pair_matrix(self, data_2d, constant):
+    def _emit_isolated_raters(self, stacklevel=3):
+        """One warning for every facet_element recorded by _warn_isolated_raters()."""
+        log, self._isolated_log = getattr(self, "_isolated_log", None) or {}, None
+        if not log:
+            return
+        overall = sorted(n for n, w in log.items() if None in w)
+        partial = {n: [x for x in w if x is not None] for n, w in log.items() if None not in w}
+        parts = []
+        if overall:
+            parts.append(
+                f"{self._facet_n(len(overall))} {'has' if len(overall) == 1 else 'have'} zero PAIR "
+                f"comparisons with any other {self.facet_label}: {overall}."
+            )
+        if partial:
+            detail = "; ".join(f"{n} ({', '.join(map(str, w))})" for n, w in sorted(partial.items()))
+            lead = self._facet_n(len(partial)) if not overall else str(len(partial))
+            parts.append(
+                f"{lead} {'has' if len(partial) == 1 else 'have'} zero PAIR comparisons with any other "
+                f"{self.facet_label} for some items or thresholds: {detail}."
+            )
+        warnings.warn(
+            " ".join(parts) + " Their estimates there are unidentified from the data "
+            "(undefined at constant=0; otherwise driven entirely by the smoothing constant). "
+            "Consider dropping them or gathering more responses.",
+            UserWarning,
+            stacklevel=stacklevel,
+        )
+
+    def _pair_matrix(self, data_2d, constant, where=None):
         """Build a PAIR pairwise matrix from (R, P) data and apply smoothing."""
         R = data_2d.shape[0]
         matrix = np.zeros((R, R), dtype=np.float64)
@@ -1535,7 +2012,7 @@ class MFRM(Rasch):
             higher = (data_2d == category + 1).astype(np.float64)
             lower = (data_2d == category).astype(np.float64)
             matrix += higher @ lower.T
-        self._warn_isolated_raters(matrix)
+        self._warn_isolated_raters(matrix, where)
         constant_matrix = ((matrix + matrix.T) > 0).astype(np.float64) * constant
         matrix += constant_matrix
         np.fill_diagonal(matrix, matrix.diagonal() + constant)
@@ -1611,6 +2088,7 @@ class MFRM(Rasch):
             higher = (flat == category + 1).astype(np.float64)
             lower = (flat == category).astype(np.float64)
             matrix += higher @ lower.T
+        self._warn_isolated_raters(matrix)
         constant_matrix = ((matrix + matrix.T) > 0).astype(np.float64) * constant
         matrix += constant_matrix
         np.fill_diagonal(matrix, matrix.diagonal() + constant)
@@ -1624,7 +2102,7 @@ class MFRM(Rasch):
         self, item, data, constant=0.1, method="log-lik", matrix_power=None, log_lik_tol=0.000001
     ):
         """PAIR facet_element effect for a single item (items parameterisation)."""
-        matrix = self._pair_matrix(data[item, :, :], constant)
+        matrix = self._pair_matrix(data[item, :, :], constant, where=self.item_names[item])
         mat = self._raise_matrix_power(matrix, matrix_power, constant, method)
         return self.priority_vector(
             mat, method=method, log_lik_tol=log_lik_tol, raters=True
@@ -1667,7 +2145,7 @@ class MFRM(Rasch):
             matrix += at_k @ at_km1.T
 
         matrix = matrix.astype(np.float64)
-        self._warn_isolated_raters(matrix)
+        self._warn_isolated_raters(matrix, where=f"threshold {category + 1}")
         constant_matrix = ((matrix + matrix.T) > 0).astype(np.float64) * constant
         matrix += constant_matrix
         np.fill_diagonal(matrix, matrix.diagonal() + constant)
@@ -1733,7 +2211,7 @@ class MFRM(Rasch):
     def _derive_stretch_model(self, deviation_df, reference_values, regression="huber"):
         """
         Shared closed-form 2-parameter (shift lambda_r + stretch scale_r)
-        reduction of a fully free per-rater deviation table (the K-length
+        reduction of a fully free per-facet-element deviation table (the K-length
         'thresholds' or I-length 'items' facet_effects), recovered directly
         from an already-calibrated fit rather than via new iterative
         estimation. Used by both 'centrality' (restricts
@@ -1744,7 +2222,7 @@ class MFRM(Rasch):
         scale_r == 1 is neutral (collapses to 'global': deviation == lambda_r
         for every element) and scale_r is NOT bounded to be positive --
         scale_r <= 0 reverses (scale_r < 0) or collapses (scale_r == 0) the
-        reference facet's order for that rater, a disorder situation
+        reference facet's order for that facet element (e.g. rater), a disorder situation
         flagged by the caller via _warn_nonpositive_stretch, not clipped
         here.
 
@@ -1763,7 +2241,7 @@ class MFRM(Rasch):
 
         Parameters
         ----------
-        deviation_df : pandas.DataFrame, shape (raters, elements)
+        deviation_df : pandas.DataFrame, shape (facet elements, elements)
             e.g. self.facet_effects_thresholds or self.facet_effects_items.
         reference_values : pandas.Series, indexed by deviation_df.columns
             e.g. self.thresholds or self.items.
@@ -1783,7 +2261,7 @@ class MFRM(Rasch):
 
         Returns
         -------
-        lam, scale : pandas.Series, indexed by deviation_df.index (raters)
+        lam, scale : pandas.Series, indexed by deviation_df.index (facet elements)
         reconstructed : pandas.DataFrame, same shape/columns as deviation_df
         """
         if regression not in ("huber", "theil-sen"):
@@ -1806,10 +2284,10 @@ class MFRM(Rasch):
                     lam_r, slope_r = float(hr.intercept_), float(hr.coef_[0])
                 except Exception as e:
                     warnings.warn(
-                        f"Huber regression failed for facet_element "
+                        f"Huber regression failed for {self.facet_label_eg} "
                         f"{facet_element!r} while deriving stretch parameters "
                         f"({type(e).__name__}: {e}) -- falling back to "
-                        f"Theil-Sen for this facet_element only.",
+                        f"Theil-Sen for this {self.facet_label} only.",
                         UserWarning,
                         stacklevel=2,
                     )
@@ -1830,9 +2308,9 @@ class MFRM(Rasch):
         return lam, scale, reconstructed
 
     def _derive_stretch_single(self, deviation_1d, reference_values, regression="huber"):
-        """Single-rater convenience wrapper around _derive_stretch_model, for
-        callers (e.g. per_rater_model_selection) working with one rater's
-        plain numpy deviation vector rather than the usual (raters x
+        """Single-facet-element convenience wrapper around _derive_stretch_model, for
+        callers (e.g. per_rater_model_selection) working with one facet element's (e.g. rater's)
+        plain numpy deviation vector rather than the usual (facet elements x
         elements) DataFrame. deviation_1d must already be ordered to match
         reference_values.index."""
         df = pd.DataFrame([deviation_1d], index=["_single"], columns=reference_values.index)
@@ -1840,20 +2318,43 @@ class MFRM(Rasch):
         return float(lam.iloc[0]), float(scale.iloc[0]), recon.iloc[0].values
 
     def _warn_nonpositive_stretch(self, scale, param_name, model_name):
-        """Flag (not clip) facet_elements whose recovered stretch parameter
-        is <= 0 -- a disorder situation for the reference facet (reversed
-        order at scale < 0, zero spread at scale == 0), not an invalid one.
-        Matches the package's existing Disordered/Prop disordered
-        convention (report, don't silently force away)."""
+        """Flag (not clip) facet_elements whose threshold stretch is <= 0
+        (centrality's omega, bistretch's omega_thresholds): their thresholds
+        collapse to one point (0) or reverse order (< 0), so the rating
+        scale functions almost dichotomously -- a valid result, but an
+        extreme one worth checking. Item stretches (pseudo_halo's omega,
+        bistretch's omega_items) are flagged only when < 0 (reversed item
+        difficulty order): omega_items = 0 is the limiting case of the
+        pseudo-halo effect itself (all items treated as equally
+        difficult)."""
+        if model_name == "pseudo_halo" or param_name == "omega_items":
+            bad = scale[scale < 0]
+            if len(bad):
+                warnings.warn(
+                    f"{self._facet_n(len(bad))} {'has' if len(bad) == 1 else 'have'} {param_name} < 0 under the "
+                    f"'{model_name}' model: {list(bad.index)}. They reverse the "
+                    f"order of item difficulty: items that are harder overall "
+                    f"are easier for them. This goes beyond the pseudo-halo "
+                    f"effect, whose limit is {param_name} = 0 (all items "
+                    f"treated as equally difficult). This is a valid result, "
+                    f"not an estimation failure, but worth checking.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            return
         bad = scale[scale <= 0]
         if len(bad):
             warnings.warn(
-                f"{len(bad)} facet_element(s) have {param_name} <= 0 under the "
-                f"'{model_name}' model: {list(bad.index)}. This reverses "
-                f"({param_name} < 0) or collapses ({param_name} == 0) the "
-                f"reference facet's natural order for these facet_elements "
-                f"-- a disorder situation, not an invalid one, but worth "
-                f"checking.",
+                f"{self._facet_n(len(bad))} {'has' if len(bad) == 1 else 'have'} {param_name} <= 0 under the "
+                f"'{model_name}' model: {list(bad.index)}. Their thresholds "
+                f"collapse to a single point ({param_name} = 0), where every "
+                f"category is equally likely, or reverse order ({param_name} "
+                f"< 0), where the middle categories are less likely still. "
+                f"Either way the lowest or highest category is the most likely "
+                f"response almost everywhere, so the rating scale functions "
+                f"almost dichotomously -- an extreme form of extreme response "
+                f"tendency. This is a valid result, not an estimation failure, "
+                f"but worth checking.",
                 UserWarning,
                 stacklevel=2,
             )
@@ -1861,7 +2362,7 @@ class MFRM(Rasch):
     def _bh_correct(self, pvals, alpha=0.05):
         """Benjamini-Hochberg FDR correction, applied within the given
         1-D array of p-values (one 'family' of tests -- callers decide
-        the family, e.g. one rater's items). Returns a boolean array,
+        the family, e.g. one facet element's items). Returns a boolean array,
         same length/order as pvals."""
         pvals = np.asarray(pvals, dtype=float)
         m = len(pvals)
@@ -1879,8 +2380,8 @@ class MFRM(Rasch):
         self, free_est, stretch_est, se_diff, test, correction, alpha, no_of_samples
     ):
         """
-        Per-rater, per-element divergence test comparing a fully-free
-        per-rater deviation table (free_est, e.g. self.facet_effects_items)
+        Per-facet-element, per-element divergence test comparing a fully-free
+        per-facet-element deviation table (free_est, e.g. self.facet_effects_items)
         against a stretch-restricted model's reconstruction of the same
         table (stretch_est, e.g. self.facet_effects_pseudo_halo_full_vector)
         -- an item-by-item (or threshold-by-threshold) indication of where
@@ -1900,11 +2401,11 @@ class MFRM(Rasch):
         (not a problem unique to one pair, despite an earlier, incorrect
         claim to that effect -- see raschpy memory notes).
 
-        Empirically, this cleanly separates raters whose data genuinely
+        Empirically, this cleanly separates facet elements (e.g. raters) whose data genuinely
         supports the stretch restriction (near-zero elements flagged,
-        even for raters with a true omega_r close to 1, where the
+        even for facet elements with a true omega_r close to 1, where the
         aggregate R² diagnostic that was tried and dropped gave
-        misleadingly low values) from raters/datasets with no true
+        misleadingly low values) from facet elements/datasets with no true
         stretch structure at all (most elements flagged) -- including
         after Benjamini-Hochberg correction. A robust-z alternative
         (median/MAD, as used elsewhere in this package for anchor
@@ -1948,8 +2449,8 @@ class MFRM(Rasch):
             given this plain 't' correction is already free to keep.
         correction : {None, 'bh'}
             If 'bh', Benjamini-Hochberg FDR correction is applied WITHIN
-            each rater's own family of tests (that rater's items, or that
-            rater's thresholds) -- not pooled across raters. If None
+            each facet element's own family of tests (that facet element's items, or that
+            facet element's thresholds) -- not pooled across facet elements. If None
             (default), raw p-values are compared against alpha directly.
         alpha : float
             Significance threshold (post-correction, if any).
@@ -1961,8 +2462,8 @@ class MFRM(Rasch):
         -------
         p : pandas.DataFrame, same shape as free_est
         flagged : pandas.DataFrame of bool, same shape as free_est
-        summary : pandas.DataFrame, index=free_est.index (raters),
-            columns ['Flagged', 'Total'] -- per-rater flagged element
+        summary : pandas.DataFrame, index=free_est.index (facet elements),
+            columns ['Flagged', 'Total'] -- per-facet-element flagged element
             count and the total number of elements tested.
         """
         if test not in ("wald", "t"):
@@ -1997,6 +2498,37 @@ class MFRM(Rasch):
         )
         return p, flagged, summary
 
+    def _fit_divergence_parent(self, model, parent, anc, samples):
+        """
+        Fit the parent model for the divergence test when the stretch model
+        was not derived from it (estimation='cp-full-rcl' (or 'cpat-rcl') fits a stretch model
+        directly, so its resamples carry no parent calibration). The parent
+        is calibrated on each stored resample, in place -- still paired with
+        that resample's stretch fit -- and on a copy of self, which is
+        returned, so self's latest-calibration attributes are unchanged.
+        Anchored: the parent is anchor-calibrated on the stretch model's
+        anchors, with the full-data anchor adjustment fixed across resamples.
+        The data issues these refits would warn about were already reported
+        by the stretch model's own calibration and bootstrap, so they are not
+        repeated.
+        """
+        import copy
+        kw = self._refit_kw(parent)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            ref = copy.copy(self)
+            ref.calibrate(**kw, model=parent)
+            anchors = adj = None
+            if anc:
+                anchors = list(getattr(self, f"anchor_rater_names_{model}"))
+                ref.calibrate_anchor(parent, anchors)
+                adj = ref._extract_anchor_adj(parent, anchors)
+            for s in samples:
+                s.calibrate(**kw, model=parent)
+                if anc:
+                    s.calibrate_anchor(parent, anchors, adj=adj)
+        return ref
+
     def _get_divergence_inputs(self, model, anc):
         """
         Return {axis: (free_est, stretch_est, se_diff)} for the given
@@ -2020,7 +2552,7 @@ class MFRM(Rasch):
         is already guaranteed to exist here, since rater_stats_df
         requests store_bootstrap=True on its own _ensure_se(model, ...)
         call whenever divergence_test is set, before reaching this
-        method. Some resamples may drop a rater entirely (excluded by
+        method. Some resamples may drop a facet element (e.g. rater) entirely (excluded by
         chance from that resample); these are filtered out per axis,
         matching the same shape-check convention used in
         _store_rater_se.
@@ -2035,9 +2567,15 @@ class MFRM(Rasch):
         prefix = "anchor_" if anc else ""
         n_rows = self.no_of_facet_elements
         samples = getattr(self, f"_bootstrap_samples_{model}")
+        parent = {"centrality": "thresholds", "pseudo_halo": "items", "bistretch": "bivector"}[model]
+        free_attrs = ([f"{prefix}facet_effects_bivector_items", f"{prefix}facet_effects_bivector_thresholds"]
+                      if model == "bistretch" else [f"{prefix}facet_effects_{parent}"])
+        ref = self
+        if any(not hasattr(s, a) for s in samples for a in free_attrs):
+            ref = self._fit_divergence_parent(model, parent, anc, samples)
 
         def _paired(free_attr, stretch_attr):
-            free_est = getattr(self, free_attr)
+            free_est = getattr(ref, free_attr)
             stretch_est = getattr(self, stretch_attr)
             valid = [
                 s for s in samples
@@ -2104,7 +2642,7 @@ class MFRM(Rasch):
     ):
         """
         Scatter of the free vector model's per-element estimates against
-        the stretch model's reconstruction of them (pooling every rater
+        the stretch model's reconstruction of them (pooling every facet element (e.g. rater)
         and every element across whichever axis/axes div_inputs covers --
         one axis for centrality/pseudo_halo, both for bistretch), flagged
         elements in a different colour, with a y=x identity line -- same
@@ -2185,14 +2723,14 @@ class MFRM(Rasch):
         regression="huber",
     ):
         """
-        Jin & Wang (2018)-style rater centrality/extremity facet_element
+        Jin & Wang (2018)-style facet element (e.g. rater) centrality/extremity facet_element
         effect -- a 2-parameter (lambda_r shift, omega_r stretch) restriction
         of the unrestricted 'thresholds' model. See _derive_stretch_model
         for the shared closed-form recipe (including the regression=
         argument). omega_r is Jin & Wang's own notation for this
         threshold-stretch coefficient.
 
-        omega_r > 1 spreads reference thresholds apart for that rater
+        omega_r > 1 spreads reference thresholds apart for that facet element
         ("central" -- a bigger person-location gap is needed to cross into
         a more extreme category, so extreme categories are under-used);
         0 < omega_r < 1 compresses them ("extreme" -- smaller gaps suffice,
@@ -2226,8 +2764,8 @@ class MFRM(Rasch):
         the regression= argument).
 
         omega_r < 1 compresses the spread of reference item locations
-        toward zero for that rater -- items look more similar in
-        difficulty to that rater than they really are, the halo
+        toward zero for that facet element (e.g. rater) -- items look more similar in
+        difficulty to that facet element than they really are, the halo
         signature (ironing out real item-difficulty differences).
         omega_r > 1 exaggerates real item-difficulty differences instead.
         omega_r == 1 is neutral and collapses to 'global'.
@@ -2235,10 +2773,10 @@ class MFRM(Rasch):
         Tests only compressed item-difficulty *perception* under an
         otherwise locally-independent response process -- NOT classic
         halo effect's usual mechanism (elevated local item interdependence
-        / residual correlation for that rater). Pair with
-        item_res_corr_analysis/facet_res_corr_analysis run per-rater to
+        / residual correlation for that facet element). Pair with
+        item_res_corr_analysis/facet_res_corr_analysis run per-facet-element to
         check for that separately; omega_r alone should not be read as
-        "this rater exhibits halo effect."
+        "this facet element exhibits halo effect."
         """
         self._estimate_raters_items(
             constant=constant,
@@ -2416,8 +2954,8 @@ class MFRM(Rasch):
 
         Reuses bivector's own existing identification convention
         directly -- no new scheme needed. bivector's item vector already
-        carries the rater's overall level (nonzero mean by construction),
-        and its threshold vector is already zero-summed per rater (pure
+        carries the facet element's (e.g. rater's) overall level (nonzero mean by construction),
+        and its threshold vector is already zero-summed per facet element (pure
         shape, no level). Applies the exact same _derive_stretch_model
         recipe 'centrality'/'pseudo_halo' already use, once per axis:
 
@@ -2502,7 +3040,7 @@ class MFRM(Rasch):
         return bool(matrix_marginals)
 
     def _resolve_facet_constant(self, model, robust, mm):
-        """Per-model default facet_element (rater) stage smoothing constant,
+        """Per-model default facet element (e.g. rater) stage smoothing constant,
         used when ``constant`` is left None. See calibrate() for the
         rationale and the simulation studies these values come from."""
         if model in ("items", "thresholds"):
@@ -2530,15 +3068,44 @@ class MFRM(Rasch):
         threshold_constant=None,
         method=None,
         matrix_power=None,
-        log_lik_tol=0.000001,
+        log_lik_tol=None,
         matrix_marginals=None,
         regression="huber",
         robust=False,
+        estimation=None,
+        ridge=None,
+        interaction_ridge=None,
+        stretch_ridge=None,
     ):
         """
         Calibrate the MFRM for the specified facet_element parameterisation.
 
-        Three-stage sequential estimation:
+        estimation='cp-full-rcl' (default): regularised composite likelihood on all
+        response-pattern pairs. For two items scored by the same facet
+        element, or two facet elements scoring the same item, every pair of
+        response patterns (a, b) and (a-1, b+1) with the same total is a binomial comparison in which the person cancels.
+        Smoothing constants go on the item and facet element comparisons and
+        on CPAT's threshold patterns only; the other patterns are left
+        unsmoothed. estimation='cpat-rcl': the same, restricted to CPAT's
+        patterns: odd totals give the item comparisons within each facet
+        element and the facet element comparisons within each item, even
+        totals the threshold patterns ((k, k) against (k-1, k+1) on two
+        items, by the same facet element).
+
+        Both RCL methods fit all their patterns jointly, as one
+        composite likelihood, by Newton-Raphson: item locations, thresholds
+        and the model's facet element parameters together, so each
+        sub-model has its own item locations and thresholds (items_{model},
+        thresholds_{model}). The facet element parameters carry ridge
+        penalties (ridge, interaction_ridge, stretch_ridge), and the
+        pattern counts additive smoothing constants (see constant). Thin
+        category widths and widths next to an empty middle category are
+        handled as in RSM.calibrate(). The stretch models are fitted from
+        two starts, from a 'pair-cpat' fit: its stretch parameters, and
+        omega = 1; the fit with the higher composite likelihood is kept.
+
+        estimation='pair-cpat': the method used before v1.4.0 (Elliott &
+        Buttery, 2022), three stages in one pass:
           1. item_diffs()       — PAIR item item_locations (shared across models)
           2. ra_thresholds()    — CPAT shared thresholds (shared across models)
           3. raters_{model}()   — PAIR facet_element effects (model-specific)
@@ -2551,7 +3118,7 @@ class MFRM(Rasch):
             Additive smoothing constant. ``None`` (default) uses the
             simulation-tuned per-stage defaults (see ``robust`` and the note
             below). An explicit float overrides every stage -- item
-            locations, thresholds and the facet_element (rater) stage all use
+            locations, thresholds and the facet element (e.g. rater) stage all use
             that value -- and takes precedence over ``robust`` and
             ``threshold_constant``. Pass ``constant=0.1`` to reproduce
             pre-1.3.0 output.
@@ -2562,7 +3129,7 @@ class MFRM(Rasch):
         method : {'cos', 'log-lik', 'ls', 'evm'} or None, default None
             Priority-vector method. ``None`` resolves by estimand density:
             ``'log-lik'`` for the low-parameter representations -- 'global'
-            (one severity per facet element from a small dense
+            (one location per facet element from a small dense
             facet-element x facet-element matrix) and the three stretch
             models ('centrality', 'pseudo_halo', 'bistretch', whose parent
             vector is re-pooled through a slope regression) -- and ``'cos'``
@@ -2591,14 +3158,14 @@ class MFRM(Rasch):
         robust : bool, default False
             Selects the more conservative / tail-protective calibration for
             rough data, resolved per model. It changes:
-            'matrix' -- the rater-cell constant switches from the
+            'matrix' -- the facet-element-cell constant switches from the
             missing-sensitive default ``clip((0.68 - 0.22 m)/sqrt(R), 0.15,
             0.5)`` to the R-only ``clip(0.65/sqrt(R), 0.15, 0.5)``, where
             ``m`` is the observed missing-data proportion and ``R`` the
             number of facet elements;
             'bivector' -- switches to the direct pooled-PAIR estimator and a
-            larger rater-stage constant (~2.0);
-            'bistretch' -- the rater/stretch-stage constant drops from 0.1 to
+            larger facet-element-stage constant (~2.0);
+            'bistretch' -- the facet element/stretch-stage constant drops from 0.1 to
             0.05.
             For every other model ``robust=True`` currently has no effect
             (accepted for forward compatibility). Ignored, with a
@@ -2611,19 +3178,133 @@ class MFRM(Rasch):
         threshold_constant : float
             The ra_thresholds (threshold-location) smoothing constant used.
         facet_constant : float
-            The facet_element (rater) stage smoothing constant used, after
+            The facet element stage smoothing constant used, after
             resolving ``None`` / ``robust`` / the per-model rule.
 
         Notes
         -----
-        Default additive smoothing constants were determined through
-        simulation studies.
+        Default additive smoothing constants and ridge penalties were
+        determined through simulation studies.
+
+        estimation='cp-full-rcl' / 'cpat-rcl' arguments
+        ---------------------------------------
+        estimation : {'cp-full-rcl', 'cpat-rcl', 'pair-cpat'} or None, default None
+            None resolves to the method of the object's last calibration,
+            or 'cp-full-rcl' for the first one. method, matrix_power,
+            log_lik_tol, matrix_marginals and robust apply to 'pair-cpat'
+            only; other values passed with 'cp-full-rcl' or 'cpat-rcl' are ignored,
+            with a UserWarning. regression sets the stretch-model start from the
+            'pair-cpat' fit.
+        constant : with 'cp-full-rcl' or 'cpat-rcl', None uses the data-adaptive item rule
+            ``min(1, 0.548 * I ** (-0.2 * log10(n * K)))`` per item pair (n
+            the number of (facet element, person) rows with a response),
+            spread over the R * K (facet element, boundary) cells, and 0.1
+            per facet element parameter for the facet element comparisons,
+            spread over the cells informing each parameter. An explicit
+            value replaces both.
+        threshold_constant : with 'cp-full-rcl' or 'cpat-rcl', per CPAT threshold-pattern cell,
+            divided by R; None gives 0.03 (or constant, if given).
+        ridge : float or None, default None
+            'global', 'items', 'thresholds', 'bivector' and 'matrix' (its
+            bivector parts): ridge * sum(deviation^2) on the facet element
+            deviations, in logits. None gives 0.3.
+        interaction_ridge : float or None, default None
+            'matrix' only: penalty on the item x threshold interactions
+            beyond the bivector parts. None gives 3.
+        stretch_ridge : float or None, default None
+            'centrality', 'pseudo_halo', 'bistretch': penalty on
+            (omega - 1)^2. None gives 1.
+        A regularisation argument passed to a sub-model it does not apply
+        to (or with 'pair-cpat') is ignored, with a UserWarning.
         """
         model = self._MODEL_ALIASES.get(model, model)
         if model not in self._MODELS:
             raise ValueError(f"model must be one of {self._MODELS}")
+        if estimation is None:
+            estimation = getattr(self, "estimation", "cp-full-rcl")
+        if estimation not in ("cp-full-rcl", "cpat-rcl", "pair-cpat"):
+            raise ValueError(
+                f"estimation must be 'cp-full-rcl', 'cpat-rcl', 'pair-cpat' or None, got {estimation!r}."
+            )
+        self.estimation = estimation
+        _applies = {
+            "ridge": ("global", "items", "thresholds", "bivector", "matrix"),
+            "interaction_ridge": ("matrix",),
+            "stretch_ridge": ("centrality", "pseudo_halo", "bistretch"),
+        }
+        _reg = dict(ridge=ridge, interaction_ridge=interaction_ridge, stretch_ridge=stretch_ridge)
+        ignored = [
+            f"{name}={value!r}" for name, value in _reg.items()
+            if value is not None and (estimation == "pair-cpat" or model not in _applies[name])
+        ]
+        if estimation in ("cp-full-rcl", "cpat-rcl"):
+            ignored += [
+                f"{name}={value!r}" for name, value, default in (
+                    ("method", method, None), ("matrix_power", matrix_power, None),
+                    ("log_lik_tol", log_lik_tol, 0.000001), ("matrix_marginals", matrix_marginals, None),
+                    ("robust", robust, False),
+                ) if value is not None and value != default
+            ]
+        if ignored:
+            where = (
+                "with estimation='pair-cpat'" if estimation == "pair-cpat"
+                else f"with estimation='{estimation}' and model='{model}'"
+            )
+            warnings.warn(
+                f"{', '.join(ignored)} {'does' if len(ignored) == 1 else 'do'} not apply {where} "
+                f"and {'is' if len(ignored) == 1 else 'are'} ignored.",
+                UserWarning,
+                stacklevel=2,
+            )
+        if log_lik_tol is None:
+            log_lik_tol = 0.000001
 
         _STRETCH = ("centrality", "pseudo_halo", "bistretch")
+        # A stretch model with no restriction degrees of freedom per facet
+        # element (a line through 2 points) is just its parent model.
+        _restriction_df = {
+            "centrality": (self.max_score - 2, "thresholds"),
+            "pseudo_halo": (self.no_of_items - 2, "items"),
+            "bistretch": (self.no_of_items + self.max_score - 4, "bivector"),
+        }
+        if model in _restriction_df and _restriction_df[model][0] <= 0:
+            parent = _restriction_df[model][1]
+            warnings.warn(
+                f"With {self.no_of_items} items and max_score={self.max_score}, "
+                f"model='{model}' imposes no restriction on model='{parent}': it "
+                f"has the same number of free parameters per {self.facet_label_eg} and "
+                f"fits the data identically. Use model='{parent}' instead.",
+                UserWarning,
+                stacklevel=2,
+            )
+        # Sub-models with rater-specific thresholds: a facet element that used a
+        # category twice or less leaves the thresholds next to it poorly
+        # determined for that facet element. Not raised for bootstrap
+        # resamples: resampling persons often thins a category the data itself
+        # uses enough, and any real shortfall is reported for the full data.
+        if model in ("thresholds", "bivector", "matrix", "centrality", "bistretch") and not self._resample:
+            sparse = {}
+            for fe in self.facet_names:
+                v = self.responses.loc[fe].to_numpy(dtype=float)
+                cnt = np.bincount(v[np.isfinite(v)].astype(int), minlength=self.max_score + 1)
+                low = {k: int(c) for k, c in enumerate(cnt) if c <= 2}
+                if low:
+                    sparse[fe] = low
+            if sparse:
+                detail = "; ".join(
+                    f"{fe} (" + ", ".join(f"category {k}: {c}" for k, c in low.items()) + ")"
+                    for fe, low in sparse.items()
+                )
+                warnings.warn(
+                    f"{self._facet_n(len(sparse))} used some score "
+                    f"categories twice or less: {detail}. Under model='{model}', "
+                    f"each {self.facet_label}'s location is estimated separately "
+                    f"at each threshold, so these {self.facets_label}' locations "
+                    f"at the thresholds bounding those categories are poorly "
+                    f"determined. See category_counts_df() for the full breakdown.",
+                    UserWarning,
+                    stacklevel=2,
+                )
         # Low-parameter representations (one severity per facet element, or a
         # stretch pair re-pooled through a slope regression) default to
         # 'log-lik'; the per-slice representations to 'cos'. See calibrate's
@@ -2633,7 +3314,7 @@ class MFRM(Rasch):
         if method is None:
             method = "log-lik" if model in _LOGLIK_DEFAULT else "cos"
 
-        if constant is not None and robust:
+        if constant is not None and robust and estimation == "pair-cpat":
             warnings.warn(
                 f"Both `constant={constant}` and `robust=True` were passed. An "
                 f"explicit `constant` takes precedence and is used for every "
@@ -2679,7 +3360,7 @@ class MFRM(Rasch):
 
         if len(self.facet_names) == 1:
             warnings.warn(
-                "Only one facet_element detected. MFRM with a single facet_element reduces to RSM. "
+                f"Only one {self.facet_label_eg} detected. MFRM with a single {self.facet_label} reduces to RSM. "
                 "Consider using RSM instead.",
                 UserWarning,
                 stacklevel=2,
@@ -2688,10 +3369,17 @@ class MFRM(Rasch):
         if len(self.item_names) == 1:
             warnings.warn(
                 "Only one item detected. MFRM with a single item reduces to RSM "
-                "with facet_elements as items. Consider reconfiguring and using RSM instead.",
+                f"with {self.facets_label_eg} as items. Consider reconfiguring and using RSM instead.",
                 UserWarning,
                 stacklevel=2,
             )
+
+        self._remove_null_persons()
+        self._warn_facet_groups(stacklevel=3)
+        if estimation in ("cp-full-rcl", "cpat-rcl"):
+            self._calibrate_rcl(model, constant, threshold_constant, regression, full_patterns=estimation == "cp-full-rcl", **_reg)
+            self._set_facet_aliases(model)
+            return
 
         self._remove_null_persons()
         self.item_diffs(
@@ -2710,11 +3398,261 @@ class MFRM(Rasch):
             kw["matrix_marginals"] = mm
         if model in _STRETCH:
             kw["regression"] = regression
-        getattr(self, f"_estimate_raters_{model}")(**kw)
+        self._isolated_log = {}
+        try:
+            getattr(self, f"_estimate_raters_{model}")(**kw)
+        finally:
+            self._emit_isolated_raters(stacklevel=3)
         self.constant = item_constant
         self.threshold_constant = thr_constant
         self.facet_constant = facet_constant
+        self.convergence = None
+        setattr(self, f"estimation_{model}", "pair-cpat")
+        setattr(self, f"items_{model}", self.items)
+        setattr(self, f"thresholds_{model}", self.thresholds)
         self._set_facet_aliases(model)
+
+    # parameters informing each facet element parameter, for spreading the
+    # facet element constant over cells: per-cell constant = c * factor
+    def _facet_cell_factor(self, model):
+        I, K = self.no_of_items, self.max_score
+        return {
+            "global": 1 / (I * K), "items": 1 / K, "thresholds": 1 / I,
+            "bivector": (I + K) / (I * K), "matrix": 1.0,
+            # stretch models: their parent cell model's factor
+            "centrality": 1 / I, "pseudo_halo": 1 / K, "bistretch": (I + K) / (I * K),
+        }[model]
+
+    def _refit_kw(self, model):
+        """estimation= and the regularisation arguments of the latest
+        calibration, for refits on new objects (bootstrap resamples, group
+        calibrations), keeping only those that apply to model."""
+        kw = dict(estimation=getattr(self, "estimation", None))
+        applies = dict(ridge=("global", "items", "thresholds", "bivector", "matrix"),
+                       interaction_ridge=("matrix",),
+                       stretch_ridge=("centrality", "pseudo_halo", "bistretch"))
+        if kw["estimation"] in ("cp-full-rcl", "cpat-rcl"):
+            for name, models in applies.items():
+                value = getattr(self, name, None)
+                if value is not None and model in models:
+                    kw[name] = value
+        return kw
+
+    def _warn_facet_groups(self, stacklevel=3):
+        """Warn if the facet elements fall into groups never compared with
+        each other (no person scored one point apart on the same item by
+        facet elements from different groups): how the groups' locations
+        differ is then not identified by the data."""
+        from raschpy import _rcl
+        R, I, K = self.no_of_facet_elements, self.no_of_items, self.max_score
+        if R < 2:
+            return
+        X = self.responses.to_numpy(dtype=np.float64).reshape(R, -1, I)
+        A = np.zeros((R, R))
+        for c in range(K):
+            hi = np.nan_to_num(X == c + 1).astype(np.float64).reshape(R, -1)
+            lo = np.nan_to_num(X == c).astype(np.float64).reshape(R, -1)
+            A += hi @ lo.T
+        comps = _rcl.facet_components((A + A.T)[None, None])
+        if len(comps) > 1:
+            groups = "; ".join(str([self.facet_names[r] for r in c]) for c in comps)
+            warnings.warn(
+                f"The {self.facets_label_eg} fall into {len(comps)} groups with no comparisons "
+                f"between them (no person was scored one point apart on the same item by "
+                f"{self.facets_label} from different groups): {groups}. How the groups' "
+                f"locations differ is not identified by the data, so comparisons between "
+                f"{self.facets_label} in different groups are not meaningful. Link the groups "
+                f"(some persons rated by {self.facets_label} from more than one group) or "
+                f"analyse them separately.",
+                UserWarning,
+                stacklevel=stacklevel,
+            )
+
+    def _shipped_widths(self, item_locations, threshold_constant):
+        """Category widths from the RSM cpat-cml threshold rule (with its
+        empty-category handling), pooling every facet element's responses,
+        given item_locations."""
+        from raschpy.rsm import RSM
+        stacked = self.responses.copy()
+        stacked.index = [f"{r}|{p}" for r, p in stacked.index]
+        pooled = RSM(stacked, max_score=self.max_score, validate=False)
+        thr = pooled.threshold_set(
+            item_locations.reindex(stacked.columns), constant=threshold_constant,
+            threshold_method="cpat-cml",
+        )
+        return np.diff(np.asarray(thr, dtype=float))
+
+    def _calibrate_rcl(self, model, constant, threshold_constant, regression,
+                       ridge=None, interaction_ridge=None, stretch_ridge=None, full_patterns=True):
+        """RCL calibration of one sub-model -- full pattern set (estimation='cp-full-rcl') or CPAT's patterns
+        ('cpat-rcl'); see calibrate()."""
+        import copy
+        from raschpy import _rcl
+
+        R, I, K = self.no_of_facet_elements, self.no_of_items, self.max_score
+        ridge = 0.3 if ridge is None else float(ridge)
+        interaction_ridge = 3.0 if interaction_ridge is None else float(interaction_ridge)
+        stretch_ridge = 1.0 if stretch_ridge is None else float(stretch_ridge)
+        if constant is None:
+            rows = int(self.responses.notna().any(axis=1).sum())
+            item_constant = min(1.0, 0.548 * I ** (-0.2 * np.log10(max(rows * K, 1))))
+            facet_constant = 0.1
+        else:
+            item_constant = facet_constant = float(constant)
+        if threshold_constant is not None:
+            thr_constant = float(threshold_constant)
+        else:
+            thr_constant = 0.03 if constant is None else float(constant)
+        c_item = item_constant / (R * K)
+        c_thr = thr_constant / R
+        c_facet = facet_constant * self._facet_cell_factor(model)
+
+        X = self.responses.to_numpy(dtype=np.float64).reshape(R, -1, I)
+        counts = _rcl.pattern_counts(X, K)
+        cat_counts = _rcl.category_counts(X, K)
+        split = _rcl.empty_widths(cat_counts, K)
+        full_arg = dict(X=X, empty=_rcl.empty_categories(cat_counts)) if full_patterns else None
+        rho = _rcl.width_ridges(counts[1], counts[2], K, exclude=split)
+        totals = (counts[1] + counts[2]).sum(axis=(0, 2, 3))
+        self._warn_no_information(
+            [k + 1 for k in range(K - 1) if totals[k] == 0 and k not in split], stacklevel=5)
+        items_idx = self.responses.columns
+        facets = self.facet_names
+
+        if model in ("centrality", "pseudo_halo", "bistretch"):
+            # starts from a 'pair-cpat' fit, run on a copy so none of its
+            # attributes are left behind
+            start = copy.copy(self)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                start.calibrate(model=model, estimation="pair-cpat", regression=regression)
+            d0 = start.items.reindex(items_idx).to_numpy(dtype=float)
+            t0 = np.asarray(start.thresholds, dtype=float)
+            lam0 = getattr(start, f"lambda_{model}").reindex(facets).to_numpy(dtype=float)
+            if model == "centrality":
+                wI0 = np.ones(R)
+                wT0 = start.omega_centrality.reindex(facets).to_numpy(dtype=float)
+            elif model == "pseudo_halo":
+                wI0 = start.omega_pseudo_halo.reindex(facets).to_numpy(dtype=float)
+                wT0 = np.ones(R)
+            else:
+                wI0 = start.omega_items_bistretch.reindex(facets).to_numpy(dtype=float)
+                wT0 = start.omega_thresholds_bistretch.reindex(facets).to_numpy(dtype=float)
+            wI0, wT0 = np.nan_to_num(wI0, nan=1.0), np.nan_to_num(wT0, nan=1.0)
+            sm = _rcl.StretchModel(model, counts, R, I, K, c_item, c_thr, c_facet, stretch_ridge,
+                                   width_rho=rho, drop_widths=split, full=full_arg)
+
+            def fit(fixed_widths):
+                fixed = {sm.tau_cols.start + k: v for k, v in fixed_widths.items()}
+                best = None
+                for st in (sm.theta_from(d0, t0, lam0, wI0, wT0),
+                           sm.theta_from(d0, t0, lam0, np.ones(R), np.ones(R))):
+                    th, info = sm.fit(st, fixed=fixed)
+                    if best is None or info["objective"] > best[1]["objective"]:
+                        best = (th, info)
+                return best
+
+            fixed_widths = {}
+            if split:
+                w = self._shipped_widths(pd.Series(d0, index=items_idx), thr_constant)
+                fixed_widths = {k: w[k] for k in split}
+            theta, info = fit(fixed_widths)
+            if split:
+                # re-estimate the split-out widths given the joint fit's items, and refit with them
+                d, *_ = sm.unpack(theta)
+                w = self._shipped_widths(pd.Series(d, index=items_idx), thr_constant)
+                fixed_widths = {k: w[k] for k in split}
+                theta, info = fit(fixed_widths)
+            self._rcl_fits = getattr(self, "_rcl_fits", {})
+            self._rcl_fits[model] = dict(
+                kind="stretch", sm=sm, theta=theta, split=split,
+                fixed=[sm.tau_cols.start + k for k in fixed_widths])
+            d, tau, lam, wI, wT = sm.unpack(theta)
+            lam_s = pd.Series(lam, index=facets)
+            item_dev = pd.DataFrame(lam[:, None] + (wI[:, None] - 1) * d[None, :], index=facets, columns=items_idx)
+            thr_dev = pd.DataFrame((wT[:, None] - 1) * tau[None, :], index=facets, columns=range(1, K + 1))
+            if model == "centrality":
+                omega = pd.Series(wT, index=facets)
+                self.lambda_centrality, self.omega_centrality = lam_s, omega
+                self.facet_effects_centrality_full_vector = thr_dev.add(lam_s, axis=0)
+                self.facet_effects_centrality = pd.DataFrame({"lambda": lam_s, "omega": omega})
+                self._warn_nonpositive_stretch(omega, "omega", "centrality")
+            elif model == "pseudo_halo":
+                omega = pd.Series(wI, index=facets)
+                self.lambda_pseudo_halo, self.omega_pseudo_halo = lam_s, omega
+                self.facet_effects_pseudo_halo_full_vector = item_dev
+                self.facet_effects_pseudo_halo = pd.DataFrame({"lambda": lam_s, "omega": omega})
+                self._warn_nonpositive_stretch(omega, "omega", "pseudo_halo")
+            else:
+                om_i, om_t = pd.Series(wI, index=facets), pd.Series(wT, index=facets)
+                self.lambda_bistretch = lam_s
+                self.omega_items_bistretch, self.omega_thresholds_bistretch = om_i, om_t
+                self.facet_effects_bistretch_items, self.facet_effects_bistretch_thresholds = item_dev, thr_dev
+                full = item_dev.to_numpy()[:, :, None] + thr_dev.to_numpy()[:, None, :]
+                mi = pd.MultiIndex.from_product([facets, self.item_names], names=[self.facet, "item"])
+                self.facet_effects_bistretch_full_vector = pd.DataFrame(
+                    full.reshape(-1, K), index=mi, columns=range(1, K + 1))
+                self.facet_effects_bistretch = pd.DataFrame(
+                    {"lambda": lam_s, "omega_items": om_i, "omega_thresholds": om_t})
+                self._warn_nonpositive_stretch(om_i, "omega_items", "bistretch")
+                self._warn_nonpositive_stretch(om_t, "omega_thresholds", "bistretch")
+            widths = np.diff(tau)
+        else:
+            cm, theta, info = _rcl.fit_cell(
+                model, counts, R, I, K, c_item, c_thr, c_facet, ridge=ridge,
+                interaction_ridge=interaction_ridge, width_rho=rho,
+                fixed_widths={k: 0.0 for k in split}, full=full_arg,
+            )
+            self._rcl_fits = getattr(self, "_rcl_fits", {})
+            self._rcl_fits[model] = dict(kind="cell", cm=cm, theta=theta, info=info, split=split)
+            parts = cm.parts(theta)
+            d, s = parts["delta"], parts["s"]
+            widths = np.diff(parts["tau"])
+            if split:
+                w = self._shipped_widths(pd.Series(d, index=items_idx), thr_constant)
+                widths[split] = w[split]
+            mi = pd.MultiIndex.from_product([facets, self.item_names], names=[self.facet, "item"])
+            if model == "global":
+                self.facet_effects_global = pd.Series(s[:, 0, 0], index=facets)
+            elif model == "items":
+                self.facet_effects_items = pd.DataFrame(s[:, :, 0], index=facets, columns=items_idx)
+            elif model == "thresholds":
+                self.facet_effects_thresholds = pd.DataFrame(s[:, 0, :], index=facets, columns=range(1, K + 1))
+            elif model == "matrix":
+                self.facet_effects_matrix = pd.DataFrame(s.reshape(-1, K), index=mi, columns=range(1, K + 1))
+                thr_marg = s.mean(axis=1)
+                self.marginal_facet_effects_items = pd.DataFrame(s.mean(axis=2), index=facets, columns=items_idx)
+                self.marginal_facet_effects_thresholds = pd.DataFrame(
+                    thr_marg - thr_marg.mean(axis=1, keepdims=True), index=facets, columns=range(1, K + 1))
+            else:  # bivector
+                # (no facet element parameters when there is a single facet element)
+                a = parts["a"][:, :, 0] if "a" in parts else np.zeros((R, I))
+                t2 = parts["t2"][:, 0, :] if "t2" in parts else np.zeros((R, K))
+                self.facet_effects_bivector_items = pd.DataFrame(a, index=facets, columns=items_idx)
+                self.facet_effects_bivector_thresholds = pd.DataFrame(t2, index=facets, columns=range(1, K + 1))
+                self.facet_effects_bivector = pd.DataFrame(s.reshape(-1, K), index=mi, columns=range(1, K + 1))
+
+        tau = np.concatenate([[0.0], np.cumsum(widths)])
+        self.items = pd.Series(d - d.mean(), index=items_idx)
+        self.thresholds = pd.Series(tau - tau.mean(), index=range(1, K + 1))
+        setattr(self, f"items_{model}", self.items)
+        setattr(self, f"thresholds_{model}", self.thresholds)
+        self.constant = item_constant
+        self.threshold_constant = thr_constant
+        self.facet_constant = facet_constant
+        self.ridge = ridge if model in ("global", "items", "thresholds", "bivector", "matrix") else None
+        self.interaction_ridge = interaction_ridge if model == "matrix" else None
+        self.stretch_ridge = stretch_ridge if model in ("centrality", "pseudo_halo", "bistretch") else None
+        self.convergence = dict(iterations=info["iterations"], converged=info["converged"])
+        setattr(self, f"convergence_{model}", self.convergence)
+        setattr(self, f"estimation_{model}", "cp-full-rcl" if full_patterns else "cpat-rcl")
+        if not info["converged"]:
+            warnings.warn(
+                f"RCL-CPAT calibration of model='{model}' did not converge in "
+                f"{info['iterations']} iterations; the estimates may be unreliable.",
+                UserWarning,
+                stacklevel=3,
+            )
 
     # Backwards-compatible aliases
     def calibrate_global(self, **kw):
@@ -2766,15 +3704,25 @@ class MFRM(Rasch):
         log_lik_tol=0.000001,
         adj=None,
         regression="huber",
+        estimation=None,
+        matrix_marginals=None,
+        ridge=None,
+        interaction_ridge=None,
+        stretch_ridge=None,
     ):
         """
         Anchor calibration: set mean facet_effect of anchors to zero
         and adjust item item_locations and thresholds accordingly.
 
+        calibrate : if True, runs calibrate() first with constant,
+            threshold_constant, method, robust, matrix_power, log_lik_tol,
+            regression, estimation, matrix_marginals, ridge,
+            interaction_ridge and stretch_ridge (all as for calibrate()).
+
         adj : pre-computed anchor adjustment from _extract_anchor_adj().
             If provided, used as a fixed constant instead of re-estimating
             from self. Pass this in bootstrap loops to avoid inflating SEs
-            with anchor rater sampling variance.
+            with anchor facet element (e.g. rater) sampling variance.
         regression : {'huber', 'theil-sen'}, default 'huber'
             centrality/pseudo_halo/bistretch only -- see calibrate(). Ignored
             for every other model.
@@ -2789,6 +3737,11 @@ class MFRM(Rasch):
                 robust=robust,
                 matrix_power=matrix_power,
                 log_lik_tol=log_lik_tol,
+                estimation=estimation,
+                matrix_marginals=matrix_marginals,
+                ridge=ridge,
+                interaction_ridge=interaction_ridge,
+                stretch_ridge=stretch_ridge,
                 **({"regression": regression} if model in ("centrality", "pseudo_halo", "bistretch") else {}),
             )
 
@@ -2831,26 +3784,26 @@ class MFRM(Rasch):
         seed=None,
     ):
         """
-        Test whether the raters proposed as `anchors` actually agree with
+        Test whether the facet elements (e.g. raters) proposed as `anchors` actually agree with
         each other, before calibrate_anchor() recentres their group mean
         to zero.
 
         calibrate_anchor() only ever imposes mean(anchor facet_effects) == 0 —
         it has no way to notice whether that mean is a stable, shared
-        reference point or an artefact of averaging over raters who don't
-        behave alike. If one or more anchor raters have a genuinely
+        reference point or an artefact of averaging over facet elements who don't
+        behave alike. If one or more anchor facet elements have a genuinely
         different facet_effect from the rest, the anchor-implied "zero" is
         unstable and the whole anchored scale inherits that instability.
         This is unrelated to per_rater_model_selection (which asks how
-        COMPLEX a rater's own facet_effect structure needs to be) — this asks
-        whether the specific set of raters chosen to DEFINE the anchor
+        COMPLEX a facet element's own facet_effect structure needs to be) — this asks
+        whether the specific set of facet elements chosen to DEFINE the anchor
         actually agree with each other. A separate, opt-in diagnostic
         (not run automatically by calibrate_anchor) since the 'cochran'
         test needs bootstrap SEs, which aren't otherwise computed by
         default and would add unexpected cost to every calibrate_anchor
         call.
 
-        Uses each rater's own free (unanchored) facet_effects_{model} —
+        Uses each facet element's own free (unanchored) facet_effects_{model} —
         deliberately not anchor_facet_effects_{model} — since the point is
         to check whether this candidate anchor SET is internally
         consistent before it gets used to define anything, using an
@@ -2861,9 +3814,9 @@ class MFRM(Rasch):
         ----------
         model : str
             One of 'global', 'items', 'thresholds', 'matrix', 'bivector',
-            'centrality', 'pseudo_halo'.
+            'centrality', 'pseudo_halo', 'bistretch'.
         anchors : list
-            Rater identifiers to test — the same set you'd pass to
+            Facet element identifiers to test — the same set you'd pass to
             calibrate_anchor(model, anchors). At least 2 required.
         rater_homogeneity_test : {'cochran', 'robust'}, default 'cochran'
             'cochran': Cochran's Q heterogeneity test (Cochran, 1954,
@@ -2873,14 +3826,14 @@ class MFRM(Rasch):
             Q = sum(w_r*(facet_effect_r - weighted_mean)^2),
             weights w_r=1/SE_r^2 from bootstrap SEs, chi-squared with
             df=n_anchors-1, evaluated on the anchor set exactly as
-            supplied. Which specific rater(s) are responsible is then
+            supplied. Which specific facet element(s) are responsible is then
             identified by sequential exclusion (standard meta-analysis
-            outlier diagnostic): repeatedly drop the rater with the
+            outlier diagnostic): repeatedly drop the facet element with the
             largest |z| against the CURRENT remaining group's own
             weighted mean and retest, until Q is no longer significant. A
             single-pass z-test against the full group's mean isn't used
-            for per-rater flagging because one severely deviant rater
-            drags that mean far enough that every OTHER rater also looks
+            for per-facet-element flagging because one severely deviant facet element
+            drags that mean far enough that every OTHER facet element also looks
             significant relative to it — sequential exclusion re-centres
             on each remaining subgroup instead, so it isolates the true
             offender(s) rather than flagging the whole set.
@@ -2892,13 +3845,15 @@ class MFRM(Rasch):
             standard significance test/p-value for this statistic, so no
             omnibus result is produced.
         per_component : 'auto', True, or False, default 'auto'
-            For items/thresholds/matrix/bivector models (facet_effect is a
-            vector or surface, not one number per rater), also test
-            homogeneity component-by-component (per item, per threshold,
-            or per (item, threshold) cell for matrix/bivector) in addition
+            For every model except 'global' (facet_effect is a vector or
+            surface, not one number per facet element), also test homogeneity
+            component-by-component (per item, per threshold, or per
+            (item, threshold) cell for matrix/bivector/bistretch -- for
+            centrality/pseudo_halo/bistretch, components are cells of the
+            reconstructed full vector, not lambda/omega) in addition
             to the scalar (whole-profile-mean) test. 'auto' turns this on
             for every model except 'global' (nothing to break out there).
-            Can produce many rows for matrix/bivector
+            Can produce many rows for matrix/bivector/bistretch
             (no_of_items * max_score).
         alpha : float, default 0.05
             Significance level for all Cochran's Q tests here: the initial
@@ -2908,10 +3863,10 @@ class MFRM(Rasch):
         correction : {'bh', 'bonferroni', None}, default 'bh'
             Multiple-comparison correction across the per-component tests
             (if run) — genuinely independent tests, one per component, so
-            correcting across them is appropriate. Not used for per-rater
+            correcting across them is appropriate. Not used for per-facet-element
             flagging: sequential exclusion (above) already decides that
             via repeated omnibus tests, not a family of independent
-            per-rater p-values, so a correction doesn't apply there.
+            per-facet-element p-values, so a correction doesn't apply there.
             rater_homogeneity_test='cochran' only.
         robust_z_threshold : float, default 3.5
             Flagging threshold for rater_homogeneity_test='robust'
@@ -2932,15 +3887,15 @@ class MFRM(Rasch):
         anchor_homogeneity_test : pandas.Series or None
             Q, df, p, Flagged, N_dropped_for_homogeneity for the scalar
             (whole-profile) omnibus test, evaluated on the anchor set as
-            supplied (N_dropped_for_homogeneity is how many raters the
+            supplied (N_dropped_for_homogeneity is how many facet elements the
             sequential-exclusion procedure needed to remove before Q
             stopped being significant). None if
             rater_homogeneity_test='robust' (no omnibus statistic exists
             for that method).
         anchor_homogeneity_per_rater : pandas.DataFrame
-            One row per anchor rater. rater_homogeneity_test='cochran':
+            One row per anchor facet element. rater_homogeneity_test='cochran':
             Facet effect, SE, z, p, Flagged — Flagged is whether
-            sequential exclusion removed this rater (z/p are relative to
+            sequential exclusion removed this facet element (z/p are relative to
             whichever group they were tested against: their own removal
             step if dropped, or the final retained group if not).
             rater_homogeneity_test='robust': Facet effect, Robust z, Flagged.
@@ -2948,7 +3903,7 @@ class MFRM(Rasch):
             One row per component (item name / threshold number / (item,
             threshold) tuple) with that component's own omnibus result —
             Q, df, p, p_corrected, Flagged (cochran), or Flagged only
-            (robust, meaning at least one rater exceeded the threshold on
+            (robust, meaning at least one facet element exceeded the threshold on
             that component). None if per_component resolves to False.
         """
         model = self._MODEL_ALIASES.get(model, model)
@@ -2960,7 +3915,7 @@ class MFRM(Rasch):
             raise ValueError("correction must be 'bh', 'bonferroni', or None")
         if len(anchors) < 2:
             raise ValueError(
-                "anchors must contain at least 2 raters to test homogeneity."
+                f"anchors must contain at least 2 {self.facets_label_eg} to test homogeneity."
             )
         if per_component == "auto":
             per_component = model != "global"
@@ -2984,7 +3939,7 @@ class MFRM(Rasch):
                 return sev.loc[rater]
             if model in ("items", "thresholds", "centrality", "pseudo_halo"):
                 return sev.loc[rater].mean() if component is None else sev.loc[rater, component]
-            # matrix / bivector: MultiIndex (facet_element, item) rows, columns=thresholds
+            # matrix / bivector / bistretch: MultiIndex (facet_element, item) rows, columns=thresholds
             if component is None:
                 return sev.loc[rater].values.mean()
             item, k = component
@@ -2992,7 +3947,7 @@ class MFRM(Rasch):
 
         if model in ("items", "thresholds", "centrality", "pseudo_halo"):
             components = list(sev0.columns)
-        elif model in ("matrix", "bivector"):
+        elif model in ("matrix", "bivector", "bistretch"):
             components = [
                 (item, k)
                 for item in self.item_names
@@ -3042,13 +3997,13 @@ class MFRM(Rasch):
             return weighted_mean, q, df, p, z
 
         def _sequential_exclusion(facet_effects, se, min_group=2):
-            """Iteratively drop the rater with the largest |z| against the
+            """Iteratively drop the facet element (e.g. rater) with the largest |z| against the
             CURRENT group's weighted mean, recomputing Q each time, until Q
-            is no longer significant or min_group raters remain.
+            is no longer significant or min_group facet elements remain.
 
             A single-pass Cochran's Q against the full group's weighted mean
-            is not robust to one severely deviant rater: that rater alone
-            drags the weighted mean far enough that every OTHER rater also
+            is not robust to one severely deviant facet element: that facet element alone
+            drags the weighted mean far enough that every OTHER facet element also
             looks significantly different from it, flagging the whole group
             instead of just the true offender. This sequential-exclusion
             approach (standard in meta-analysis heterogeneity diagnostics)
@@ -3121,7 +4076,7 @@ class MFRM(Rasch):
         if table["Flagged"].any():
             offenders = list(table.index[table["Flagged"]])
             warnings.warn(
-                f"Anchor rater(s) {offenders} do not appear homogeneous with "
+                f"Anchor {self._facet_n(len(offenders), count=False)} {offenders} {'does' if len(offenders) == 1 else 'do'} not appear homogeneous with "
                 f"the rest of the anchor set ({rater_homogeneity_test} test; "
                 "see anchor_homogeneity_per_rater). The anchor-defined zero "
                 "point may be unstable — consider revising the anchor set.",
@@ -3176,6 +4131,9 @@ class MFRM(Rasch):
             item_adj = self.facet_effects_bivector_items.loc[anchors].mean(axis=0)
             thr_adj = self.facet_effects_bivector_thresholds.loc[anchors].mean(axis=0)
             return (item_adj, thr_adj)
+        elif model in ("centrality", "pseudo_halo", "bistretch") and \
+                getattr(self, f"estimation_{model}", "pair-cpat") in ("cp-full-rcl", "cpat-rcl"):
+            return self._stretch_anchor_adj(model, anchors)
         elif model == "centrality":
             return self.facet_effects_thresholds.loc[anchors].mean(axis=0)
         elif model == "pseudo_halo":
@@ -3187,8 +4145,8 @@ class MFRM(Rasch):
 
     def _calibrate_anchor_global(self, anchors, adj=None):
         """Anchor calibration for global parameterisation. Shifts all facet effects so anchor mean is zero."""
-        self.anchor_items_global = self.items.copy()
-        self.anchor_thresholds_global = self.thresholds.copy()
+        self.anchor_items_global = self._items_for("global").copy()
+        self.anchor_thresholds_global = self._thresholds_for("global").copy()
         self.anchor_facet_effects_global = self.facet_effects_global.copy()
 
         if adj is None:
@@ -3197,8 +4155,8 @@ class MFRM(Rasch):
 
     def _calibrate_anchor_items(self, anchors, adj=None):
         """Anchor calibration for items parameterisation. Adjusts per-item facet effects and absorbs mean into item item_locations."""
-        self.anchor_items_items = self.items.copy()
-        self.anchor_thresholds_items = self.thresholds.copy()
+        self.anchor_items_items = self._items_for("items").copy()
+        self.anchor_thresholds_items = self._thresholds_for("items").copy()
 
         sev_df = self.facet_effects_items.copy()  # already (R, I) DataFrame
         if adj is None:
@@ -3211,8 +4169,8 @@ class MFRM(Rasch):
 
     def _calibrate_anchor_thresholds(self, anchors, adj=None):
         """Anchor calibration for thresholds parameterisation. Adjusts per-threshold facet effects and absorbs mean into thresholds."""
-        self.anchor_items_thresholds = self.items.copy()
-        self.anchor_thresholds_thresholds = self.thresholds.copy()
+        self.anchor_items_thresholds = self._items_for("thresholds").copy()
+        self.anchor_thresholds_thresholds = self._thresholds_for("thresholds").copy()
 
         sev_df = self.facet_effects_thresholds.copy()  # already (R, K+1) DataFrame
         if adj is None:
@@ -3223,6 +4181,71 @@ class MFRM(Rasch):
         self.anchor_facet_effects_thresholds = sev_df
         self.anchor_thresholds_thresholds -= self.anchor_thresholds_thresholds.mean()
 
+    def _stretch_params(self, model):
+        """(lambda, omega_items, omega_thresholds) Series of a stretch model's
+        calibration (omega fixed at 1 on the axis the model does not stretch)."""
+        lam = getattr(self, f"lambda_{model}")
+        ones = pd.Series(1.0, index=lam.index)
+        if model == "centrality":
+            return lam, ones, self.omega_centrality
+        if model == "pseudo_halo":
+            return lam, self.omega_pseudo_halo, ones
+        return lam, self.omega_items_bistretch, self.omega_thresholds_bistretch
+
+    def _stretch_anchor_adj(self, model, anchors):
+        """Anchor adjustment of an RCL-CPAT stretch model: the anchors' mean
+        shift and mean stretches (see _calibrate_anchor_stretch_rcl)."""
+        lam, om_i, om_t = self._stretch_params(model)
+        return (float(lam.loc[anchors].mean()), float(om_i.loc[anchors].mean()),
+                float(om_t.loc[anchors].mean()))
+
+    def _calibrate_anchor_stretch_rcl(self, model, anchors, adj=None):
+        """
+        Anchor calibration of a stretch model fitted with estimation=
+        'cp-full-rcl' or 'cpat-rcl'. The anchors become the reference: their mean shift
+        lambda is set to 0 and their mean stretches omega to 1, with item
+        locations and thresholds rescaled to compensate, so that every
+        location lambda_r + omega_items_r * delta_i + omega_thresholds_r *
+        tau_h is unchanged apart from a common shift (the anchors' mean
+        lambda, taken up by the persons):
+            omega' = omega / mean(omega over anchors),
+            delta' = delta * mean(omega_items over anchors),
+            tau' = tau * mean(omega_thresholds over anchors),
+            lambda' = lambda - mean(lambda over anchors).
+        Item locations and thresholds stay centred.
+        """
+        lam, om_i, om_t = self._stretch_params(model)
+        lam_a, wi_a, wt_a = self._stretch_anchor_adj(model, anchors) if adj is None else adj
+        d = self._items_for(model) * wi_a
+        tau = self._thresholds_for(model) * wt_a
+        lam2, om_i2, om_t2 = lam - lam_a, om_i / wi_a, om_t / wt_a
+        items_idx, K = self.responses.columns, self.max_score
+        item_dev = pd.DataFrame(lam2.to_numpy()[:, None] + (om_i2.to_numpy()[:, None] - 1) * d.reindex(items_idx).to_numpy()[None, :],
+                                index=lam.index, columns=items_idx)
+        thr_dev = pd.DataFrame((om_t2.to_numpy()[:, None] - 1) * tau.to_numpy()[None, :],
+                               index=lam.index, columns=range(1, K + 1))
+        setattr(self, f"anchor_items_{model}", d)
+        setattr(self, f"anchor_thresholds_{model}", tau)
+        setattr(self, f"anchor_lambda_{model}", lam2)
+        if model == "centrality":
+            self.anchor_omega_centrality = om_t2
+            self.anchor_facet_effects_centrality_full_vector = thr_dev.add(lam2, axis=0)
+            self.anchor_facet_effects_centrality = pd.DataFrame({"lambda": lam2, "omega": om_t2})
+        elif model == "pseudo_halo":
+            self.anchor_omega_pseudo_halo = om_i2
+            self.anchor_facet_effects_pseudo_halo_full_vector = item_dev
+            self.anchor_facet_effects_pseudo_halo = pd.DataFrame({"lambda": lam2, "omega": om_i2})
+        else:
+            self.anchor_omega_items_bistretch, self.anchor_omega_thresholds_bistretch = om_i2, om_t2
+            self.anchor_facet_effects_bistretch_items = item_dev
+            self.anchor_facet_effects_bistretch_thresholds = thr_dev
+            full = item_dev.to_numpy()[:, :, None] + thr_dev.to_numpy()[:, None, :]
+            mi = pd.MultiIndex.from_product([self.facet_names, self.item_names], names=[self.facet, "item"])
+            self.anchor_facet_effects_bistretch_full_vector = pd.DataFrame(
+                full.reshape(-1, K), index=mi, columns=range(1, K + 1))
+            self.anchor_facet_effects_bistretch = pd.DataFrame(
+                {"lambda": lam2, "omega_items": om_i2, "omega_thresholds": om_t2})
+
     def _calibrate_anchor_centrality(self, anchors, adj=None, regression="huber"):
         """
         Anchor calibration for centrality. Delegates to the
@@ -3232,6 +4255,8 @@ class MFRM(Rasch):
         from the anchored facet effects and anchored reference thresholds.
         See _derive_stretch_model for the regression= argument.
         """
+        if getattr(self, "estimation_centrality", "pair-cpat") in ("cp-full-rcl", "cpat-rcl"):
+            return self._calibrate_anchor_stretch_rcl("centrality", anchors, adj=adj)
         self._calibrate_anchor_thresholds(anchors, adj=adj)
         self.anchor_items_centrality = self.anchor_items_thresholds.copy()
         self.anchor_thresholds_centrality = (
@@ -3257,6 +4282,8 @@ class MFRM(Rasch):
         anchored reference item locations. See _derive_stretch_model for
         the regression= argument.
         """
+        if getattr(self, "estimation_pseudo_halo", "pair-cpat") in ("cp-full-rcl", "cpat-rcl"):
+            return self._calibrate_anchor_stretch_rcl("pseudo_halo", anchors, adj=adj)
         self._calibrate_anchor_items(anchors, adj=adj)
         self.anchor_items_pseudo_halo = self.anchor_items_items.copy()
         self.anchor_thresholds_pseudo_halo = self.anchor_thresholds_items.copy()
@@ -3277,8 +4304,8 @@ class MFRM(Rasch):
         Subtracts the mean anchor facet_element effect (per item, per threshold)
         from all facet_elements, and absorbs it into item item_locations and thresholds.
         """
-        self.anchor_items_matrix = self.items.copy()
-        self.anchor_thresholds_matrix = self.thresholds.copy()
+        self.anchor_items_matrix = self._items_for("matrix").copy()
+        self.anchor_thresholds_matrix = self._thresholds_for("matrix").copy()
 
         # (R, I, K+1) array from MultiIndex DataFrame
         sev_array = self.facet_effects_matrix.values.reshape(
@@ -3336,8 +4363,8 @@ class MFRM(Rasch):
         The anchored full matrix is then reconstructed from the anchored
         vectors.
         """
-        self.anchor_items_bivector = self.items.copy()
-        self.anchor_thresholds_bivector = self.thresholds.copy()
+        self.anchor_items_bivector = self._items_for("bivector").copy()
+        self.anchor_thresholds_bivector = self._thresholds_for("bivector").copy()
 
         # ---- Item vector adjustment --------------------------------------
         item_sev_df = self.facet_effects_bivector_items.copy()  # (R, I) DataFrame
@@ -3388,6 +4415,8 @@ class MFRM(Rasch):
         reference items/thresholds. See _derive_stretch_model for the
         regression= argument, applied to both axes.
         """
+        if getattr(self, "estimation_bistretch", "pair-cpat") in ("cp-full-rcl", "cpat-rcl"):
+            return self._calibrate_anchor_stretch_rcl("bistretch", anchors, adj=adj)
         self._calibrate_anchor_bivector(anchors, adj=adj)
         self.anchor_items_bistretch = self.anchor_items_bivector.copy()
         self.anchor_thresholds_bistretch = self.anchor_thresholds_bivector.copy()
@@ -3482,14 +4511,36 @@ class MFRM(Rasch):
             facet_element: self.responses.xs(facet_element)
             for facet_element in self.facet_names
         }
-        samples = []
+        # built one at a time (a generator), so only the resamples the caller
+        # keeps are held in memory at once
         for pick in picks:
             sample_dict = {
                 facet_element: data_dict[facet_element].loc[pick].reset_index(drop=True)
                 for facet_element in self.facet_names
             }
-            samples.append(pd.concat(sample_dict.values(), keys=sample_dict.keys()))
-        return [MFRM(s, self.max_score, validate=False) for s in samples]
+            sample = pd.concat(sample_dict.values(), keys=sample_dict.keys())
+            with warnings.catch_warnings():
+                # resamples keep every facet element (an element can be missed by
+                # chance), so their estimates line up with the original's
+                warnings.simplefilter("ignore", UserWarning)
+                yield MFRM(sample, self.max_score, validate=False,
+                           facet=self.facet if self.facet_label != "facet element" else None,
+                           facet_plural=self.facets if self.facet_label != "facet element" else None,
+                           _keep_empty=True)
+
+    def _resamples(self, no_of_samples, seed=None, keep=False):
+        """
+        Bootstrap resamples (see _bootstrap_samples()), one at a time. Once the
+        caller's loop has moved on from a resample, its responses and fit
+        working arrays are dropped -- they are most of its memory, and only
+        its estimates are used afterwards -- unless keep=True (the resamples
+        are stored for later refits, e.g. store_bootstrap=True).
+        """
+        for s in self._bootstrap_samples(no_of_samples, seed=seed):
+            yield s
+            if not keep:
+                for name in ("responses", "_rcl_fits", "extreme_persons", "invalid_responses"):
+                    s.__dict__.pop(name, None)
 
     def _se_from_bootstrap(self, ests_arr, labels, interval):
         """Compute SE and optional CI from a (B, N) bootstrap array."""
@@ -3515,10 +4566,33 @@ class MFRM(Rasch):
         log_lik_tol=0.000001,
         store_bootstrap=False,
         seed=None,
+        se_method=None,
     ):
         """
-        Bootstrap standard errors for item item_locations, thresholds, and
-        facet_element effects for the specified model.
+        Standard errors for item locations, thresholds, and facet_element
+        effects for the specified model.
+
+        se_method='sandwich' (sub-models calibrated with estimation=
+        'cp-full-rcl' or 'cpat-rcl'): analytic standard errors. The covariance of the fitted
+        parameters is a sandwich, with bread the negative Hessian of the
+        penalised composite log-likelihood at the estimates and meat the
+        sum over persons of their score outer products (persons as the
+        independent units); the standard errors of every reported quantity
+        follow by the delta method, and intervals are estimate +/- z * SE.
+        se_method='bootstrap': no_of_samples bootstrap resamples of persons,
+        each recalibrated, as before v1.4.0.
+        se_method=None (default): the sandwich for an RCL ('cp-full-rcl' or 'cpat-rcl') sub-model,
+        unless store_bootstrap=True (which needs the fitted resamples) or
+        the sub-model is 'mixed', in which case the bootstrap; and the
+        bootstrap, with a UserWarning giving the reason, whenever the
+        sandwich does not apply: an unused score category (whose
+        neighbouring widths are set by the cpat-cml rule), a calibration
+        that did not converge, or estimates the data do not identify (whose
+        bootstrap standard errors then reflect the penalties and starting
+        values). So standard errors are always produced. The bootstrap for a
+        'pair-cpat' sub-model. An explicit se_method='sandwich' gives NaN
+        for estimates the data do not identify, with a UserWarning. self.se_method_{model} (and
+        self.se_method) record the method used.
 
         Parameters
         ----------
@@ -3532,8 +4606,44 @@ class MFRM(Rasch):
         seed : int or None, default None
             Seed for the bootstrap resampling RNG. Pass an int for fully
             reproducible standard errors; None (default) draws fresh entropy.
+        se_method : {None, 'sandwich', 'bootstrap'}, default None
+            Standard error method; see above.
         """
         model = self._MODEL_ALIASES.get(model, model)
+        if se_method not in (None, "sandwich", "bootstrap"):
+            raise ValueError(
+                f"se_method must be None, 'sandwich' or 'bootstrap', got {se_method!r}."
+            )
+        if model != "mixed" and not hasattr(self, f"facet_effects_{model}"):
+            self.calibrate(model=model)
+        rcl = model != "mixed" and getattr(self, f"estimation_{model}", None) in ("cp-full-rcl", "cpat-rcl")
+        if se_method == "sandwich" and (not rcl or store_bootstrap):
+            raise ValueError(
+                "se_method='sandwich' needs a sub-model calibrated with estimation='cp-full-rcl' (or 'cpat-rcl') "
+                "(not 'mixed'), and no stored bootstrap samples (store_bootstrap=False)."
+            )
+        if se_method is None and rcl and not store_bootstrap:
+            obstacle = self._rcl_sandwich_obstacle(model)
+            if obstacle is not None:
+                warnings.warn(
+                    f"Standard errors for model='{model}' computed by bootstrap rather than "
+                    f"analytically (sandwich), because {obstacle}. Pass se_method= to choose "
+                    f"the method explicitly.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                se_method = "bootstrap"
+            else:
+                se_method = "sandwich"
+        if se_method == "sandwich":
+            self.se_method = "sandwich"
+            setattr(self, f"se_method_{model}", "sandwich")
+            setattr(self, f"_bootstrap_stored_{model}", False)
+            setattr(self, f"_bootstrap_interval_{model}", interval)
+            self._rcl_sandwich_std_errors(model, anchors, interval)
+            return
+        self.se_method = "bootstrap"
+        setattr(self, f"se_method_{model}", "bootstrap")
         if model == "mixed":
             self._sync_mixed(
                 anchors,
@@ -3568,11 +4678,45 @@ class MFRM(Rasch):
         # sampling variance).
         adj_fixed = self._extract_anchor_adj(cal_model, anchors) if anchors is not None else None
 
-        samples = self._bootstrap_samples(no_of_samples, seed=seed)
-        for s in samples:
-            if model == "mixed":
+        samples = []
+        collector = _BootstrapWarnings()
+        for s in self._resamples(no_of_samples, seed=seed, keep=store_bootstrap):
+            samples.append(s)
+            with collector.resample():
+                if model == "mixed":
+                    s.calibrate(
+                        **self._refit_kw("matrix"),
+                        model="matrix",
+                        constant=constant,
+                        threshold_constant=threshold_constant,
+                        method=method,
+                        robust=robust,
+                        matrix_power=matrix_power,
+                        log_lik_tol=log_lik_tol,
+                    )
+                    if anchors is not None:
+                        s.calibrate_anchor(
+                            "matrix",
+                            anchors,
+                            constant=constant,
+                            threshold_constant=threshold_constant,
+                            method=method,
+                            robust=robust,
+                            matrix_power=matrix_power,
+                            log_lik_tol=log_lik_tol,
+                            adj=adj_fixed,
+                        )
+                        s.anchor_facet_effects_mixed = s._apply_rater_models(
+                            s.anchor_facet_effects_matrix, rater_models_for_bootstrap, anchor=True
+                        )
+                    else:
+                        s.facet_effects_mixed = s._apply_rater_models(
+                            s.facet_effects_matrix, rater_models_for_bootstrap
+                        )
+                    continue
                 s.calibrate(
-                    model="matrix",
+                    **self._refit_kw(model),
+                    model=model,
                     constant=constant,
                     threshold_constant=threshold_constant,
                     method=method,
@@ -3582,7 +4726,7 @@ class MFRM(Rasch):
                 )
                 if anchors is not None:
                     s.calibrate_anchor(
-                        "matrix",
+                        model,
                         anchors,
                         constant=constant,
                         threshold_constant=threshold_constant,
@@ -3592,35 +4736,7 @@ class MFRM(Rasch):
                         log_lik_tol=log_lik_tol,
                         adj=adj_fixed,
                     )
-                    s.anchor_facet_effects_mixed = s._apply_rater_models(
-                        s.anchor_facet_effects_matrix, rater_models_for_bootstrap
-                    )
-                else:
-                    s.facet_effects_mixed = s._apply_rater_models(
-                        s.facet_effects_matrix, rater_models_for_bootstrap
-                    )
-                continue
-            s.calibrate(
-                model=model,
-                constant=constant,
-                threshold_constant=threshold_constant,
-                method=method,
-                robust=robust,
-                matrix_power=matrix_power,
-                log_lik_tol=log_lik_tol,
-            )
-            if anchors is not None:
-                s.calibrate_anchor(
-                    model,
-                    anchors,
-                    constant=constant,
-                    threshold_constant=threshold_constant,
-                    method=method,
-                    robust=robust,
-                    matrix_power=matrix_power,
-                    log_lik_tol=log_lik_tol,
-                    adj=adj_fixed,
-                )
+        collector.emit()
 
         if store_bootstrap:
             setattr(self, f"_bootstrap_samples_{model}", samples)
@@ -3648,10 +4764,14 @@ class MFRM(Rasch):
         item_se, item_lo, item_hi = self._se_from_bootstrap(
             item_ests, self.responses.columns, interval
         )
-        setattr(self, f"{prefix}item_se", pd.Series(item_se, index=self.responses.columns))
-        if item_lo is not None:
-            setattr(self, f"{prefix}item_low", pd.Series(item_lo, index=self.responses.columns))
-            setattr(self, f"{prefix}item_high", pd.Series(item_hi, index=self.responses.columns))
+        # Item locations can differ between sub-models (estimation='cp-full-rcl' (or 'cpat-rcl')),
+        # so their SEs are stored per sub-model; the unsuffixed attributes
+        # hold the latest.
+        for suffix in ("", f"_{model}"):
+            setattr(self, f"{prefix}item_se{suffix}", pd.Series(item_se, index=self.responses.columns))
+            if item_lo is not None:
+                setattr(self, f"{prefix}item_low{suffix}", pd.Series(item_lo, index=self.responses.columns))
+                setattr(self, f"{prefix}item_high{suffix}", pd.Series(item_hi, index=self.responses.columns))
 
         thr_se, thr_lo, thr_hi = self._se_from_bootstrap(thresh_ests, None, interval)
         setattr(self, f"{prefix}threshold_se_{model}", thr_se)
@@ -3690,7 +4810,262 @@ class MFRM(Rasch):
         # Rater SE — structure differs by model
         self._store_rater_se(model, samples, anc, interval, prefix)
 
+    def _store_rater_se(self, model, samples, anchor, interval, prefix):
+        self._store_rater_se_impl(model, samples, anchor, interval, prefix)
+        self._nan_extreme_facet_se(model, prefix)
+
     def _store_stretch_param_se(self, model, samples, anchor, interval, prefix, param_names):
+        self._store_stretch_param_se_impl(model, samples, anchor, interval, prefix, param_names)
+        self._nan_extreme_facet_se(model, prefix)
+
+    def _rcl_sandwich_std_errors(self, model, anchors, interval):
+        self._rcl_sandwich_std_errors_impl(model, anchors, interval)
+        self._nan_extreme_facet_se(model, "anchor_" if anchors is not None else "")
+
+    def _nan_extreme_facet_se(self, model, prefix):
+        """Set the standard errors (and interval bounds) of extreme facet elements to NaN: their
+        locations are not identified by the data, so no standard error is meaningful."""
+        ext = list(getattr(self, "extreme_facet_elements", None) or [])
+        if not ext:
+            return
+        names = [f"{prefix}rater_{k}_{model}" for k in ("se", "low", "high")]
+        names += [f"{prefix}rater_se_marginal_items", f"{prefix}rater_se_marginal_thresholds"]
+        names += [f"{prefix}{p}_{k}_{model}" for p in ("lambda", "omega", "omega_items", "omega_thresholds")
+                  for k in ("se", "low", "high")]
+        for name in names:
+            v = getattr(self, name, None)
+            if isinstance(v, (pd.Series, pd.DataFrame)):
+                idx = v.index
+                mask = (idx.get_level_values(0) if isinstance(idx, pd.MultiIndex) else idx).isin(ext)
+                if mask.any():
+                    v = v.copy()
+                    v.loc[mask] = np.nan
+                    setattr(self, name, v)
+            elif isinstance(v, dict):
+                v = dict(v)
+                for e in ext:
+                    if e in v:
+                        v[e] = np.nan * np.asarray(v[e], dtype=float) if np.ndim(v[e]) else np.nan
+                setattr(self, name, v)
+
+    def _rcl_sandwich_obstacle(self, model):
+        """None if the sandwich applies to an RCL-CPAT sub-model; otherwise
+        the reason the bootstrap is used instead: an unused score category
+        (the widths next to it are set by the cpat-cml rule), a calibration
+        that did not converge, or estimates the data do not identify."""
+        from raschpy import _rcl
+        fit = self._rcl_fits[model]
+        x = self.responses.to_numpy(dtype=float)
+        empty = [c for c in range(self.max_score + 1) if (x == c).sum() == 0]
+        if empty:
+            return (
+                f"score categor{'ies' if len(empty) > 1 else 'y'} {', '.join(map(str, empty))} "
+                f"{'have' if len(empty) > 1 else 'has'} no responses: the category widths next to "
+                f"{'them' if len(empty) > 1 else 'it'} are set by a rule the analytic standard "
+                f"errors do not account for"
+            )
+        if not getattr(self, f"convergence_{model}")["converged"]:
+            return "the calibration did not converge, and the sandwich assumes it did"
+        R, I, K = self.no_of_facet_elements, self.no_of_items, self.max_score
+        X = self.responses.to_numpy(dtype=np.float64).reshape(R, -1, I)
+        if fit["kind"] == "cell":
+            try:
+                null = _rcl.cell_null(fit["cm"], fit["theta"], fit["info"])
+            except _rcl.SandwichTooLarge as ex:
+                return (f"the design is too large to form the analytic standard errors' "
+                        f"information matrix ({ex})")
+        else:
+            null = _rcl.stretch_null(fit["sm"], fit["theta"], fixed=fit["fixed"])
+        if null.shape[1]:
+            if fit["kind"] == "cell":
+                _rcl.release_state(fit["info"])
+            return (
+                "the data do not identify some of the estimates (for example the locations of "
+                f"{self.facets_label} never compared with the others, or of items not linked "
+                "to the others); their bootstrap standard errors reflect the penalties and "
+                "starting values rather than the data"
+            )
+        return None
+
+    def _rcl_sandwich_std_errors_impl(self, model, anchors, interval):
+        """Sandwich standard errors for a sub-model calibrated by RCL-CPAT
+        (see std_errors()), stored under the same attribute names as the
+        bootstrap, with intervals estimate +/- z * SE and the bootstrap
+        attributes None."""
+        from raschpy import _rcl
+
+        fit = self._rcl_fits[model]
+        R, I, K = self.no_of_facet_elements, self.no_of_items, self.max_score
+        X = self.responses.to_numpy(dtype=np.float64).reshape(R, -1, I)
+        anc = anchors is not None
+        prefix = "anchor_" if anc else ""
+        if anc:
+            self.calibrate_anchor(model, anchors)
+        n_s = R * I * K
+        stretch_rows = None
+        if fit["kind"] == "cell":
+            cm, theta, info = fit["cm"], fit["theta"], fit["info"]
+            V, free, null = _rcl.cell_sandwich(cm, theta, info, X, K)
+            J = info["_state"]["J"]
+            Z = np.zeros((I + K + n_s, cm.p))
+            Z[:I, cm.slices["delta"]] = cm._NI
+            Z[I:I + K, cm.slices["tau"]] = cm._T
+            Zs = J.copy()
+            Zs[:, cm.slices["delta"]] = 0.0
+            Zs[:, cm.slices["tau"]] = 0.0
+            Z[I + K:] = Zs
+            Z = Z[:, free]
+            del J, Zs
+            _rcl.release_state(info)
+            # anchoring with a fixed adjustment shifts estimates by constants
+            C = Z @ V @ Z.T
+            out_null = Z @ null
+        else:
+            sm, theta = fit["sm"], fit["theta"]
+            V, free, null = _rcl.stretch_sandwich(sm, theta, X, K, fixed=fit["fixed"], drop_widths=fit["split"])
+            Mf = sm.M[:, free]
+            C_phi = Mf @ V @ Mf.T
+            adj = self._stretch_anchor_adj(model, anchors) if anc else None
+
+            def outputs(phi):
+                oD, oT, oL, oI, oW = sm.off
+                d, tau, lam = phi[oD:oD + I], phi[oT:oT + K], phi[oL:oL + R]
+                wI, wT = phi[oI:oI + R], phi[oW:oW + R]
+                if adj is not None:
+                    lam_a, wi_a, wt_a = adj
+                    d, tau, lam, wI, wT = d * wi_a, tau * wt_a, lam - lam_a, wI / wi_a, wT / wt_a
+                s = lam[:, None, None] + (wI[:, None, None] - 1) * d[None, :, None] + (wT[:, None, None] - 1) * tau[None, None, :]
+                return np.concatenate([d, tau, s.ravel(), lam, wI, wT])
+
+            phi0 = sm.phi0 + sm.M @ theta
+            h = 1e-6
+            F = np.column_stack([(outputs(phi0 + h * e) - outputs(phi0 - h * e)) / (2 * h)
+                                 for e in np.eye(len(phi0))])
+            C = F @ C_phi @ F.T
+            out_null = F @ Mf @ null
+            stretch_rows = I + K + n_s
+
+        if out_null.shape[1]:
+            # directions the data do not identify: no standard error
+            hit = np.abs(out_null).max(axis=1) > 1e-8
+            C = C.copy()
+            C[hit, :] = np.nan
+            C[:, hit] = np.nan
+            _rcl.warn_unidentified(stacklevel=4)
+        var = np.clip(np.diag(C), 0, None)
+        z = norm.ppf(0.5 + interval / 2) if interval else None
+        items_idx, cols_k = self.responses.columns, range(1, K + 1)
+
+        # items
+        item_se = pd.Series(np.sqrt(var[:I]), index=items_idx)
+        item_est = self._items_for(model, anchor=anc).reindex(items_idx)
+        for suffix in ("", f"_{model}"):
+            setattr(self, f"{prefix}item_se{suffix}", item_se)
+            if z is not None:
+                setattr(self, f"{prefix}item_low{suffix}", item_est - z * item_se)
+                setattr(self, f"{prefix}item_high{suffix}", item_est + z * item_se)
+        # thresholds and widths
+        thr_se = np.sqrt(var[I:I + K])
+        thr_est = np.asarray(self._thresholds_for(model, anchor=anc), dtype=float)
+        setattr(self, f"{prefix}threshold_se_{model}", thr_se)
+        setattr(self, f"{prefix}threshold_low_{model}", thr_est - z * thr_se if z is not None else None)
+        setattr(self, f"{prefix}threshold_high_{model}", thr_est + z * thr_se if z is not None else None)
+        Dm = np.diff(np.eye(K), axis=0)
+        w_se = np.sqrt(np.clip(np.diag(Dm @ C[I:I + K, I:I + K] @ Dm.T), 0, None))
+        widths = np.diff(thr_est)
+        for k in fit["split"]:
+            w_se[k] = np.nan                                  # set by the cpat-cml rule, not by the fit
+        setattr(self, f"{prefix}cat_width_bootstrap_{model}", None)
+        setattr(self, f"{prefix}cat_width_se_{model}", {k + 1: float(w_se[k]) for k in range(K - 1)})
+        if z is not None:
+            setattr(self, f"{prefix}cat_width_low_{model}", {k + 1: widths[k] - z * w_se[k] for k in range(K - 1)})
+            setattr(self, f"{prefix}cat_width_high_{model}", {k + 1: widths[k] + z * w_se[k] for k in range(K - 1)})
+
+        # facet element effects: covariance of the location-grid deviations s
+        Cs = C[I + K:I + K + n_s, I + K:I + K + n_s].reshape(R, I, K, R, I, K)
+        r_ix = np.arange(R)
+
+        def se_cells():
+            return np.sqrt(np.clip(np.diag(C)[I + K:I + K + n_s], 0, None)).reshape(R, I, K)
+
+        def se_item_part():
+            # mean over thresholds of s, per (facet element, item)
+            v = np.array([[Cs[r, i, :, r, i, :].sum() / K ** 2 for i in range(I)] for r in r_ix])
+            return np.sqrt(np.clip(v, 0, None))
+
+        def se_threshold_part(centred_over_items):
+            # thresholds part: s - mean over thresholds (first item), or the
+            # matrix marginal: mean over items, centred over thresholds
+            L = np.eye(K) - np.full((K, K), 1 / K)
+            out = np.zeros((R, K))
+            for r in r_ix:
+                if centred_over_items:
+                    Cr = Cs[r, :, :, r, :, :].reshape(I * K, I * K)
+                    A = np.kron(np.full((1, I), 1 / I), L)
+                    out[r] = np.diag(A @ Cr @ A.T)
+                else:
+                    out[r] = np.diag(L @ Cs[r, 0, :, r, 0, :] @ L.T)
+            return np.sqrt(np.clip(out, 0, None))
+
+        sev_est = getattr(self, self._sev_attr(model, anchor=anc))
+        cells = se_cells()
+        facets = self.facet_names
+
+        def store_interval(se_obj, est_obj):
+            if z is not None:
+                setattr(self, f"{prefix}rater_low_{model}", est_obj - z * se_obj)
+                setattr(self, f"{prefix}rater_high_{model}", est_obj + z * se_obj)
+
+        if model == "global":
+            se = pd.Series(cells[:, 0, 0], index=facets)
+            setattr(self, f"{prefix}rater_se_{model}", se)
+            store_interval(se, sev_est.reindex(facets))
+        elif model in ("items", "pseudo_halo"):
+            se = pd.DataFrame(cells[:, :, 0], index=facets, columns=items_idx)
+            setattr(self, f"{prefix}rater_se_{model}", se)
+            store_interval(se, sev_est.reindex(index=facets, columns=items_idx))
+        elif model in ("thresholds", "centrality"):
+            se = pd.DataFrame(cells[:, 0, :], index=facets, columns=cols_k)
+            setattr(self, f"{prefix}rater_se_{model}", se)
+            store_interval(se, sev_est.reindex(index=facets, columns=cols_k))
+        elif model == "matrix":
+            mi = pd.MultiIndex.from_product([facets, items_idx], names=[self.facet, "item"])
+            se = pd.DataFrame(cells.reshape(-1, K), index=mi, columns=cols_k)
+            setattr(self, f"{prefix}rater_se_{model}", se)
+            setattr(self, f"{prefix}rater_se_marginal_items",
+                    pd.DataFrame(se_item_part(), index=facets, columns=items_idx))
+            setattr(self, f"{prefix}rater_se_marginal_thresholds",
+                    pd.DataFrame(se_threshold_part(True), index=facets, columns=cols_k))
+            store_interval(se, sev_est.reindex(index=mi, columns=cols_k))
+        else:  # bivector, bistretch: item part (mean over thresholds) and threshold part
+            se_items = pd.DataFrame(se_item_part(), index=facets, columns=items_idx)
+            se_thresholds = pd.DataFrame(se_threshold_part(False), index=facets, columns=cols_k)
+            setattr(self, f"{prefix}rater_se_marginal_items", se_items)
+            setattr(self, f"{prefix}rater_se_marginal_thresholds", se_thresholds)
+            setattr(self, f"{prefix}rater_se_{model}", se_items)
+
+        if stretch_rows is not None:
+            names = {"centrality": ["lambda", "omega"], "pseudo_halo": ["lambda", "omega"],
+                     "bistretch": ["lambda", "omega_items", "omega_thresholds"]}[model]
+            rows = {"lambda": stretch_rows, "omega_items": stretch_rows + R, "omega_thresholds": stretch_rows + 2 * R}
+            rows["omega"] = rows["omega_thresholds"] if model == "centrality" else rows["omega_items"]
+            for pname in names:
+                r0 = rows[pname]
+                se = pd.Series(np.sqrt(var[r0:r0 + R]), index=facets)
+                setattr(self, f"{prefix}{pname}_se_{model}", se)
+                if z is not None:
+                    est = getattr(self, f"{prefix}{pname}_{model}").reindex(facets)
+                    setattr(self, f"{prefix}{pname}_low_{model}", est - z * se)
+                    setattr(self, f"{prefix}{pname}_high_{model}", est + z * se)
+            cov = {}
+            for a_i, p1 in enumerate(names):
+                for p2 in names[a_i + 1:]:
+                    cov[f"{p1}_{p2}"] = pd.Series(
+                        [C[rows[p1] + r, rows[p2] + r] for r in r_ix], index=facets)
+            setattr(self, f"{prefix}stretch_param_cov_{model}", cov)
+        self._set_facet_aliases(model, anchor=anc)
+
+    def _store_stretch_param_se_impl(self, model, samples, anchor, interval, prefix, param_names):
         """
         Bootstrap SE/CI for a stretch-restricted model's own raw shift/
         stretch parameters (lambda, omega -- or omega_items/
@@ -3698,6 +5073,19 @@ class MFRM(Rasch):
         full-vector SE _store_rater_se already computes.
         Stored as self.{prefix}{param}_se_{model}, and (if interval is
         given) self.{prefix}{param}_low_{model}/_high_{model}.
+
+        Also stores self.{prefix}stretch_param_cov_{model}: a dict
+        {"{p1}_{p2}": pandas.Series} of per-facet-element bootstrap COVARIANCE
+        between every pair of param_names (e.g. "lambda_omega" for
+        centrality/pseudo_halo; "lambda_omega_items",
+        "lambda_omega_thresholds", "omega_items_omega_thresholds" for
+        bistretch) -- needed for drf_test's joint (lambda, omega)
+        covariance-aware test, since lambda and omega come from one
+        shared regression per facet element (e.g. rater) and are NOT independent. Each pair's
+        covariance is computed only from bootstrap samples where BOTH
+        parameters were successfully estimated (their own valid subsets
+        may differ slightly from each single parameter's own SE
+        computation above).
         """
         lo_p = 50 * (1 - interval) if interval is not None else None
         hi_p = 50 * (1 + interval) if interval is not None else None
@@ -3721,7 +5109,30 @@ class MFRM(Rasch):
                     pd.Series(np.percentile(ests, hi_p, axis=0), index=self.facet_names),
                 )
 
-    def _store_rater_se(self, model, samples, anchor, interval, prefix):
+        if len(param_names) > 1:
+            cov_dict = {}
+            for i, p1 in enumerate(param_names):
+                for p2 in param_names[i + 1:]:
+                    attr1 = f"anchor_{p1}_{model}" if anchor else f"{p1}_{model}"
+                    attr2 = f"anchor_{p2}_{model}" if anchor else f"{p2}_{model}"
+                    valid = [
+                        s for s in samples
+                        if len(getattr(s, attr1)) == self.no_of_facet_elements
+                        and len(getattr(s, attr2)) == self.no_of_facet_elements
+                    ]
+                    ests1 = np.array([getattr(s, attr1).values for s in valid])
+                    ests2 = np.array([getattr(s, attr2).values for s in valid])
+                    if len(valid) > 1:
+                        cov_vals = np.array([
+                            np.cov(ests1[:, r], ests2[:, r])[0, 1]
+                            for r in range(ests1.shape[1])
+                        ])
+                    else:
+                        cov_vals = np.full(self.no_of_facet_elements, np.nan)
+                    cov_dict[f"{p1}_{p2}"] = pd.Series(cov_vals, index=self.facet_names)
+            setattr(self, f"{prefix}stretch_param_cov_{model}", cov_dict)
+
+    def _store_rater_se_impl(self, model, samples, anchor, interval, prefix):
         """Store facet_element SE attributes for the given model."""
         lo_p = 50 * (1 - interval) if interval is not None else None
         hi_p = 50 * (1 + interval) if interval is not None else None
@@ -4066,7 +5477,7 @@ class MFRM(Rasch):
         model : str
             One of 'global', 'items', 'thresholds', 'matrix'.
         anchors : list or None
-            Raters whose mean facet_effect is anchored to zero. If None,
+            Facet elements (e.g. raters) whose mean facet_effect is anchored to zero. If None,
             falls back to anchor_rater_names_{model} set by calibrate_anchor().
         interval : float or None
             If provided, store percentile CIs at this level (e.g. 0.95).
@@ -4085,6 +5496,16 @@ class MFRM(Rasch):
         model = self._MODEL_ALIASES.get(model, model)
         if interval is None:
             interval = getattr(self, f"_bootstrap_interval_{model}", None)
+        if getattr(self, f"se_method_{model}", None) == "sandwich":
+            if anchors is None:
+                anchors = getattr(self, f"anchor_rater_names_{model}", None)
+            if not anchors:
+                raise ValueError(
+                    f"anchors must be provided, or calibrate_anchor() must have been run "
+                    f'for model="{model}".'
+                )
+            self._rcl_sandwich_std_errors(model, anchors, interval or None)
+            return
 
         stored_flag = getattr(self, f"_bootstrap_stored_{model}", False)
         # 'mixed' has no calibrate_anchor() of its own -- everything is derived
@@ -4104,22 +5525,25 @@ class MFRM(Rasch):
                     f"anchor_rater_names_{cal_model} is available."
                 )
             adj_fixed = self._extract_anchor_adj(cal_model, anchor_raters_used)
+            collector = _BootstrapWarnings()
             for s in samples:
-                s.calibrate_anchor(
-                    cal_model,
-                    anchor_raters_used,
-                    constant=constant,
-                    threshold_constant=threshold_constant,
-                    method=method,
-                    robust=robust,
-                    matrix_power=matrix_power,
-                    log_lik_tol=log_lik_tol,
-                    adj=adj_fixed,
-                )
-                if model == "mixed":
-                    s.anchor_facet_effects_mixed = s._apply_rater_models(
-                        s.anchor_facet_effects_matrix, self.anchor_rater_models
+                with collector.resample():
+                    s.calibrate_anchor(
+                        cal_model,
+                        anchor_raters_used,
+                        constant=constant,
+                        threshold_constant=threshold_constant,
+                        method=method,
+                        robust=robust,
+                        matrix_power=matrix_power,
+                        log_lik_tol=log_lik_tol,
+                        adj=adj_fixed,
                     )
+                    if model == "mixed":
+                        s.anchor_facet_effects_mixed = s._apply_rater_models(
+                            s.anchor_facet_effects_matrix, self.anchor_rater_models, anchor=True
+                        )
+            collector.emit()
         else:
             # Slow path: full bootstrap rerun
             if anchors is None:
@@ -4131,45 +5555,51 @@ class MFRM(Rasch):
                     f"anchor_rater_names_{cal_model} is available."
                 )
             adj_fixed = self._extract_anchor_adj(cal_model, anchors)
-            samples = self._bootstrap_samples(no_of_samples, seed=seed)
-            for s in samples:
-                s.calibrate(
-                    model=cal_model,
-                    constant=constant,
-                    threshold_constant=threshold_constant,
-                    method=method,
-                    robust=robust,
-                    matrix_power=matrix_power,
-                    log_lik_tol=log_lik_tol,
-                )
-                s.calibrate_anchor(
-                    cal_model,
-                    anchors,
-                    constant=constant,
-                    threshold_constant=threshold_constant,
-                    method=method,
-                    robust=robust,
-                    matrix_power=matrix_power,
-                    log_lik_tol=log_lik_tol,
-                    adj=adj_fixed,
-                )
-                if model == "mixed":
-                    s.anchor_facet_effects_mixed = s._apply_rater_models(
-                        s.anchor_facet_effects_matrix, self.anchor_rater_models
+            samples = []
+            collector = _BootstrapWarnings()
+            for s in self._resamples(no_of_samples, seed=seed):
+                samples.append(s)
+                with collector.resample():
+                    s.calibrate(
+                        **self._refit_kw(cal_model),
+                        model=cal_model,
+                        constant=constant,
+                        threshold_constant=threshold_constant,
+                        method=method,
+                        robust=robust,
+                        matrix_power=matrix_power,
+                        log_lik_tol=log_lik_tol,
                     )
+                    s.calibrate_anchor(
+                        cal_model,
+                        anchors,
+                        constant=constant,
+                        threshold_constant=threshold_constant,
+                        method=method,
+                        robust=robust,
+                        matrix_power=matrix_power,
+                        log_lik_tol=log_lik_tol,
+                        adj=adj_fixed,
+                    )
+                    if model == "mixed":
+                        s.anchor_facet_effects_mixed = s._apply_rater_models(
+                            s.anchor_facet_effects_matrix, self.anchor_rater_models, anchor=True
+                        )
+            collector.emit()
 
-        # Item item_location SEs — from anchor_items_{cal_model} ('matrix' for 'mixed',
-        # since item locations aren't model-specific and 'mixed' calibrates via matrix)
+        # Item location SEs -- from anchor_items_{cal_model} ('matrix' for 'mixed',
+        # which calibrates via matrix); stored per sub-model, unsuffixed = latest
         item_ests = np.array(
             [getattr(s, f"anchor_items_{cal_model}").values for s in samples]
         )
         item_se, item_lo, item_hi = self._se_from_bootstrap(
             item_ests, self.responses.columns, interval
         )
-        self.anchor_item_se = pd.Series(item_se, index=self.responses.columns)
-        if item_lo is not None:
-            self.anchor_item_low = pd.Series(item_lo, index=self.responses.columns)
-            self.anchor_item_high = pd.Series(item_hi, index=self.responses.columns)
+        for suffix in ("", f"_{model}"):
+            setattr(self, f"anchor_item_se{suffix}", pd.Series(item_se, index=self.responses.columns))
+            if item_lo is not None:
+                setattr(self, f"anchor_item_low{suffix}", pd.Series(item_lo, index=self.responses.columns))
+                setattr(self, f"anchor_item_high{suffix}", pd.Series(item_hi, index=self.responses.columns))
 
         # Threshold SEs
         thresh_ests = np.array(
@@ -4369,7 +5799,10 @@ class MFRM(Rasch):
         missing_as_incorrect=False,
     ):
         """
-        Newton-Raphson ML person_location estimation with optional Warm correction.
+        Newton-Raphson ML person_location estimation; with warm_corr=True
+        (default) returns Warm's (1989) weighted likelihood estimate, solved
+        directly and finite for extreme scores (ext_score_adjustment then
+        only sets the starting value).
 
         The key difference between models is how the log-numerator is constructed
         per facet_element — handled entirely by _cat_probs_mfrm() so the NR loop is
@@ -4488,21 +5921,27 @@ class MFRM(Rasch):
                 estimates[active] = np.nan
 
             if warm_corr:
-                valid = estimates.notna()
-                if valid.any():
-                    valid_idx = estimates.index[valid]
-                    valid_pf = nr_filter.loc[
-                        pd.IndexSlice[facet_elements, valid_idx], :
-                    ]
-                    estimates[valid] += self.warm(
-                        estimates[valid],
-                        items,
-                        facet_elements,
-                        facet_effects,
-                        thresholds,
-                        valid_pf,
-                        model,
-                    )
+                raw = sum(
+                    person_data.loc[r].reindex(estimates.index).sum(axis=1)
+                    for r in facet_elements
+                ).values.astype(float)
+                pf_by_facet = {
+                    r: nr_filter.loc[r].reindex(estimates.index).values
+                    for r in facet_elements
+                }
+                estimates = pd.Series(
+                    self._solve_wle(
+                        raw,
+                        estimates.values,
+                        lambda t, rows: self._wle_moments(
+                            t, items, facet_elements, facet_effects, thresholds,
+                            {r: pf[rows] for r, pf in pf_by_facet.items()}, model,
+                        ),
+                        tolerance,
+                        max_iters,
+                    ),
+                    index=estimates.index,
+                )
 
         except Exception as e:
             warnings.warn(
@@ -4641,6 +6080,30 @@ class MFRM(Rasch):
             **kw,
         )
 
+    def _wle_moments(
+        self, person_locations, items, facet_elements, facet_effects, thresholds,
+        person_filters, model,
+    ):
+        """
+        Expected score, information, and third and fourth cumulants of the
+        total score (summed over facet elements (e.g. raters) and items) at the given
+        person locations, for _solve_wle().
+
+        person_filters : dict {facet_element: array (N, I)}, 1 = observed,
+        0 or NaN = missing.
+        """
+        probs_dict, cats = self._cat_probs_mfrm(
+            np.asarray(person_locations, dtype=float), items, facet_elements,
+            thresholds, model, facet_effects,
+        )
+        totals = [0.0, 0.0, 0.0, 0.0]
+        for facet_element in facet_elements:
+            parts = self._polytomous_moments(
+                probs_dict[facet_element], cats, person_filters[facet_element]
+            )
+            totals = [t + p for t, p in zip(totals, parts)]
+        return tuple(totals)
+
     def warm(
         self,
         person_locations,
@@ -4666,16 +6129,16 @@ class MFRM(Rasch):
         items : list
             Item subset to use.
         facet_elements : list
-            Rater subset to use.
+            Facet element (e.g. rater) subset to use.
         facet_effects : Series or dict
-            Rater facet_effect parameters (structure depends on model).
+            Facet element effect parameters (structure depends on model).
         thresholds : array-like
             Rasch-Andrich threshold vector.
         person_filter : pandas.DataFrame
             Binary mask (1.0 = responded, NaN = missing), with (Rater, Person)
             MultiIndex and items as columns.
         model : str, default 'global'
-            Rater parameterisation.
+            Facet element parameterisation.
 
         Returns
         -------
@@ -4719,25 +6182,25 @@ class MFRM(Rasch):
     def warm_global(self, person_locations, items, facet_elements, facet_effects, pf, **kw):
         """Alias for warm(..., model='global'). See warm for full documentation."""
         return self.warm(
-            person_locations, items, facet_elements, facet_effects, self.thresholds, pf, "global"
+            person_locations, items, facet_elements, facet_effects, self._thresholds_for("global"), pf, "global"
         )
 
     def warm_items(self, person_locations, items, facet_elements, facet_effects, pf, **kw):
         """Alias for warm(..., model='items'). See warm for full documentation."""
         return self.warm(
-            person_locations, items, facet_elements, facet_effects, self.thresholds, pf, "items"
+            person_locations, items, facet_elements, facet_effects, self._thresholds_for("items"), pf, "items"
         )
 
     def warm_thresholds(self, person_locations, items, facet_elements, facet_effects, pf, **kw):
         """Alias for warm(..., model='thresholds'). See warm for full documentation."""
-        thr = kw.get("thresholds", self.thresholds)
+        thr = kw.get("thresholds", self._thresholds_for("thresholds"))
         return self.warm(
             person_locations, items, facet_elements, facet_effects, thr, pf, "thresholds"
         )
 
     def warm_centrality(self, person_locations, items, facet_elements, facet_effects, pf, **kw):
         """Alias for warm(..., model='centrality'). See warm for full documentation."""
-        thr = kw.get("thresholds", self.thresholds)
+        thr = kw.get("thresholds", self._thresholds_for("centrality"))
         return self.warm(
             person_locations, items, facet_elements, facet_effects, thr, pf, "centrality"
         )
@@ -4745,19 +6208,19 @@ class MFRM(Rasch):
     def warm_pseudo_halo(self, person_locations, items, facet_elements, facet_effects, pf, **kw):
         """Alias for warm(..., model='pseudo_halo'). See warm for full documentation."""
         return self.warm(
-            person_locations, items, facet_elements, facet_effects, self.thresholds, pf, "pseudo_halo"
+            person_locations, items, facet_elements, facet_effects, self._thresholds_for("pseudo_halo"), pf, "pseudo_halo"
         )
 
     def warm_bistretch(self, person_locations, items, facet_elements, facet_effects, pf, **kw):
         """Alias for warm(..., model='bistretch'). See warm for full documentation."""
         return self.warm(
-            person_locations, items, facet_elements, facet_effects, self.thresholds, pf, "bistretch"
+            person_locations, items, facet_elements, facet_effects, self._thresholds_for("bistretch"), pf, "bistretch"
         )
 
     def warm_matrix(self, person_locations, items, facet_elements, facet_effects, pf, **kw):
         """Alias for warm(..., model='matrix'). See warm for full documentation."""
         return self.warm(
-            person_locations, items, facet_elements, facet_effects, self.thresholds, pf, "matrix"
+            person_locations, items, facet_elements, facet_effects, self._thresholds_for("matrix"), pf, "matrix"
         )
 
     def warm_bivector(self, person_locations, items, facet_elements, facet_effects, pf, **kw):
@@ -4767,7 +6230,7 @@ class MFRM(Rasch):
             items,
             facet_elements,
             facet_effects,
-            self.thresholds,
+            self._thresholds_for("bivector"),
             pf,
             "bivector",
         )
@@ -4795,7 +6258,7 @@ class MFRM(Rasch):
         Parameters
         ----------
         model : str, default 'global'
-            Rater parameterisation.
+            Facet element (e.g. rater) parameterisation.
         anchor : bool, default False
             If True, uses anchor-calibrated parameters.
         persons : list, str, or None, default None
@@ -4812,7 +6275,7 @@ class MFRM(Rasch):
         items : list or None, default None
             Item subset. None uses all items.
         facet_elements : list, str, or None, default None
-            Rater subset. None uses all facet_elements.
+            Facet element subset. None uses all facet_elements.
 
         Returns
         -------
@@ -4939,13 +6402,13 @@ class MFRM(Rasch):
             Raw total score to convert. Extreme scores adjusted by
             ext_score_adjustment.
         model : str, default 'global'
-            Rater parameterisation.
+            Facet element (e.g. rater) parameterisation.
         anchor : bool, default False
             If True, uses anchor-calibrated parameters.
         items : list or None, default None
             Item subset. None uses all items.
         facet_elements : list or None, default None
-            Rater subset. None uses all facet_elements.
+            Facet element subset. None uses all facet_elements.
         warm_corr : bool, default True
             If True, applies Warm's (1989) bias correction.
         tolerance : float, default 0.00001
@@ -5020,25 +6483,18 @@ class MFRM(Rasch):
             iters += 1
 
         if warm_corr:
-            # Build a minimal single-person MultiIndex person_filter for warm()
-            pf_mi = pd.DataFrame(
-                1.0,
-                index=pd.MultiIndex.from_product(
-                    [facet_elements, ["_score_lookup_person_"]],
-                    names=self.responses.index.names,
-                ),
-                columns=items,
-            )
-            estimate += float(
-                self.warm(
-                    pd.Series({"_score_lookup_person_": estimate}),
-                    items,
-                    facet_elements,
-                    facet_effects,
-                    thresholds,
-                    pf_mi,
-                    model,
-                ).iloc[0]
+            pf_by_facet = {r: np.ones((1, len(items))) for r in facet_elements}
+            estimate = float(
+                self._solve_wle(
+                    [float(score)],
+                    [estimate],
+                    lambda t, rows: self._wle_moments(
+                        t, items, facet_elements, facet_effects, thresholds,
+                        {r: pf[rows] for r, pf in pf_by_facet.items()}, model,
+                    ),
+                    tolerance,
+                    max_iters,
+                )[0]
             )
 
         if iters >= max_iters:
@@ -5110,6 +6566,8 @@ class MFRM(Rasch):
         tolerance=0.00001,
         max_iters=100,
         ext_score_adjustment=0.5,
+        filename=None,
+        file_format="csv",
     ):
         """
         Build a score-to-person_location lookup table for all possible raw scores.
@@ -5121,7 +6579,7 @@ class MFRM(Rasch):
         Parameters
         ----------
         model : str, default 'global'
-            Rater parameterisation.
+            Facet element (e.g. rater) parameterisation.
         anchor : bool, default False
             If True, uses anchor-calibrated parameters.
         attribute : bool, default True
@@ -5129,7 +6587,7 @@ class MFRM(Rasch):
         items : list or None, default None
             Item subset. None uses all items.
         facet_elements : list or None, default None
-            Rater subset. None uses all facet_elements.
+            Facet element subset. None uses all facet_elements.
         ext_scores : bool, default True
             If True, includes extreme scores adjusted by ext_score_adjustment.
         warm_corr : bool, default True
@@ -5140,11 +6598,22 @@ class MFRM(Rasch):
             Maximum Newton-Raphson iterations.
         ext_score_adjustment : float, default 0.5
             Adjustment for extreme scores.
+        filename : str or None, default None
+            If given, also saves the returned table to
+            ``{filename}.{file_format}`` (path without extension, as for
+            the plotting methods).
+        file_format : {'csv', 'xlsx'}, default 'csv'
+            File format used when filename is given.
 
         Attributes set (if attribute=True)
         -----------------------------------
         score_table_{model} : pandas.Series
             Person location estimate for each possible raw score, indexed by score.
+
+        Returns
+        -------
+        pandas.Series
+            The table, also stored as the attribute listed above.
         """
         model = self._MODEL_ALIASES.get(model, model)
         if items is None:
@@ -5180,45 +6649,47 @@ class MFRM(Rasch):
         )
         if attribute:
             setattr(self, f"score_table_{model}", table)
-        else:
-            return table
+        _save_table(table, filename, file_format)
+        return table
 
     # Backwards-compatible aliases
     def score_lookup_table_global(self, **kw):
         """Alias for score_lookup_table(model='global'). See score_lookup_table for full documentation."""
-        self.score_lookup_table(model="global", **kw)
+        return self.score_lookup_table(model="global", **kw)
 
     def score_lookup_table_items(self, **kw):
         """Alias for score_lookup_table(model='items'). See score_lookup_table for full documentation."""
-        self.score_lookup_table(model="items", **kw)
+        return self.score_lookup_table(model="items", **kw)
 
     def score_lookup_table_thresholds(self, **kw):
         """Alias for score_lookup_table(model='thresholds'). See score_lookup_table for full documentation."""
-        self.score_lookup_table(model="thresholds", **kw)
+        return self.score_lookup_table(model="thresholds", **kw)
 
     def score_lookup_table_matrix(self, **kw):
         """Alias for score_lookup_table(model='matrix'). See score_lookup_table for full documentation."""
-        self.score_lookup_table(model="matrix", **kw)
+        return self.score_lookup_table(model="matrix", **kw)
 
     def score_lookup_table_bivector(self, **kw):
         """Alias for score_lookup_table(model='bivector'). See score_lookup_table for full documentation."""
-        self.score_lookup_table(model="bivector", **kw)
+        return self.score_lookup_table(model="bivector", **kw)
 
     # ------------------------------------------------------------------
     # Category counts
     # ------------------------------------------------------------------
     def score_lookup_table_centrality(self, **kw):
         """Alias for score_lookup_table(model='centrality'). See score_lookup_table for full documentation."""
-        self.score_lookup_table(model="centrality", **kw)
+        return self.score_lookup_table(model="centrality", **kw)
     def score_lookup_table_pseudo_halo(self, **kw):
         """Alias for score_lookup_table(model='pseudo_halo'). See score_lookup_table for full documentation."""
-        self.score_lookup_table(model="pseudo_halo", **kw)
+        return self.score_lookup_table(model="pseudo_halo", **kw)
     def score_lookup_table_bistretch(self, **kw):
         """Alias for score_lookup_table(model='bistretch'). See score_lookup_table for full documentation."""
-        self.score_lookup_table(model="bistretch", **kw)
+        return self.score_lookup_table(model="bistretch", **kw)
 
     def category_counts_df(
-        self, persons=None, items=None, facet_elements=None, counts_name=None
+        self, persons=None, items=None, facet_elements=None, counts_name=None,
+        filename=None,
+        file_format="csv",
     ):
         """
         Build response frequency tables for one or more persons, across
@@ -5256,6 +6727,12 @@ class MFRM(Rasch):
             succession of tables (e.g. one per exogenous-variable group)
             can be kept side by side for comparison rather than
             overwriting each other.
+        filename : str or None, default None
+            If given, also saves the returned table to
+            ``{filename}.{file_format}`` (path without extension, as for
+            the plotting methods).
+        file_format : {'csv', 'xlsx'}, default 'csv'
+            File format used when filename is given.
 
         Returns
         -------
@@ -5327,6 +6804,7 @@ class MFRM(Rasch):
             self.counts[counts_name] = df
             self.counts[f"{counts_name}_facet_elements"] = facet_elements_df
 
+        _save_table(df, filename, file_format)
         return df
 
     # ------------------------------------------------------------------
@@ -5336,7 +6814,7 @@ class MFRM(Rasch):
     def fit_matrices(self, cat_prob_dict):
         """
         Compute expected scores, info, kurtosis, residuals from cat_prob_dict.
-        cat_prob_dict: {cat: (Rater×Person, Items) DataFrame}
+        cat_prob_dict: {cat: (Facet element (e.g. rater)×Person, Items) DataFrame}
         """
         exp_score_df = sum(cat * df for cat, df in cat_prob_dict.items())
         info_df = sum(
@@ -5784,7 +7262,7 @@ class MFRM(Rasch):
         self._run_threshold_fit("bistretch", **kw)
 
     def facet_pivot(self, df):
-        """Pivot (Rater×Person, Items) DataFrame to (Person×Items, Raters)."""
+        """Pivot (Facet element (e.g. rater)×Person, Items) DataFrame to (Person×Items, Facet elements)."""
         return pd.DataFrame(
             {
                 facet_element: df.xs(facet_element).T.stack()
@@ -6010,16 +7488,19 @@ class MFRM(Rasch):
         """Alias for person_fit_statistics(model='bistretch'). See person_fit_statistics for full documentation."""
         self._run_person_fit("bistretch", **kw)
 
-    def test_fit_statistics(self, person_locations, rsems, item_se=None):
-        """Shared test-level separation and reliability statistics."""
+    def test_fit_statistics(self, person_locations, rsems, item_se=None, model=None):
+        """Shared test-level separation and reliability statistics. model
+        selects the sub-model's own item locations and standard errors
+        (default: the latest calibration)."""
         if item_se is None:
-            item_se = self.item_se
+            item_se = self.item_se if model is None else self._item_se_for(model)
+        item_locations = self.items if model is None else self._items_for(model)
 
         scores = self.responses.unstack(level=0).sum(axis=1)
         max_scores = self.responses.unstack(level=0).count(axis=1) * self.max_score
         person_locations = person_locations[(scores > 0) & (scores < max_scores)]
 
-        isi = (self.items.var() / (item_se**2).mean() - 1) ** 0.5
+        isi = (item_locations.var() / (item_se**2).mean() - 1) ** 0.5
         item_strata = (4 * isi + 1) / 3
         item_reliability = isi**2 / (1 + isi**2)
 
@@ -6041,11 +7522,11 @@ class MFRM(Rasch):
         """Internal dispatcher: run test-level separation statistics for the given model."""
         if not hasattr(self, f"csem_vector_{model}"):
             self._run_person_fit(model, **kw)
-        if not hasattr(self, "item_se"):
+        if not hasattr(self, f"threshold_se_{model}"):
             self.std_errors(model=model, **kw)
         person_locations = getattr(self, f"persons_{model}")
         rsems = getattr(self, f"rsem_vector_{model}")
-        results = self.test_fit_statistics(person_locations, rsems)
+        results = self.test_fit_statistics(person_locations, rsems, model=model)
         for name, val in zip(
             [
                 "isi",
@@ -6092,10 +7573,36 @@ class MFRM(Rasch):
         """Alias for test_fit_statistics(model='bistretch'). See test_fit_statistics for full documentation."""
         self._run_test_fit("bistretch", **kw)
 
-    def _log_likelihood(self, model="global", responses=None, anchor=False, persons=None):
+    def _log_likelihood(
+        self, model="global", responses=None, anchor=False, persons=None,
+        items=None, thresholds=None, facet_effects=None,
+    ):
+        """
+        items, thresholds, facet_effects : optional overrides, default None
+            Evaluate this facet_element's/model's log-likelihood against
+            EXTERNALLY supplied parameter values instead of self's own
+            current calibration (self.items / self.thresholds /
+            self.facet_effects_{model}) -- the same "plug in a fixed
+            value instead of this object's own free estimate" pattern
+            `persons=` already uses for pooled-abilities DIF/DRF omnibus
+            tests. Lets a caller hold one or two parameter families fixed
+            (e.g. at a pooled/combined-group model's own values) while
+            evaluating this object's own value for the remaining one(s) --
+            the mechanism behind axis-isolated DIF/DRF omnibus tests (pin
+            facet_effects to test items in isolation, or pin items+
+            thresholds to test facet_effects in isolation). None (default,
+            for all three) reproduces the previous, unisolated behaviour
+            exactly.
+        """
         if responses is None:
             responses = self.responses
-        _, thresholds, facet_effects = self._get_params(model, anchor=anchor)
+        _items, _thresholds, _facet_effects = self._get_params(model, anchor=anchor)
+        if items is None:
+            items = _items
+        if thresholds is None:
+            thresholds = _thresholds
+        if facet_effects is None:
+            facet_effects = _facet_effects
         total_scores = responses.groupby(level=1).sum().sum(axis=1)
         max_possible = responses.notna().groupby(level=1).sum().sum(axis=1) * self.max_score
         non_extreme = total_scores.index[(total_scores > 0) & (total_scores < max_possible)]
@@ -6112,6 +7619,7 @@ class MFRM(Rasch):
             thresholds,
             model,
             facet_effects,
+            item_locations=items,
         )
         ll = 0.0
         for facet_element in facet_names:
@@ -6159,9 +7667,9 @@ class MFRM(Rasch):
         Parameters
         ----------
         model : str, default 'global'
-            Rater parameterisation: 'global', 'items', 'thresholds', or 'matrix'.
+            Facet element (e.g. rater) parameterisation: 'global', 'items', 'thresholds', or 'matrix'.
         anchors : list or None, default None
-            Rater identifiers to treat as anchors for SE computation.
+            Facet element identifiers to treat as anchors for SE computation.
         warm_corr : bool, default True
             Warm bias correction for person_location estimates.
         se : bool, default True
@@ -6206,7 +7714,7 @@ class MFRM(Rasch):
         threshold_infit_ms_{model}, threshold_outfit_ms_{model} : Series
             Threshold infit and outfit mean-square.
         rater_infit_ms_{model}, rater_outfit_ms_{model} : Series
-            Rater infit and outfit mean-square.
+            Facet element infit and outfit mean-square.
         person_infit_ms_{model}, person_outfit_ms_{model} : Series
             Person infit and outfit mean-square.
         csem_vector_{model}, rsem_vector_{model} : Series
@@ -6341,7 +7849,7 @@ class MFRM(Rasch):
         """
         Andersen (1973) likelihood ratio test of parameter invariance.
 
-        DISABLED as of 2026-07-06 — see NotImplementedError raised below.
+        Disabled (raises NotImplementedError).
 
         Splits persons into low and high groups by median person_location or total raw
         score, fits the model separately in each group, and tests whether item
@@ -6350,10 +7858,10 @@ class MFRM(Rasch):
         Parameters
         ----------
         model : str, default 'global'
-            Rater parameterisation: 'global', 'items', 'thresholds', 'matrix', or 'bivector'.
+            Facet element (e.g. rater) parameterisation: 'global', 'items', 'thresholds', 'matrix', or 'bivector'.
         split_by : str, default 'person_location'
             Split criterion: 'person_location' (ML person estimates) or 'score' (total raw scores
-            summed across all raters and items).
+            summed across all facet elements and items).
         warm_corr : bool, default True
             Warm bias correction for person_location estimates.
         tolerance, max_iters, ext_score_adjustment : floats
@@ -6383,7 +7891,7 @@ class MFRM(Rasch):
         """
         model = self._MODEL_ALIASES.get(model, model)
         raise NotImplementedError(
-            "MFRM.andersen_lr_test() is disabled. A 2026-07-06 simulation study "
+            "MFRM.andersen_lr_test() is disabled. A simulation study "
             "(I=5, K=3, R=3, N=100..4000, split_by='person_location' and 'score') found "
             "the LR statistic floors to 0 (p=1.0, 'no misfit') in 58-100% of "
             "replications depending on model, and this floor rate does NOT "
@@ -6400,7 +7908,7 @@ class MFRM(Rasch):
             "shrink with more data, since PAIR was never targeting the "
             "likelihood surface. This method will be re-enabled once MFRM "
             "supports a genuine (C)ML calibration path for use in this test. "
-            "For rater-parameterisation comparisons (not group-invariance "
+            f"For {self.facet_label_eg} parameterisation comparisons (not group-invariance "
             "testing), use model_selection() instead, which is unaffected."
         )
 
@@ -6437,6 +7945,1360 @@ class MFRM(Rasch):
         """Alias for andersen_lr_test(model='bistretch'). See andersen_lr_test for full documentation."""
         self.andersen_lr_test(model="bistretch", **kw)
 
+    # ------------------------------------------------------------------
+    # Differential Item Functioning (DIF) / Differential Category
+    # Functioning (DCF)
+    # ------------------------------------------------------------------
+
+    _DIF_RISK = {
+        "thresholds": (
+            "high: the facet element effects at each threshold lie along "
+            "the same axis as the shared thresholds."
+        ),
+        "matrix": (
+            "highest: the full (facet element, item, threshold) grid is the "
+            "least constrained representation, with the sparsest cells."
+        ),
+        "bivector": (
+            "high: its threshold part has the same risk as 'thresholds', "
+            "and its item part a milder one."
+        ),
+        "bistretch": (
+            "high: its two stretch parameters reduce, but do not remove, "
+            "the risk of 'bivector'."
+        ),
+        "centrality": (
+            "moderate: a two-parameter restriction of 'thresholds', with "
+            "the same risk, reduced."
+        ),
+    }
+
+    def global_fit(self, *args, **kwargs):
+        """
+        Not available for MFRM: the global invariance test (Section on
+        global_fit() for SLM, PCM and RSM) needs a per-group sandwich for
+        every sub-model, which is not implemented. Use dif_test() to test
+        item, threshold or facet element (e.g. rater) invariance across
+        person groups.
+        """
+        raise NotImplementedError(
+            "global_fit() is available for SLM, PCM and RSM, not yet for MFRM. To test "
+            "invariance across groups of persons, use dif_test()."
+        )
+
+    def dif_test(
+        self,
+        covariate,
+        model="global",
+        reference=None,
+        selection_method="wald",
+        corr_tol=0.95,
+        sd_ratio_tol=1.1,
+        min_anchors=6,
+        wald_alpha=0.05,
+        test="wald",
+        omnibus=True,
+        welch=False,
+        size_adjust=False,
+        reference_n=100,
+        dcf_cap=2000,
+        correction="bh",
+        alpha=0.05,
+        logit_threshold=0.43,
+        category=False,
+        category_thresholds=(0.43, 0.64),
+        category_alpha=0.05,
+        no_of_samples=500,
+        plot=False,
+        plot_kwargs=None,
+        warm_corr=True,
+        tolerance=0.00001,
+        max_iters=100,
+        ext_score_adjustment=0.5,
+        constant=None,
+        threshold_constant=None,
+        method=None,
+        matrix_power=None,
+        matrix_marginals=None,
+        regression="huber",
+        robust=False,
+        log_lik_tol=0.000001,
+        seed=None,
+    ):
+        """
+        Differential Item Functioning (DIF) and Differential Category
+        Functioning (DCF) test by an exogenous person variable (e.g.
+        Gender, L1), under the specified facet element (e.g. rater) model.
+
+        Persons (not facet elements) are split into reference and focal
+        groups, and each group is calibrated as its own MFRM under `model`,
+        with the object's latest estimation method. Item-location DIF is
+        tested per item, after purifying the item-location scale (items
+        only); DCF is tested per category width, using the single shared
+        threshold vector.
+
+        The per-item likelihood-ratio test (test='lr'/'both') compares, for
+        each item, each group's log-likelihood with its own fitted item
+        location against that with a single location pooled across groups
+        (precision-weighted, on each group's own scale), re-estimating
+        person locations under the pooled value and holding the facet
+        effects at their fitted values; df = 1. It is mildly liberal;
+        test='wald' (the default) is preferred.
+
+        There are two omnibus likelihood-ratio tests, both evaluated at the
+        pooled (combined-group) model's person locations:
+        dif_omnibus_table tests items only (facet effects held at their
+        pooled values in both groups, items and thresholds free per group);
+        df_omnibus_table tests items and facet effects together (all free
+        per group). Both have df = common items - 1.
+
+        If method=None, calibrate() resolves it by model, so dif_test()
+        under two different models can use different item-estimation
+        methods; pass method= explicitly for directly comparable results.
+
+        With estimation='pair-cpat', a UserWarning is raised for the six
+        models at risk of compressed item locations and thresholds
+        which can produce apparent DIF/DCF when the two
+        groups' facet element panels differ; 'global', 'items' and
+        'pseudo_halo' carry no warning.
+
+        Parameters
+        ----------
+        covariate : str
+            Column name in self.exogenous to group persons by.
+        model : str, default 'global'
+            One of self._MODELS: the facet element representation each
+            group is calibrated under.
+        reference : str or None, default None
+            Value of `covariate` for the reference group. None uses the
+            largest group.
+        selection_method : {'wald', 'robust_z', 'none'}, default 'wald'
+            Purification of the item-location scale: sequential Wald tests
+            ('wald'), modified z-score exclusion ('robust_z'), or a mean
+            shift over all common items ('none').
+        corr_tol, sd_ratio_tol, min_anchors, wald_alpha : floats/int
+            Settings of the active selection method.
+        test : {'wald', 'lr', 'both'}, default 'wald'
+            Per-item DIF test(s). 'lr'/'both' add the likelihood-ratio test
+            (two person re-estimations per item per focal group) and a
+            'Flagged_LR' column; 'Flagged' always reflects the Wald test.
+        omnibus : bool, default True
+            If True, also computes the two omnibus tests per focal group.
+        welch : bool, default False
+            If True, the item-location and DCF Wald tests use Welch-
+            Satterthwaite degrees of freedom instead of the normal.
+        size_adjust : bool, default False
+            If True, inflates each group's standard errors at large N:
+            item-location SEs by sqrt(n / reference_n) (Tristán, 2006),
+            category-width SEs by max(1, sqrt(n / dcf_cap)), n being the
+            group's number of persons.
+        reference_n : int, default 100
+            Reference sample size for the item-location SEs when
+            size_adjust=True.
+        dcf_cap : float, default 2000
+            Cap, in persons, for the category-width SEs when
+            size_adjust=True.
+        correction : 'bh', 'bonferroni', or None, default 'bh'
+            Multiple-comparison correction, applied separately to the
+            item-location and DCF p-values.
+        alpha : float, default 0.05
+            Significance level for flagging.
+        logit_threshold : float, default 0.43
+            Minimum absolute difference, in logits, for flagging.
+        category : bool, default False
+            If True, adds an ETS 'Category' column to dif_table: 'A'
+            (negligible), 'B+'/'B-' (slight to moderate) or 'C+'/'C-'
+            (moderate to large) (Zwick, Thayer & Lewis, 1999).
+        category_thresholds : (float, float), default (0.43, 0.64)
+            B and C category boundaries, in logits.
+        category_alpha : float, default 0.05
+            Significance level for the category tests.
+        no_of_samples : int, default 500
+            Bootstrap resamples for each group's standard errors.
+        plot, plot_kwargs :
+            If plot=True, plot_anchor_selection() per focal group, with
+            plot_kwargs passed to it.
+        warm_corr, tolerance, max_iters, ext_score_adjustment :
+            Person-estimation settings, used for the likelihood-ratio and
+            omnibus tests.
+        constant, threshold_constant, method, matrix_power,
+        matrix_marginals, regression, robust, log_lik_tol :
+            Passed to each group's calibrate() call. matrix_marginals and
+            regression are not passed to the bootstrap.
+        seed : int or None, default None
+            Seed for each group's bootstrap.
+
+        Attributes set
+        --------------
+        dif_model : str
+            The `model` used.
+        dif_table : pandas.DataFrame
+            One row per (item, focal group) pair. Columns: 'Group',
+            'Reference' / 'Focal' / 'Focal (purified)', 'Difference', 'SE',
+            'z', 'p', 'p (corrected)', 'Selected', 'Flagged'; 'df' if
+            welch=True; 'LR', 'p_LR', 'p_LR (corrected)', 'Flagged_LR' if
+            test is 'lr' or 'both'; 'Category' if category=True.
+        dif_omnibus_table : pandas.DataFrame or None
+            One row per focal group: 'LR', 'df', 'p', 'Flagged', for the
+            test of items only. None if omnibus=False.
+        df_omnibus_table : pandas.DataFrame or None
+            As dif_omnibus_table, for the joint test of items and facet
+            effects. None if omnibus=False.
+        threshold_dif_table : pandas.DataFrame
+            DCF on category widths (thresholds[k+1] - thresholds[k]). One
+            row per (category, focal group) pair: 'Group', 'Category',
+            'Reference' / 'Focal', 'Difference', 'SE', 'z', 'p',
+            'p (corrected)', 'Flagged'; 'df' if welch=True.
+        dif_reference, dif_covariate : the reference group value and
+            covariate column name used.
+        dif_reference_model : MFRM
+            Fitted model for the reference group.
+        dif_focal_models : dict {focal_value: MFRM}
+            Fitted models for each focal group.
+        dif_tc : dict {focal_value: float}
+            Item-scale translation constant applied to each focal group.
+        dif_anchor_selection : dict {focal_value: pandas.DataFrame or None}
+            Purification table for each focal group.
+        dif_plots : dict {focal_value: matplotlib.figure.Figure or None}
+        dif_group_sizes : dict {group_value: int}
+            Non-extreme, non-missing-variable N used for each group.
+        """
+        from raschpy.mfrm import MFRM
+
+        model = self._MODEL_ALIASES.get(model, model)
+        if model not in self._MODELS:
+            raise ValueError(f"model must be one of {self._MODELS}")
+        # issue #17 arises from 'pair-cpat''s staged estimation; the groups are calibrated with the latest
+        # estimation method (_refit_kw), 'cp-full-rcl' if none
+        if model in self._DIF_RISK and (getattr(self, "estimation", None) or "cp-full-rcl") == "pair-cpat":
+            warnings.warn(
+                f"model='{model}' with estimation='pair-cpat': risk of compressed item "
+                f"locations and thresholds: {self._DIF_RISK[model]} "
+                f"If the reference and focal groups' {self.facet_label_eg} panels differ in "
+                f"composition, this compression can produce apparent DIF/DCF "
+                f"that is an artefact of the comparison, not a genuine group "
+                f"difference.",
+                UserWarning,
+                stacklevel=2,
+            )
+        self._dif_validate(
+            correction, selection_method, test, category_thresholds, reference_n,
+            dcf_cap=dcf_cap,
+        )
+
+        # Non-extreme persons, aggregating across facet_elements (matches
+        # model_selection()/andersen_lr_test()'s own convention).
+        total_scores = self.responses.groupby(level=1).sum().sum(axis=1)
+        max_possible = (
+            self.responses.notna().groupby(level=1).sum().sum(axis=1) * self.max_score
+        )
+        non_extreme = total_scores.index[(total_scores > 0) & (total_scores < max_possible)]
+
+        cov_values, reference, focal_levels, group_sizes, n_missing = self._dif_group_setup(
+            non_extreme, covariate, reference
+        )
+
+        def _group_responses(idx):
+            # Splitting by person can leave a facet_element (rater) with
+            # zero actual data for this group's persons -- self.responses
+            # is a full (facet_element, person) grid (every facet_element
+            # has a row for every person, NaN where unrated -- see
+            # __init__'s canonicalisation step), so a naive person-mask
+            # selection would still carry that facet_element's now-all-NaN
+            # rows into the new MFRM's constructor, which has no analogue
+            # of _remove_null_persons() for facet_elements and would treat
+            # it as a genuine (degenerate) rater. Drop it here instead.
+            mask = self.responses.index.get_level_values(1).isin(idx)
+            resp = self.responses[mask]
+            nonnull_by_rater = resp.notna().groupby(level=0).sum().sum(axis=1)
+            active_raters = nonnull_by_rater[nonnull_by_rater > 0].index
+            return resp[resp.index.get_level_values(0).isin(active_raters)]
+
+        pe_kw = dict(
+            warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
+            ext_score_adjustment=ext_score_adjustment,
+        )
+        cal_kw = dict(
+            constant=constant, threshold_constant=threshold_constant, method=method,
+            matrix_power=matrix_power, matrix_marginals=matrix_marginals,
+            regression=regression, robust=robust, log_lik_tol=log_lik_tol,
+            **self._refit_kw(model),
+        )
+        se_kw = dict(
+            no_of_samples=no_of_samples, constant=constant,
+            threshold_constant=threshold_constant, method=method, robust=robust,
+            matrix_power=matrix_power, log_lik_tol=log_lik_tol, seed=seed,
+            # store_bootstrap=True keeps the fitted bootstrap resamples
+            # (self._bootstrap_samples_{model}) so item purification's
+            # Var(tc) can be estimated directly from their empirical
+            # distribution instead of an independence-assumption formula
+            # -- see _purification_loo_tc.
+            store_bootstrap=True,
+        )
+
+        needs_ll = test in ("lr", "both") or omnibus
+
+        ref_idx = cov_values.index[cov_values == reference]
+        ref_model = MFRM(_group_responses(ref_idx), max_score=self.max_score)
+        ref_model.calibrate(model=model, **cal_kw)
+        ref_model.std_errors(model=model, **se_kw)
+        if needs_ll:
+            ref_model.person_estimates(model=model, **pe_kw)
+            ll_ref = ref_model._log_likelihood(model=model)
+
+        all_item_rows = []
+        all_threshold_rows = []
+        focal_models = {}
+        tc_dict = {}
+        anchor_selection_dict = {}
+        plot_dict = {}
+        omnibus_rows = {}
+        df_omnibus_rows = {}
+
+        for focal in focal_levels:
+            focal_idx = cov_values.index[cov_values == focal]
+            focal_model = MFRM(_group_responses(focal_idx), max_score=self.max_score)
+            focal_model.calibrate(model=model, **cal_kw)
+            focal_model.std_errors(model=model, **se_kw)
+            if needs_ll:
+                focal_model.person_estimates(model=model, **pe_kw)
+                ll_focal = focal_model._log_likelihood(model=model)
+
+            # --- Item-location DIF ---
+            common_items = ref_model.items.index.intersection(focal_model.items.index)
+            ref_samples = getattr(ref_model, f"_bootstrap_samples_{model}", [])
+            focal_samples = getattr(focal_model, f"_bootstrap_samples_{model}", [])
+            ref_boot = self._bootstrap_value_matrix(ref_samples, "items", common_items)
+            focal_boot = self._bootstrap_value_matrix(focal_samples, "items", common_items)
+
+            wald_result = self._dif_item_wald_block(
+                ref_model, focal_model, ref_boot, focal_boot,
+                selection_method, corr_tol, sd_ratio_tol, min_anchors, wald_alpha,
+                size_adjust, reference_n, welch, correction, alpha, logit_threshold,
+                category, category_thresholds, category_alpha,
+            )
+            common_items = wald_result["common_items"]
+            tc = wald_result["tc"]
+            focal_shifted = wald_result["focal_shifted"]
+            diff = wald_result["diff"]
+            se = wald_result["se"]
+            z = wald_result["z"]
+            p = wald_result["p"]
+            p_corrected = wald_result["p_corrected"]
+            flagged = wald_result["flagged"]
+            selected = wald_result["selected"]
+            item_welch_df = wald_result["welch_df"]
+            category_col = wald_result["category_col"]
+            anchor_selection_dict[focal] = wald_result["anchor_table"]
+
+            if test in ("lr", "both"):
+                ll_h1 = ll_ref + ll_focal
+                sev_attr = self._sev_attr(model)
+                compact_attr = f"facet_effects_{model}"
+
+                def _make_dif_scratch(base_model):
+                    scratch = MFRM(base_model.responses, max_score=self.max_score)
+                    scratch.thresholds = base_model.thresholds
+                    setattr(scratch, compact_attr, getattr(base_model, compact_attr))
+                    if sev_attr != compact_attr:
+                        setattr(scratch, sev_attr, getattr(base_model, sev_attr))
+                    return scratch
+
+                ref_scratch = _make_dif_scratch(ref_model)
+                focal_scratch = _make_dif_scratch(focal_model)
+                lr_rows = {}
+                for item in common_items:
+                    w_ref = 1.0 / ref_model.item_se[item] ** 2
+                    w_focal = 1.0 / focal_model.item_se[item] ** 2
+                    pooled = (
+                        w_ref * ref_model.items[item] + w_focal * focal_shifted[item]
+                    ) / (w_ref + w_focal)
+                    pooled_focal_scale = pooled - tc[item]
+
+                    ref_scratch.items = ref_model.items.copy()
+                    ref_scratch.items[item] = pooled
+                    ref_scratch.person_estimates(model=model, **pe_kw)
+                    ll_ref_h0 = ref_scratch._log_likelihood(model=model)
+
+                    focal_scratch.items = focal_model.items.copy()
+                    focal_scratch.items[item] = pooled_focal_scale
+                    focal_scratch.person_estimates(model=model, **pe_kw)
+                    ll_focal_h0 = focal_scratch._log_likelihood(model=model)
+
+                    lr_i = max(0.0, 2 * (ll_h1 - (ll_ref_h0 + ll_focal_h0)))
+                    lr_rows[item] = {"LR": lr_i, "p_LR": float(chi2.sf(lr_i, 1))}
+
+                lr_table = self._dif_lr_table(
+                    lr_rows, common_items, correction, alpha, diff, logit_threshold
+                )
+
+            if omnibus:
+                combined_idx = ref_idx.append(focal_idx)
+                m_full = MFRM(_group_responses(combined_idx), max_score=self.max_score)
+                m_full.calibrate(model=model, **cal_kw)
+                m_full.person_estimates(model=model, **pe_kw)
+                pooled_items, pooled_thresholds, pooled_facet_effects = m_full._get_params(model)
+                ll_full = m_full._log_likelihood(model=model)
+                pooled_persons = getattr(m_full, f"persons_{model}")
+                pooled_ref_persons = pooled_persons.reindex(ref_model.person_names)
+                pooled_focal_persons = pooled_persons.reindex(focal_model.person_names)
+
+                # Joint DF -- both axes (items/thresholds AND facet_effects)
+                # free per group.
+                # df undercounts the facet_effects axis on purpose here
+                # (kept for backward comparability with the earlier
+                # single-omnibus behaviour) -- prefer dif_omnibus_table
+                # below for an axis-attributed, properly-scoped answer.
+                ll_ref_df = ref_model._log_likelihood(model=model, persons=pooled_ref_persons)
+                ll_focal_df = focal_model._log_likelihood(model=model, persons=pooled_focal_persons)
+                lr_df = max(0.0, -2 * (ll_full - (ll_ref_df + ll_focal_df)))
+                df_df = len(common_items) - 1
+                p_df = float(chi2.sf(lr_df, df_df))
+                df_omnibus_rows[focal] = {
+                    "LR": lr_df, "df": df_df, "p": p_df, "Flagged": p_df < alpha,
+                }
+
+                # Item-isolated DIF omnibus -- facet_effects pinned at the
+                # pooled (m_full) value on both sides, items/thresholds
+                # free per group. Properly nested against the same H0
+                # (m_full's own fit): the facet_effects axis is held EQUAL
+                # to H0's own value rather than left free, so df=items-1
+                # is correctly scoped.
+                ll_ref_dif = ref_model._log_likelihood(
+                    model=model, persons=pooled_ref_persons, facet_effects=pooled_facet_effects,
+                )
+                ll_focal_dif = focal_model._log_likelihood(
+                    model=model, persons=pooled_focal_persons, facet_effects=pooled_facet_effects,
+                )
+                lr_dif = max(0.0, -2 * (ll_full - (ll_ref_dif + ll_focal_dif)))
+                df_dif = len(common_items) - 1
+                p_dif = float(chi2.sf(lr_dif, df_dif))
+                omnibus_rows[focal] = {
+                    "LR": lr_dif, "df": df_dif, "p": p_dif, "Flagged": p_dif < alpha,
+                }
+
+            item_table = self._dif_item_table(
+                focal, ref_model, focal_model, common_items, focal_shifted,
+                diff, se, z, p, p_corrected, selected, flagged,
+                welch_df=item_welch_df if welch else None,
+                category_col=category_col if category else None,
+                lr_table=lr_table if test in ("lr", "both") else None,
+            )
+
+            # --- DCF: category widths, shared threshold vector, no
+            # purification (same rationale as RSM's dif_test) ---
+            ref_widths = ref_model.thresholds.diff().dropna()
+            focal_widths = focal_model.thresholds.diff().dropna()
+            ref_widths.index = focal_widths.index = range(1, len(ref_widths) + 1)
+            thr_index = ref_widths.index
+            thr_diff = focal_widths - ref_widths
+
+            ref_se_thr = pd.Series(
+                getattr(ref_model, f"cat_width_se_{model}")
+            ).reindex(thr_index)
+            focal_se_thr = pd.Series(
+                getattr(focal_model, f"cat_width_se_{model}")
+            ).reindex(thr_index)
+            ref_n_thr = ref_model.no_of_persons
+            focal_n_thr = focal_model.no_of_persons
+            if size_adjust:
+                # Raw person-count cap, NOT _threshold_total_weights --
+                # deliberate, see dcf_cap's own docstring/known-issues for
+                # why (total_weight scales with rater-panel size R without
+                # a matching true-precision gain, an unresolved confound;
+                # raw N is invariant to R by construction, at the cost of
+                # not tracking per-category sparsity the way PCM/RSM's own
+                # weight-based cap does).
+                ref_eff = min(ref_n_thr, dcf_cap)
+                focal_eff = min(focal_n_thr, dcf_cap)
+                ref_se_thr = ref_se_thr * np.sqrt(ref_n_thr / ref_eff)
+                focal_se_thr = focal_se_thr * np.sqrt(focal_n_thr / focal_eff)
+                ref_n_thr = ref_eff
+                focal_n_thr = focal_eff
+
+            thr_se = pd.Series(
+                np.sqrt(ref_se_thr ** 2 + focal_se_thr ** 2).values, index=thr_index
+            )
+            if welch:
+                thr_z_vals, thr_df_vals, thr_p_vals = self._welch_satterthwaite(
+                    thr_diff.values, ref_se_thr.values, ref_n_thr,
+                    focal_se_thr.values, focal_n_thr,
+                )
+                thr_z = pd.Series(thr_z_vals, index=thr_index)
+                thr_welch_df = pd.Series(thr_df_vals, index=thr_index)
+                thr_p = pd.Series(thr_p_vals, index=thr_index)
+            else:
+                thr_z = thr_diff / thr_se
+                thr_p = pd.Series(2 * norm.sf(np.abs(thr_z.values)), index=thr_index)
+
+            if correction == "bonferroni":
+                thr_p_corrected = (thr_p * len(thr_p)).clip(upper=1.0)
+            elif correction == "bh":
+                thr_p_corrected = self._bh_correction(thr_p)
+            else:
+                thr_p_corrected = thr_p
+
+            thr_flagged = (thr_p_corrected < alpha) & (thr_diff.abs() >= logit_threshold)
+
+            threshold_table = pd.DataFrame(
+                {
+                    "Group": focal,
+                    "Category": thr_index,
+                    "Reference": ref_widths,
+                    "Focal": focal_widths,
+                    "Difference": thr_diff,
+                    "SE": thr_se,
+                    "z": thr_z,
+                    "p": thr_p,
+                    "p (corrected)": thr_p_corrected,
+                    "Flagged": thr_flagged,
+                },
+                index=thr_index,
+            )
+            if welch:
+                threshold_table["df"] = thr_welch_df
+
+            all_item_rows.append(item_table)
+            all_threshold_rows.append(threshold_table)
+            focal_models[focal] = focal_model
+            tc_dict[focal] = tc
+
+            if plot and anchor_selection_dict[focal] is not None:
+                plot_dict[focal] = self.plot_anchor_selection(
+                    anchor_selection_dict[focal], **(plot_kwargs or {})
+                )
+            else:
+                plot_dict[focal] = None
+
+        self.dif_model = model
+        self.dif_table = pd.concat(all_item_rows)
+        self.dif_omnibus_table = pd.DataFrame(omnibus_rows).T if omnibus else None
+        self.df_omnibus_table = pd.DataFrame(df_omnibus_rows).T if omnibus else None
+        self.threshold_dif_table = pd.concat(all_threshold_rows, ignore_index=True)
+        self.dif_reference = reference
+        self.dif_covariate = covariate
+        self.dif_reference_model = ref_model
+        self.dif_focal_models = focal_models
+        self.dif_tc = tc_dict
+        self.dif_anchor_selection = anchor_selection_dict
+        self.dif_plots = plot_dict
+        self.dif_group_sizes = group_sizes
+
+    def _drf_element_table(
+        self, focal, ref_df, focal_df, ref_se_df, focal_se_df,
+        selection_method, corr_tol, sd_ratio_tol, min_anchors, wald_alpha,
+        welch, correction, alpha, logit_threshold, ref_n, focal_n, row_label,
+        ref_boot_elements=None, focal_boot_elements=None,
+    ):
+        """
+        Per-element DRF Wald test for a (facet element (e.g. rater) x element) facet_effect
+        table -- 'items' (element=item), 'thresholds' (element=category),
+        or one track of 'bivector'/'matrix' (item-marginal or threshold-
+        marginal). Shared by all four because the underlying statistical
+        problem is identical once you're looking at one (facet element x element)
+        table: purifies EACH ELEMENT'S OWN COLUMN independently (one
+        translation constant per element, not one per focal group) --
+        confirmed necessary directly from priority_vector()'s own zero-
+        centring convention (each element's facet-element-deviation column is
+        independently zero-mean across whichever facet elements are present for
+        THAT element). Every element is tested (not just
+        purification-selected ones), matching dif_test's own convention.
+
+        Purification is LEAVE-ONE-OUT per facet element within each element's
+        column (via _purification_loo_tc): a whole-set translation constant
+        inflates Type I error when the set of common facet elements is
+        small.
+
+        ref_df, focal_df, ref_se_df, focal_se_df : pandas.DataFrame
+            (facet element x element), already restricted to the eligible
+            (common) facet element set.
+        ref_boot_elements, focal_boot_elements : dict {element: DataFrame
+            or None}, from _bootstrap_element_matrices, or None --
+            when supplied, purification's variance is estimated directly
+            from the bootstrap distribution rather than an independence-
+            assumption formula (see _purification_loo_tc).
+
+        Returns
+        -------
+        table : pandas.DataFrame
+            One row per (facet element, element), index=facet element (non-unique -- one
+            row per element), with a `row_label` column naming the
+            element. Correction is a single flat BH/Bonferroni pool
+            across the WHOLE table (every facet element x element row), matching
+            dif_table's own convention -- not a separate pool per
+            element or per facet element.
+        tc_per_element : dict {element: pandas.Series}
+            Each element's LEAVE-ONE-OUT translation constant, one value
+            per facet element (not a single scalar per element any more).
+        anchor_selection_per_element : dict {element: pandas.DataFrame or None}
+            Whole-set (non-LOO) diagnostic only -- see _purification_loo_tc.
+        """
+        rows = []
+        tc_per_element = {}
+        anchor_selection_per_element = {}
+        for element in ref_df.columns:
+            ref_col = ref_df[element]
+            focal_col = focal_df[element]
+            focal_se_col = focal_se_df[element]
+            ref_se_col = ref_se_df[element]
+            ref_boot = (ref_boot_elements or {}).get(element)
+            focal_boot = (focal_boot_elements or {}).get(element)
+            tc, ref_var, focal_var, selected, anchor_table = self._purification_loo_tc(
+                ref_col, focal_col, ref_se_col, focal_se_col,
+                selection_method, corr_tol, sd_ratio_tol, min_anchors, wald_alpha,
+                ref_boot=ref_boot, focal_boot=focal_boot,
+            )
+            tc_per_element[element] = tc
+            anchor_selection_per_element[element] = anchor_table
+
+            focal_shifted = focal_col + tc
+            diff = focal_shifted - ref_col
+            ref_se_eff = np.sqrt(ref_var)
+            focal_se_eff = np.sqrt(focal_var)
+            se = np.sqrt(ref_var + focal_var)
+            if welch:
+                z_vals, df_vals, p_vals = self._welch_satterthwaite(
+                    diff.values, ref_se_eff.values, ref_n, focal_se_eff.values, focal_n,
+                )
+                z = pd.Series(z_vals, index=ref_col.index)
+                w_df = pd.Series(df_vals, index=ref_col.index)
+                p = pd.Series(p_vals, index=ref_col.index)
+            else:
+                z = diff / se
+                p = pd.Series(2 * norm.sf(np.abs(z.values)), index=ref_col.index)
+
+            tbl = pd.DataFrame(
+                {
+                    "Group": focal,
+                    row_label: element,
+                    "Reference": ref_col,
+                    "Focal": focal_col,
+                    "Focal (purified)": focal_shifted,
+                    "Difference": diff,
+                    "SE": se,
+                    "z": z,
+                    "p": p,
+                    "Selected": ref_col.index.isin(selected),
+                },
+                index=ref_col.index,
+            )
+            if welch:
+                tbl["df"] = w_df
+            rows.append(tbl)
+
+        table = pd.concat(rows)
+        if correction == "bonferroni":
+            table["p (corrected)"] = (table["p"] * len(table)).clip(upper=1.0)
+        elif correction == "bh":
+            table["p (corrected)"] = self._bh_correction(table["p"])
+        else:
+            table["p (corrected)"] = table["p"]
+        table["Flagged"] = (
+            (table["p (corrected)"] < alpha) & (table["Difference"].abs() >= logit_threshold)
+        )
+        table.index.name = self.facet.capitalize()
+        return table, tc_per_element, anchor_selection_per_element
+
+    _STRETCH_PARAMS = {
+        "centrality": ["lambda", "omega"],
+        "pseudo_halo": ["lambda", "omega"],
+        "bistretch": ["lambda", "omega_items", "omega_thresholds"],
+    }
+
+    def _drf_stretch_test(
+        self, focal, model, ref_model, focal_model, eligible,
+        selection_method, corr_tol, sd_ratio_tol, min_anchors, wald_alpha,
+        correction, alpha, logit_threshold,
+    ):
+        """
+        Joint covariance-aware DRF test for the stretch models
+        ('centrality', 'pseudo_halo', 'bistretch').
+
+        lambda purifies exactly like 'global' DRF (common-facet-element
+        translation constant via _wald_anchor_selection/
+        _robust_anchor_selection); it inherits community-wide zero-centring for free, same mechanism
+        as facet_effects_global. omega (and omega_items/omega_thresholds
+        for bistretch) need NO purification at all -- confirmed directly
+        in code (shifting the reference scale by a known constant left
+        omega exactly unchanged, to machine precision).
+
+        Because lambda and omega come from ONE shared regression per
+        facet element (e.g. rater) (WLS of the deviation vector on the reference scale), they
+        are NOT independent -- the primary test is a joint
+        T = Delta^T Sigma^-1 Delta (df = number of stretch parameters for
+        this model), using the (lambda, omega) covariance
+        _store_stretch_param_se now captures from paired bootstrap draws,
+        NOT two independent marginal Wald tests, which would ignore that
+        correlation. Marginal z-tests are still reported per parameter as
+        a secondary breakdown (own, independent correction pool), mirror-
+        ing the aggregate-plus-component convention used elsewhere in
+        this file (e.g. check_anchor_homogeneity, dif_table/
+        threshold_dif_table).
+
+        Returns
+        -------
+        table : pandas.DataFrame, one row per common facet element.
+        tc : float (lambda's translation constant for this focal group).
+        anchor_table : pandas.DataFrame or None.
+        """
+        params = self._STRETCH_PARAMS[model]
+
+        ref_lambda = getattr(ref_model, f"lambda_{model}").loc[eligible]
+        focal_lambda = getattr(focal_model, f"lambda_{model}").loc[eligible]
+        ref_lambda_se = getattr(ref_model, f"lambda_se_{model}").loc[eligible]
+        focal_lambda_se = getattr(focal_model, f"lambda_se_{model}").loc[eligible]
+
+        ref_samples = getattr(ref_model, f"_bootstrap_samples_{model}", [])
+        focal_samples = getattr(focal_model, f"_bootstrap_samples_{model}", [])
+        ref_boot = self._bootstrap_value_matrix(ref_samples, f"lambda_{model}", eligible)
+        focal_boot = self._bootstrap_value_matrix(focal_samples, f"lambda_{model}", eligible)
+
+        # Leave-one-out per rater, with tc's own variance estimated
+        # directly from the bootstrap distribution -- fixes known issue
+        # #39 (an independence-assumption closed form under-covered
+        # too, ~2x nominal; see _purification_loo_tc's own docstring).
+        tc, ref_lambda_var, focal_lambda_var, selected, anchor_table = self._purification_loo_tc(
+            ref_lambda, focal_lambda, ref_lambda_se, focal_lambda_se,
+            selection_method, corr_tol, sd_ratio_tol, min_anchors, wald_alpha,
+            ref_boot=ref_boot, focal_boot=focal_boot,
+        )
+
+        ref_vals, focal_vals, ref_se, focal_se = {}, {}, {}, {}
+        ref_vals["lambda"], focal_vals["lambda"] = ref_lambda, focal_lambda + tc
+        # Both sides now come from _purification_loo_tc's bootstrap-based variance
+        # (falls back to the independence-assumption formula, still
+        # split correctly by group, when bootstrap samples aren't
+        # available) -- feeds both the marginal z-test and the joint
+        # covariance matrix's lambda diagonal below.
+        ref_se["lambda"] = np.sqrt(ref_lambda_var)
+        focal_se["lambda"] = np.sqrt(focal_lambda_var)
+        for p in params[1:]:
+            ref_vals[p] = getattr(ref_model, f"{p}_{model}").loc[eligible]
+            focal_vals[p] = getattr(focal_model, f"{p}_{model}").loc[eligible]
+            ref_se[p] = getattr(ref_model, f"{p}_se_{model}").loc[eligible]
+            focal_se[p] = getattr(focal_model, f"{p}_se_{model}").loc[eligible]
+
+        diffs = {p: focal_vals[p] - ref_vals[p] for p in params}
+
+        def _cov_matrices(model_obj, se_dict):
+            cov_pairs = getattr(model_obj, f"stretch_param_cov_{model}", {})
+            mats = {}
+            for r in eligible:
+                M = np.zeros((len(params), len(params)))
+                for i, p in enumerate(params):
+                    M[i, i] = se_dict[p].loc[r] ** 2
+                for i, p1 in enumerate(params):
+                    for j, p2 in enumerate(params[i + 1:], start=i + 1):
+                        key = f"{p1}_{p2}"
+                        val = cov_pairs[key].loc[r] if key in cov_pairs else 0.0
+                        M[i, j] = M[j, i] = val
+                mats[r] = M
+            return mats
+
+        sigma_ref = _cov_matrices(ref_model, ref_se)
+        sigma_focal = _cov_matrices(focal_model, focal_se)
+
+        n_params = len(params)
+        T_vals, p_vals = {}, {}
+        for r in eligible:
+            sigma = sigma_ref[r] + sigma_focal[r]
+            delta = np.array([diffs[p].loc[r] for p in params])
+            try:
+                T = float(delta @ np.linalg.solve(sigma, delta))
+            except np.linalg.LinAlgError:
+                T = np.nan
+            T_vals[r] = T
+            p_vals[r] = float(chi2.sf(T, n_params)) if np.isfinite(T) else np.nan
+
+        T_series = pd.Series(T_vals)
+        p_series = pd.Series(p_vals)
+        if correction == "bonferroni":
+            p_corrected = (p_series * len(p_series)).clip(upper=1.0)
+        elif correction == "bh":
+            p_corrected = self._bh_correction(p_series)
+        else:
+            p_corrected = p_series
+        flagged = (p_corrected < alpha) & (
+            pd.concat([diffs[p].abs() for p in params], axis=1).max(axis=1) >= logit_threshold
+        )
+
+        data = {"Group": focal}
+        for p in params:
+            data[f"Reference_{p}"] = ref_vals[p]
+            data[f"Focal_{p}"] = focal_vals[p] if p == "lambda" else focal_vals[p]
+            data[f"Difference_{p}"] = diffs[p]
+        data["T"] = T_series
+        data["df"] = n_params
+        data["p"] = p_series
+        data["p (corrected)"] = p_corrected
+        data["Selected"] = eligible.isin(selected)
+        data["Flagged"] = flagged
+
+        for p in params:
+            se_p = np.sqrt(ref_se[p] ** 2 + focal_se[p] ** 2)
+            z_p = diffs[p] / se_p
+            pval_p = pd.Series(2 * norm.sf(np.abs(z_p.values)), index=eligible)
+            if correction == "bonferroni":
+                pval_p_corr = (pval_p * len(pval_p)).clip(upper=1.0)
+            elif correction == "bh":
+                pval_p_corr = self._bh_correction(pval_p)
+            else:
+                pval_p_corr = pval_p
+            data[f"z_{p}"] = z_p
+            data[f"p_{p}"] = pval_p
+            data[f"p_{p} (corrected)"] = pval_p_corr
+            data[f"Flagged_{p}"] = (pval_p_corr < alpha) & (diffs[p].abs() >= logit_threshold)
+
+        table = pd.DataFrame(data, index=eligible)
+        table.index.name = self.facet.capitalize()
+        return table, tc, anchor_table
+
+    def drf_test(
+        self,
+        covariate,
+        model="global",
+        reference=None,
+        selection_method="wald",
+        corr_tol=0.95,
+        sd_ratio_tol=1.1,
+        min_anchors=2,
+        wald_alpha=0.05,
+        min_persons_per_group=5,
+        omnibus=None,
+        welch=False,
+        correction="bh",
+        alpha=0.05,
+        logit_threshold=0.43,
+        no_of_samples=500,
+        plot=False,
+        plot_kwargs=None,
+        warm_corr=True,
+        tolerance=0.00001,
+        max_iters=100,
+        ext_score_adjustment=0.5,
+        constant=None,
+        threshold_constant=None,
+        method=None,
+        matrix_power=None,
+        robust=False,
+        log_lik_tol=0.000001,
+        seed=None,
+    ):
+        """
+        Differential Rater Functioning (DRF) test by an exogenous person
+        variable: the facet element (e.g. rater) location analogue of DIF.
+        The tests depend on the model:
+
+        - 'global': one test per common facet element.
+        - 'items'/'thresholds'/'bivector'/'matrix': a separate test of each
+          facet element's effect on each item or threshold. 'bivector' and
+          'matrix' produce two tables, drf_table (items) and
+          drf_threshold_table (thresholds); 'matrix' uses the marginal
+          item and threshold projections.
+        - 'centrality'/'pseudo_halo'/'bistretch': one joint test per common
+          facet element of its 2 (or 3, 'bistretch') parameters (lambda,
+          omega; or omega_items/omega_thresholds): T = D' S^-1 D, with D
+          the focal-minus-reference differences and S their covariance
+          from paired bootstrap draws, referred to chi-squared with 2 (or
+          3) df. Separate z-tests per parameter are also reported. lambda
+          is purified as for 'global'; omega is not purified.
+
+        Only common facet elements are tested: those that rated at least
+        min_persons_per_group persons in each group (others are listed in
+        drf_excluded_raters). The facet element location scale is purified
+        with the same anchor-selection methods as dif_test; all common
+        facet elements are tested. For 'global' there is one translation
+        constant per focal group; for 'items'/'thresholds'/'bivector'/
+        'matrix' there is one per item or threshold.
+
+        The omnibus test is available for 'global' only, and is run by
+        default. It holds items and thresholds at their pooled
+        (combined-group) values and lets only the facet effects vary per
+        group, with df = common facet elements - 1.
+
+        Parameters
+        ----------
+        covariate : str
+            Column name in self.exogenous to group persons by.
+        model : str, default 'global'
+            One of self._MODELS; determines the tests (see above).
+        reference : str or None, default None
+            Value of `covariate` for the reference group. None uses the
+            largest group.
+        selection_method : {'wald', 'robust_z', 'none'}, default 'wald'
+            Purification of the facet element location scale: sequential
+            Wald tests ('wald'), modified z-score exclusion ('robust_z'),
+            or a mean shift over all common facet elements ('none').
+        corr_tol, sd_ratio_tol, min_anchors, wald_alpha : floats/int
+            Settings of the active selection method. min_anchors defaults
+            to 2.
+        min_persons_per_group : int, default 5
+            Minimum number of persons a facet element must have rated in
+            each group to be tested.
+        omnibus : bool or None, default None
+            Whether to run the omnibus test ('global' only; True with any
+            other model raises ValueError). None runs it for 'global'.
+        welch : bool, default False
+            If True, the Wald tests use Welch-Satterthwaite degrees of
+            freedom instead of the normal.
+        correction : 'bh', 'bonferroni', or None, default 'bh'
+            Multiple-comparison correction across each table's tests.
+        alpha : float, default 0.05
+            Significance level for flagging.
+        logit_threshold : float, default 0.43
+            Minimum absolute difference, in logits, for flagging.
+        no_of_samples : int, default 500
+            Bootstrap resamples for each group's standard errors.
+        plot, plot_kwargs :
+            If plot=True, plot_anchor_selection() per focal group, with
+            plot_kwargs passed to it.
+        warm_corr, tolerance, max_iters, ext_score_adjustment :
+            Person-estimation settings, used for the omnibus test.
+        constant, threshold_constant, method, matrix_power, robust,
+        log_lik_tol :
+            Passed to each group's calibrate() call.
+        seed : int or None, default None
+            Seed for each group's bootstrap.
+
+        Attributes set
+        --------------
+        drf_model : str
+            The `model` used.
+        drf_table : pandas.DataFrame
+            Common facet elements only. 'global': one row per (facet
+            element, focal group), with 'Group', 'Reference' / 'Focal' /
+            'Focal (purified)', 'Difference', 'SE', 'z', 'p',
+            'p (corrected)', 'Selected', 'Flagged', and 'df' if welch=True.
+            'items'/'thresholds'/'bivector'/'matrix': one row per (facet
+            element, item or threshold, focal group), with the same columns
+            plus 'Item' or 'Category'; one correction across the table;
+            items only for 'bivector'/'matrix'.
+            'centrality'/'pseudo_halo'/'bistretch': one row per (facet
+            element, focal group), with 'Group'; 'Reference_{param}',
+            'Focal_{param}', 'Difference_{param}' per parameter; 'T', 'df',
+            'p', 'p (corrected)', 'Selected' (lambda purification),
+            'Flagged' (joint test); and 'z_{param}', 'p_{param}',
+            'p_{param} (corrected)', 'Flagged_{param}' per parameter, with
+            a separate correction.
+        drf_threshold_table : pandas.DataFrame or None
+            'bivector'/'matrix' only: the threshold tests, same columns as
+            drf_table plus 'Category', corrected separately.
+        drf_omnibus_table : pandas.DataFrame or None
+            One row per focal group: 'LR', 'df', 'p', 'Flagged'. None
+            unless the omnibus test is run.
+        drf_excluded_raters : dict {focal_value: list}
+            Facet elements present in both groups but excluded for rating
+            fewer than min_persons_per_group persons in at least one.
+        drf_reference, drf_covariate : the reference group value and
+            covariate column name used.
+        drf_reference_model : MFRM
+            Fitted model for the reference group.
+        drf_focal_models : dict {focal_value: MFRM}
+        drf_tc : dict
+            Leave-one-out translation constants, one per common facet
+            element. 'global', and lambda for 'centrality'/'pseudo_halo'/
+            'bistretch': {focal_value: pandas.Series}. 'items'/
+            'thresholds': {focal_value: {element: pandas.Series}}.
+            'bivector'/'matrix': {focal_value: {'items': {element: Series},
+            'thresholds': {element: Series}}}.
+        drf_anchor_selection : dict {focal_value: pandas.DataFrame or None}
+        drf_plots : dict {focal_value: matplotlib.figure.Figure or None}
+        drf_group_sizes : dict {group_value: int}
+        """
+        from raschpy.mfrm import MFRM
+
+        model = self._MODEL_ALIASES.get(model, model)
+        if model not in self._MODELS:
+            raise ValueError(f"model must be one of {self._MODELS}")
+        if omnibus is None:
+            # 'global' only, since that's the only model with a validated
+            # omnibus construction -- default to the better-performing
+            # option where one exists; False elsewhere, since no
+            # omnibus construction exists there yet.
+            omnibus = model == "global"
+        if omnibus and model != "global":
+            raise ValueError(
+                "omnibus=True is only supported for model='global'. The "
+                "omnibus LR construction's df (see the pooled-item/"
+                "threshold-pinning mechanism above) has only been worked "
+                f"out for global's single {self.facet_label_eg} location scalar -- for "
+                "'items'/'thresholds'/'bivector'/'matrix' the correct df "
+                f"would need to charge for the full per-element {self.facet_label} "
+                "parameter count (mirroring model_selection()'s own "
+                "rater_k table), which hasn't been done. Pass "
+                "omnibus=False for these models."
+            )
+        if correction not in ("bh", "bonferroni", None):
+            raise ValueError("correction must be 'bh', 'bonferroni', or None")
+        if selection_method not in ("wald", "robust_z", "none"):
+            raise ValueError("selection_method must be 'wald', 'robust_z', or 'none'")
+        if min_persons_per_group < 1:
+            raise ValueError("min_persons_per_group must be at least 1.")
+
+        if getattr(self, "exogenous", None) is None:
+            raise ValueError(
+                "No exogenous data available. Pass exogenous= to the "
+                "constructor before calling drf_test()."
+            )
+        if covariate not in self.exogenous.columns:
+            raise ValueError(f"'{covariate}' is not a column in self.exogenous.")
+
+
+        # Non-extreme persons, aggregating across facet_elements (same
+        # convention as dif_test).
+        total_scores = self.responses.groupby(level=1).sum().sum(axis=1)
+        max_possible = (
+            self.responses.notna().groupby(level=1).sum().sum(axis=1) * self.max_score
+        )
+        non_extreme = total_scores.index[(total_scores > 0) & (total_scores < max_possible)]
+
+        cov_values = self.exogenous.loc[non_extreme, covariate].dropna()
+        n_missing = len(non_extreme) - len(cov_values)
+
+        levels = cov_values.value_counts()
+        if len(levels) < 2:
+            raise ValueError(
+                f"'{covariate}' has fewer than 2 distinct non-null values "
+                f"among non-extreme persons -- cannot run a DRF test."
+            )
+
+        if reference is None:
+            reference = levels.index[0]
+        elif reference not in levels.index:
+            raise ValueError(f"reference='{reference}' is not a value of '{covariate}'.")
+
+        focal_levels = [lvl for lvl in levels.index if lvl != reference]
+        if len(focal_levels) > 1:
+            warnings.warn(
+                f"'{covariate}' has {len(levels)} levels. drf_test() "
+                f"compares each focal level to the reference level "
+                f"'{reference}' individually (reference-group design); "
+                f"all-pairwise comparisons between non-reference levels "
+                f"are not supported.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        group_sizes = {reference: int(levels.loc[reference])}
+        for focal in focal_levels:
+            group_sizes[focal] = int(levels.loc[focal])
+
+        if n_missing > 0:
+            warnings.warn(
+                f"{n_missing} non-extreme person(s) have a missing value for "
+                f"'{covariate}' and were excluded. Group sizes used: "
+                f"{group_sizes}.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        def _group_responses(idx):
+            mask = self.responses.index.get_level_values(1).isin(idx)
+            resp = self.responses[mask]
+            nonnull_by_rater = resp.notna().groupby(level=0).sum().sum(axis=1)
+            active_raters = nonnull_by_rater[nonnull_by_rater > 0].index
+            return resp[resp.index.get_level_values(0).isin(active_raters)]
+
+        def _rated_person_counts(resp):
+            return resp.notna().any(axis=1).groupby(level=0).sum()
+
+        pe_kw = dict(
+            warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
+            ext_score_adjustment=ext_score_adjustment,
+        )
+        cal_kw = dict(
+            constant=constant, threshold_constant=threshold_constant, method=method,
+            matrix_power=matrix_power, robust=robust, log_lik_tol=log_lik_tol,
+            **self._refit_kw(model),
+        )
+        se_kw = dict(
+            no_of_samples=no_of_samples, constant=constant,
+            threshold_constant=threshold_constant, method=method, robust=robust,
+            matrix_power=matrix_power, log_lik_tol=log_lik_tol, seed=seed,
+            # store_bootstrap=True keeps the fitted bootstrap resamples
+            # (self._bootstrap_samples_{model}) so purification's Var(tc)
+            # can be estimated directly from their empirical distribution
+            # instead of an independence-assumption formula -- see
+            # _purification_loo_tc.
+            store_bootstrap=True,
+        )
+
+        ref_idx = cov_values.index[cov_values == reference]
+        ref_responses = _group_responses(ref_idx)
+        ref_model = MFRM(ref_responses, max_score=self.max_score)
+        ref_model.calibrate(model=model, **cal_kw)
+        ref_model.std_errors(model=model, **se_kw)
+        ref_counts = _rated_person_counts(ref_responses)
+
+        all_rows = []
+        all_threshold_rows = []
+        focal_models = {}
+        tc_dict = {}
+        anchor_selection_dict = {}
+        plot_dict = {}
+        excluded_dict = {}
+        omnibus_rows = {}
+
+        for focal in focal_levels:
+            focal_idx = cov_values.index[cov_values == focal]
+            focal_responses = _group_responses(focal_idx)
+            focal_model = MFRM(focal_responses, max_score=self.max_score)
+            focal_model.calibrate(model=model, **cal_kw)
+            focal_model.std_errors(model=model, **se_kw)
+            focal_counts = _rated_person_counts(focal_responses)
+
+            common_raters = ref_model.facet_names.intersection(focal_model.facet_names)
+            eligible = pd.Index([
+                r for r in common_raters
+                if ref_counts.get(r, 0) >= min_persons_per_group
+                and focal_counts.get(r, 0) >= min_persons_per_group
+            ])
+            excluded_dict[focal] = [r for r in common_raters if r not in eligible]
+            if len(eligible) < 2:
+                raise ValueError(
+                    f"Only {self._facet_n(len(eligible))} {'bridges' if len(eligible) == 1 else 'bridge'} the "
+                    f"reference and '{focal}' groups with at least "
+                    f"min_persons_per_group={min_persons_per_group} rated "
+                    f"persons in each -- cannot run a DRF test for this "
+                    f"focal group. Lower min_persons_per_group or check "
+                    f"{self.facet_label} panel overlap between groups."
+                )
+
+            elem_kw = dict(
+                selection_method=selection_method, corr_tol=corr_tol,
+                sd_ratio_tol=sd_ratio_tol, min_anchors=min_anchors, wald_alpha=wald_alpha,
+                welch=welch, correction=correction, alpha=alpha,
+                logit_threshold=logit_threshold,
+                ref_n=ref_model.no_of_persons, focal_n=focal_model.no_of_persons,
+            )
+
+            if model in ("items", "thresholds"):
+                # Per-axis-slice purification: each item's/threshold's own
+                # column is independently zero-mean across raters, so _drf_element_table
+                # purifies per element, not once for the whole table.
+                ref_df = getattr(ref_model, f"facet_effects_{model}").loc[eligible]
+                focal_df = getattr(focal_model, f"facet_effects_{model}").loc[eligible]
+                ref_se_df = getattr(ref_model, f"rater_se_{model}").loc[eligible]
+                focal_se_df = getattr(focal_model, f"rater_se_{model}").loc[eligible]
+                ref_samples = getattr(ref_model, f"_bootstrap_samples_{model}", [])
+                focal_samples = getattr(focal_model, f"_bootstrap_samples_{model}", [])
+                ref_boot_e = self._bootstrap_element_matrices(
+                    ref_samples, f"facet_effects_{model}", eligible
+                )
+                focal_boot_e = self._bootstrap_element_matrices(
+                    focal_samples, f"facet_effects_{model}", eligible
+                )
+                row_label = "Item" if model == "items" else "Category"
+                table, tc_e, anchor_e = self._drf_element_table(
+                    focal, ref_df, focal_df, ref_se_df, focal_se_df,
+                    row_label=row_label,
+                    ref_boot_elements=ref_boot_e, focal_boot_elements=focal_boot_e,
+                    **elem_kw,
+                )
+                all_rows.append(table)
+                tc_dict[focal] = tc_e
+                anchor_selection_dict[focal] = anchor_e
+                plot_dict[focal] = None  # per-element plotting not supported yet
+
+            elif model in ("bivector", "matrix"):
+                # 'matrix' deliberately uses the MARGINAL item/threshold
+                # projections (marginal_facet_effects_items/_thresholds),
+                # not a full per-(rater,item,threshold) table, whose cells
+                # are too sparse among common raters for a reliable test. Both marginals
+                # are confirmed zero-mean-across-raters per element (a
+                # mean of zero-mean-per-cell quantities is itself zero-
+                # mean), so the same per-axis-slice purification applies
+                # unchanged.
+                if model == "bivector":
+                    items_attr, thr_attr = (
+                        "facet_effects_bivector_items", "facet_effects_bivector_thresholds"
+                    )
+                else:
+                    items_attr, thr_attr = (
+                        "marginal_facet_effects_items", "marginal_facet_effects_thresholds"
+                    )
+                ref_items_df = getattr(ref_model, items_attr).loc[eligible]
+                focal_items_df = getattr(focal_model, items_attr).loc[eligible]
+                ref_thr_df = getattr(ref_model, thr_attr).loc[eligible]
+                focal_thr_df = getattr(focal_model, thr_attr).loc[eligible]
+                # rater_se_marginal_items/_thresholds are shared (non-model-
+                # suffixed) attribute names, freshly set by the std_errors()
+                # call just above for THIS model -- safe to read here.
+                ref_se_items_df = ref_model.rater_se_marginal_items.loc[eligible]
+                focal_se_items_df = focal_model.rater_se_marginal_items.loc[eligible]
+                ref_se_thr_df = ref_model.rater_se_marginal_thresholds.loc[eligible]
+                focal_se_thr_df = focal_model.rater_se_marginal_thresholds.loc[eligible]
+
+                ref_samples = getattr(ref_model, f"_bootstrap_samples_{model}", [])
+                focal_samples = getattr(focal_model, f"_bootstrap_samples_{model}", [])
+                ref_boot_items = self._bootstrap_element_matrices(ref_samples, items_attr, eligible)
+                focal_boot_items = self._bootstrap_element_matrices(focal_samples, items_attr, eligible)
+                ref_boot_thr = self._bootstrap_element_matrices(ref_samples, thr_attr, eligible)
+                focal_boot_thr = self._bootstrap_element_matrices(focal_samples, thr_attr, eligible)
+
+                table_items, tc_items, anchor_items = self._drf_element_table(
+                    focal, ref_items_df, focal_items_df, ref_se_items_df, focal_se_items_df,
+                    row_label="Item",
+                    ref_boot_elements=ref_boot_items, focal_boot_elements=focal_boot_items,
+                    **elem_kw,
+                )
+                table_thr, tc_thr, anchor_thr = self._drf_element_table(
+                    focal, ref_thr_df, focal_thr_df, ref_se_thr_df, focal_se_thr_df,
+                    row_label="Category",
+                    ref_boot_elements=ref_boot_thr, focal_boot_elements=focal_boot_thr,
+                    **elem_kw,
+                )
+                all_rows.append(table_items)
+                all_threshold_rows.append(table_thr)
+                tc_dict[focal] = {"items": tc_items, "thresholds": tc_thr}
+                anchor_selection_dict[focal] = {"items": anchor_items, "thresholds": anchor_thr}
+                plot_dict[focal] = None  # per-element plotting not supported yet
+
+            elif model in ("centrality", "pseudo_halo", "bistretch"):
+                # Joint covariance-aware test -- lambda purified (common-
+                # rater anchoring, like 'global'), omega(s) unpurified
+                # (confirmed shift-invariant). See _drf_stretch_test's own
+                # docstring.
+                table, tc_lambda, anchor_lambda = self._drf_stretch_test(
+                    focal, model, ref_model, focal_model, eligible,
+                    selection_method=selection_method, corr_tol=corr_tol,
+                    sd_ratio_tol=sd_ratio_tol, min_anchors=min_anchors,
+                    wald_alpha=wald_alpha, correction=correction, alpha=alpha,
+                    logit_threshold=logit_threshold,
+                )
+                all_rows.append(table)
+                tc_dict[focal] = tc_lambda
+                anchor_selection_dict[focal] = anchor_lambda
+                plot_dict[focal] = None  # per-element plotting not supported yet
+
+            else:  # model == "global"
+                ref_sev = ref_model.facet_effects_global.loc[eligible]
+                focal_sev = focal_model.facet_effects_global.loc[eligible]
+                ref_se = ref_model.rater_se_global.loc[eligible]
+                focal_se_all = focal_model.rater_se_global.loc[eligible]
+
+                ref_samples = getattr(ref_model, "_bootstrap_samples_global", [])
+                focal_samples = getattr(focal_model, "_bootstrap_samples_global", [])
+                ref_boot = self._bootstrap_value_matrix(ref_samples, "facet_effects_global", eligible)
+                focal_boot = self._bootstrap_value_matrix(focal_samples, "facet_effects_global", eligible)
+
+                # Leave-one-out per rater, with tc's own variance
+                # estimated from the bootstrap distribution (see
+                # _purification_loo_tc).
+                tc, ref_var, focal_var, selected, anchor_table = self._purification_loo_tc(
+                    ref_sev, focal_sev, ref_se, focal_se_all,
+                    selection_method, corr_tol, sd_ratio_tol, min_anchors, wald_alpha,
+                    ref_boot=ref_boot, focal_boot=focal_boot,
+                )
+                anchor_selection_dict[focal] = anchor_table
+
+                focal_shifted = focal_sev + tc
+                diff = focal_shifted - ref_sev
+
+                ref_se = np.sqrt(ref_var)
+                focal_se = np.sqrt(focal_var)
+                se = np.sqrt(ref_var + focal_var)
+                if welch:
+                    z_vals, df_vals, p_vals = self._welch_satterthwaite(
+                        diff.values, ref_se.values, ref_model.no_of_persons,
+                        focal_se.values, focal_model.no_of_persons,
+                    )
+                    z = pd.Series(z_vals, index=eligible)
+                    rater_welch_df = pd.Series(df_vals, index=eligible)
+                    p = pd.Series(p_vals, index=eligible)
+                else:
+                    z = diff / se
+                    p = pd.Series(2 * norm.sf(np.abs(z.values)), index=eligible)
+
+                if correction == "bonferroni":
+                    p_corrected = (p * len(p)).clip(upper=1.0)
+                elif correction == "bh":
+                    p_corrected = self._bh_correction(p)
+                else:
+                    p_corrected = p
+
+                flagged = (p_corrected < alpha) & (diff.abs() >= logit_threshold)
+                tc_dict[focal] = tc
+
+            if omnibus:
+                combined_idx = ref_idx.append(focal_idx)
+                m_full = MFRM(_group_responses(combined_idx), max_score=self.max_score)
+                m_full.calibrate(model=model, **cal_kw)
+                m_full.person_estimates(model=model, **pe_kw)
+                pooled_items, pooled_thresholds, _ = m_full._get_params(model)
+                ll_full = m_full._log_likelihood(model=model)
+                pooled_persons = getattr(m_full, f"persons_{model}")
+                pooled_ref_persons = pooled_persons.reindex(ref_model.person_names)
+                pooled_focal_persons = pooled_persons.reindex(focal_model.person_names)
+                # Rater-isolated DRF omnibus -- items/thresholds pinned at
+                # the pooled (m_full) value on both sides, facet_effects
+                # free per group. Properly nested against the same H0
+                # (m_full's own fit): the item axis is held EQUAL to H0's
+                # own value rather than left free, so df=eligible-1 is
+                # rater-specific.
+                ll_ref_omni = ref_model._log_likelihood(
+                    model=model, persons=pooled_ref_persons,
+                    items=pooled_items, thresholds=pooled_thresholds,
+                )
+                ll_focal_omni = focal_model._log_likelihood(
+                    model=model, persons=pooled_focal_persons,
+                    items=pooled_items, thresholds=pooled_thresholds,
+                )
+                lr_omni = max(0.0, -2 * (ll_full - (ll_ref_omni + ll_focal_omni)))
+                df_omni = len(eligible) - 1
+                p_omni = float(chi2.sf(lr_omni, df_omni))
+                omnibus_rows[focal] = {
+                    "LR": lr_omni, "df": df_omni, "p": p_omni,
+                    "Flagged": p_omni < alpha,
+                }
+
+            if model == "global":
+                table = pd.DataFrame(
+                    {
+                        "Group": focal,
+                        "Reference": ref_sev,
+                        "Focal": focal_sev,
+                        "Focal (purified)": focal_shifted,
+                        "Difference": diff,
+                        "SE": se,
+                        "z": z,
+                        "p": p,
+                        "p (corrected)": p_corrected,
+                        "Selected": eligible.isin(selected),
+                        "Flagged": flagged,
+                    },
+                    index=eligible,
+                )
+                table.index.name = self.facet.capitalize()
+                if welch:
+                    table["df"] = rater_welch_df
+                all_rows.append(table)
+
+                if plot and anchor_selection_dict[focal] is not None:
+                    plot_dict[focal] = self.plot_anchor_selection(
+                        anchor_selection_dict[focal], **(plot_kwargs or {})
+                    )
+                else:
+                    plot_dict[focal] = None
+
+            focal_models[focal] = focal_model
+
+        self.drf_model = model
+        self.drf_table = pd.concat(all_rows)
+        self.drf_threshold_table = (
+            pd.concat(all_threshold_rows) if all_threshold_rows else None
+        )
+        self.drf_omnibus_table = pd.DataFrame(omnibus_rows).T if omnibus else None
+        self.drf_excluded_raters = excluded_dict
+        self.drf_reference = reference
+        self.drf_covariate = covariate
+        self.drf_reference_model = ref_model
+        self.drf_focal_models = focal_models
+        self.drf_tc = tc_dict
+        self.drf_anchor_selection = anchor_selection_dict
+        self.drf_plots = plot_dict
+        self.drf_group_sizes = group_sizes
+
     def model_selection(
         self,
         test="AIC",
@@ -6458,14 +9320,14 @@ class MFRM(Rasch):
         seed=None,
     ):
         """
-        Compare MFRM rater parameterisations using AIC, BIC, or LR.
+        Compare MFRM facet element (e.g. rater) parameterisations using AIC, BIC, or LR.
 
         Calibrates the active models (all eight -- global, items, thresholds,
         bivector, matrix, centrality, pseudo_halo, bistretch -- unless
         models= restricts this) if not already done, computes the
         log-likelihood for each, and ranks them by the chosen criterion.
         centrality and pseudo_halo are each 2-parameter restrictions of
-        thresholds/items respectively (Jin & Wang 2018-style rater
+        thresholds/items respectively (Jin & Wang 2018-style facet element
         centrality/extremity, and a pseudo-halo-effect item-difficulty-
         compression model); bistretch is a 3-parameter restriction of
         bivector, combining both stretch axes -- see calibrate()'s
@@ -6508,8 +9370,8 @@ class MFRM(Rasch):
         min_effect : float, default 0
             Minimum effect size (logits) required to prefer a more complex
             model over a simpler one. The effect between two models is the
-            max absolute difference between their fitted severity surfaces
-            (each model's facet_effects broadcast to a common (rater, item,
+            max absolute difference between their fitted location surfaces
+            (each model's facet_effects broadcast to a common (facet element, item,
             category) grid -- see _severity_grid -- same units as
             facet_effects_matrix for every model). For test='LR', an
             additional condition alongside the p-value for every reported
@@ -6521,11 +9383,16 @@ class MFRM(Rasch):
             global) -- if AIC/BIC selects centrality/pseudo_halo/bistretch
             directly, min_effect does not walk it back further (same scope
             as per_rater_model_selection's own min_effect). Default 0
-            disables (never gates).
+            disables (never gates). min_effect is optional and a matter of taste: in simulation the
+            tests alone classify well, so the gate expresses a judgement of
+            practical importance rather than improving accuracy. If wanted,
+            0.43 and 0.64 mirror the ETS DIF category boundaries (moderate
+            and large).
         sampling : None, 'dynamic', or int, default 'dynamic'
             Subsamples non-extreme persons before LL computation (parameters
             estimated on full data; only the LL evaluation is subsampled).
-            'dynamic' uses T = min(20*(I-1)*(R-1), 1500); an integer fixes T
+            'dynamic' uses T = min(20*R*(I-1)*(K-1), 1500), K = max_score
+            (K - 1 taken as 1 for dichotomous data); an integer fixes T
             directly; None disables. n_ll (= T when triggered) is used in
             BIC's ln(n) term.
         warm_corr, tolerance, max_iters, ext_score_adjustment : floats
@@ -6578,6 +9445,9 @@ class MFRM(Rasch):
                 raise ValueError("models must not contain duplicate entries.")
             if len(active_models) < 2:
                 raise ValueError("models must contain at least 2 model names.")
+        active_models = self._drop_equivalent_models(active_models, "model_selection()")
+        if len(active_models) < 2:
+            raise ValueError("models must contain at least 2 distinct models for this design.")
 
         n_items = self.no_of_items
         m = self.max_score
@@ -6621,7 +9491,7 @@ class MFRM(Rasch):
         n_ll = n_persons
         if sampling is not None:
             T = (
-                min(20 * (n_items - 1) * (R - 1), 1500)
+                min(20 * R * (n_items - 1) * max(m - 1, 1), 1500)
                 if sampling == "dynamic"
                 else int(sampling)
             )
@@ -6756,22 +9626,26 @@ class MFRM(Rasch):
                 pd.DataFrame(lr_results).T.rename_axis("Comparison")
             )
 
-    def _rater_ll_from_sev(self, sev_rik, persons, responses_r):
+    def _rater_ll_from_sev(self, sev_rik, persons, responses_r, anchor=False):
         """
-        Log-likelihood contribution for one rater given an (I, m) facet_effect array.
+        Log-likelihood contribution for one facet element (e.g. rater) given an (I, m) facet_effect array.
 
         sev_rik : ndarray shape (I, m)
             Per-threshold facet_effect increments in matrix format — same as the
-            values stored in facet_effects_matrix for one rater. cumsum is
+            values stored in facet_effects_matrix for one facet element. cumsum is
             applied per item inside this function, matching _cat_probs_mfrm.
         persons : pd.Series
             Person person_location estimates, already filtered to non-extreme persons.
         responses_r : pd.DataFrame shape (N, I)
-            All responses for this rater.
+            All responses for this facet element.
+        anchor : bool
+            sev_rik is in the anchored frame of reference: use the anchored
+            matrix item locations and thresholds, which absorb the anchors'
+            mean effects.
         """
-        thresholds = self.thresholds.values          # (m,)
+        thresholds = self._thresholds_for("matrix", anchor=anchor).values          # (m,)
         cumtau = np.concatenate([[0.0], np.cumsum(thresholds)])  # (m+1,)
-        diff_arr = self.items.values                  # (I,)
+        diff_arr = self._items_for("matrix", anchor=anchor).values                  # (I,)
         cats = np.arange(len(thresholds) + 1, dtype=float)  # (m+1,)
         ab = persons.values                           # (N,)
         obs = responses_r.reindex(persons.index).values  # (N, I)
@@ -6816,19 +9690,19 @@ class MFRM(Rasch):
         seed=None,
     ):
         """
-        Assign the simplest adequate rater parameterisation to each rater.
+        Assign the simplest adequate facet element (e.g. rater) parameterisation to each facet element.
 
         Calibrates the matrix model once (full data), derives all restricted
-        parameterisations as marginal means of each rater's matrix parameters,
-        then tests top-down per rater — no refitting at any step.
+        parameterisations as marginal means of each facet element's matrix parameters,
+        then tests top-down per facet element — no refitting at any step.
 
-        Each rater's LL is evaluated over all observations made by that rater
+        Each facet element's LL is evaluated over all observations made by that facet element
         (whether persons were single- or multi-marked), filtered to persons
-        non-extreme on that rater's own data. Person person_locations come from the
+        non-extreme on that facet element's own data. Person person_locations come from the
         full-data matrix-model estimates.
 
         Testing ladder (top-down):
-          matrix → bivector  (df = (I-1)*(m-1) per rater)
+          matrix → bivector  (df = (I-1)*(m-1) per facet element)
             if rejected  → assign matrix
             if accepted  → test both forks simultaneously:
               bivector → items       (df = m-1)
@@ -6874,12 +9748,12 @@ class MFRM(Rasch):
         Parameters
         ----------
         anchors : list or None, default None
-            Rater identifiers to use as the anchor frame of reference. When
+            Facet element identifiers to use as the anchor frame of reference. When
             provided, the matrix model is calibrated in anchor mode (anchor
-            raters' mean facet_effect fixed to zero) before testing. Different
-            anchor sets give different — all valid — per-rater assignments,
-            because the zero-sum constraint means a non-uniform rater can
-            induce apparent non-uniformity in others. All raters (anchor and
+            facet elements' mean facet_effect fixed to zero) before testing. Different
+            anchor sets give different — all valid — per-facet-element assignments,
+            because the zero-sum constraint means a non-uniform facet element can
+            induce apparent non-uniformity in others. All facet elements (anchor and
             non-anchor) are tested; results are stored as
             anchor_facet_effects_mixed and anchor_rater_models.
         test : {'AIC', 'BIC', 'LR'}, default 'AIC'
@@ -6888,7 +9762,7 @@ class MFRM(Rasch):
             then fork to items/thresholds/global) plus the extra targeted
             stretch test described above, with significance level alpha.
         models : list/tuple of str, or None, default None
-            Restrict the candidate models each rater can be assigned instead
+            Restrict the candidate models each facet element can be assigned instead
             of the full family of eight. For AIC/BIC this is a direct filter
             -- the minimum is taken only over the given models (any non-empty
             subset works; aic_sig_test=True tests the winner against
@@ -6911,13 +9785,13 @@ class MFRM(Rasch):
             ΔAIC > 0 (vs baseline) AND p = exp(-ΔAIC/2) < alpha. Prevents
             spurious complexity at large n where ΔAIC differences are small.
         sampling : 'dynamic', int, or None, default 'dynamic'
-            Per-rater subsampling for LL evaluation. 'dynamic' uses
+            Per-facet-element subsampling for LL evaluation. 'dynamic' uses
             T = min(20*(I-1)*(m-1), 1500); an integer fixes T directly;
-            None uses all of each rater's persons. Parameters are always
+            None uses all of each facet element's persons. Parameters are always
             estimated on the full data; only LL evaluation is subsampled.
             n_r (= T when triggered) is used in BIC's ln(n) term.
         seed : int or None, default None
-            Seed for the per-rater subsampling RNG (only used when sampling
+            Seed for the per-facet-element subsampling RNG (only used when sampling
             triggers). Pass an int for reproducible LL evaluation; None
             (default) draws fresh entropy. Note: previously this subsampling
             was hardcoded to random_state=0 (always deterministic); passing
@@ -6943,7 +9817,11 @@ class MFRM(Rasch):
             bistretch as the global best, min_effect does not walk it back
             further). For LR it is an additional condition at each ladder
             step (including the extra rung) alongside the p-value. Default 0
-            disables.
+            disables. min_effect is optional and a matter of taste: in simulation the
+            tests alone classify well, so the gate expresses a judgement of
+            practical importance rather than improving accuracy. If wanted,
+            0.43 and 0.64 mirror the ETS DIF category boundaries (moderate
+            and large).
         warm_corr, tolerance, max_iters, ext_score_adjustment : floats
             Person estimation kwargs (for matrix model).
         constant, method, matrix_power, log_lik_tol : floats
@@ -6976,7 +9854,8 @@ class MFRM(Rasch):
         m = self.max_score
         anchored = anchors is not None
 
-        backbone = {"global", "items", "thresholds", "bivector"}
+        # dichotomous data: only items and pseudo_halo vary by item (see _drop_equivalent_models)
+        backbone = {"global", "items"} if m == 1 else {"global", "items", "thresholds", "bivector"}
         if models is None:
             active_models = set(self._MODELS)
         else:
@@ -6993,10 +9872,10 @@ class MFRM(Rasch):
                 raise ValueError(
                     f"For test='LR', models= must include the full backbone "
                     f"{sorted(backbone)} -- the top-down fork can't work "
-                    f"without all four. 'matrix' and each of 'centrality'/"
-                    f"'pseudo_halo'/'bistretch' are independently optional. "
+                    f"without them. The other models are independently optional. "
                     f"AIC/BIC don't have this restriction."
                 )
+        active_models = self._drop_equivalent_models(active_models, "per_rater_model_selection()")
         matrix_allowed = "matrix" in active_models
         centrality_allowed = "centrality" in active_models
         pseudo_halo_allowed = "pseudo_halo" in active_models
@@ -7048,7 +9927,7 @@ class MFRM(Rasch):
 
             # Dynamic subsampling for LL evaluation (parameters from full data)
             if sampling == 'dynamic':
-                T = min(20 * (n_items - 1) * (m - 1), 1500)
+                T = min(20 * (n_items - 1) * max(m - 1, 1), 1500)
             elif isinstance(sampling, int):
                 T = sampling
             else:
@@ -7057,7 +9936,7 @@ class MFRM(Rasch):
                 persons_r = persons_r.sample(T, random_state=seed)
 
             if len(persons_r) == 0:
-                records[rater] = {"selected_model": "matrix",
+                records[rater] = {"selected_model": "items" if m == 1 else "matrix",
                                   "LL_matrix": np.nan, "LL_bivector": np.nan,
                                   "LL_items": np.nan, "LL_thresholds": np.nan,
                                   "LL_global": np.nan}
@@ -7095,16 +9974,16 @@ class MFRM(Rasch):
             # bivector's own item_means/lambda_rk split exactly as
             # _estimate_raters_bistretch does.
             _, omega_cen, cen_1d = self._derive_stretch_single(
-                thresh_means, self.thresholds
+                thresh_means, self._thresholds_for("matrix", anchor=anchored)
             )
             _, omega_pha, pha_1d = self._derive_stretch_single(
-                item_means, self.items
+                item_means, self._items_for("matrix", anchor=anchored)
             )
             lam_bis, omega_items_bis, item_1d_bis = self._derive_stretch_single(
-                item_means, self.items
+                item_means, self._items_for("matrix", anchor=anchored)
             )
             _, omega_thresholds_bis, thr_1d_bis = self._derive_stretch_single(
-                lambda_rk, self.thresholds
+                lambda_rk, self._thresholds_for("matrix", anchor=anchored)
             )
             sev_centrality = np.tile(cen_1d[None, :], (n_items, 1))
             sev_pseudo_halo = np.tile(pha_1d[:, None], (1, m))
@@ -7117,14 +9996,16 @@ class MFRM(Rasch):
             eff_glb_pha = float(np.max(np.abs(sev_global - sev_pseudo_halo)))
             eff_glb_bis = float(np.max(np.abs(sev_global - sev_bistretch)))
 
-            ll_mat = self._rater_ll_from_sev(sev_mat,    persons_r, responses_r)
-            ll_biv = self._rater_ll_from_sev(sev_biv,    persons_r, responses_r)
-            ll_itm = self._rater_ll_from_sev(sev_items,  persons_r, responses_r)
-            ll_thr = self._rater_ll_from_sev(sev_thresh, persons_r, responses_r)
-            ll_glb = self._rater_ll_from_sev(sev_global, persons_r, responses_r)
-            ll_cen = self._rater_ll_from_sev(sev_centrality,  persons_r, responses_r)
-            ll_pha = self._rater_ll_from_sev(sev_pseudo_halo, persons_r, responses_r)
-            ll_bis = self._rater_ll_from_sev(sev_bistretch,   persons_r, responses_r)
+            def _ll(sev, mod):
+                return self._rater_ll_from_sev(sev, persons_r, responses_r, anchored)
+            ll_mat = _ll(sev_mat, "matrix")
+            ll_biv = _ll(sev_biv, "bivector")
+            ll_itm = _ll(sev_items, "items")
+            ll_thr = _ll(sev_thresh, "thresholds")
+            ll_glb = _ll(sev_global, "global")
+            ll_cen = _ll(sev_centrality, "centrality")
+            ll_pha = _ll(sev_pseudo_halo, "pseudo_halo")
+            ll_bis = _ll(sev_bistretch, "bistretch")
 
             rec = {
                 "LL_matrix": ll_mat, "LL_bivector": ll_biv,
@@ -7179,6 +10060,27 @@ class MFRM(Rasch):
                         selected = "global"
                     if selected == "thresholds" and eff_thr_glb < min_effect:
                         selected = "global"
+
+            elif m == 1:  # LR, dichotomous: global -> items, then the pseudo_halo restriction
+                lr_gi = max(0.0, -2.0 * (ll_glb - ll_itm))
+                p_gi = float(chi2.sf(lr_gi, n_items - 1))
+                rec.update({"LR_glb_vs_items": lr_gi, "p_glb_vs_items": p_gi})
+                if p_gi < alpha and eff_itm_glb >= min_effect:
+                    selected = "items"
+                    if pseudo_halo_allowed:
+                        lr_pha = max(0.0, -2.0 * (ll_pha - ll_itm))
+                        p_pha = float(chi2.sf(lr_pha, n_items - 2))
+                        rec.update({"LR_itm_vs_pha": lr_pha, "p_itm_vs_pha": p_pha})
+                        if not (p_pha < alpha and eff_itm_pha >= min_effect):
+                            selected = "pseudo_halo"
+                else:
+                    selected = "global"
+                    if pseudo_halo_allowed:
+                        lr_gh = max(0.0, -2.0 * (ll_glb - ll_pha))
+                        p_gh = float(chi2.sf(lr_gh, 1))
+                        rec.update({"LR_glb_vs_pha": lr_gh, "p_glb_vs_pha": p_gh})
+                        if p_gh < alpha and eff_glb_pha >= min_effect:
+                            selected = "pseudo_halo"
 
             else:  # LR — top-down ladder
                 rec.update({"LR_biv_vs_matrix": np.nan, "p_biv_vs_matrix": np.nan,
@@ -7297,7 +10199,8 @@ class MFRM(Rasch):
                         "centrality", "pseudo_halo", "bistretch")]
             extra_cols = ic_cols + (["p_vs_baseline", "baseline_model"] if test == "AIC" and aic_sig_test else [])
         else:
-            extra_cols = ["LR_biv_vs_matrix", "p_biv_vs_matrix",
+            extra_cols = (["LR_glb_vs_items", "p_glb_vs_items"] if m == 1 else []) + [
+                          "LR_biv_vs_matrix", "p_biv_vs_matrix",
                           "LR_items_vs_biv", "p_items_vs_biv",
                           "LR_thresh_vs_biv", "p_thresh_vs_biv",
                           "LR_biv_vs_bis", "p_biv_vs_bis",
@@ -7307,6 +10210,10 @@ class MFRM(Rasch):
                           "LR_glb_vs_pha", "p_glb_vs_pha",
                           "LR_glb_vs_bis", "p_glb_vs_bis"]
         cols = ["selected_model"] + ll_cols + extra_cols
+        if m == 1:  # dichotomous: only the global/items/pseudo_halo columns are meaningful
+            keep = ("global", "items", "pseudo_halo", "glb_vs_items", "itm_vs_pha", "glb_vs_pha",
+                    "p_vs_baseline", "baseline_model", "selected_model")
+            cols = [c for c in cols if c.endswith(keep)]
         table = pd.DataFrame(records).T.rename_axis("Rater")
         table = table.reindex(columns=cols)
         rater_models = table["selected_model"]
@@ -7329,20 +10236,20 @@ class MFRM(Rasch):
                 sev = item_means[:, None] + lambda_rk[None, :]
             elif assigned == "centrality":
                 _, _, cen_1d = self._derive_stretch_single(
-                    thresh_means, self.thresholds
+                    thresh_means, self._thresholds_for("matrix", anchor=anchored)
                 )
                 sev = np.tile(cen_1d[None, :], (n_items, 1))
             elif assigned == "pseudo_halo":
                 _, _, pha_1d = self._derive_stretch_single(
-                    item_means, self.items
+                    item_means, self._items_for("matrix", anchor=anchored)
                 )
                 sev = np.tile(pha_1d[:, None], (1, m))
             elif assigned == "bistretch":
                 _, _, item_1d_bis = self._derive_stretch_single(
-                    item_means, self.items
+                    item_means, self._items_for("matrix", anchor=anchored)
                 )
                 _, _, thr_1d_bis = self._derive_stretch_single(
-                    lambda_rk, self.thresholds
+                    lambda_rk, self._thresholds_for("matrix", anchor=anchored)
                 )
                 sev = item_1d_bis[:, None] + thr_1d_bis[None, :]
             elif assigned == "items":
@@ -7395,20 +10302,23 @@ class MFRM(Rasch):
 
         return table
 
-    def _apply_rater_models(self, facet_effects_matrix, rater_models):
-        """Derive facet_effects_mixed by applying per-rater model restrictions to matrix estimates.
+    def _apply_rater_models(self, facet_effects_matrix, rater_models, anchor=False):
+        """Derive facet_effects_mixed by applying per-facet-element model restrictions to matrix estimates.
 
         Parameters
         ----------
         facet_effects_matrix : DataFrame
-            MultiIndex (rater, item) × thresholds, as produced by calibrate(model='matrix').
+            MultiIndex (facet element (e.g. rater), item) × thresholds, as produced by calibrate(model='matrix').
         rater_models : Series
-            Per-rater model assignment (index=rater names, values in _MODELS).
+            Per-facet-element model assignment (index=facet element names, values in _MODELS).
+        anchor : bool
+            facet_effects_matrix is anchored: derive the stretch models
+            against the anchored matrix item locations and thresholds.
 
         Returns
         -------
         DataFrame
-            Same MultiIndex structure as facet_effects_matrix, with each rater's
+            Same MultiIndex structure as facet_effects_matrix, with each facet element's
             facet_effect values replaced by the marginal-mean projection of their
             assigned model.
         """
@@ -7435,21 +10345,21 @@ class MFRM(Rasch):
                     sev_r = item_means[:, None] + lambda_rk[None, :]
                 elif assigned == "centrality":
                     _, _, cen_1d = self._derive_stretch_single(
-                        thresh_means, self.thresholds
+                        thresh_means, self._thresholds_for("matrix", anchor=anchor)
                     )
                     sev_r = np.tile(cen_1d[None, :], (n_items, 1))
                 elif assigned == "pseudo_halo":
                     _, _, pha_1d = self._derive_stretch_single(
-                        item_means, self.items
+                        item_means, self._items_for("matrix", anchor=anchor)
                     )
                     sev_r = np.tile(pha_1d[:, None], (1, m))
                 elif assigned == "bistretch":
                     lambda_rk = thresh_means - mu_r
                     _, _, item_1d_bis = self._derive_stretch_single(
-                        item_means, self.items
+                        item_means, self._items_for("matrix", anchor=anchor)
                     )
                     _, _, thr_1d_bis = self._derive_stretch_single(
-                        lambda_rk, self.thresholds
+                        lambda_rk, self._thresholds_for("matrix", anchor=anchor)
                     )
                     sev_r = item_1d_bis[:, None] + thr_1d_bis[None, :]
             blocks.append(
@@ -7535,7 +10445,7 @@ class MFRM(Rasch):
         """
         Analyse facet_element residual correlations.
 
-        Pivots the residual DataFrame to (Person×Items, Raters) shape,
+        Pivots the residual DataFrame to (Person×Items, Facet elements (e.g. raters)) shape,
         computes the inter-facet_element correlation matrix, and performs PCA.
         A large first eigenvalue suggests systematic facet_element bias.
 
@@ -7582,7 +10492,7 @@ class MFRM(Rasch):
             )
         except Exception:
             warnings.warn(
-                "PCA of facet_element standardised residuals failed. "
+                f"PCA of {self.facet_label_eg} standardised residuals failed. "
                 "Eigenvectors and loadings set to None.",
                 UserWarning,
                 stacklevel=2,
@@ -7759,7 +10669,7 @@ class MFRM(Rasch):
         last run under anchors.
 
         Fit statistics and residuals are invariant to the anchor shift itself
-        (a pure translation), so once a valid per-rater assignment exists we
+        (a pure translation), so once a valid per-facet-element assignment exists we
         can compute everything from it directly. When anchors is given, this
         (re-)syncs from the anchor-derived assignment for that exact anchor
         set every time, so the existing anchor-unaware fit-stat machinery
@@ -7843,7 +10753,7 @@ class MFRM(Rasch):
         trigger = f"{prefix}threshold_se_{model}"
         # Re-run if SEs not computed, or if CIs requested but not yet stored,
         # or if stored bootstrap samples are needed but weren't kept.
-        ci_attr = "anchor_item_low" if anc else "item_low"
+        ci_attr = f"anchor_item_low_{model}" if anc else f"item_low_{model}"
         ci_missing = interval is not None and not hasattr(self, ci_attr)
         need_bootstrap_samples = store_bootstrap and not getattr(
             self, f"_bootstrap_stored_{model}", False
@@ -7904,6 +10814,8 @@ class MFRM(Rasch):
         no_of_samples=500,
         interval=None,
         seed=None,
+        filename=None,
+        file_format="csv",
     ):
         """
         Build and store the item statistics summary table.
@@ -7914,7 +10826,7 @@ class MFRM(Rasch):
         Parameters
         ----------
         model : str, default 'global'
-            Rater parameterisation.
+            Facet element (e.g. rater) parameterisation.
         anchors : list or None, default None
             If provided, uses anchor-calibrated item item_locations.
         full : bool, default False
@@ -7956,6 +10868,12 @@ class MFRM(Rasch):
         seed : int or None, default None
             Seed passed through to the internal std_errors() call (only
             used if not already computed). None draws fresh entropy.
+        filename : str or None, default None
+            If given, also saves the returned table to
+            ``{filename}.{file_format}`` (path without extension, as for
+            the plotting methods).
+        file_format : {'csv', 'xlsx'}, default 'csv'
+            File format used when filename is given.
 
         Attributes set
         --------------
@@ -7963,6 +10881,11 @@ class MFRM(Rasch):
             Item statistics with items as rows. Always contains Estimate,
             Count, Facility, Infit MS, Outfit MS. SE (and CI bound columns,
             if interval is set) included only when se=True.
+
+        Returns
+        -------
+        pandas.DataFrame
+            The table, also stored as the attribute listed above.
         """
 
         model = self._MODEL_ALIASES.get(model, model)
@@ -8008,26 +10931,18 @@ class MFRM(Rasch):
             self._run_item_fit(model)
 
         anc = anchors is not None
-        item_locations = getattr(self, f"anchor_items_{model}") if anc else self.items
+        item_locations = self._items_for(model, anchor=anc)
 
         stats = pd.DataFrame(index=self.responses.columns)
         stats["Estimate"] = item_locations.round(dp)
         if se:
-            se_vals = (
-                self.anchor_item_se
-                if (anc and hasattr(self, "anchor_item_se"))
-                else self.item_se
-            )
-            low = (
-                self.anchor_item_low
-                if (anc and hasattr(self, "anchor_item_low"))
-                else self.item_low if hasattr(self, "item_low") else None
-            )
-            high = (
-                self.anchor_item_high
-                if (anc and hasattr(self, "anchor_item_high"))
-                else self.item_high if hasattr(self, "item_high") else None
-            )
+            se_vals = self._item_se_for(model, "se", anchor=anc)
+            if se_vals is None:
+                se_vals = self._item_se_for(model, "se")
+            low = self._item_se_for(model, "low", anchor=anc)
+            high = self._item_se_for(model, "high", anchor=anc)
+            if anc and low is None:
+                low, high = self._item_se_for(model, "low"), self._item_se_for(model, "high")
             stats["SE"] = se_vals.round(dp)
             if interval is not None and low is not None:
                 lo_lbl = f"{round((1 - interval) * 50, 1)}%"
@@ -8047,36 +10962,39 @@ class MFRM(Rasch):
             stats["Exp PM corr"] = getattr(self, f"exp_point_measure_{model}").round(dp)
 
         setattr(self, f"item_stats_{model}", stats)
+        table = getattr(self, f"item_stats_{model}")
+        _save_table(table, filename, file_format)
+        return table
 
     # Backwards-compatible aliases
     def item_stats_df_global(self, **kw):
         """Alias for item_stats_df(model='global'). See item_stats_df for full documentation."""
-        self.item_stats_df(model="global", **kw)
+        return self.item_stats_df(model="global", **kw)
 
     def item_stats_df_items(self, **kw):
         """Alias for item_stats_df(model='items'). See item_stats_df for full documentation."""
-        self.item_stats_df(model="items", **kw)
+        return self.item_stats_df(model="items", **kw)
 
     def item_stats_df_thresholds(self, **kw):
         """Alias for item_stats_df(model='thresholds'). See item_stats_df for full documentation."""
-        self.item_stats_df(model="thresholds", **kw)
+        return self.item_stats_df(model="thresholds", **kw)
 
     def item_stats_df_matrix(self, **kw):
         """Alias for item_stats_df(model='matrix'). See item_stats_df for full documentation."""
-        self.item_stats_df(model="matrix", **kw)
+        return self.item_stats_df(model="matrix", **kw)
 
     def item_stats_df_bivector(self, **kw):
         """Alias for item_stats_df(model='bivector'). See item_stats_df for full documentation."""
-        self.item_stats_df(model="bivector", **kw)
+        return self.item_stats_df(model="bivector", **kw)
     def item_stats_df_centrality(self, **kw):
         """Alias for item_stats_df(model='bivector'). See item_stats_df for full documentation."""
-        self.item_stats_df(model="centrality", **kw)
+        return self.item_stats_df(model="centrality", **kw)
     def item_stats_df_pseudo_halo(self, **kw):
         """Alias for item_stats_df(model='bivector'). See item_stats_df for full documentation."""
-        self.item_stats_df(model="pseudo_halo", **kw)
+        return self.item_stats_df(model="pseudo_halo", **kw)
     def item_stats_df_bistretch(self, **kw):
         """Alias for item_stats_df(model='bivector'). See item_stats_df for full documentation."""
-        self.item_stats_df(model="bistretch", **kw)
+        return self.item_stats_df(model="bistretch", **kw)
 
     def threshold_stats_df(
         self,
@@ -8101,6 +11019,8 @@ class MFRM(Rasch):
         no_of_samples=500,
         interval=None,
         seed=None,
+        filename=None,
+        file_format="csv",
     ):
         """
         Build and store the threshold statistics summary table.
@@ -8111,7 +11031,7 @@ class MFRM(Rasch):
         Parameters
         ----------
         model : str, default 'global'
-            Rater parameterisation.
+            Facet element (e.g. rater) parameterisation.
         anchors : list or None, default None
             Anchor facet_elements for SE computation.
         full : bool, default False
@@ -8152,11 +11072,22 @@ class MFRM(Rasch):
         seed : int or None, default None
             Seed passed through to the internal std_errors() call (only
             used if not already computed). None draws fresh entropy.
+        filename : str or None, default None
+            If given, also saves the returned table to
+            ``{filename}.{file_format}`` (path without extension, as for
+            the plotting methods).
+        file_format : {'csv', 'xlsx'}, default 'csv'
+            File format used when filename is given.
 
         Attributes set
         --------------
         threshold_stats_{model} : pandas.DataFrame
             Threshold statistics, rows Threshold 1..Threshold max_score.
+
+        Returns
+        -------
+        pandas.DataFrame
+            The table, also stored as the attribute listed above.
         """
 
         model = self._MODEL_ALIASES.get(model, model)
@@ -8203,7 +11134,7 @@ class MFRM(Rasch):
 
         anc = anchors is not None
         thresholds = (
-            getattr(self, f"anchor_thresholds_{model}") if anc else self.thresholds
+            self._thresholds_for(model, anchor=anc)
         )
         thr_se_attr = f"anchor_threshold_se_{model}" if anc else f"threshold_se_{model}"
         thr_se = getattr(self, thr_se_attr, None)
@@ -8255,35 +11186,38 @@ class MFRM(Rasch):
             ).values.round(dp)
 
         setattr(self, f"threshold_stats_{model}", stats)
+        table = getattr(self, f"threshold_stats_{model}")
+        _save_table(table, filename, file_format)
+        return table
 
     def threshold_stats_df_global(self, **kw):
         """Alias for threshold_stats_df(model='global'). See threshold_stats_df for full documentation."""
-        self.threshold_stats_df(model="global", **kw)
+        return self.threshold_stats_df(model="global", **kw)
 
     def threshold_stats_df_items(self, **kw):
         """Alias for threshold_stats_df(model='items'). See threshold_stats_df for full documentation."""
-        self.threshold_stats_df(model="items", **kw)
+        return self.threshold_stats_df(model="items", **kw)
 
     def threshold_stats_df_thresholds(self, **kw):
         """Alias for threshold_stats_df(model='thresholds'). See threshold_stats_df for full documentation."""
-        self.threshold_stats_df(model="thresholds", **kw)
+        return self.threshold_stats_df(model="thresholds", **kw)
 
     def threshold_stats_df_matrix(self, **kw):
         """Alias for threshold_stats_df(model='matrix'). See threshold_stats_df for full documentation."""
-        self.threshold_stats_df(model="matrix", **kw)
+        return self.threshold_stats_df(model="matrix", **kw)
 
     def threshold_stats_df_bivector(self, **kw):
         """Alias for threshold_stats_df(model='bivector'). See threshold_stats_df for full documentation."""
-        self.threshold_stats_df(model="bivector", **kw)
+        return self.threshold_stats_df(model="bivector", **kw)
     def threshold_stats_df_centrality(self, **kw):
         """Alias for threshold_stats_df(model='bivector'). See threshold_stats_df for full documentation."""
-        self.threshold_stats_df(model="centrality", **kw)
+        return self.threshold_stats_df(model="centrality", **kw)
     def threshold_stats_df_pseudo_halo(self, **kw):
         """Alias for threshold_stats_df(model='bivector'). See threshold_stats_df for full documentation."""
-        self.threshold_stats_df(model="pseudo_halo", **kw)
+        return self.threshold_stats_df(model="pseudo_halo", **kw)
     def threshold_stats_df_bistretch(self, **kw):
         """Alias for threshold_stats_df(model='bivector'). See threshold_stats_df for full documentation."""
-        self.threshold_stats_df(model="bistretch", **kw)
+        return self.threshold_stats_df(model="bistretch", **kw)
 
     def category_stats_df(
         self,
@@ -8303,6 +11237,8 @@ class MFRM(Rasch):
         no_of_samples=500,
         interval=None,
         seed=None,
+        filename=None,
+        file_format="csv",
     ):
         """
         Build and store the category width statistics summary table.
@@ -8313,11 +11249,11 @@ class MFRM(Rasch):
         degrees of freedom, so the max_score per-threshold SEs threshold_
         stats_df reports are correlated, not independent, and understate
         the true uncertainty of the physically meaningful step-structure
-        quantity. self.thresholds (and its anchored counterpart) is shared
-        across all five rater parameterisations, so the reported widths
-        are the same regardless of model= — only their bootstrap SEs can
-        differ, since std_errors() recalibrates the whole model (rater
-        facet_effects included) per resample. Reported *alongside*
+        quantity. The widths are those of the sub-model given by model=
+        (thresholds_{model}; with estimation='pair-cpat' the same for every
+        sub-model, though their bootstrap SEs can differ, since std_errors()
+        recalibrates the whole model, facet element facet_effects included,
+        per resample). Reported *alongside*
         threshold_stats_df's output, not instead of it — threshold-level
         SEs remain the expected, standard report.
 
@@ -8338,7 +11274,7 @@ class MFRM(Rasch):
         Parameters
         ----------
         model : str, default 'global'
-            Rater parameterisation. Affects the reported SE (via that
+            Facet element parameterisation. Affects the reported SE (via that
             model's own bootstrap) but not the Estimate column itself.
         anchors : list or None, default None
             Anchor facet_elements. If given, uses anchor_thresholds_{model}
@@ -8362,6 +11298,12 @@ class MFRM(Rasch):
         seed : int or None, default None
             Seed for std_errors(), used only if it hasn't already been
             run.
+        filename : str or None, default None
+            If given, also saves the returned table to
+            ``{filename}.{file_format}`` (path without extension, as for
+            the plotting methods).
+        file_format : {'csv', 'xlsx'}, default 'csv'
+            File format used when filename is given.
 
         Attributes set
         --------------
@@ -8373,6 +11315,11 @@ class MFRM(Rasch):
             the std, so it already reflects Cov(threshold_k,
             threshold_{k+1})), CI bounds if interval is not None,
             Disordered (Estimate < 0), and Prop disordered.
+
+        Returns
+        -------
+        pandas.DataFrame
+            The table, also stored as the attribute listed above.
         """
         model = self._MODEL_ALIASES.get(model, model)
         self._ensure_calibrated(
@@ -8410,7 +11357,7 @@ class MFRM(Rasch):
         prefix = "anchor_" if anc else ""
 
         thresholds = (
-            getattr(self, f"anchor_thresholds_{model}") if anc else self.thresholds
+            self._thresholds_for(model, anchor=anc)
         )
         thresholds = pd.Series(np.asarray(thresholds), index=range(1, self.max_score + 1))
         cat_widths = thresholds.diff().dropna()
@@ -8444,35 +11391,38 @@ class MFRM(Rasch):
         ).round(dp)
 
         setattr(self, f"category_stats_{model}", stats)
+        table = getattr(self, f"category_stats_{model}")
+        _save_table(table, filename, file_format)
+        return table
 
     def category_stats_df_global(self, **kw):
         """Alias for category_stats_df(model='global'). See category_stats_df for full documentation."""
-        self.category_stats_df(model="global", **kw)
+        return self.category_stats_df(model="global", **kw)
 
     def category_stats_df_items(self, **kw):
         """Alias for category_stats_df(model='items'). See category_stats_df for full documentation."""
-        self.category_stats_df(model="items", **kw)
+        return self.category_stats_df(model="items", **kw)
 
     def category_stats_df_thresholds(self, **kw):
         """Alias for category_stats_df(model='thresholds'). See category_stats_df for full documentation."""
-        self.category_stats_df(model="thresholds", **kw)
+        return self.category_stats_df(model="thresholds", **kw)
 
     def category_stats_df_matrix(self, **kw):
         """Alias for category_stats_df(model='matrix'). See category_stats_df for full documentation."""
-        self.category_stats_df(model="matrix", **kw)
+        return self.category_stats_df(model="matrix", **kw)
 
     def category_stats_df_bivector(self, **kw):
         """Alias for category_stats_df(model='bivector'). See category_stats_df for full documentation."""
-        self.category_stats_df(model="bivector", **kw)
+        return self.category_stats_df(model="bivector", **kw)
     def category_stats_df_centrality(self, **kw):
         """Alias for category_stats_df(model='bivector'). See category_stats_df for full documentation."""
-        self.category_stats_df(model="centrality", **kw)
+        return self.category_stats_df(model="centrality", **kw)
     def category_stats_df_pseudo_halo(self, **kw):
         """Alias for category_stats_df(model='bivector'). See category_stats_df for full documentation."""
-        self.category_stats_df(model="pseudo_halo", **kw)
+        return self.category_stats_df(model="pseudo_halo", **kw)
     def category_stats_df_bistretch(self, **kw):
         """Alias for category_stats_df(model='bivector'). See category_stats_df for full documentation."""
-        self.category_stats_df(model="bistretch", **kw)
+        return self.category_stats_df(model="bistretch", **kw)
 
     def person_stats_df(
         self,
@@ -8494,6 +11444,8 @@ class MFRM(Rasch):
         log_lik_tol=0.000001,
         interval=None,
         no_of_samples=500,
+        filename=None,
+        file_format="csv",
     ):
         """
         Build and store the person statistics summary table.
@@ -8504,7 +11456,7 @@ class MFRM(Rasch):
         Parameters
         ----------
         model : str, default 'global'
-            Rater parameterisation.
+            Facet element (e.g. rater) parameterisation.
         anchors : list or None, default None
             If provided, uses anchor-calibrated person_locations.
         full : bool, default False
@@ -8536,6 +11488,12 @@ class MFRM(Rasch):
             CI width (unused directly; passed to _ensure_calibrated).
         no_of_samples : int, default 500
             Bootstrap samples.
+        filename : str or None, default None
+            If given, also saves the returned table to
+            ``{filename}.{file_format}`` (path without extension, as for
+            the plotting methods).
+        file_format : {'csv', 'xlsx'}, default 'csv'
+            File format used when filename is given.
 
         Attributes set
         --------------
@@ -8543,6 +11501,11 @@ class MFRM(Rasch):
             Person statistics with persons as rows. Contains Estimate, CSEM,
             Score, Max score, p, Infit MS, Outfit MS. Optional: RSEM, Infit Z,
             Outfit Z.
+
+        Returns
+        -------
+        pandas.DataFrame
+            The table, also stored as the attribute listed above.
         """
 
         model = self._MODEL_ALIASES.get(model, model)
@@ -8593,35 +11556,38 @@ class MFRM(Rasch):
                 stats.loc[src.index, col] = src.round(dp).values
 
         setattr(self, f"person_stats_{model}", stats)
+        table = getattr(self, f"person_stats_{model}")
+        _save_table(table, filename, file_format)
+        return table
 
     def person_stats_df_global(self, **kw):
         """Alias for person_stats_df(model='global'). See person_stats_df for full documentation."""
-        self.person_stats_df(model="global", **kw)
+        return self.person_stats_df(model="global", **kw)
 
     def person_stats_df_items(self, **kw):
         """Alias for person_stats_df(model='items'). See person_stats_df for full documentation."""
-        self.person_stats_df(model="items", **kw)
+        return self.person_stats_df(model="items", **kw)
 
     def person_stats_df_thresholds(self, **kw):
         """Alias for person_stats_df(model='thresholds'). See person_stats_df for full documentation."""
-        self.person_stats_df(model="thresholds", **kw)
+        return self.person_stats_df(model="thresholds", **kw)
 
     def person_stats_df_matrix(self, **kw):
         """Alias for person_stats_df(model='matrix'). See person_stats_df for full documentation."""
-        self.person_stats_df(model="matrix", **kw)
+        return self.person_stats_df(model="matrix", **kw)
 
     def person_stats_df_bivector(self, **kw):
         """Alias for person_stats_df(model='bivector'). See person_stats_df for full documentation."""
-        self.person_stats_df(model="bivector", **kw)
+        return self.person_stats_df(model="bivector", **kw)
     def person_stats_df_centrality(self, **kw):
         """Alias for person_stats_df(model='bivector'). See person_stats_df for full documentation."""
-        self.person_stats_df(model="centrality", **kw)
+        return self.person_stats_df(model="centrality", **kw)
     def person_stats_df_pseudo_halo(self, **kw):
         """Alias for person_stats_df(model='bivector'). See person_stats_df for full documentation."""
-        self.person_stats_df(model="pseudo_halo", **kw)
+        return self.person_stats_df(model="pseudo_halo", **kw)
     def person_stats_df_bistretch(self, **kw):
         """Alias for person_stats_df(model='bivector'). See person_stats_df for full documentation."""
-        self.person_stats_df(model="bistretch", **kw)
+        return self.person_stats_df(model="bistretch", **kw)
 
     def test_stats_df(
         self,
@@ -8639,6 +11605,8 @@ class MFRM(Rasch):
         log_lik_tol=0.000001,
         no_of_samples=500,
         seed=None,
+        filename=None,
+        file_format="csv",
     ):
         """
         Build and store the test-level summary statistics table.
@@ -8649,7 +11617,7 @@ class MFRM(Rasch):
         Parameters
         ----------
         model : str, default 'global'
-            Rater parameterisation.
+            Facet element (e.g. rater) parameterisation.
         dp : int, default 3
             Decimal places.
         warm_corr : bool, default True
@@ -8674,12 +11642,23 @@ class MFRM(Rasch):
         seed : int or None, default None
             Seed passed through to the internal std_errors() call (only
             used if not already computed). None draws fresh entropy.
+        filename : str or None, default None
+            If given, also saves the returned table to
+            ``{filename}.{file_format}`` (path without extension, as for
+            the plotting methods).
+        file_format : {'csv', 'xlsx'}, default 'csv'
+            File format used when filename is given.
 
         Attributes set
         --------------
         test_stats_{model} : pandas.DataFrame
             Two-column table (Items, Persons) with rows:
             Mean, SD, Separation ratio, Strata, Reliability.
+
+        Returns
+        -------
+        pandas.DataFrame
+            The table, also stored as the attribute listed above.
         """
 
         model = self._MODEL_ALIASES.get(model, model)
@@ -8699,8 +11678,8 @@ class MFRM(Rasch):
         stats = pd.DataFrame(
             {
                 "Items": [
-                    self.items.mean(),
-                    self.items.std(),
+                    self._items_for(model).mean(),
+                    self._items_for(model).std(),
                     getattr(self, f"isi_{model}"),
                     getattr(self, f"item_strata_{model}"),
                     getattr(self, f"item_reliability_{model}"),
@@ -8716,47 +11695,50 @@ class MFRM(Rasch):
             index=["Mean", "SD", "Separation ratio", "Strata", "Reliability"],
         )
         setattr(self, f"test_stats_{model}", stats.round(dp))
+        table = getattr(self, f"test_stats_{model}")
+        _save_table(table, filename, file_format)
+        return table
 
     def test_stats_df_global(self, **kw):
         """Alias for test_stats_df(model='global'). See test_stats_df for full documentation."""
-        self.test_stats_df(model="global", **kw)
+        return self.test_stats_df(model="global", **kw)
 
     def test_stats_df_items(self, **kw):
         """Alias for test_stats_df(model='items'). See test_stats_df for full documentation."""
-        self.test_stats_df(model="items", **kw)
+        return self.test_stats_df(model="items", **kw)
 
     def test_stats_df_thresholds(self, **kw):
         """Alias for test_stats_df(model='thresholds'). See test_stats_df for full documentation."""
-        self.test_stats_df(model="thresholds", **kw)
+        return self.test_stats_df(model="thresholds", **kw)
 
     def test_stats_df_matrix(self, **kw):
         """Alias for test_stats_df(model='matrix'). See test_stats_df for full documentation."""
-        self.test_stats_df(model="matrix", **kw)
+        return self.test_stats_df(model="matrix", **kw)
 
     def test_stats_df_bivector(self, **kw):
         """Alias for test_stats_df(model='bivector'). See test_stats_df for full documentation."""
-        self.test_stats_df(model="bivector", **kw)
+        return self.test_stats_df(model="bivector", **kw)
 
     # ------------------------------------------------------------------
     # Rater stats table (most complex -- varies substantially by model)
     # ------------------------------------------------------------------
     def test_stats_df_centrality(self, **kw):
         """Alias for test_stats_df(model='bivector'). See test_stats_df for full documentation."""
-        self.test_stats_df(model="centrality", **kw)
+        return self.test_stats_df(model="centrality", **kw)
 
     # ------------------------------------------------------------------
     # Rater stats table (most complex -- varies substantially by model)
     # ------------------------------------------------------------------
     def test_stats_df_pseudo_halo(self, **kw):
         """Alias for test_stats_df(model='bivector'). See test_stats_df for full documentation."""
-        self.test_stats_df(model="pseudo_halo", **kw)
+        return self.test_stats_df(model="pseudo_halo", **kw)
 
     # ------------------------------------------------------------------
     # Rater stats table (most complex -- varies substantially by model)
     # ------------------------------------------------------------------
     def test_stats_df_bistretch(self, **kw):
         """Alias for test_stats_df(model='bivector'). See test_stats_df for full documentation."""
-        self.test_stats_df(model="bistretch", **kw)
+        return self.test_stats_df(model="bistretch", **kw)
 
     # ------------------------------------------------------------------
     # Rater stats table (most complex -- varies substantially by model)
@@ -8788,6 +11770,8 @@ class MFRM(Rasch):
         no_of_samples=500,
         interval=None,
         seed=None,
+        filename=None,
+        file_format="csv",
     ):
         """
         Build and store the facet_element statistics summary table.
@@ -8806,10 +11790,10 @@ class MFRM(Rasch):
                        facet_element, MultiIndex columns (parameter,
                        statistic), plus (if divergence_test is set) a
                        'Flagged items'/'Flagged categories' column giving
-                       each rater's count of items/thresholds where the
+                       each facet element's (e.g. rater's) count of items/thresholds where the
                        stretch reconstruction diverges significantly from
                        the free vector model (see divergence_test below).
-                       The reconstructed full-length severity vector (per
+                       The reconstructed full-length location vector (per
                        item for pseudo_halo, per threshold for centrality,
                        both for bistretch) that used to be this table's
                        own content is stored separately as
@@ -8825,7 +11809,7 @@ class MFRM(Rasch):
         Parameters
         ----------
         model : str, default 'global'
-            Rater parameterisation.
+            Facet element parameterisation.
         anchors : list or None, default None
             Anchor facet_elements for SE computation.
         full : bool, default False
@@ -8874,8 +11858,8 @@ class MFRM(Rasch):
         correction : {None, 'bh'}, default None
             Only relevant when divergence_test is set. If 'bh',
             Benjamini-Hochberg FDR correction is applied within each
-            rater's own family of tests (that rater's items, or that
-            rater's thresholds -- not pooled across raters). No-op when
+            facet element's own family of tests (that facet element's items, or that
+            facet element's thresholds -- not pooled across facet elements). No-op when
             divergence_test=None.
         alpha : float, default 0.05
             Only relevant when divergence_test is set. Significance
@@ -8914,11 +11898,22 @@ class MFRM(Rasch):
         seed : int or None, default None
             Seed passed through to the internal std_errors() call (only
             used if not already computed). None draws fresh entropy.
+        filename : str or None, default None
+            If given, also saves the returned table to
+            ``{filename}.{file_format}`` (path without extension, as for
+            the plotting methods).
+        file_format : {'csv', 'xlsx'}, default 'csv'
+            File format used when filename is given.
 
         Attributes set
         --------------
         rater_stats_{model} : pandas.DataFrame
-            Rater statistics table. Structure depends on model (see above).
+            Facet element statistics table. Structure depends on model (see above).
+
+        Returns
+        -------
+        pandas.DataFrame
+            The table, also stored as the attribute listed above.
         """
 
         model = self._MODEL_ALIASES.get(model, model)
@@ -9015,7 +12010,7 @@ class MFRM(Rasch):
             rhi = getattr(self, hi_attr, None)
 
             def _ov_stats():
-                """Build the overall rater fit statistics sub-table for the current model."""
+                """Build the overall facet element (e.g. rater) fit statistics sub-table for the current model."""
                 cols = (
                     ["Count", "Infit MS", "Infit Z", "Outfit MS", "Outfit Z"]
                     if zstd
@@ -9336,6 +12331,61 @@ class MFRM(Rasch):
                                 ].values.round(dp)
                             result[key] = sub.T
 
+            elif model == "mixed":
+                # facet_effects_mixed / anchor_facet_effects_mixed are
+                # aliased (via _sync_mixed) to the same (rater, item) x
+                # threshold cell shape as facet_effects_matrix -- so this
+                # is a verbatim copy of the matrix model's marginal=False
+                # (full cell table) path above. There is no marginal=True
+                # representation for 'mixed': it blends a different
+                # sub-parameterisation per rater (self.rater_models), so
+                # there is no single restricted per-rater marginal to
+                # derive the way there is for matrix -- see known-issues
+                # #36. marginal is ignored here; always the full table.
+                if marginal:
+                    warnings.warn(
+                        "rater_stats_df(model='mixed') has no marginal=True "
+                        "representation -- 'mixed' assigns a different "
+                        f"{self.facet_label_eg} parameterisation per {self.facet_label} (self.rater_models), "
+                        f"so there is no single restricted per-{self.facet_label} marginal "
+                        "to report, unlike 'matrix'. Returning the full "
+                        "(item, threshold) cell table, as if marginal=False.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+                for item in self.item_names:
+                    for t in range(1, self.max_score + 1):
+                        key = f"{item}, Threshold {t}"
+                        sub = pd.DataFrame(index=self.facet_names)
+                        sub["Estimate"] = facet_effects.loc[
+                            (slice(None), item), t
+                        ].values.round(dp)
+                        if (
+                            rse is not None
+                            and not isinstance(rse, dict)
+                            and not rse.empty
+                        ):
+                            sub["SE"] = rse.loc[(slice(None), item), t].values.round(
+                                dp
+                            )
+                        if interval is not None and rlo is not None:
+                            sub[f"{round((1-interval)*50, 1)}%"] = rlo.loc[
+                                (slice(None), item), t
+                            ].values.round(dp)
+                            sub[f"{round((1+interval)*50, 1)}%"] = rhi.loc[
+                                (slice(None), item), t
+                            ].values.round(dp)
+                        result[key] = sub.T
+
+                # The one thing genuinely specific to 'mixed': which
+                # sub-parameterisation each rater was assigned.
+                models_attr = "anchor_rater_models" if anc else "rater_models"
+                rater_models = getattr(self, models_attr, None)
+                if rater_models is not None:
+                    sub = pd.DataFrame(index=self.facet_names)
+                    sub["Model"] = rater_models.reindex(self.facet_names).values
+                    result["Rater model"] = sub.T
+
             result["Overall statistics"] = _ov_stats()
             stats = pd.concat(result.values(), keys=result.keys()).T
             if flagged_col_keys:
@@ -9347,41 +12397,54 @@ class MFRM(Rasch):
                 # these read as True/False, not 1.0/0.0.
                 flagged_cols = [(k, "Flagged") for k in flagged_col_keys]
                 stats[flagged_cols] = stats[flagged_cols].astype(bool)
+            if "Rater model" in result:
+                # Same dtype-taint pattern as flagged_cols above, but from
+                # mixing a genuinely non-numeric (string) group -- the
+                # concat+transpose above forces every column to object
+                # dtype once one row is text, not just the text one's own
+                # column. Cast every other column back to float; leave
+                # ('Rater model', 'Model') as the object/string dtype it
+                # actually is.
+                numeric_cols = [c for c in stats.columns if c[0] != "Rater model"]
+                stats[numeric_cols] = stats[numeric_cols].astype(float)
             setattr(self, f"rater_stats_{model}", stats)
         self._set_facet_aliases(model)
+        table = getattr(self, f"rater_stats_{model}")
+        _save_table(table, filename, file_format)
+        return table
 
     def rater_stats_df_global(self, **kw):
         """Alias for rater_stats_df(model='global'). See rater_stats_df for full documentation."""
-        self.rater_stats_df(model="global", **kw)
+        return self.rater_stats_df(model="global", **kw)
 
     def rater_stats_df_items(self, **kw):
         """Alias for rater_stats_df(model='items'). See rater_stats_df for full documentation."""
-        self.rater_stats_df(model="items", **kw)
+        return self.rater_stats_df(model="items", **kw)
 
     def rater_stats_df_thresholds(self, **kw):
         """Alias for rater_stats_df(model='thresholds'). See rater_stats_df for full documentation."""
-        self.rater_stats_df(model="thresholds", **kw)
+        return self.rater_stats_df(model="thresholds", **kw)
 
     def rater_stats_df_matrix(self, **kw):
         """Alias for rater_stats_df(model='matrix'). See rater_stats_df for full documentation."""
-        self.rater_stats_df(model="matrix", **kw)
+        return self.rater_stats_df(model="matrix", **kw)
 
     def rater_stats_df_bivector(self, **kw):
         """Alias for rater_stats_df(model='bivector'). See rater_stats_df for full documentation."""
-        self.rater_stats_df(model="bivector", **kw)
+        return self.rater_stats_df(model="bivector", **kw)
 
     # ------------------------------------------------------------------
     # Save statistics
     # ------------------------------------------------------------------
     def rater_stats_df_centrality(self, **kw):
         """Alias for rater_stats_df(model='centrality'). See rater_stats_df for full documentation."""
-        self.rater_stats_df(model="centrality", **kw)
+        return self.rater_stats_df(model="centrality", **kw)
     def rater_stats_df_pseudo_halo(self, **kw):
         """Alias for rater_stats_df(model='pseudo_halo'). See rater_stats_df for full documentation."""
-        self.rater_stats_df(model="pseudo_halo", **kw)
+        return self.rater_stats_df(model="pseudo_halo", **kw)
     def rater_stats_df_bistretch(self, **kw):
         """Alias for rater_stats_df(model='bistretch'). See rater_stats_df for full documentation."""
-        self.rater_stats_df(model="bistretch", **kw)
+        return self.rater_stats_df(model="bistretch", **kw)
 
     def save_stats(
         self,
@@ -9414,12 +12477,12 @@ class MFRM(Rasch):
         tables to either a single Excel workbook or separate CSV files. For
         model in ('centrality', 'pseudo_halo', 'bistretch'), also saves a
         sixth table/file -- rater_stats_{model}_full_vector, the
-        reconstructed full-length severity vector (see rater_stats_df).
+        reconstructed full-length location vector (see rater_stats_df).
 
         Parameters
         ----------
         model : str, default 'global'
-            Rater parameterisation.
+            Facet element (e.g. rater) parameterisation.
         filename : str, default ''
             Output filename or path (without extension for CSV).
         format : str, default 'csv'
@@ -10929,7 +13992,7 @@ class MFRM(Rasch):
     ):
         """
         Item Characteristic Curve for one item and/or facet element (e.g.
-        rater), or several of either (or both) overlaid on the same axes.
+        facet element (e.g. rater)), or several of either (or both) overlaid on the same axes.
 
         item : str or list of str
             A single name draws one curve, as before. A list overlays one
@@ -10958,8 +14021,8 @@ class MFRM(Rasch):
             curve per (item, facet element) combination -- legended
             "item / facet_element" -- but this is really a lot of curves
             on one plot at once and can get hard to read fast; one list
-            and one fixed value (one item across several raters, or one
-            rater across several items) reads far more clearly. See the
+            and one fixed value (one item across several facet elements, or one
+            facet element across several items) reads far more clearly. See the
             manual for an example of each.
         """
         model = self._MODEL_ALIASES.get(model, model)
@@ -11516,7 +14579,7 @@ class MFRM(Rasch):
     ):
         """
         Item Information Curve for one item and/or facet element (e.g.
-        rater), or several of either (or both) overlaid on the same axes.
+        facet element (e.g. rater)), or several of either (or both) overlaid on the same axes.
 
         item : str or list of str
             A single name draws one curve, as before. A list overlays
@@ -11744,7 +14807,7 @@ class MFRM(Rasch):
             if n_complete == 0:
                 warnings.warn(
                     "TCC observed score overlay suppressed: no persons have "
-                    "complete data across all facet_element×item combinations in scope.",
+                    f"complete data across all {self.facet_label_eg} × item combinations in scope.",
                     UserWarning,
                     stacklevel=2,
                 )
@@ -11754,7 +14817,7 @@ class MFRM(Rasch):
                     warnings.warn(
                         f"TCC observed score overlay uses {n_complete} of "
                         f"{len(obs_counts)} persons with complete data across "
-                        f"all facet_element×item combinations in scope.",
+                        f"all {self.facet_label_eg} × item combinations in scope.",
                         UserWarning,
                         stacklevel=2,
                     )
@@ -12119,9 +15182,16 @@ class MFRM(Rasch):
         labelsize=12,
         filename=None,
         file_format="png",
-        plot_density=300,
+        dpi=300,
+        plot_density=None,
     ):
         """Standardised residuals histogram with optional item/facet_element subsetting."""
+        if plot_density is not None:
+            warnings.warn(
+                "plot_density= is deprecated and will be removed in a future version; use dpi= instead.",
+                FutureWarning, stacklevel=2,
+            )
+            dpi = plot_density
         model = self._MODEL_ALIASES.get(model, model)
         if not hasattr(self, f"std_residual_df_{model}"):
             self.fit_statistics(model=model)
@@ -12167,7 +15237,7 @@ class MFRM(Rasch):
             labelsize=labelsize,
             filename=filename,
             file_format=file_format,
-            plot_density=plot_density,
+            plot_density=dpi,
         )
 
     def std_residuals_plot_global(self, **kw):
@@ -12201,2545 +15271,542 @@ class MFRM(Rasch):
         """Alias for std_residuals_plot(model='pseudo_halo'). See std_residuals_plot for full documentation."""
         return self.std_residuals_plot(model="pseudo_halo", **kw)
 
+    # Backwards-compatible aliases
+    def wright_map_global(self, **kw):
+        """Alias for wright_map(model='global'). See wright_map for full documentation."""
+        return self.wright_map(model="global", **kw)
 
-    def wright_map(
-        self,
-        model,
-        person_names=None,
-        item_names=None,
-        facet_element_names=None,
-        expand_model=False,
-        show_stretch=True,
-        item_level="items",
-        orientation="vertical",
-        map_type="hist",
-        item_labels=False,
-        item_strip=False,
-        item_distribution=False,
-        facet_labels=False,
-        overlay_facet=False,
-        strip_thickness=2.0,
-        strip_alpha=0.3,
-        sort="location",
-        palette="colorblind multi",
-        neutral_extremes=False,
-        item_row_height=None,
-        facet_row_height=None,
-        narrow_font=False,
-        edge_padding=0.5,
-        distribution_markers=False,
-        group_by=None,
-        group_colors=None,
-        stack=True,
-        blend=False,
-        prop=False,
-        person_lim=None,
-        item_lim=None,
-        facet_lim=None,
-        person_scaling=1,
-        facet_scaling=1,
-        no_of_bins=20,
-        pad=False,
-        plot_range=None,
-        kde_points=500,
-        bw_method="scott",
-        line_width=1,
-        figsize=None,
-        title=None,
-        plot_style="white",
-        edge_color="black",
-        person_color="skyblue",
-        item_color="salmon",
-        facet_color="mediumseagreen",
-        person_line_color="black",
-        item_line_color="black",
-        facet_line_color="black",
-        marker_color="darkred",
-        alpha=0.6,
-        black=False,
-        font="Times New Roman",
-        title_font_size=15,
-        axis_font_size=12,
-        labelsize=12,
-        item_label_size=8,
-        facet_label_size=8,
-        tick_interval=1,
-        filename=None,
-        file_format="png",
-        dpi=300,
+    def wright_map_items(self, **kw):
+        """Alias for wright_map(model='items'). See wright_map for full documentation."""
+        return self.wright_map(model="items", **kw)
+
+    def wright_map_thresholds(self, **kw):
+        """Alias for wright_map(model='thresholds'). See wright_map for full documentation."""
+        return self.wright_map(model="thresholds", **kw)
+
+    def wright_map_matrix(self, **kw):
+        """Alias for wright_map(model='matrix'). See wright_map for full documentation."""
+        return self.wright_map(model="matrix", **kw)
+
+    def wright_map_bivector(self, **kw):
+        """Alias for wright_map(model='bivector'). See wright_map for full documentation."""
+        return self.wright_map(model="bivector", **kw)
+
+    def wright_map_centrality(self, **kw):
+        """Alias for wright_map(model='centrality'). See wright_map for full documentation."""
+        return self.wright_map(model="centrality", **kw)
+
+    def wright_map_pseudo_halo(self, **kw):
+        """Alias for wright_map(model='pseudo_halo'). See wright_map for full documentation."""
+        return self.wright_map(model="pseudo_halo", **kw)
+
+    def wright_map_bistretch(self, **kw):
+        """Alias for wright_map(model='bistretch'). See wright_map for full documentation."""
+        return self.wright_map(model="bistretch", **kw)
+
+    # ------------------------------------------------------------------
+    # Simulation recovery diagnostics
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _category_widths(thresholds):
+        """Category widths (tau_{k+1} - tau_k), relabelled 1..max_score-1."""
+        widths = thresholds.diff().dropna()
+        widths.index = range(1, len(thresholds))
+        return widths
+
+    def _rater_effect_subvectors(self, model, anchor=False):
+        """
+        (label, generating_series, estimated_series, se_series) tuples
+        for model's own compact facet-effect representation --
+        1 sub-vector for global/items/thresholds/matrix, 2 for
+        bivector/centrality/pseudo_halo, 3 for bistretch. Only valid when
+        model == self.generating.model (the matched case) -- see
+        recovery_stats()'s cross-submodel fallback (_generating_severity_grid
+        / _severity_grid) for the mismatched case, which has no analogous
+        per-submodel SE.
+        """
+        prefix = "anchor_" if anchor else ""
+        gen = self.generating
+        if model in ("global", "items", "thresholds", "matrix"):
+            est = getattr(self, f"{prefix}facet_effects_{model}")
+            se = getattr(self, f"{prefix}rater_se_{model}")
+            gen_vals = gen.facet_effects
+            if isinstance(est, pd.Series):
+                gen_flat, est_flat, se_flat = gen_vals.reindex(est.index), est, se
+            else:
+                gen_aligned = gen_vals.reindex(index=est.index, columns=est.columns)
+                gen_flat, est_flat, se_flat = (
+                    gen_aligned.stack(), est.stack(), se.stack(),
+                )
+            return [(model, gen_flat, est_flat, se_flat)]
+        if model == "bivector":
+            est_items = getattr(self, f"{prefix}facet_effects_bivector_items")
+            est_thr = getattr(self, f"{prefix}facet_effects_bivector_thresholds")
+            se_items = getattr(self, f"{prefix}rater_se_marginal_items")
+            se_thr = getattr(self, f"{prefix}rater_se_marginal_thresholds")
+            gen_items = gen.item_effects.reindex(index=est_items.index, columns=est_items.columns)
+            gen_thr = gen.threshold_effects.reindex(index=est_thr.index, columns=est_thr.columns)
+            return [
+                ("items", gen_items.stack(), est_items.stack(), se_items.stack()),
+                ("thresholds", gen_thr.stack(), est_thr.stack(), se_thr.stack()),
+            ]
+        if model in ("centrality", "pseudo_halo"):
+            compact = getattr(self, f"{prefix}facet_effects_{model}")
+            return [
+                (
+                    "lambda", gen.lambda_.reindex(compact.index),
+                    compact["lambda"], getattr(self, f"{prefix}lambda_se_{model}"),
+                ),
+                (
+                    "omega", gen.omega.reindex(compact.index),
+                    compact["omega"], getattr(self, f"{prefix}omega_se_{model}"),
+                ),
+            ]
+        if model == "bistretch":
+            compact = getattr(self, f"{prefix}facet_effects_bistretch")
+            return [
+                (
+                    "lambda", gen.lambda_.reindex(compact.index),
+                    compact["lambda"], getattr(self, f"{prefix}lambda_se_bistretch"),
+                ),
+                (
+                    "omega_items", gen.omega_items.reindex(compact.index),
+                    compact["omega_items"], getattr(self, f"{prefix}omega_items_se_bistretch"),
+                ),
+                (
+                    "omega_thresholds", gen.omega_thresholds.reindex(compact.index),
+                    compact["omega_thresholds"], getattr(self, f"{prefix}omega_thresholds_se_bistretch"),
+                ),
+            ]
+        raise ValueError(f"Unrecognised model {model!r}.")
+
+    def recovery_stats(
+        self, model=None, anchor=False, groups=None, rater_subset=None,
+        separate_rater_plots=False, alpha=0.05, correction="bh",
+        divergence_tol=0.1, plot=True, **plot_kwargs,
     ):
         """
-        Plot a Wright map showing person, item, and facet-element location
-        distributions.
+        Compare recovered parameter estimates against the true generating
+        values from the simulation this object was constructed from.
 
-        Global-model MFRM extension of RSM's wright_map, adding the
-        calibration facet (e.g. raters) as a third dimension. Persons and
-        items behave identically to RSM's own wright_map (same parameters,
-        same layout engine); a facet-element panel is added alongside,
-        either as its own dedicated panel (default) or overlaid onto the
-        items panel/axis (overlay_facet=True). The facet named 'raters' by
-        default is whatever self.facets/self.facet_names alias to for this
-        instance (e.g. 'judges', if constructed with a custom facet name).
+        No-op (warns, returns None) unless this object was built from a
+        simulation (self.generating exists). Unlike SLM/PCM/RSM, there is
+        NO further model-match requirement here: `model` defaults to
+        self.generating.model ("recover whichever model was actually
+        generated"), but an EXPLICIT model= that differs from
+        self.generating.model is allowed through deliberately -- Elliott &
+        Buttery (2022a) themselves used exactly this construction (fitting
+        a simpler model to data generated under a richer one) to
+        demonstrate the person-measurement cost of model misspecification,
+        so a strict match would block MFRM's own primary use case for
+        this method.
+
+        Items/thresholds/category_widths are compared directly regardless
+        of model vs self.generating.model, using the sub-model's own
+        estimates (_items_for(model)/_thresholds_for(model)).
+
+        Facet-effect recovery has two modes. When model ==
+        self.generating.model (the matched case), it uses model's own
+        compact representation with proper bootstrap SEs (1 sub-vector for
+        global/items/thresholds/matrix, 2 for bivector/centrality/
+        pseudo_halo, 3 for bistretch -- see _rater_effect_subvectors).
+        When they differ (a deliberate misspecification study), it falls
+        back to comparing the full broadcast (facet element, item, category)
+        location grid (_severity_grid / _generating_severity_grid) with NO
+        SE -- there's no single well-defined SE for a grid cell assembled
+        from a coarser or differently-shaped representation, so z/p/
+        Flagged are left NaN/False there; RMSE/MAE/bias/r/r_squared/SD_ratio/
+        regression remain meaningful and are still computed.
+
+        Person recovery does NOT compare the recovered person estimate
+        directly against self.generating.persons -- that would conflate
+        item/threshold/rater estimation and model-specification error
+        with the irreducible stochastic noise of a single finite response
+        pattern. Instead, following Elliott & Buttery (2022a), a pseudo-
+        estimate is computed: the same Newton-Raphson person() procedure
+        re-run on the same self.responses, but using the TRUE generating
+        item/threshold/facet-effect parameters (under self.generating.model,
+        NOT necessarily `model`) in place of the estimated ones. The
+        persons table's 'error' column is (recovered estimate -
+        pseudo-estimate), not (recovered estimate - true theta) -- both
+        share the same actual response-pattern noise, so differencing
+        cancels that shared stochastic component, leaving the COMBINED
+        effect of parameter estimation error and model misspecification
+        on person measurement (this method does not, and cannot, separate
+        those two).
+
+        groups='rater' (MFRM-specific) triggers a by-facet-element breakdown of
+        person recovery: for each facet element R, both the recovered estimate and
+        the pseudo-estimate are recomputed restricted to just R's own
+        response row per person (person(facet_elements=[R])), isolating
+        whether a SPECIFIC facet element's own location/calibration quality is
+        dragging down person measurement, as distinct from the general
+        (all-facet-elements-pooled) case. This is NOT a plain partition of the
+        pooled result by group label (a person is typically rated by
+        several facet elements, so "which group" doesn't apply the way a
+        demographic covariate would) -- it's a genuinely separate
+        restricted re-estimation per facet element. `rater_subset` (list of facet element
+        names, default None = all of self.facet_names) restricts which
+        facet elements get their own direct-comparison plot (see below); it does
+        not affect the summary table, which always covers every facet element.
+        A plain pandas.Series may also be passed to `groups` for ordinary
+        person-level grouping (mirrors wright_map's group_by convention),
+        applying to person recovery only.
 
         Parameters
         ----------
-        model : str
-            MFRM sub-model: 'global', 'items', 'thresholds', 'matrix',
-            'bivector', 'centrality', 'pseudo_halo', or 'bistretch'.
-            Required and positional -- there is no default, so the model
-            actually plotted always matches what was passed (rather than
-            silently falling back to 'global' and, if that hasn't been
-            calibrated yet, calibrating it fresh). Prefer the
-            model-specific aliases (wright_map_global, wright_map_items,
-            wright_map_thresholds, wright_map_matrix, wright_map_bivector,
-            wright_map_centrality, wright_map_pseudo_halo,
-            wright_map_bistretch) when convenient. For 'items'/
-            'thresholds', each facet element's own multiple severities
-            (one per item, or one per threshold) are all plotted
-            individually, named e.g. 'Rater_1_Item_1'/'Rater_1_1'. For
-            'matrix', every (facet element, item, threshold) combination
-            is plotted individually, named e.g. 'Rater_1_Item_1_1' --
-            this can be a *lot* of individual values (facet elements x
-            items x max_score), so facet_labels=True in particular can
-            produce a very tall panel there. For 'bivector', its own two
-            marginal severity vectors (per item, per threshold) are
-            plotted directly by default rather than the full (facet
-            element, item, threshold) grid they're summed to reconstruct
-            -- see expand_model below to plot that full grid instead.
-            Named the same way as 'items'/'thresholds' (e.g.
-            'Rater_1_Item_1' and 'Rater_1_1' both appearing for the same
-            rater). For the stretch models (centrality, pseudo_halo,
-            bistretch), each is a 2-(or 3-)parameter (lambda shift,
-            omega stretch[es]) restriction of an unrestricted model --
-            the facet panel plots lambda (a plain logit-scale shift, one
-            value per rater) exactly as 'global' would by default; see
-            expand_model below to plot each rater's full reconstructed
-            vector instead. omega isn't a logit value at all either way
-            (a dimensionless spread multiplier centred on 1), so it
-            never appears on this axis -- see show_stretch below for the
-            separate panel(s) it gets instead.
-        person_names : str, list, or None, default None
-            Person subset to include. None uses all persons.
-        item_names : str, list, or None, default None
-            Item subset to include. None uses all items.
-        facet_element_names : str, list, or None, default None
-            Facet-element subset to include (e.g. specific raters). None
-            uses all elements of the facet.
-        expand_model : bool, default False
-            Only used for model='bivector' or one of the stretch models
-            (centrality, pseudo_halo, bistretch; silently ignored for
-            every other model). If True, plots each facet element's full
-            reconstructed vector instead of its single marginal/lambda
-            point -- shaped differently depending on model:
-              - 'bivector': the full (facet element, item, threshold)
-                grid, from summing its own two marginal severity vectors
-                -- every entry is just one item-vector value plus one
-                threshold-vector value, not an independent estimate, but
-                this can still be useful to see how the two vectors
-                interact at each individual (item, threshold)
-                combination. Named the same way as 'matrix', e.g.
-                'Rater_1_Item_1_1'.
-              - 'centrality': the per-threshold vector lambda + (omega -
-                1) * tau_k reconstructs, one point per Rasch-Andrich
-                threshold, named the same way 'thresholds' would be
-                (e.g. 'Rater_1_1').
-              - 'pseudo_halo': the per-item vector lambda + (omega - 1) *
-                delta_i reconstructs, one point per item, named the same
-                way 'items' would be (e.g. 'Rater_1_Item_1').
-              - 'bistretch': the per-(item, threshold) vector both
-                reconstructed axes sum to, named the same way 'matrix'
-                would be (e.g. 'Rater_1_Item_1_1').
-            The stretch panel(s) below (show_stretch) are unaffected
-            either way -- they show omega itself, not a location, so
-            there's nothing to expand there.
-        show_stretch : bool, default True
-            Only used for the stretch models (centrality, pseudo_halo,
-            bistretch; silently ignored for every other model). Adds
-            omega -- each rater's stretch factor(s) -- as its own
-            panel(s) bolted onto the right of the whole figure, one bar
-            per rater in plain facet-name order, centred on 1 (>1
-            expands, <1 compresses; see each model's own calibrate_*
-            docstring for what that means there) rather than 0, on its
-            own scale entirely unrelated to the shared Location axis.
-            bistretch gets two such panels stacked (omega_items above
-            omega_thresholds), sharing the same rater order and the same
-            y-limits as each other (so a bar's length is comparable
-            panel to panel, not just within its own). Set False for a
-            plain shift-only (lambda) map, styled exactly like
-            model='global'.
-        item_level : str, default 'items'
-            'items' plots one point per item at its central location.
-            'thresholds' plots one point per Rasch-Andrich threshold
-            instead, flattened across all items. Ignored when
-            item_strip=True, which always needs each item's full threshold
-            set regardless of this setting.
-        orientation : str, default 'vertical'
-            'vertical' places location on the x-axis, persons above the
-            baseline. 'horizontal' places location on the y-axis, persons
-            to the left of the baseline.
-        map_type : str, default 'hist'
-            'hist' plots (back-to-back, when item_labels=False) histograms.
-            'kde' plots smoothed kernel density estimate curves instead.
-            Only governs the person side once item_labels=True, since the
-            item side becomes a label panel rather than a distribution.
-            Also governs the facet panel, when it is a distribution rather
-            than facet_labels.
-        item_labels : bool, default False
-            If True, items are listed by name in a dedicated panel next to
-            the person distribution (grouped into no_of_bins location bins,
-            stacked as rows within a bin, ordered by location) rather than
-            mirrored as a second distribution sharing the same axis.
-        item_strip : bool, default False
-            If True, draws each item as a Winsteps-style divided strip --
-            one row per item, spanning its own threshold range, divided
-            into coloured category segments with a boundary line at each
-            threshold. Implies item_labels=True.
-        item_distribution : bool, default False
-            If True, adds a further panel -- a plain (non-mirrored) hist or
-            KDE of item (or threshold, per item_level) locations -- between
-            the person panel and the item_labels panel. Implies
-            item_labels=True.
-        facet_labels : bool, default False
-            If True, facet elements are listed by name in a dedicated
-            panel (grouped into no_of_bins location bins, stacked as rows
-            within a bin, ordered by location), the same way item_labels
-            lists items, rather than shown as a hist/kde distribution.
-            Forces overlay_facet=False.
-        overlay_facet : bool, default False
-            If True, the facet distribution is overlaid (as an outlined,
-            hatched shape rather than a filled one) onto the items panel
-            or axis instead of getting its own dedicated panel. Silently
-            forced to False whenever item_labels=True and/or
-            facet_labels=True, since overlaying a distribution onto a
-            name-label panel doesn't make visual sense.
-        strip_thickness : float, default 2.0
-            Multiplier on the physical height (vertical orientation) or
-            width (horizontal orientation) of each item's strip row. Only
-            used when item_strip=True.
-        strip_alpha : float, default 0.3
-            Fill transparency for the strip's category segments. Only used
-            when item_strip=True.
-        sort : str, default 'location'
-            Ordering of item strip rows. 'location' sorts by each item's
-            lowest threshold. 'order' preserves self.items' own index
-            order. Only used when item_strip=True.
-        palette : str or None, default 'dark multi'
-            Named colour palette for the strip's category segments,
-            reusing the same palette_dict convention as plot_data(). None
-            uses a flat item_color fill with no per-category distinction.
-            Only used when item_strip=True.
-        neutral_extremes : bool, default False
-            The strip's open (unbounded) top and bottom categories always
-            draw out to the location axis limits (there's no real boundary
-            to stop short at). If True, they fade from a neutral cream
-            colour toward the real threshold instead of using a flat fill
-            in the category palette -- de-emphasising the open-ended
-            extremes rather than drawing the viewer's eye to an arbitrary
-            width. Only used when item_strip=True.
-        item_row_height : float or None, default None
-            Physical height, in inches, allocated per stacked item-label
-            row. If None, measured automatically from the longest item
-            name at the given font size. Only used when item_labels=True.
-        facet_row_height : float or None, default None
-            Physical height, in inches, allocated per stacked facet-label
-            row. If None, measured automatically from the longest facet
-            element name at the given font size. Only used when
-            facet_labels=True.
-        narrow_font : bool, default False
-            If True, item labels, facet-element labels, and (with
-            item_strip=True) the row labels beside the strip are set in
-            'Arial Narrow' instead of font. A condensed font renders each
-            name shorter, so it needs less stacked row height -- useful
-            when names are long and many end up sharing a bin or crowding
-            the strip. Falls back to matplotlib's usual font substitution
-            if 'Arial Narrow' isn't installed. Only affects item_labels=True
-            and/or facet_labels=True; everything else (axis text, legend,
-            title) still uses font.
-        edge_padding : float, default 0.5
-            Extra padding, in inches, added around the item-label margin
-            (left of the axes in vertical orientation, below the axes in
-            horizontal orientation) beyond what's needed to fit the
-            longest item name. The same value produces matching-looking
-            margins in both orientations. Only used when item_strip=True
-            (facet_labels' own binned panel, like item_labels' own,
-            doesn't need this margin -- names are drawn inside the panel,
-            not as outside row labels).
-        distribution_markers : bool, default False
-            If True, overlays mean/+-1SD/+-2SD reference marks (labelled
-            mu, mu+-sigma, mu+-2sigma) for persons and items, in their
-            respective colours.
-        group_by : pandas.Series or None, default None
-            Person-level grouping (e.g. a DIF group), indexed like
-            self.persons_{model}, used to split the person distribution
-            into one sub-distribution per unique value. None plots persons
-            as a single series.
-        group_colors : dict or None, default None
-            Mapping from each group_by value to a colour. If None, colours
-            are drawn from the 'tab10' colormap in sorted group order.
-        stack : bool, default True
-            When group_by is set: for map_type='hist', True draws one
-            segmented column per bin (each group's count stacked within
-            the bar); False draws separate columns per group (dodged, or
-            alpha-blended if blend=True). For map_type='kde', True draws
-            curves cumulatively stacked (streamgraph-style); False overlays
-            each group's curve from zero.
-        blend : bool, default False
-            Only relevant when group_by is set, map_type='hist', and
-            stack=False. If True, draws each group as full-height,
-            alpha-blended overlapping bars instead of dodged (side-by-side)
-            bars.
-        prop : bool, default False
-            If True, normalises each distribution to proportions/density
-            rather than raw counts.
-        person_lim : float or None, default None
-            One-sided magnitude for persons' own Count/Proportion axis
-            (e.g. person_lim=30 shows 0 to 30). If None, chosen
-            automatically from persons' own natural peak, independently
-            of items'/facets' own scale. Persons' own panel always keeps
-            its full physical size regardless of this value -- items'
-            and facets' own panels (when they get a dedicated hist/kde
-            panel, i.e. item_distribution=True and/or a non-facet_labels,
-            non-overlaid facet panel) are sized proportionally against
-            it, so a given Count/Proportion value reads at the same
-            physical scale in every panel that participates.
-        item_lim : float or None, default None
-            One-sided magnitude for items' own Count/Proportion axis.
-            Same semantics as person_lim, for whichever panel items end
-            up in (mirrored onto the same axis as persons when
-            item_labels=False, or their own item_distribution panel).
-        facet_lim : float or None, default None
-            One-sided magnitude for the facet-element distribution's own
-            Count/Proportion axis. Same semantics as person_lim, for
-            whichever panel the facet distribution ends up in (overlaid
-            onto the items panel/axis when overlay_facet=True, or its
-            own dedicated panel). Only used when the facet is shown as a
-            distribution rather than facet_labels.
-        person_scaling : float, default 1
-            Rebalances the item (and facet) distribution against the
-            person distribution: with person_scaling=10 they read 10x
-            larger per Count/Proportion unit than the person side, so
-            they take 10x more of the plot. Useful when far more persons
-            than items/facet elements otherwise leave those distributions
-            a flat, uninformative squiggle at the persons' scale. All
-            sides keep their true tick-label values. When items (and, not
-            overlaid, the facet) have their own panel -- item_labels=True
-            or item_distribution=True -- that panel is grown to match,
-            enlarging the figure. In the mirrored single-axis map
-            (item_labels=False) the zero baseline instead shifts to give
-            the item side (and an overlaid facet) more of the shared
-            axis, at the same figure size -- the person side is
-            compressed to make room. See person_lim for why the
-            comparison isn't well-defined when items are shown only as
-            labels with no distribution.
-        facet_scaling : float, default 1
-            Reduces the facet panel's own physical size by this factor,
-            on top of person_scaling -- independent of it, so the facet
-            panel can be dialled back without changing the item panel.
-            facet_scaling=10 makes the facet panel 10x smaller than it
-            would otherwise be. Useful for the extended MFRM models
-            (items, thresholds, matrix, bivector), where the facet
-            panel's natural range comes from far more individual values
-            than persons'/items' (e.g. matrix's facet_elements x items x
-            max_score raw severities), which can otherwise make it
-            balloon out of proportion even at person_scaling=1 -- and
-            gets worse still if person_scaling != 1, since that
-            multiplier applies to the facet panel too. facet_scaling=1
-            leaves that behaviour as-is.
-        no_of_bins : int, default 20
-            Number of histogram bins spanning the location range. Also
-            defines the location-binning grid used for item_labels=True
-            and facet_labels=True.
-        pad : bool, default False
-            If True, adds 5% padding to either end of the location axis
-            limits. If False, the location axis is bounded exactly to the
-            plotted range.
-        plot_range : tuple of (float, float) or None, default None
-            (lo, hi) limits for the location axis. If None, uses the floor
-            of the combined minimum and the ceiling of the combined maximum
-            of persons, items, and facet elements.
-        kde_points : int, default 500
-            Number of points at which each KDE curve is evaluated. Only
-            used when map_type='kde'.
-        bw_method : str, scalar, or callable, default 'scott'
-            Bandwidth selection method passed to scipy.stats.gaussian_kde.
-            Only used when map_type='kde'.
-        line_width : float, default 1
-            Line width of the KDE curves. Only used when map_type='kde'.
-        figsize : tuple of (float, float) or None, default None
-            Base figure size in inches for the person distribution. If
-            None, defaults to (8, 6) for orientation='vertical' or (4, 8)
-            for orientation='horizontal'. When item_labels=True, the person
-            panel gets half of this (matching how much space it occupied
-            in the original mirrored layout), and the figure grows further
-            to fit however many stacked item and/or facet-element rows are
-            needed -- the person distribution's own size is never reduced
-            to make room.
-        title : str or None, default None
-            Plot title. If None, no title is shown.
-        plot_style : str, default 'white'
-            Plot background style: 'white' or 'dark'.
-        edge_color : str, default 'black'
-            Edge colour of the histogram bars. Only used when
-            map_type='hist' and group_by is None.
-        person_color : str, default 'skyblue'
-            Fill colour for the person distribution. Ignored when group_by
-            is set (each group uses group_colors instead). Overridden by a
-            grey shade when black=True.
-        item_color : str, default 'salmon'
-            Fill colour for the item distribution. Only used when
-            item_labels=False. Overridden by a grey shade when black=True.
-        facet_color : str, default 'mediumseagreen'
-            Fill colour for the facet-element distribution. Only used when
-            facet_labels=False. Overridden by a grey shade when black=True.
-        person_line_color : str, default 'black'
-            Line colour for the person KDE curve. Only used when
-            map_type='kde' and group_by is None.
-        item_line_color : str, default 'black'
-            Colour for item labels (item_labels=True) or the item KDE
-            curve line (item_labels=False, map_type='kde').
-        facet_line_color : str, default 'black'
-            Colour for facet-element labels (facet_labels=True) or the
-            facet KDE curve line (facet_labels=False, map_type='kde').
-        marker_color : str, default 'darkred'
-            Colour of the tick marks and labels drawn when
-            distribution_markers=True. Only used for the single-series
-            (group_by=None) case -- grouped marks use each group's own
-            colour instead, to stay identifiable against its distribution.
-        alpha : float, default 0.6
-            Fill transparency for the distributions.
-        black : bool, default False
-            If True, renders person_color/item_color/facet_color as grey
-            shades instead. Has no effect on group_by colours.
-        font : str, default 'Times New Roman'
-            Font family for all plot text.
-        title_font_size : int, default 15
-            Title font size in points.
-        axis_font_size : int, default 12
-            Axis label font size in points.
-        labelsize : int, default 12
-            Tick label font size in points.
-        item_label_size : int, default 8
-            Font size, in points, for item names in the item_labels panel.
-        facet_label_size : int, default 8
-            Font size, in points, for facet-element names in the
-            facet_labels panel.
-        tick_interval : float, default 1
-            Spacing between Location axis ticks. Ticks are evenly spaced
-            at multiples of this value across the plotted range, rather
-            than using matplotlib's own automatic tick choice.
-        filename : str or None, default None
-            If provided, saves the plot to this path. No file extension
-            needed.
-        file_format : str, default 'png'
-            Output file format.
-        dpi : int, default 300
-            Output resolution in dots per inch.
+        model : str or None, default None
+            Which facet element sub-model's estimates to recover. None defaults
+            to self.generating.model.
+        anchor : bool, default False
+            If True, compare against model's anchored attributes
+            (self.anchor_items_{model}, self.anchor_thresholds_{model},
+            self.anchor_persons_{model}, self.anchor_facet_effects_{model})
+            instead of the unanchored ones. Raises ValueError if
+            calibrate_anchor() has not been run for this model.
+        groups : pandas.Series, 'rater', or None, default None
+            Person-level grouping for person recovery (see above).
+        rater_subset : list or None, default None
+            Restricts the by-facet-element direct-comparison plot (groups='rater'
+            only) to these facet elements. None uses every facet element.
+        separate_rater_plots : bool, default False
+            For bivector/bistretch's multiple facet element sub-vectors, False
+            (default) plots them combined on one axes (different colours,
+            separate OLS/Huber fits); True plots them separately.
+        alpha : float, default 0.05
+            Significance threshold for the per-parameter z-test.
+        correction : {'bh', 'bonferroni', None}, default 'bh'
+            Multiple-comparison correction, applied within each parameter
+            type's own family of tests.
+        divergence_tol : float, default 0.1
+            Threshold for the OLS-vs-Huber slope divergence flag.
+        plot : bool, default True
+            If True, also produce a recovery plot per parameter type.
+        **plot_kwargs
+            Forwarded to _recovery_plot().
 
         Returns
         -------
         None
-            Displays and closes the figure. Use filename to save.
+            Results are stored in self.recovery: .items/.persons/
+            .thresholds/.category_widths/.raters, each holding .table and
+            .summary (see _parameter_recovery_table). Also sets
+            self.recovery.parameter_estimation_residual (float): the
+            Elliott & Buttery (2022) expected-score-space RMS residual
+            between generating and estimated item location + shared
+            thresholds at the true generating theta, deliberately
+            facet-free (facet element effects excluded) -- see
+            _parameter_estimation_residual.
         """
-        if model not in (
-            "global", "items", "thresholds", "matrix", "bivector",
-            "centrality", "pseudo_halo", "bistretch",
-        ):
-            raise NotImplementedError(f"wright_map does not support the {model!r} MFRM model.")
+        from raschpy.base import _SimParams
 
-        if black:
-            person_color = "lightgray"
-            item_color = "darkgray"
-            facet_color = "gray"
-
-        if not hasattr(self, f"persons_{model}"):
-            self.person_estimates(model=model)
-
-        all_persons = getattr(self, f"persons_{model}")
-        persons = all_persons if person_names is None else all_persons.loc[person_names]
-
-        # a strip needs every item's full threshold set regardless of
-        # item_level (it draws the whole operating range, not one point),
-        # so it also implies item_labels -- friendlier than raising when
-        # someone passes item_strip=True on its own
-        if item_strip:
-            item_labels = True
-
-        # a plain item/threshold hist or KDE panel only makes sense as a
-        # further panel alongside the labelled one -- on its own it's just
-        # the old mirrored mode with item_labels=False
-        if item_distribution:
-            item_labels = True
-
-        # overlaying a distribution onto a name-label panel doesn't make
-        # visual sense -- always use a separate facet panel in that case
-        if item_labels or facet_labels:
-            overlay_facet = False
-
-        # items get a genuine, separate, scale-matched panel only when
-        # explicitly requested (item_distribution=True, which also forces
-        # item_labels=True above).
-        item_dist_panel = item_distribution
-
-        # In the mirrored single-axis map (item_labels=False) persons and
-        # items -- and an overlaid facet -- share one count axis, so
-        # person_scaling has no separate panel to resize. Instead, exactly
-        # as for SLM/RSM/PCM, it enlarges the item side of that shared
-        # axis by this factor: the item distribution (and any overlaid
-        # facet) ends up person_scaling x larger relative to persons, with
-        # the figure size unchanged (the person side is compressed to make
-        # room). 1 whenever items have their own panel, so the panel-
-        # sizing use of person_scaling below is untouched.
-        mirror_item_scale = person_scaling if not item_labels else 1
-
-        base_items = self.items if item_names is None else self.items.loc[item_names]
-
-        if not hasattr(self, f"facet_effects_{model}"):
-            self.calibrate(model=model)
-
-        # facet_element_names always filters by rater name (matching
-        # what it does for 'global'), applied before flattening below --
-        # for 'items'/'thresholds' that's the raw table's own row index;
-        # for 'matrix' it's the first level of its (rater, item) row
-        # index, which .loc[] with a plain list of rater names also
-        # selects on
-        def _filter_by_rater(table):
-            return table if facet_element_names is None else table.loc[facet_element_names]
-
-        def _flatten_facets(table):
-            # one row per rater, one column per item/threshold/category
-            # -- stacking flattens that to one entry per combination,
-            # e.g. 'Rater_1_Item_1' or 'Rater_1_1' for a 2-level table,
-            # 'Rater_1_Item_1_1' for a 3-level one (matrix's own (rater,
-            # item) row index plus the stacked category column)
-            stacked = table.stack().dropna()
-            return stacked.set_axis(
-                ["_".join(str(p) for p in idx) for idx in stacked.index]
+        if not hasattr(self, "generating"):
+            warnings.warn(
+                "recovery_stats() is a no-op: this object was not built "
+                "from a simulation (no self.generating found).",
+                UserWarning,
+                stacklevel=2,
             )
+            return None
 
-        # The stretch models (centrality, pseudo_halo, bistretch) are each
-        # a 2-(or 3-)parameter (lambda shift, omega stretch[es])
-        # restriction of an unrestricted model -- lambda is a plain
-        # logit-scale shift, one value per rater, structurally identical
-        # to facet_effects_global, so it plots exactly like 'global' by
-        # default. omega (a dimensionless spread multiplier centred on 1,
-        # not a logit value) has no meaningful place on the shared
-        # Location axis at all either way -- see the bolted-on stretch
-        # panel(s) near the end of this method instead (show_stretch=
-        # True). expand_model=True swaps facets for the full
-        # reconstructed per-threshold (centrality)/per-item (pseudo_halo)/
-        # per-(item, threshold) (bistretch) vector instead of the single
-        # lambda point -- lambda + omega combined back out to individual
-        # element positions, named the same way the corresponding
-        # unrestricted model (thresholds/items/matrix) would be. The
-        # omega panel(s) below are unaffected either way, since they show
-        # what drove the expansion, not a location. Same argument
-        # bivector's own expansion below uses -- each model resolves it
-        # to whatever shape (flat per-element vector here; a (facet
-        # element, item, threshold) grid there) its own restriction
-        # implies.
-        stretch_omega = None
-        if model in ("centrality", "pseudo_halo", "bistretch"):
-            fe_stretch = getattr(self, f"facet_effects_{model}")
-            if expand_model:
-                facets = _flatten_facets(
-                    _filter_by_rater(
-                        getattr(self, f"facet_effects_{model}_full_vector")
-                    )
+        gen_model = self.generating.model
+        if model is None:
+            model = gen_model
+        model = self._MODEL_ALIASES.get(model, model)
+
+        prefix = "anchor_" if anchor else ""
+        if anchor:
+            # No anchor_csem_vector_{model} requirement -- CSEM (Fisher-
+            # information-based conditional SEM) is invariant to a pure
+            # anchor shift (a constant translation changes neither the
+            # residual nor information structure it's built from), unlike
+            # the bootstrap SEs below which genuinely differ under
+            # anchoring (they must account for anchor-rater sampling
+            # variance) -- confirmed no anchor_csem_vector_{model}
+            # attribute exists anywhere in the package. Person SE below
+            # uses the plain csem_vector_{model} regardless of anchor.
+            required = [
+                f"anchor_items_{model}", f"anchor_thresholds_{model}",
+                "anchor_item_se", f"anchor_threshold_se_{model}",
+                f"anchor_cat_width_se_{model}", f"csem_vector_{model}",
+            ]
+            missing = [a for a in required if not hasattr(self, a)]
+            if missing:
+                raise ValueError(
+                    f"anchor=True requires the full anchored analysis to "
+                    f"have already been run for model={model!r} (missing: "
+                    f"{missing}). Run calibrate_anchor(model={model!r}, ...) "
+                    f"(or calibrate_{model}_anchor()) followed by "
+                    f"anchor_std_errors(model={model!r}, ...), "
+                    f"person_estimates(model={model!r}, anchor=True), and "
+                    f"fit_statistics(model={model!r}) (for the plain, "
+                    f"anchor-invariant csem_vector_{model}) first -- "
+                    f"recovery_stats() does not lazily auto-trigger the "
+                    f"anchored bootstrap (it needs an explicit anchors= "
+                    f"list this method has no way to infer safely)."
                 )
-            else:
-                facets = _filter_by_rater(fe_stretch["lambda"])
-            if model == "bistretch":
-                stretch_omega = {
-                    "omega_items": _filter_by_rater(fe_stretch["omega_items"]),
-                    "omega_thresholds": _filter_by_rater(fe_stretch["omega_thresholds"]),
-                }
-            else:
-                stretch_omega = {"omega": _filter_by_rater(fe_stretch["omega"])}
-        elif model == "global":
-            facets = _filter_by_rater(self.facet_effects_global)
-        elif model == "bivector" and not expand_model:
-            # bivector's true parameters are the two marginal vectors
-            # (per-item severity, per-threshold severity) its full
-            # (rater, item, threshold) matrix is reconstructed FROM (as
-            # their sum) -- showing that full reconstructed matrix would
-            # be redundant, since every entry is just one item-vector
-            # value plus one threshold-vector value, not an independent
-            # estimate. Plotting the two vectors directly instead, named
-            # the same way the standalone items/thresholds models are,
-            # shows what bivector actually estimates. expand_model=True
-            # opts into the full grid instead (silently ignored for
-            # every other model, where it has no separate meaning).
-            items_facets = _flatten_facets(
-                _filter_by_rater(self.facet_effects_bivector_items)
-            )
-            thr_facets = _flatten_facets(
-                _filter_by_rater(self.facet_effects_bivector_thresholds)
-            )
-            facets = pd.concat([items_facets, thr_facets])
         else:
-            facets = _flatten_facets(
-                _filter_by_rater(getattr(self, f"facet_effects_{model}"))
-            )
-        facet_label = self.facets.capitalize()
+            if not hasattr(self, f"facet_effects_{model}"):
+                self.calibrate(model=model)
+            # interval=0.95 here (not strictly needed by recovery_stats()
+            # itself, which only reads item_se/csem_vector_{model}) so a
+            # later full=True call to rater_stats_df()/etc. doesn't crash:
+            # those check hasattr(self, "item_se") to decide whether to
+            # (re-)bootstrap, and would otherwise find item_se already set
+            # but item_low/item_high still missing -- a real crash found
+            # via testing the same issue in SLM/PCM/RSM, not a hypothetical.
+            if not hasattr(self, f"csem_vector_{model}"):
+                self.fit_statistics(model=model, interval=0.95)
 
-        # the mirrored / item_distribution hist/KDE draws Rasch-Andrich
-        # thresholds rather than item central locations whenever item_level
-        # asks for them (or item_strip forces the per-threshold
-        # flattening) -- label its legend entry to match.
-        item_dist_label = (
-            "Thresholds" if (item_level == "thresholds" or item_strip) else "Items"
+        self.recovery = _SimParams()
+
+        # the sub-model's own item locations / thresholds (anchored or not)
+        est_items = self._items_for(model, anchor=anchor)
+        items_table, items_summary = self._parameter_recovery_table(
+            self.generating.items, est_items, se=self._item_se_for(model, anchor=anchor),
+            alpha=alpha, correction=correction, divergence_tol=divergence_tol,
+        )
+        self.recovery.items = _SimParams()
+        self.recovery.items.table = items_table
+        self.recovery.items.summary = items_summary
+
+        est_thresh = self._thresholds_for(model, anchor=anchor)
+        threshold_se = pd.Series(
+            getattr(self, f"{prefix}threshold_se_{model}"), index=range(1, self.max_score + 1)
+        )
+        thresholds_table, thresholds_summary = self._parameter_recovery_table(
+            self.generating.thresholds, est_thresh, se=threshold_se, alpha=alpha,
+            correction=correction, divergence_tol=divergence_tol,
+        )
+        self.recovery.thresholds = _SimParams()
+        self.recovery.thresholds.table = thresholds_table
+        self.recovery.thresholds.summary = thresholds_summary
+
+        gen_widths = self._category_widths(self.generating.thresholds)
+        est_widths = self._category_widths(est_thresh)
+        cat_width_se = pd.Series(getattr(self, f"{prefix}cat_width_se_{model}"))
+        widths_table, widths_summary = self._parameter_recovery_table(
+            gen_widths, est_widths, se=cat_width_se, alpha=alpha,
+            correction=correction, divergence_tol=divergence_tol,
+        )
+        self.recovery.category_widths = _SimParams()
+        self.recovery.category_widths.table = widths_table
+        self.recovery.category_widths.summary = widths_summary
+
+        # Persons -- pseudo-estimate construction (Elliott & Buttery, 2022a).
+        # Scratch instance, never mutates self (same convention as
+        # RSM._threshold_structure_ll/std_errors/andersen_lr_test). Built
+        # under self.generating.model, NOT `model` -- the pseudo-estimate
+        # always reflects the TRUE generating structure.
+        probe = MFRM(self.responses, max_score=self.generating.max_score)
+        probe.items = self.generating.items
+        probe.thresholds = self.generating.thresholds
+        setattr(probe, probe._sev_attr(gen_model), self.generating.facet_effects)
+        # _get_params' auto-calibrate gate checks hasattr(self,
+        # f"facet_effects_{model}") -- the COMPACT name, not _sev_attr's
+        # own name (which has a "_full_vector" suffix for centrality/
+        # pseudo_halo/bistretch specifically). Without also setting the
+        # compact name here, that gate would see "not yet calibrated" for
+        # those three models and silently trigger a full independent
+        # recalibration of the probe from the real data -- discovered
+        # empirically: persons RMSE came out as exactly 0.0 for all three
+        # stretch models before this fix, since the probe was just
+        # reproducing self's own real fit rather than using the injected
+        # generating severities at all. The compact attribute's VALUE is
+        # never actually read for these three models (only its presence
+        # matters for the gate -- _get_params returns the _full_vector
+        # attribute's value, not this one), so any correctly-shaped
+        # placeholder is fine.
+        if not hasattr(probe, f"facet_effects_{gen_model}"):
+            setattr(probe, f"facet_effects_{gen_model}", self.generating.facet_effects)
+
+        if not hasattr(self, f"{prefix}persons_{model}"):
+            self.person_estimates(model=model, anchor=anchor)
+        est_persons = getattr(self, f"{prefix}persons_{model}")
+        # csem_vector_{model} is never anchor-prefixed -- CSEM is
+        # invariant to a pure anchor shift, see the anchor=True check
+        # above.
+        csem = getattr(self, f"csem_vector_{model}")
+
+        if isinstance(groups, str) and groups == "rater":
+            raters = list(self.facet_names)
+            plot_raters = rater_subset if rater_subset is not None else raters
+            real_by_rater = {}
+            pseudo_by_rater = {}
+            for r in raters:
+                real_by_rater[r] = self.person(
+                    self.person_names, model=model, anchor=anchor, facet_elements=[r],
+                )
+                pseudo_by_rater[r] = probe.person(
+                    probe.person_names, model=gen_model, facet_elements=[r],
+                )
+            person_groups = pd.concat(
+                {r: pd.Series(r, index=real_by_rater[r].index) for r in raters}
+            ).droplevel(0)
+            # Flatten to (rater, person) rows for the table/summary, plus
+            # 'Overall' via the pooled pseudo/real estimate already
+            # computed above.
+            real_flat = pd.concat(
+                {r: real_by_rater[r] for r in raters}
+            )
+            pseudo_flat = pd.concat(
+                {r: pseudo_by_rater[r] for r in raters}
+            )
+            group_labels = pd.Series(
+                [idx[0] for idx in real_flat.index], index=real_flat.index
+            )
+            persons_table, persons_summary = self._parameter_recovery_table(
+                pseudo_flat, real_flat, se=None, alpha=alpha,
+                correction=correction, divergence_tol=divergence_tol,
+                groups=group_labels,
+            )
+            # Overall column reflects the pooled (all-rater) comparison,
+            # not an aggregate of the per-rater ones -- overwrite it.
+            probe.person_estimates(model=gen_model)
+            pseudo_estimate = getattr(probe, f"persons_{gen_model}")
+            _, pooled_summary = self._parameter_recovery_table(
+                pseudo_estimate, est_persons, se=csem, alpha=alpha,
+                correction=correction, divergence_tol=divergence_tol,
+            )
+            persons_summary["Overall"] = pooled_summary["Overall"]
+        else:
+            person_groups = groups if isinstance(groups, pd.Series) else None
+            probe.person_estimates(model=gen_model)
+            pseudo_estimate = getattr(probe, f"persons_{gen_model}")
+            persons_table, persons_summary = self._parameter_recovery_table(
+                pseudo_estimate, est_persons, se=csem, alpha=alpha,
+                correction=correction, divergence_tol=divergence_tol,
+                groups=person_groups,
+            )
+        self.recovery.persons = _SimParams()
+        self.recovery.persons.table = persons_table
+        self.recovery.persons.summary = persons_summary
+
+        # Parameter-estimation residual (Elliott & Buttery, 2022): RMS
+        # expected-score residual between (generating item location,
+        # generating shared thresholds) and (estimated item location,
+        # estimated shared thresholds), jointly -- at the true generating
+        # theta throughout. Deliberately facet-free (ignores rater
+        # effects entirely), matching wright_map's own established
+        # facet-free convention for item/threshold-only point-position
+        # math -- rater recovery has its own, separate comparison below
+        # (self.recovery.raters), and folding 8 different rater-
+        # representation shapes into this one scalar would need a design
+        # decision this metric doesn't need to make.
+        def _facet_free_exp_score(theta, item_location, thresh):
+            thresh = np.asarray(thresh)
+            cats = np.arange(len(thresh) + 1, dtype=float)
+            cumsum = np.concatenate([[0.0], np.cumsum(thresh)])
+            log_nums = cats * (theta - item_location) - cumsum
+            log_nums -= log_nums.max()
+            nums = np.exp(log_nums)
+            probs = nums / nums.sum()
+            return float((cats * probs).sum())
+
+        gen_items_ = self.generating.items
+        gen_thresh_ = self.generating.thresholds
+        self.recovery.parameter_estimation_residual = self._parameter_estimation_residual(
+            self.generating.persons,
+            lambda theta, item: _facet_free_exp_score(theta, gen_items_[item], gen_thresh_),
+            lambda theta, item: _facet_free_exp_score(theta, est_items[item], est_thresh),
         )
 
-        if item_level == "items" and not item_strip:
-            items = base_items
+        # Rater/facet effects. subvectors is a plain dict (not a _SimParams
+        # attribute namespace) since a sub-vector label can be 'global' --
+        # a Python keyword, so `.subvectors.global` would be a SyntaxError
+        # via dot access even though setattr/getattr would technically work.
+        self.recovery.raters = _SimParams()
+        if model == gen_model:
+            subvectors = self._rater_effect_subvectors(model, anchor=anchor)
+            raters_gen = {}
+            raters_est = {}
+            sub_tables = {}
+            for label, g, e, se in subvectors:
+                sub_table, sub_summary = self._parameter_recovery_table(
+                    g, e, se=se, alpha=alpha, correction=correction,
+                    divergence_tol=divergence_tol,
+                )
+                sub_tables[label] = _SimParams()
+                sub_tables[label].table = sub_table
+                sub_tables[label].summary = sub_summary
+                raters_gen[label] = g
+                raters_est[label] = e
+            self.recovery.raters.subvectors = sub_tables
+            self.recovery.raters.table = None
+            self.recovery.raters.summary = None
         else:
-            # one entry per Rasch-Andrich threshold rather than one per item.
-            # self.thresholds is a Series of step values tau_k, shared
-            # across items (Global MFRM builds on RSM's own threshold
-            # structure): delta_i + tau_k as one outer-sum matrix.
-            matrix = pd.DataFrame(
-                base_items.values[:, None] + self.thresholds.values[None, :],
-                index=base_items.index,
-                columns=self.thresholds.index,
+            gen_grid = self._generating_severity_grid(gen_model).ravel()
+            est_grid = self._severity_grid(model).ravel()
+            mi = pd.MultiIndex.from_product(
+                [self.facet_names, self.item_names, range(1, self.max_score + 1)]
             )
-
-            # pandas' stack() stopped dropping NaN by default as of the
-            # 2.1+ implementation, so drop the short items' padding NaNs
-            # explicitly rather than relying on stack()'s own default
-            stacked = matrix.stack().dropna()
-            items = stacked.set_axis(
-                [f"{item} (τ{k})" for item, k in stacked.index]
+            gen_s = pd.Series(gen_grid, index=mi)
+            est_s = pd.Series(est_grid, index=mi)
+            raters_table, raters_summary = self._parameter_recovery_table(
+                gen_s, est_s, se=None, alpha=alpha, correction=correction,
+                divergence_tol=divergence_tol,
             )
+            self.recovery.raters.table = raters_table
+            self.recovery.raters.summary = raters_summary
+            self.recovery.raters.subvectors = None
+            raters_gen = {"raters": gen_s}
+            raters_est = {"raters": est_s}
 
-            if item_strip:
-                # kept grouped by item (not flattened) for the strip
-                # renderer, which needs each item's own ordered threshold
-                # list rather than one independent point per threshold.
-                # Segments are the item's own *most probable category*
-                # map -- the theta interval where each category actually
-                # has the highest response probability -- rather than
-                # just the interval between two raw threshold values.
-                # Category k's (unnormalised) log-response-odds relative
-                # to category 0 is S_k(theta) = k*theta - T_k, a straight
-                # line in theta (T_k = the cumulative sum of thresholds
-                # 1..k in their own natural, possibly disordered, order);
-                # "most probable category" is exactly whichever line is
-                # highest, so the segments are the upper envelope of
-                # these lines. For ordered thresholds this reduces to
-                # exactly the interval between adjacent thresholds; when
-                # disordered, a category whose bump never rises above its
-                # neighbours' is correctly dropped from the envelope
-                # entirely, rather than drawn as a spurious sliver.
-                def _most_probable_category_segments(thresholds_natural):
-                    m = len(thresholds_natural)
-                    T = np.concatenate([[0.0], np.cumsum(thresholds_natural)])
-                    hull = []
-
-                    def redundant(l1, l2, l3):
-                        m1, b1 = l1
-                        m2, b2 = l2
-                        m3, b3 = l3
-                        return (b3 - b1) * (m1 - m2) <= (b2 - b1) * (m1 - m3)
-
-                    # slopes (category numbers 0..m) are already sorted
-                    # ascending regardless of threshold order, which is
-                    # what lets this single-pass stack (the sorted-slope
-                    # convex-hull trick) work without re-sorting anything
-                    for h in range(m + 1):
-                        line = (h, -T[h])
-                        while len(hull) >= 2 and redundant(hull[-2], hull[-1], line):
-                            hull.pop()
-                        hull.append(line)
-                    segs = []
-                    for i, (slope, intercept) in enumerate(hull):
-                        seg_lo = (
-                            None
-                            if i == 0
-                            else (intercept - hull[i - 1][1])
-                            / (hull[i - 1][0] - slope)
-                        )
-                        seg_hi = (
-                            None
-                            if i == len(hull) - 1
-                            else (hull[i + 1][1] - intercept)
-                            / (slope - hull[i + 1][0])
-                        )
-                        segs.append((seg_lo, seg_hi, slope))
-                    return segs
-
-                item_thresholds_natural = {
-                    item: row.dropna().values for item, row in matrix.iterrows()
-                }
-                item_segments = {
-                    item: _most_probable_category_segments(t)
-                    for item, t in item_thresholds_natural.items()
-                }
-                # a category missing from its item's segments never has
-                # the highest response probability anywhere -- exactly
-                # what disordered Rasch-Andrich thresholds mean
-                # geometrically (its own probability "bump" never rises
-                # above its neighbours')
-                item_missing_categories = {
-                    item: sorted(
-                        set(range(len(t) + 1))
-                        - {lab for _, _, lab in item_segments[item]}
-                    )
-                    for item, t in item_thresholds_natural.items()
-                }
-                disordered_items = [
-                    item
-                    for item, missing in item_missing_categories.items()
-                    if missing
-                ]
-                if disordered_items:
-                    warnings.warn(
-                        "Disordered thresholds for item(s) "
-                        f"{', '.join(str(i) for i in disordered_items)}. "
-                        "Only categories that are most probable for some "
-                        "range of the trait shown. For more detailed "
-                        "inspection of threshold structure, run self.crcs() "
-                        "plot and/or self.threshold_stats_df()."
-                    )
-
-        no_of_items = len(items)
-        no_of_facets = len(facets)
-
-        if group_by is not None:
-            group_by = group_by.reindex(persons.index)
-            person_group_values = sorted(group_by.dropna().unique(), key=str)
-            if group_colors is None:
-                cmap = plt.get_cmap("tab10")
-                group_colors = {
-                    g: cmap(i % 10) for i, g in enumerate(person_group_values)
-                }
-
-        if plot_range is None:
-            combined = np.concatenate([persons.values, items.values, facets.values])
-            span_lo, span_hi = float(combined.min()), float(combined.max())
-            if distribution_markers:
-                # the μ±2σ ticks (and their rotated labels) are drawn at
-                # mean ± 2·SD of each plotted distribution and can fall
-                # outside its raw data extent when that distribution is
-                # wide or heavy-tailed — fold them into the range so they
-                # stay on-canvas rather than being clipped at the spine
-                marker_values = [items.values, facets.values]
-                if group_by is not None:
-                    marker_values += [
-                        persons.values[group_by.values == g]
-                        for g in person_group_values
-                    ]
-                else:
-                    marker_values.append(persons.values)
-                for mv in marker_values:
-                    if len(mv):
-                        mv_mean, mv_sd = float(np.mean(mv)), float(np.std(mv))
-                        span_lo = min(span_lo, mv_mean - 2 * mv_sd)
-                        span_hi = max(span_hi, mv_mean + 2 * mv_sd)
-            lo = np.floor(span_lo)
-            hi = np.ceil(span_hi)
-        else:
-            lo, hi = plot_range[0], plot_range[1]
-
-        bins = np.linspace(lo, hi, no_of_bins + 1)
-
-        # each distribution's own natural peak, computed analytically
-        # (no plotting needed) so panel sizing/axis ranges can be
-        # resolved before the figure is even built. Computed
-        # independently per distribution -- deliberately NOT sharing a
-        # single "widest" value across persons/items/facets, since a
-        # small-N facet's own much more sharply peaked KDE would
-        # otherwise force persons' own well-populated distribution onto
-        # a needlessly inflated scale (and vice versa for a tiny facet
-        # squeezed onto persons' own wide one)
-        def _natural_max(values, n):
-            if map_type == "hist":
-                counts, _ = np.histogram(values, bins=bins)
-                peak = counts.max() if len(counts) else 0
-                return peak / n if prop else peak
-            kde_vals = gaussian_kde(values, bw_method=bw_method)(
-                np.linspace(lo, hi, kde_points)
+        if plot:
+            self._recovery_plot(self.generating.items, est_items, "items", **plot_kwargs)
+            self._recovery_plot(
+                self.generating.thresholds, est_thresh, "thresholds", **plot_kwargs
             )
-            peak = kde_vals.max() if len(kde_vals) else 0
-            return peak if prop else peak * n
-
-        person_natural_max = _natural_max(persons.values, len(persons))
-        item_natural_max = _natural_max(items.values, no_of_items)
-        facet_natural_max = _natural_max(facets.values, no_of_facets)
-
-        # rounds a natural peak up to a "neat" ceiling -- 1/1.5/2/2.5/3/
-        # 4/5/6/8/10 x a power of 10 -- and picks a tick step that
-        # divides it exactly, from a matching per-fraction divisor,
-        # rather than leaving the step to a separately-chosen locator
-        # that has no reason to land on a divisor of this specific
-        # ceiling (which previously left the axis's own true top edge
-        # short of its last drawn tick, e.g. ticks 0..28 against a
-        # ceiling of 30). The 10% pad before searching guarantees the
-        # chosen ceiling sits visibly above the true peak even when that
-        # peak already IS a neat number itself (a small integer count,
-        # for instance) -- without it, the tallest bar/curve would land
-        # flush against the axis's own edge, with no headroom at all.
-        _nice_fractions = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10]
-        _nice_divisors = {1: 4, 1.5: 3, 2: 4, 2.5: 5, 3: 3, 4: 4, 5: 5, 6: 3, 8: 4, 10: 5}
-
-        def _nice_ceil_and_step(x, integer):
-            if x <= 0:
-                return 0, (1 if integer else 0.1)
-            x = x * 1.1
-            exponent = np.floor(np.log10(x))
-            fraction = x / 10**exponent
-            nice_fraction = next(f for f in _nice_fractions if f >= fraction - 1e-9)
-            ceiling = nice_fraction * 10**exponent
-            step = ceiling / _nice_divisors[nice_fraction]
-            if integer:
-                step = max(1, round(step))
-                ceiling = step * np.ceil(x / step)
-            return ceiling, step
-
-        def _nice_step_for(ceiling, integer):
-            # an explicit *_lim is used exactly as given (the ceiling
-            # itself isn't adjusted), but still gets a step matched to
-            # whichever known "nice" fraction it's closest to, so it at
-            # least *usually* divides evenly -- an arbitrary user value
-            # isn't guaranteed to, the way an auto-computed ceiling is
-            if ceiling <= 0:
-                return 1 if integer else 0.1
-            exponent = np.floor(np.log10(ceiling))
-            fraction = ceiling / 10**exponent
-            nice_fraction = min(_nice_fractions, key=lambda f: abs(f - fraction))
-            step = ceiling / _nice_divisors[nice_fraction]
-            if integer:
-                step = max(1, round(step))
-            return step
-
-        _integer_counts = map_type == "hist" and not prop
-
-        if person_lim is not None:
-            person_range = person_lim
-            person_step = _nice_step_for(person_lim, _integer_counts)
-        else:
-            person_range, person_step = _nice_ceil_and_step(
-                person_natural_max, _integer_counts
+            self._recovery_plot(
+                gen_widths, est_widths, "category widths", **plot_kwargs
             )
-        if item_lim is not None:
-            item_range = item_lim
-            item_step = _nice_step_for(item_lim, _integer_counts)
-        else:
-            item_range, item_step = _nice_ceil_and_step(item_natural_max, _integer_counts)
-        if facet_lim is not None:
-            facet_range = facet_lim
-            facet_step = _nice_step_for(facet_lim, _integer_counts)
-        else:
-            facet_range, facet_step = _nice_ceil_and_step(
-                facet_natural_max, _integer_counts
-            )
-
-        # breathing room reserved before row 0 of the item panel (used for
-        # both the boundary_margin below and, when distribution_markers
-        # draws a tick alongside each item-side mark, for keeping that
-        # tick inside the margin and clear of row 0's own text -- shared
-        # so the two stay consistent if this value ever changes)
-        item_row_margin = 0.45
-        # same idea for the facet-labels panel, which never carries
-        # distribution_markers' own reserved band -- kept as its own named
-        # constant (same value) purely for readability at its call sites
-        facet_row_margin = 0.45
-
-        # shared physical sizing for distribution_markers' ticks: a fixed
-        # gap (inches) between a tick and its own label, and a fixed tick
-        # length (rows) on the item side -- both fixed in real inches
-        # rather than a fraction of whatever data range is being plotted,
-        # so the two sides (persons' count-axis-based scale vs items'
-        # row-based scale) end up visually consistent instead of drifting
-        # apart depending on the dataset
-        mark_gap_in = 0.065
-        mark_tick_rows = 0.15
-        # physical breathing room (inches) between the widest mark's own
-        # label and where item names start -- separate from the +0.5-row
-        # collision buffer below (that one exists purely to stop an
-        # item's own centred text reaching back into the mark's text; this
-        # one is just visual spacing between the two blocks of text)
-        item_label_gap_in = 0.08
-
-        # when item_labels shows a dedicated item panel (rather than
-        # item_distribution's separate histogram/KDE), distribution_markers'
-        # item-side marks are drawn straight into that panel's own row
-        # grid, all at row 0 -- items then start uniformly at row 1,
-        # regardless of which bin(s) the marks themselves land in.
-        item_mark_rows = {}
-        mark_row_depth = 0
-        if distribution_markers and item_labels and not item_distribution and not item_strip:
-            item_mean = items.mean()
-            item_sd = items.std()
-            for mark_label, mark_loc in (
-                ("μ", item_mean),
-                ("μ−σ", item_mean - item_sd),
-                ("μ+σ", item_mean + item_sd),
-                ("μ−2σ", item_mean - 2 * item_sd),
-                ("μ+2σ", item_mean + 2 * item_sd),
-            ):
-                item_mark_rows[mark_label] = mark_loc
-            mark_row_depth = 1
-
-        if figsize is None:
-            base_w, base_h = (8, 6) if orientation == "vertical" else (4, 8)
-        else:
-            base_w, base_h = figsize
-
-        style_overrides = {"font.family": font, "font.size": axis_font_size}
-
-        with plt.rc_context(style_overrides):
-
-            if plot_style != "white":
-                self._apply_plot_style(plot_style)
-
-            label_margin_in = 0.0
-            item_font = "Arial Narrow" if narrow_font else font
-            facet_font = "Arial Narrow" if narrow_font else font
-
-            if item_labels and item_strip:
-                # divided-strip layout: each item is one row spanning its
-                # own threshold range. Row labels are drawn once per row,
-                # like a tick label, so each item always gets its own row
-                # (no packing) to keep that labelling unambiguous.
-                strip_ext = (hi - lo) * 0.03
-
-                def _draw_bounds(segs):
-                    if len(segs) >= 3:
-                        return (
-                            segs[0][1] - (segs[1][1] - segs[1][0]),
-                            segs[-1][0] + (segs[-2][1] - segs[-2][0]),
-                        )
-                    return segs[0][1] - strip_ext, segs[-1][0] + strip_ext
-
-                item_spans = {
-                    name: _draw_bounds(segs) for name, segs in item_segments.items()
-                }
-
-                if sort == "location":
-                    ordered_names = sorted(item_spans, key=lambda name: item_spans[name][0])
-                else:
-                    ordered_names = list(item_thresholds_natural.keys())
-
-                item_rows = {name: i for i, name in enumerate(ordered_names)}
-                max_depth = len(ordered_names)
-
-                row_names = {}
-                for name in ordered_names:
-                    row_names.setdefault(item_rows[name], []).append(name)
-                row_labels = {row: ", ".join(names) for row, names in row_names.items()}
-
-                widest_label = max(row_labels.values(), key=len)
-                probe_fig = plt.figure()
-                probe_ax = probe_fig.add_subplot(111)
-                label_rotation = 0 if orientation == "vertical" else 90
-                probe_text = probe_ax.text(
-                    0,
-                    0,
-                    widest_label,
-                    fontsize=labelsize,
-                    fontfamily=item_font,
-                    rotation=label_rotation,
-                    rotation_mode="anchor",
+            self._recovery_plot(pseudo_estimate, est_persons, "persons", **plot_kwargs)
+            if isinstance(groups, str) and groups == "rater":
+                self._recovery_plot(
+                    {r: pseudo_by_rater[r] for r in plot_raters},
+                    {r: real_by_rater[r] for r in plot_raters},
+                    "persons (by rater)", **plot_kwargs,
                 )
-                probe_fig.canvas.draw()
-                bbox = probe_text.get_window_extent(
-                    renderer=probe_fig.canvas.get_renderer()
-                )
-                label_dim = bbox.width if orientation == "vertical" else bbox.height
-                label_margin_in = label_dim / probe_fig.dpi + edge_padding
-                plt.close(probe_fig)
-
-                if item_row_height is None:
-                    probe_fig = plt.figure()
-                    probe_ax = probe_fig.add_subplot(111)
-                    probe_text = probe_ax.text(
-                        0, 0, "Ag", fontsize=labelsize, fontfamily=item_font
-                    )
-                    probe_fig.canvas.draw()
-                    bbox = probe_text.get_window_extent(
-                        renderer=probe_fig.canvas.get_renderer()
-                    )
-                    row_height_in = bbox.height / probe_fig.dpi * 1.6 * strip_thickness
-                    plt.close(probe_fig)
-                else:
-                    row_height_in = item_row_height * strip_thickness
-
-                # the axis itself later spans (max_depth + 0.1 +
-                # boundary_margin) row-units, not just max_depth -- sizing
-                # the panel to only max_depth*row_height_in would leave
-                # every row rendered slightly smaller than row_height_in
-                # actually intended, quietly eating into the buffer built
-                # into row_height_in's own measurement
-                item_panel_in = (
-                    max_depth + 0.1 + (0.7 if distribution_markers else 0.45)
-                ) * row_height_in
-
-            elif item_labels:
-                # Winsteps-style: bin items onto the histogram grid and
-                # stack names as rows within each occupied bin.
-                bin_idx = np.clip(
-                    np.digitize(items.values, bins) - 1, 0, no_of_bins - 1
-                )
-                bin_centers = (bins[:-1] + bins[1:]) / 2
-                item_groups = {}
-                for (name, loc), b in zip(items.items(), bin_idx):
-                    item_groups.setdefault(b, []).append((loc, name))
-
-                if item_row_height is None:
-                    longest_name = max((str(n) for n in items.index), key=len)
-                    probe_fig = plt.figure()
-                    probe_ax = probe_fig.add_subplot(111)
-                    probe_text = probe_ax.text(
-                        0,
-                        0,
-                        longest_name,
-                        rotation=90,
-                        fontsize=item_label_size,
-                        fontfamily=item_font,
-                        rotation_mode="anchor",
-                    )
-                    probe_fig.canvas.draw()
-                    bbox = probe_text.get_window_extent(
-                        renderer=probe_fig.canvas.get_renderer()
-                    )
-                    row_height_in = bbox.height / probe_fig.dpi * 1.3
-                    plt.close(probe_fig)
-                else:
-                    row_height_in = item_row_height
-
-                if item_mark_rows:
-                    probe_fig = plt.figure()
-                    probe_ax = probe_fig.add_subplot(111)
-                    probe_text = probe_ax.text(
-                        0, 0, "μ+2σ", rotation=90, fontsize=labelsize,
-                        rotation_mode="anchor",
-                    )
-                    probe_fig.canvas.draw()
-                    bbox = probe_text.get_window_extent(
-                        renderer=probe_fig.canvas.get_renderer()
-                    )
-                    mark_label_in = bbox.height / probe_fig.dpi
-                    plt.close(probe_fig)
-                    mark_gap_rows = mark_gap_in / row_height_in
-                    mark_text_row = -item_row_margin + mark_tick_rows + mark_gap_rows
-                    mark_row_depth = max(
-                        1.0,
-                        mark_text_row
-                        + mark_label_in / row_height_in
-                        + item_label_gap_in / row_height_in
-                        + 0.5,
-                    )
-                else:
-                    mark_row_depth = (
-                        -item_row_margin + item_label_gap_in / row_height_in + 0.5
-                    )
-
-                max_depth = max(
-                    max((len(v) for v in item_groups.values()), default=0)
-                    + mark_row_depth,
-                    1,
-                )
-                # the axis itself later spans (max_depth + 0.1 +
-                # item_row_margin) row-units, not just max_depth -- sizing
-                # the panel to only max_depth*row_height_in would leave
-                # every row rendered slightly smaller than row_height_in
-                # actually intended, quietly eating into the buffer built
-                # into row_height_in's own measurement (most visible on
-                # whichever item lands in the last row, right against the
-                # panel's outer edge)
-                item_panel_in = (max_depth + 0.1 + item_row_margin) * row_height_in
-            else:
-                item_panel_in = 0
-
-            if facet_labels:
-                # same binned-row-stacking approach as item_labels' own
-                # non-strip branch above, minus the mark_row_depth
-                # reservation -- distribution_markers isn't extended to
-                # the facet panel, so every bin's names simply start
-                # stacking from row 0
-                facet_bin_idx = np.clip(
-                    np.digitize(facets.values, bins) - 1, 0, no_of_bins - 1
-                )
-                facet_bin_centers = (bins[:-1] + bins[1:]) / 2
-                facet_groups = {}
-                for (name, loc), b in zip(facets.items(), facet_bin_idx):
-                    facet_groups.setdefault(b, []).append((loc, name))
-
-                if facet_row_height is None:
-                    longest_facet_name = max((str(n) for n in facets.index), key=len)
-                    probe_fig = plt.figure()
-                    probe_ax = probe_fig.add_subplot(111)
-                    probe_text = probe_ax.text(
-                        0,
-                        0,
-                        longest_facet_name,
-                        rotation=90,
-                        fontsize=facet_label_size,
-                        fontfamily=facet_font,
-                        rotation_mode="anchor",
-                    )
-                    probe_fig.canvas.draw()
-                    bbox = probe_text.get_window_extent(
-                        renderer=probe_fig.canvas.get_renderer()
-                    )
-                    facet_row_height_in = bbox.height / probe_fig.dpi * 1.3
-                    plt.close(probe_fig)
-                else:
-                    facet_row_height_in = facet_row_height
-
-                facet_max_depth = max(
-                    max((len(v) for v in facet_groups.values()), default=0), 1
-                )
-                # same reasoning as item_panel_in above -- the axis
-                # itself later spans (facet_max_depth + 0.1 +
-                # facet_row_margin) row-units, not just facet_max_depth
-                facet_panel_in = (
-                    facet_max_depth + 0.1 + facet_row_margin
-                ) * facet_row_height_in
-            else:
-                facet_panel_in = None  # resolved below, once person_panel_h/w exist
-
-            # figsize originally described the whole mirrored plot (persons
-            # above, items below, sharing base_h/base_w). Now that items
-            # get their own panel, persons only need the half of that
-            # budget they used to occupy -- and persons' own panel always
-            # gets that full share regardless of person_range, per the
-            # docstring's promise that it never shrinks to make room.
-            #
-            # item_distribution's panel (always alongside a one-sided ax,
-            # since item_distribution implies item_labels=True) is sized
-            # proportionally to item_range vs person_range, so a given
-            # Count/Proportion value ends up at the same physical scale
-            # in both -- e.g. an item panel needing half of persons' own
-            # range gets half of persons' own physical size, not a fixed
-            # fraction of the whole figure regardless of what it actually
-            # needs.
-            #
-            # The facet panel always matches items' own effective scale.
-            # When items have their own panel (item_labels=True, or
-            # item_distribution=True), that's the same person_panel_h/
-            # person_range reference item_dist_panel_h itself uses below.
-            # When persons and items still mirror onto the *same* ax
-            # instead (item_labels=False), items' effective scale IS ax's
-            # own: a single physical axis has one px-per-unit throughout,
-            # regardless of the two sides showing different data values,
-            # so ax's own combined span (person_range + item_range)
-            # against its own physical size gives that same reference
-            # directly -- and person_scaling then stretches the item side
-            # of that span by mirror_item_scale (the facet panel picking
-            # up the same factor, below).
-            person_panel_h = base_h / 2 if item_labels else base_h
-            person_panel_w = base_w / 2 if item_labels else base_w
-            item_dist_panel_h = (
-                person_panel_h * (item_range / person_range) * person_scaling
-                if item_dist_panel and person_range > 0
-                else (person_panel_h if item_dist_panel else 0)
-            )
-            item_dist_panel_w = (
-                person_panel_w * (item_range / person_range) * person_scaling
-                if item_dist_panel and person_range > 0
-                else (person_panel_w if item_dist_panel else 0)
-            )
-            if facet_panel_in is None:
-                if overlay_facet:
-                    facet_panel_in = 0
-                elif (item_labels or item_dist_panel) and person_range > 0:
-                    facet_panel_in = (
-                        (person_panel_h if orientation == "vertical" else person_panel_w)
-                        * (facet_range / person_range)
-                        * person_scaling
-                        / facet_scaling
-                    )
-                elif person_range + item_range * mirror_item_scale > 0:
-                    # mirrored map: persons and items share ax, whose total
-                    # span is (person_range + item_range * mirror_item_scale)
-                    # -- the item side stretched by mirror_item_scale (==
-                    # person_scaling here, 1 otherwise). Size the facet's own
-                    # panel so a facet count reads at the SAME physical
-                    # per-count scale as an item count on that stretched item
-                    # side: facet_panel_in / facet_range must equal
-                    # mirror_item_scale * person_panel / total_span. (Reduces
-                    # to the plain facet_range/(person_range+item_range) at
-                    # mirror_item_scale=1; facet_scaling still overrides.)
-                    facet_panel_in = (
-                        (person_panel_h if orientation == "vertical" else person_panel_w)
-                        * mirror_item_scale
-                        * facet_range
-                        / (person_range + item_range * mirror_item_scale)
-                        / facet_scaling
-                    )
-                else:
-                    facet_panel_in = (
-                        (base_h / 3 if orientation == "vertical" else base_w / 3)
-                        / facet_scaling
-                    )
-
-            # nothing needs its own panel only when there's no item panel
-            # of any kind (neither a name-label panel nor a separate,
-            # scale-matched distribution panel) *and* the facet
-            # distribution is being overlaid onto the (then single,
-            # mirrored) axis -- the one case that still collapses to a
-            # single simple axes, as in the original two-family
-            # (persons/items) layout
-            if not item_labels and not item_dist_panel and overlay_facet:
-                fig, ax = plt.subplots(figsize=(base_w, base_h))
-                ax_items = None
-                ax_item_dist = None
-                ax_facet = None
-            elif orientation == "vertical":
-                margin_top_in, margin_bottom_in = 1.0, 0.6
-                margin_right_in = edge_padding
-                fig_w = base_w + label_margin_in + margin_right_in
-                panel_sizes = [person_panel_h]
-                if item_dist_panel:
-                    panel_sizes.append(item_dist_panel_h)
-                if item_labels:
-                    panel_sizes.append(item_panel_in)
-                if not overlay_facet:
-                    panel_sizes.append(facet_panel_in)
-                fig_h = sum(panel_sizes) + margin_top_in + margin_bottom_in
-                fig = plt.figure(figsize=(fig_w, fig_h))
-                nrows = len(panel_sizes)
-                gridspec_kwargs = dict(
-                    height_ratios=panel_sizes,
-                    hspace=0,
-                    top=1 - margin_top_in / fig_h,
-                    bottom=margin_bottom_in / fig_h,
-                    right=1 - margin_right_in / fig_w,
-                )
-                if label_margin_in:
-                    gridspec_kwargs["left"] = label_margin_in / fig_w
-                gs = fig.add_gridspec(nrows, 1, **gridspec_kwargs)
-                ax = fig.add_subplot(gs[0])
-                row_i = 1
-                if item_dist_panel:
-                    ax_item_dist = fig.add_subplot(gs[row_i], sharex=ax)
-                    row_i += 1
-                else:
-                    ax_item_dist = None
-                if item_labels:
-                    ax_items = fig.add_subplot(gs[row_i], sharex=ax)
-                    row_i += 1
-                else:
-                    ax_items = None
-                if not overlay_facet:
-                    ax_facet = fig.add_subplot(gs[row_i], sharex=ax)
-                    row_i += 1
-                else:
-                    ax_facet = None
-            else:
-                margin_left_in, margin_right_in = 0.7, 0.7
-                margin_top_in = 0.67
-                panel_sizes = [person_panel_w]
-                if item_dist_panel:
-                    panel_sizes.append(item_dist_panel_w)
-                if item_labels:
-                    panel_sizes.append(item_panel_in)
-                if not overlay_facet:
-                    panel_sizes.append(facet_panel_in)
-                fig_w = sum(panel_sizes) + margin_left_in + margin_right_in
-                fig_h = base_h + label_margin_in + margin_top_in
-                fig = plt.figure(figsize=(fig_w, fig_h))
-                ncols = len(panel_sizes)
-                gridspec_kwargs = dict(
-                    width_ratios=panel_sizes,
-                    wspace=0,
-                    left=margin_left_in / fig_w,
-                    right=1 - margin_right_in / fig_w,
-                    top=1 - margin_top_in / fig_h,
-                )
-                if label_margin_in:
-                    gridspec_kwargs["bottom"] = label_margin_in / fig_h
-                gs = fig.add_gridspec(1, ncols, **gridspec_kwargs)
-                ax = fig.add_subplot(gs[0])
-                col_i = 1
-                if item_dist_panel:
-                    ax_item_dist = fig.add_subplot(gs[col_i], sharey=ax)
-                    col_i += 1
-                else:
-                    ax_item_dist = None
-                if item_labels:
-                    ax_items = fig.add_subplot(gs[col_i], sharey=ax)
-                    col_i += 1
-                else:
-                    ax_items = None
-                if not overlay_facet:
-                    ax_facet = fig.add_subplot(gs[col_i], sharey=ax)
-                    col_i += 1
-                else:
-                    ax_facet = None
-
-            # ordered outer-to-inner list of every panel beyond ax itself
-            # -- the last one is the true outer edge of the whole figure
-            # (gets the real Location ticks/label); everything before it
-            # is an interior panel (shares the Location scale but hides
-            # its own duplicate tick labels)
-            extra_axes = []
-            if item_dist_panel:
-                extra_axes.append(ax_item_dist)
-            if item_labels:
-                extra_axes.append(ax_items)
-            if not overlay_facet:
-                extra_axes.append(ax_facet)
-            outer_ax = extra_axes[-1] if extra_axes else ax
-            interior_axes = extra_axes[:-1]
-
-            for a in interior_axes:
-                if orientation == "vertical":
-                    a.tick_params(labelbottom=False)
-                else:
-                    a.tick_params(labelleft=False)
-
-            person_sign = 1 if orientation == "vertical" else -1
-            item_sign = -1 if orientation == "vertical" else 1
-            facet_sign = -1 if orientation == "vertical" else 1
-
-            if item_dist_panel:
-                item_ax = ax_item_dist
-            elif not item_labels:
-                item_ax = ax
-            else:
-                item_ax = None
-                item_sign = None
-
-            if overlay_facet:
-                # facets overlay onto wherever items themselves are
-                # drawn -- their own separate distribution panel if they
-                # have one (even without item_labels, per item_dist_panel
-                # above), the item_labels row panel otherwise (though
-                # overlay_facet is already forced off whenever
-                # item_labels=True, so this branch can't actually be
-                # reached that way), or plain ax as the final fallback
-                facet_dist_ax = (
-                    ax_item_dist if item_dist_panel
-                    else (ax_items if ax_items is not None else ax)
-                )
-            elif not facet_labels:
-                facet_dist_ax = ax_facet
-            else:
-                facet_dist_ax = None
-
-            if map_type == "kde":
-                x_grid = np.linspace(lo, hi, kde_points)
-
-            if group_by is None:
-                person_groups = [("Persons", persons, person_color, person_line_color)]
-            else:
-                person_groups = [
-                    (str(g), persons[group_by == g], group_colors[g], group_colors[g])
-                    for g in person_group_values
-                ]
-
-            if map_type == "hist":
-                if stack or group_by is None:
-                    data = [sub for _, sub, _, _ in person_groups]
-                    weights = [
-                        person_sign * np.ones_like(sub) / (len(sub) if prop else 1)
-                        for sub in data
-                    ]
-                    bar_colors = [c for _, _, c, _ in person_groups]
-                    group_labels = [label for label, _, _, _ in person_groups]
-
-                    ax.hist(
-                        data,
-                        weights=weights,
-                        bins=bins,
-                        color=bar_colors,
-                        edgecolor=edge_color,
-                        label=group_labels,
-                        alpha=alpha,
-                        orientation=orientation,
-                        stacked=True,
-                    )
-
-                elif not blend:
-                    data = [sub for _, sub, _, _ in person_groups]
-                    weights = [
-                        person_sign * np.ones_like(sub) / (len(sub) if prop else 1)
-                        for sub in data
-                    ]
-                    bar_colors = [c for _, _, c, _ in person_groups]
-                    group_labels = [label for label, _, _, _ in person_groups]
-
-                    ax.hist(
-                        data,
-                        weights=weights,
-                        bins=bins,
-                        color=bar_colors,
-                        edgecolor=edge_color,
-                        label=group_labels,
-                        alpha=alpha,
-                        orientation=orientation,
-                        stacked=False,
-                    )
-
-                else:
-                    for label, sub, fill_color, line_color in person_groups:
-                        weights = person_sign * np.ones_like(sub)
-                        if prop:
-                            weights = weights / len(sub)
-
-                        ax.hist(
-                            sub,
-                            weights=weights,
-                            bins=bins,
-                            color=fill_color,
-                            edgecolor=edge_color,
-                            label=label,
-                            alpha=alpha,
-                            orientation=orientation,
-                        )
-
-            else:
-                cumulative = np.zeros_like(x_grid)
-                for label, sub, fill_color, line_color in person_groups:
-                    n_sub = len(sub)
-                    kde_sub = gaussian_kde(sub, bw_method=bw_method)(x_grid)
-                    curve = person_sign * (kde_sub if prop else kde_sub * n_sub)
-
-                    if stack:
-                        base, top = cumulative, cumulative + curve
-                        cumulative = top
-                    else:
-                        base, top = np.zeros_like(x_grid), curve
-
-                    if orientation == "vertical":
-                        ax.plot(x_grid, top, color=line_color, linewidth=line_width)
-                        ax.fill_between(
-                            x_grid,
-                            base,
-                            top,
-                            color=fill_color,
-                            alpha=alpha,
-                            edgecolor=line_color,
-                            linewidth=line_width,
-                            label=label,
-                        )
-                    else:
-                        ax.plot(top, x_grid, color=line_color, linewidth=line_width)
-                        ax.fill_betweenx(
-                            x_grid,
-                            base,
-                            top,
-                            color=fill_color,
-                            alpha=alpha,
-                            edgecolor=line_color,
-                            linewidth=line_width,
-                            label=label,
-                        )
-
-            # --- items: a hist/kde on their own axis (either the old
-            # mirrored ax, sign-flipped, or the item_distribution panel,
-            # unflipped), or labelled rows in a dedicated panel, or both ---
-            if item_ax is not None:
-                if map_type == "hist":
-                    item_weights = item_sign * mirror_item_scale * np.ones_like(items)
-                    if prop:
-                        item_weights = item_weights / no_of_items
-
-                    item_ax.hist(
-                        items,
-                        weights=item_weights,
-                        bins=bins,
-                        color=item_color,
-                        edgecolor=edge_color,
-                        label=item_dist_label,
-                        alpha=alpha,
-                        orientation=orientation,
-                    )
-
-                else:
-                    kde_items = gaussian_kde(items, bw_method=bw_method)(x_grid)
-                    item_curve = item_sign * mirror_item_scale * (
-                        kde_items if prop else kde_items * no_of_items
-                    )
-
-                    if orientation == "vertical":
-                        item_ax.plot(
-                            x_grid,
-                            item_curve,
-                            color=item_line_color,
-                            linewidth=line_width,
-                        )
-                        item_ax.fill_between(
-                            x_grid,
-                            0,
-                            item_curve,
-                            color=item_color,
-                            alpha=alpha,
-                            edgecolor=item_line_color,
-                            linewidth=line_width,
-                            label=item_dist_label,
-                        )
-                    else:
-                        item_ax.plot(
-                            item_curve,
-                            x_grid,
-                            color=item_line_color,
-                            linewidth=line_width,
-                        )
-                        item_ax.fill_betweenx(
-                            x_grid,
-                            0,
-                            item_curve,
-                            color=item_color,
-                            alpha=alpha,
-                            edgecolor=item_line_color,
-                            linewidth=line_width,
-                            label=item_dist_label,
-                        )
-
-            if item_dist_panel:
-                if orientation == "vertical":
-                    ax_item_dist.spines["top"].set_visible(False)
-                else:
-                    ax_item_dist.spines["left"].set_visible(False)
-
-            # --- facets: hist/kde (own panel or overlaid onto items), or
-            # labelled rows in a dedicated panel ---
-            # an overlaid facet shares the mirrored ax's item side, so it
-            # takes the same person_scaling stretch as items; a facet in
-            # its own panel does not (that panel has its own extent).
-            facet_mirror_scale = mirror_item_scale if facet_dist_ax is ax else 1
-            if facet_dist_ax is not None:
-                if map_type == "hist":
-                    facet_weights = facet_sign * facet_mirror_scale * np.ones_like(facets)
-                    if prop:
-                        facet_weights = facet_weights / no_of_facets
-
-                    facet_dist_ax.hist(
-                        facets,
-                        weights=facet_weights,
-                        bins=bins,
-                        facecolor="none" if overlay_facet else facet_color,
-                        edgecolor=facet_color if overlay_facet else edge_color,
-                        linewidth=line_width * (2 if overlay_facet else 1),
-                        hatch="///" if overlay_facet else None,
-                        label=facet_label,
-                        alpha=1 if overlay_facet else alpha,
-                        orientation=orientation,
-                    )
-
-                else:
-                    kde_facets = gaussian_kde(facets, bw_method=bw_method)(x_grid)
-                    facet_curve = facet_sign * facet_mirror_scale * (
-                        kde_facets if prop else kde_facets * no_of_facets
-                    )
-
-                    if overlay_facet:
-                        if orientation == "vertical":
-                            facet_dist_ax.plot(
-                                x_grid, facet_curve, color=facet_color,
-                                linewidth=line_width * 2, label=facet_label,
-                            )
-                        else:
-                            facet_dist_ax.plot(
-                                facet_curve, x_grid, color=facet_color,
-                                linewidth=line_width * 2, label=facet_label,
-                            )
-                    elif orientation == "vertical":
-                        facet_dist_ax.plot(
-                            x_grid,
-                            facet_curve,
-                            color=facet_line_color,
-                            linewidth=line_width,
-                        )
-                        facet_dist_ax.fill_between(
-                            x_grid,
-                            0,
-                            facet_curve,
-                            color=facet_color,
-                            alpha=alpha,
-                            edgecolor=facet_line_color,
-                            linewidth=line_width,
-                            label=facet_label,
-                        )
-                    else:
-                        facet_dist_ax.plot(
-                            facet_curve,
-                            x_grid,
-                            color=facet_line_color,
-                            linewidth=line_width,
-                        )
-                        facet_dist_ax.fill_betweenx(
-                            x_grid,
-                            0,
-                            facet_curve,
-                            color=facet_color,
-                            alpha=alpha,
-                            edgecolor=facet_line_color,
-                            linewidth=line_width,
-                            label=facet_label,
-                        )
-
-            # the labelled panel is independent of whether item_ax drew a
-            # hist/kde above -- item_distribution can add that panel on
-            # top of either labelling style, so this is its own if/elif
-            # rather than chained onto the item_ax branch above
-            if item_labels and item_strip:
-                boundary_margin = 0.7 if distribution_markers else 0.45
-                if orientation == "vertical":
-                    ax_items.set_ylim(max_depth + 0.1, -boundary_margin)
-                else:
-                    ax_items.set_xlim(-boundary_margin, max_depth + 0.1)
-
-                if palette is not None:
-                    palette_dict = {
-                        "dark blue": ["dark", "royalblue"],
-                        "light blue": ["light", "cornflowerblue"],
-                        "dark red": ["dark", "firebrick"],
-                        "light red": ["light", "indianred"],
-                        "dark green": ["dark", "forestgreen"],
-                        "light green": ["light", "mediumseagreen"],
-                        "dark grey": ["dark", "dimgrey"],
-                        "light grey": ["light", "darkgrey"],
-                        "dark multi": ["dark", "dark"],
-                        "light multi": ["light", "muted"],
-                        "colorblind multi": ["dark", "colorblind"],
-                    }
-                    shade, base_color = palette_dict[palette]
-                    if palette == "colorblind multi":
-                        # Okabe & Ito (2008) -- colour-vision-deficiency-safe
-                        # qualitative palette, the scientific-publishing standard.
-                        # The 8th (black) entry is swapped for white on dark
-                        # backgrounds, where it would otherwise be invisible.
-                        color_map = [
-                            "#E69F00", "#56B4E9", "#009E73", "#F0E442",
-                            "#0072B2", "#D55E00", "#CC79A7",
-                            "#FFFFFF" if plot_style in self._DARK_BACKGROUND_STYLES else "#000000",
-                        ]
-                    elif shade == "dark":
-                        color_map = (
-                            sns.color_palette("dark", as_cmap=True)
-                            if palette == "dark multi"
-                            else sns.dark_palette(base_color, reverse=True, as_cmap=True)
-                        )
-                    else:
-                        color_map = (
-                            sns.color_palette("muted", as_cmap=True)
-                            if palette == "light multi"
-                            else sns.light_palette(
-                                base_color, reverse=True, as_cmap=True
-                            )
-                        )
-                    max_categories = (
-                        max(len(t) for t in item_thresholds_natural.values()) + 1
-                    )
-                    cNorm = colors.Normalize(vmin=0, vmax=max_categories + 2)
-                    if "multi" not in palette:
-                        scalar_map = cmx.ScalarMappable(norm=cNorm, cmap=color_map)
-
-                    def category_color(k):
-                        return (
-                            scalar_map.to_rgba(k)
-                            if "multi" not in palette
-                            else color_map[k]
-                        )
-
-                else:
-
-                    def category_color(k):
-                        return item_color
-
-                bar_half = 0.3
-                min_label_width = (hi - lo) * 0.02
-
-                for name, segs in item_segments.items():
-                    row = item_rows[name]
-                    # the open (unbounded) top/bottom categories always draw
-                    # out to the panel edge -- there's no real boundary to
-                    # stop at, so stopping partway (at item_spans' own
-                    # adjacent-width bound) just left an unexplained gap of
-                    # blank background between the strip and the axis edge.
-                    # neutral_extremes only controls whether that edge fill
-                    # is a flat block in the category colour (False) or
-                    # fades to a neutral colour (True), not whether it
-                    # reaches the edge at all.
-                    edge_lo, edge_hi = lo, hi
-
-                    n_segs = len(segs)
-                    for i, (seg_lo, seg_hi, k) in enumerate(segs):
-                        x0 = edge_lo if seg_lo is None else seg_lo
-                        x1 = edge_hi if seg_hi is None else seg_hi
-                        is_extreme = neutral_extremes and (i == 0 or i == n_segs - 1)
-
-                        if is_extreme:
-                            fade_steps = 8
-                            neutral_color = "#EDE6D6"
-                            slice_width = (x1 - x0) / fade_steps
-                            for s in range(fade_steps):
-                                sx0 = x0 + s * slice_width
-                                sx1 = sx0 + slice_width
-                                frac = (
-                                    (s + 1) / fade_steps
-                                    if k == 0
-                                    else (fade_steps - s) / fade_steps
-                                )
-                                slice_alpha = strip_alpha * frac
-                                if orientation == "vertical":
-                                    ax_items.add_patch(
-                                        Rectangle(
-                                            (sx0, row - bar_half),
-                                            sx1 - sx0,
-                                            2 * bar_half,
-                                            facecolor=neutral_color,
-                                            alpha=slice_alpha,
-                                            edgecolor="none",
-                                        )
-                                    )
-                                else:
-                                    ax_items.add_patch(
-                                        Rectangle(
-                                            (row - bar_half, sx0),
-                                            2 * bar_half,
-                                            sx1 - sx0,
-                                            facecolor=neutral_color,
-                                            alpha=slice_alpha,
-                                            edgecolor="none",
-                                        )
-                                    )
-                            if orientation == "vertical":
-                                ax_items.add_patch(
-                                    Rectangle(
-                                        (x0, row - bar_half),
-                                        x1 - x0,
-                                        2 * bar_half,
-                                        facecolor="none",
-                                        edgecolor="black",
-                                        linewidth=0.5,
-                                        alpha=strip_alpha,
-                                    )
-                                )
-                            else:
-                                ax_items.add_patch(
-                                    Rectangle(
-                                        (row - bar_half, x0),
-                                        2 * bar_half,
-                                        x1 - x0,
-                                        facecolor="none",
-                                        edgecolor="black",
-                                        linewidth=0.5,
-                                        alpha=strip_alpha,
-                                    )
-                                )
-                        else:
-                            color = category_color(k)
-                            if orientation == "vertical":
-                                ax_items.add_patch(
-                                    Rectangle(
-                                        (x0, row - bar_half),
-                                        x1 - x0,
-                                        2 * bar_half,
-                                        facecolor=color,
-                                        alpha=strip_alpha,
-                                        edgecolor="black",
-                                        linewidth=0.5,
-                                    )
-                                )
-                            else:
-                                ax_items.add_patch(
-                                    Rectangle(
-                                        (row - bar_half, x0),
-                                        2 * bar_half,
-                                        x1 - x0,
-                                        facecolor=color,
-                                        alpha=strip_alpha,
-                                        edgecolor="black",
-                                        linewidth=0.5,
-                                    )
-                                )
-
-                        label_color = "dimgrey" if is_extreme else "black"
-                        seg_center = (x0 + x1) / 2
-
-                        if x1 - x0 > min_label_width:
-                            if orientation == "vertical":
-                                ax_items.text(
-                                    seg_center,
-                                    row,
-                                    str(k),
-                                    ha="center",
-                                    va="center",
-                                    fontsize=labelsize,
-                                    fontweight="bold",
-                                    color=label_color,
-                                )
-                            else:
-                                ax_items.text(
-                                    row,
-                                    seg_center,
-                                    str(k),
-                                    ha="center",
-                                    va="center_baseline",
-                                    fontsize=labelsize,
-                                    fontweight="bold",
-                                    color=label_color,
-                                )
-                        else:
-                            leader_len = bar_half * 0.35
-                            leader_start = row + bar_half / 3
-                            leader_end = row + bar_half + leader_len
-                            if orientation == "vertical":
-                                ax_items.plot(
-                                    [seg_center, seg_center],
-                                    [leader_start, leader_end],
-                                    color=label_color,
-                                    linewidth=0.6,
-                                )
-                                ax_items.text(
-                                    seg_center,
-                                    leader_end,
-                                    str(k),
-                                    ha="center",
-                                    va="top",
-                                    fontsize=labelsize * 0.75,
-                                    fontweight="bold",
-                                    color=label_color,
-                                )
-                            else:
-                                ax_items.plot(
-                                    [leader_start, leader_end],
-                                    [seg_center, seg_center],
-                                    color=label_color,
-                                    linewidth=0.6,
-                                )
-                                ax_items.text(
-                                    leader_end,
-                                    seg_center,
-                                    str(k),
-                                    ha="left",
-                                    va="center_baseline",
-                                    fontsize=labelsize * 0.75,
-                                    fontweight="bold",
-                                    color=label_color,
-                                )
-
-                for label_row, label_text in row_labels.items():
-                    row_disordered = any(
-                        n in disordered_items for n in row_names[label_row]
-                    )
-                    label_kwargs = (
-                        {"color": "firebrick", "fontweight": "bold"}
-                        if row_disordered
-                        else {"color": item_line_color}
-                    )
-                    if orientation == "vertical":
-                        ax_items.text(
-                            -0.015,
-                            label_row,
-                            f"{label_text} ",
-                            transform=ax_items.get_yaxis_transform(),
-                            ha="right",
-                            va="center",
-                            fontsize=labelsize,
-                            fontfamily=item_font,
-                            clip_on=False,
-                            **label_kwargs,
-                        )
-                    else:
-                        ax_items.text(
-                            label_row,
-                            -0.015,
-                            f"{label_text} ",
-                            transform=ax_items.get_xaxis_transform(),
-                            ha="right",
-                            va="center",
-                            fontsize=labelsize,
-                            fontfamily=item_font,
-                            rotation=90,
-                            rotation_mode="anchor",
-                            clip_on=False,
-                            **label_kwargs,
-                        )
-
-                if orientation == "vertical":
-                    ax_items.spines["top"].set_visible(False)
-                    ax_items.set_yticks([])
-                else:
-                    ax_items.spines["left"].set_visible(False)
-                    ax_items.set_xticks([])
-
-            elif item_labels:
-                boundary_margin = item_row_margin
-                if orientation == "vertical":
-                    ax_items.set_ylim(max_depth + 0.1, -boundary_margin)
-                else:
-                    ax_items.set_xlim(-boundary_margin, max_depth + 0.1)
-
-                for b, entries in item_groups.items():
-                    x = bin_centers[b]
-                    for i, (loc, name) in enumerate(sorted(entries)):
-                        level = i + mark_row_depth
-                        if orientation == "vertical":
-                            ax_items.text(
-                                x,
-                                level,
-                                str(name),
-                                color=item_line_color,
-                                rotation=90,
-                                ha="center",
-                                va="top",
-                                fontsize=item_label_size,
-                                fontfamily=item_font,
-                            )
-                        else:
-                            ax_items.text(
-                                level,
-                                x,
-                                str(name),
-                                color=item_line_color,
-                                ha="left",
-                                va="center",
-                                fontsize=item_label_size,
-                                fontfamily=item_font,
-                            )
-
-                if orientation == "vertical":
-                    ax_items.spines["top"].set_visible(False)
-                    ax_items.set_yticks([])
-                else:
-                    ax_items.spines["left"].set_visible(False)
-                    ax_items.set_xticks([])
-
-            if facet_labels:
-                if orientation == "vertical":
-                    ax_facet.set_ylim(facet_max_depth + 0.1, -facet_row_margin)
-                else:
-                    ax_facet.set_xlim(-facet_row_margin, facet_max_depth + 0.1)
-
-                for b, entries in facet_groups.items():
-                    x = facet_bin_centers[b]
-                    for i, (loc, name) in enumerate(sorted(entries)):
-                        if orientation == "vertical":
-                            ax_facet.text(
-                                x,
-                                i,
-                                str(name),
-                                color=facet_line_color,
-                                rotation=90,
-                                ha="center",
-                                va="top",
-                                fontsize=facet_label_size,
-                                fontfamily=facet_font,
-                            )
-                        else:
-                            ax_facet.text(
-                                i,
-                                x,
-                                str(name),
-                                color=facet_line_color,
-                                ha="left",
-                                va="center",
-                                fontsize=facet_label_size,
-                                fontfamily=facet_font,
-                            )
-
-                if orientation == "vertical":
-                    ax_facet.spines["top"].set_visible(False)
-                    ax_facet.set_yticks([])
-                else:
-                    ax_facet.spines["left"].set_visible(False)
-                    ax_facet.set_xticks([])
-                ax_facet.axhline(
-                    -facet_row_margin, color="black", linewidth=1.3, zorder=5
-                ) if orientation == "vertical" else ax_facet.axvline(
-                    -facet_row_margin, color="black", linewidth=1.3, zorder=5
-                )
-
-            if distribution_markers:
-
-                if orientation == "vertical":
-                    y0, y1 = ax.get_ylim()
-                    nice_ticks = ax.get_yticks()
-                    if len(nice_ticks):
-                        y1 = max(y1, max(nice_ticks))
-                    ax.set_ylim(y0, y1)
-                else:
-                    x0, x1 = ax.get_xlim()
-                    nice_ticks = ax.get_xticks()
-                    if len(nice_ticks):
-                        x0 = min(x0, min(nice_ticks))
-                    ax.set_xlim(x0, x1)
-
-                def _mark_len(target_ax):
-                    if orientation == "vertical":
-                        _, y1 = target_ax.get_ylim()
-                        return 0.015 * y1
-                    else:
-                        x0, _ = target_ax.get_xlim()
-                        return 0.015 * abs(x0)
-
-                marker_fontsize = labelsize
-
-                def _in_per_unit(target_ax):
-                    bbox = target_ax.get_window_extent(
-                        renderer=fig.canvas.get_renderer()
-                    )
-                    if orientation == "vertical":
-                        _, y1 = target_ax.get_ylim()
-                        return (bbox.height / fig.dpi) / y1
-                    else:
-                        x0, _ = target_ax.get_xlim()
-                        return (bbox.width / fig.dpi) / abs(x0)
-
-                def add_distribution_markers(values, sign, color, target_ax, mark_len):
-                    mean = values.mean()
-                    sd = values.std()
-                    marks = [
-                        ("μ", mean),
-                        ("μ−σ", mean - sd),
-                        ("μ+σ", mean + sd),
-                        ("μ−2σ", mean - 2 * sd),
-                        ("μ+2σ", mean + 2 * sd),
-                    ]
-                    gap = mark_gap_in / _in_per_unit(target_ax)
-                    text_offset = sign * (mark_len + gap)
-
-                    for label, loc in marks:
-                        if orientation == "vertical":
-                            target_ax.plot(
-                                [loc, loc],
-                                [0, sign * mark_len],
-                                color=color,
-                                linewidth=1,
-                                solid_capstyle="butt",
-                                clip_on=False,
-                                zorder=6,
-                            )
-                            target_ax.text(
-                                loc,
-                                text_offset,
-                                label,
-                                color=color,
-                                ha="center",
-                                va="bottom" if sign > 0 else "top",
-                                fontsize=marker_fontsize,
-                                clip_on=False,
-                                zorder=6,
-                            )
-                        else:
-                            target_ax.plot(
-                                [0, sign * mark_len],
-                                [loc, loc],
-                                color=color,
-                                linewidth=1,
-                                solid_capstyle="butt",
-                                clip_on=False,
-                                zorder=6,
-                            )
-                            target_ax.text(
-                                text_offset,
-                                loc,
-                                label,
-                                color=color,
-                                ha="left" if sign > 0 else "right",
-                                va="center",
-                                fontsize=marker_fontsize,
-                                clip_on=False,
-                                zorder=6,
-                            )
-
-                if item_mark_rows:
-                    items_bbox = ax_items.get_window_extent(
-                        renderer=fig.canvas.get_renderer()
-                    )
-                    if orientation == "vertical":
-                        y0i, y1i = ax_items.get_ylim()
-                        items_in_per_row = (items_bbox.height / fig.dpi) / abs(
-                            y1i - y0i
-                        )
-                    else:
-                        x0i, x1i = ax_items.get_xlim()
-                        items_in_per_row = (items_bbox.width / fig.dpi) / abs(
-                            x1i - x0i
-                        )
-                    person_mark_len = (
-                        mark_tick_rows * items_in_per_row
-                    ) / _in_per_unit(ax)
-                else:
-                    person_mark_len = _mark_len(ax)
-                if group_by is None:
-                    add_distribution_markers(
-                        persons, person_sign, marker_color, ax, person_mark_len
-                    )
-                else:
-                    for label, sub, fill_color, line_color in person_groups:
-                        add_distribution_markers(
-                            sub, person_sign, line_color, ax, person_mark_len
-                        )
-
-                if item_dist_panel:
-                    add_distribution_markers(
-                        items,
-                        item_sign,
-                        marker_color,
-                        ax_item_dist,
-                        _mark_len(ax_item_dist),
-                    )
-                elif item_labels and not item_strip:
-                    tick_near = -item_row_margin
-                    tick_far = tick_near + mark_tick_rows
-                    for mark_label, mark_loc in item_mark_rows.items():
-                        if orientation == "vertical":
-                            ax_items.plot(
-                                [mark_loc, mark_loc],
-                                [tick_near, tick_far],
-                                color=marker_color,
-                                linewidth=1,
-                                solid_capstyle="butt",
-                                zorder=6,
-                            )
-                            ax_items.text(
-                                mark_loc,
-                                mark_text_row,
-                                mark_label,
-                                color=marker_color,
-                                rotation=90,
-                                ha="center",
-                                va="top",
-                                fontsize=marker_fontsize,
-                            )
-                        else:
-                            ax_items.plot(
-                                [tick_near, tick_far],
-                                [mark_loc, mark_loc],
-                                color=marker_color,
-                                linewidth=1,
-                                solid_capstyle="butt",
-                                zorder=6,
-                            )
-                            ax_items.text(
-                                mark_text_row,
-                                mark_loc,
-                                mark_label,
-                                color=marker_color,
-                                ha="left",
-                                va="center",
-                                fontsize=marker_fontsize,
-                            )
-                else:
-                    add_distribution_markers(
-                        items,
-                        -person_sign if item_labels else item_sign,
-                        marker_color,
-                        ax,
-                        person_mark_len,
-                    )
-
-            has_extra_panels = bool(extra_axes)
-
-            # ax's, ax_item_dist's, and ax_facet's own Count/Proportion
-            # limits are set explicitly further below (from
-            # person_range/item_range/facet_range), which fully
-            # supersedes pinning just one side of each to 0 here.
-
-            padding = (hi - lo) * 0.05 if pad else 0
-            loc_axis = outer_ax if (has_extra_panels and orientation == "vertical") else ax
-            loc_axis_h = (
-                outer_ax if (has_extra_panels and orientation == "horizontal") else ax
-            )
-
-            if has_extra_panels and orientation == "horizontal":
-                outer_ax.yaxis.set_ticks_position("right")
-                outer_ax.yaxis.set_label_position("right")
-
-            def _regular_loc_ticks(axis_lo, axis_hi):
-                start = np.ceil(axis_lo / tick_interval) * tick_interval
-                n = int(np.floor((axis_hi - start) / tick_interval + 1e-9)) + 1
-                return [start + i * tick_interval for i in range(max(n, 0))]
-
-            if orientation == "vertical":
-                ax.set_xlim(lo - padding, hi + padding)
-                loc_ticks = _regular_loc_ticks(lo - padding, hi + padding)
-                for a in extra_axes:
-                    a.set_xticks(loc_ticks)
-                loc_axis.set_xticks(loc_ticks)
-            else:
-                ax.set_ylim(lo - padding, hi + padding)
-                loc_ticks = _regular_loc_ticks(lo - padding, hi + padding)
-                for a in extra_axes:
-                    a.set_yticks(loc_ticks)
-                loc_axis_h.set_yticks(loc_ticks)
-
-            has_facet_dist_panel = (
-                facet_dist_ax is not None and not overlay_facet and not facet_labels
-            )
-
-            if has_extra_panels:
-                if orientation == "vertical":
-                    ax.spines["bottom"].set_visible(False)
-                    ax.tick_params(
-                        axis="x", bottom=False, top=True, labelbottom=False, labeltop=True
-                    )
-                else:
-                    ax.spines["right"].set_visible(False)
-
-            is_vertical = orientation == "vertical"
-
-            # each panel's own (lo, hi) limits, set directly from
-            # person_range/item_range/facet_range (an explicit *_lim
-            # override, or each distribution's own natural peak,
-            # resolved earlier) rather than left to independent
-            # autoscale -- this is also exactly what panel sizing above
-            # already assumed, so the rendered axis and the physical
-            # space allocated for it always agree. ax is one-sided
-            # (persons only) whenever items have their own panel
-            # (item_labels row panel and/or item_distribution's scale-
-            # matched one); otherwise persons and items mirror onto the
-            # same ax, each of its own two sides getting its own real
-            # range (the item side stretched by mirror_item_scale when
-            # person_scaling rebalances them).
-            if item_labels or item_dist_panel:
-                ax_lo = -person_range if person_sign < 0 else 0
-                ax_hi = person_range if person_sign > 0 else 0
-            else:
-                item_extent = item_range * mirror_item_scale
-                ax_lo = -(person_range if person_sign < 0 else item_extent)
-                ax_hi = person_range if person_sign > 0 else item_extent
-            if is_vertical:
-                ax.set_ylim(ax_lo, ax_hi)
-            else:
-                ax.set_xlim(ax_lo, ax_hi)
-
-            if item_dist_panel:
-                dist_lo = -item_range if item_sign < 0 else 0
-                dist_hi = item_range if item_sign > 0 else 0
-                if is_vertical:
-                    ax_item_dist.set_ylim(dist_lo, dist_hi)
-                else:
-                    ax_item_dist.set_xlim(dist_lo, dist_hi)
-
-            if has_facet_dist_panel:
-                facet_lo = -facet_range if facet_sign < 0 else 0
-                facet_hi = facet_range if facet_sign > 0 else 0
-                if is_vertical:
-                    ax_facet.set_ylim(facet_lo, facet_hi)
-                else:
-                    ax_facet.set_xlim(facet_lo, facet_hi)
-
-            def _side_ticks(reach, step):
-                # evenly spaced ticks from 0 to reach inclusive, using
-                # exactly the step already resolved (together with
-                # reach itself) to divide it evenly -- generated
-                # explicitly rather than left to a locator, which has no
-                # reason to land on a divisor of this specific ceiling
-                if reach <= 0 or step <= 0:
-                    return [0.0]
-                n = int(round(reach / step))
-                return [i * step for i in range(n + 1)]
-
-            def _relabel(
-                ax_obj,
-                pos_reach,
-                pos_step,
-                neg_reach,
-                neg_step,
-                drop_zero=False,
-                pos_scale=1.0,
-                neg_scale=1.0,
-            ):
-                # (tick position, label value) pairs: a side whose count
-                # axis was stretched by mirror_item_scale keeps its tick
-                # *labels* at the true counts, only spaced further apart
-                # (pos_scale / neg_scale = 1 everywhere else).
-                pairs = {(t * pos_scale, t) for t in _side_ticks(pos_reach, pos_step)}
-                pairs |= {(-t * neg_scale, -t) for t in _side_ticks(neg_reach, neg_step)}
-                pairs = sorted(pairs)
-                # item_dist's/facet's own zero always sits exactly at the
-                # boundary shared with its neighbour -- in horizontal
-                # orientation that boundary is a narrow vertical seam
-                # with both panels' own "0" label sitting right next to
-                # it, close enough to visually collide. Dropping the
-                # secondary panel's own redundant zero (ax's own stays)
-                # avoids that; not an issue in vertical orientation,
-                # where the seam is horizontal and the two labels don't
-                # compete for the same space.
-                if drop_zero and not is_vertical:
-                    pairs = [pl for pl in pairs if pl[0] != 0]
-                positions = [p for p, _ in pairs]
-                labels = (
-                    [f"{abs(v):.2f}" for _, v in pairs]
-                    if prop
-                    else [str(int(round(abs(v)))) for _, v in pairs]
-                )
-                if is_vertical:
-                    ax_obj.set_yticks(positions)
-                    ax_obj.set_yticklabels(labels, fontsize=labelsize)
-                else:
-                    ax_obj.set_xticks(positions)
-                    ax_obj.set_xticklabels(labels, fontsize=labelsize)
-
-            if item_labels or item_dist_panel:
-                if person_sign > 0:
-                    _relabel(ax, person_range, person_step, 0, 1)
-                else:
-                    _relabel(ax, 0, 1, person_range, person_step)
-            elif person_sign > 0:
-                # vertical: items are the negative side of the shared axis
-                _relabel(
-                    ax,
-                    person_range,
-                    person_step,
-                    item_range,
-                    item_step,
-                    neg_scale=mirror_item_scale,
-                )
-            else:
-                # horizontal: items are the positive side of the shared axis
-                _relabel(
-                    ax,
-                    item_range,
-                    item_step,
-                    person_range,
-                    person_step,
-                    pos_scale=mirror_item_scale,
-                )
-
-            if item_dist_panel:
-                if item_sign > 0:
-                    _relabel(ax_item_dist, item_range, item_step, 0, 1, drop_zero=True)
-                else:
-                    _relabel(ax_item_dist, 0, 1, item_range, item_step, drop_zero=True)
-
-            if has_facet_dist_panel:
-                if facet_sign > 0:
-                    _relabel(ax_facet, facet_range, facet_step, 0, 1, drop_zero=True)
-                else:
-                    _relabel(ax_facet, 0, 1, facet_range, facet_step, drop_zero=True)
-
-            # the explicit axhline/axvline boundary lines and the "hide
-            # the gridline that would otherwise sit right under them"
-            # cleanup both need the *final* tick set from _relabel above
-            # -- doing this earlier (against whatever ticks autoscale
-            # had chosen before the real limits were even set) hid
-            # whichever gridline happened to occupy that position in the
-            # stale tick list, not necessarily the one actually at 0
-            if is_vertical:
-                ax.axhline(0, color="black", linewidth=1.3, zorder=5)
-                for tick, gridline in zip(ax.get_yticks(), ax.yaxis.get_gridlines()):
-                    if tick == 0:
-                        gridline.set_visible(False)
-                if item_labels:
-                    ax_items.axhline(
-                        -item_row_margin, color="black", linewidth=1.3, zorder=5
-                    )
-                if has_facet_dist_panel:
-                    ax_facet.axhline(0, color="black", linewidth=1.3, zorder=5)
-                    for tick, gridline in zip(
-                        ax_facet.get_yticks(), ax_facet.yaxis.get_gridlines()
-                    ):
-                        if tick == 0:
-                            gridline.set_visible(False)
-            else:
-                ax.axvline(0, color="black", linewidth=1.3, zorder=5)
-                if item_labels:
-                    ax_items.axvline(
-                        -item_row_margin, color="black", linewidth=1.3, zorder=5
-                    )
-                if has_facet_dist_panel:
-                    ax_facet.axvline(0, color="black", linewidth=1.3, zorder=5)
-                    for tick, gridline in zip(
-                        ax_facet.get_xticks(), ax_facet.xaxis.get_gridlines()
-                    ):
-                        if tick == 0:
-                            gridline.set_visible(False)
-                for tick, gridline in zip(ax.get_xticks(), ax.xaxis.get_gridlines()):
-                    if tick == 0:
-                        gridline.set_visible(False)
-
-            if is_vertical:
-                loc_axis.set_xlabel(
-                    "Location", fontsize=axis_font_size, fontweight="bold"
-                )
-                ax.set_ylabel(
-                    "Proportion" if prop else "Count",
-                    fontsize=axis_font_size,
-                    fontweight="bold",
-                )
-                if facet_labels:
-                    ax_facet.set_ylabel(
-                        facet_label, fontsize=axis_font_size, fontweight="bold"
+            if separate_rater_plots:
+                for label in raters_gen:
+                    self._recovery_plot(
+                        raters_gen[label], raters_est[label],
+                        f"raters ({label})", **plot_kwargs,
                     )
             else:
-                loc_axis_h.set_ylabel(
-                    "Location", fontsize=axis_font_size, fontweight="bold"
+                self._recovery_plot(raters_gen, raters_est, "raters", **plot_kwargs)
+
+            if anchor:
+                # Separate anchor-vs-non-anchor view -- a different visual
+                # encoding purpose (which raters were anchored) from the
+                # subvector colouring above, so plotted as its own figure
+                # rather than combined into it. Flattens every sub-vector
+                # together (rater is always level 0 of the index, whether
+                # it's a plain rater-name Index for 'global'-shaped
+                # sub-vectors or a MultiIndex with rater first for
+                # everything else).
+                anchor_names = set(getattr(self, f"anchor_rater_names_{model}"))
+                gen_all = pd.concat(list(raters_gen.values()))
+                est_all = pd.concat(list(raters_est.values()))
+                rater_level = (
+                    gen_all.index.get_level_values(0)
+                    if isinstance(gen_all.index, pd.MultiIndex) else gen_all.index
                 )
-                ax.set_xlabel(
-                    "Proportion" if prop else "Count",
-                    fontsize=axis_font_size,
-                    fontweight="bold",
+                is_anchor = pd.Series(rater_level, index=gen_all.index).isin(anchor_names)
+                self._recovery_plot(
+                    {
+                        "Anchor raters": gen_all[is_anchor.values],
+                        "Non-anchor raters": gen_all[~is_anchor.values],
+                    },
+                    {
+                        "Anchor raters": est_all[is_anchor.values],
+                        "Non-anchor raters": est_all[~is_anchor.values],
+                    },
+                    "raters (anchor split)",
+                    colors={"Anchor raters": "black", "Non-anchor raters": "grey"},
+                    markers={"Anchor raters": "^", "Non-anchor raters": "v"},
+                    **plot_kwargs,
                 )
-                if facet_labels:
-                    ax_facet.set_xlabel(
-                        facet_label, fontsize=axis_font_size, fontweight="bold"
-                    )
 
-            ax.tick_params(axis="x", labelsize=labelsize)
-            ax.tick_params(axis="y", labelsize=labelsize)
-            for a in extra_axes:
-                a.tick_params(axis="x", labelsize=labelsize)
-                a.tick_params(axis="y", labelsize=labelsize)
-
-            if title is not None:
-                if has_extra_panels:
-                    title_y = 1 - (margin_top_in * 0.4) / fig_h
-                    fig.suptitle(
-                        title, fontsize=title_font_size, fontweight="bold", y=title_y
-                    )
-                else:
-                    ax.set_title(title, fontsize=title_font_size, fontweight="bold")
-
-            legend_handles, legend_labels = ax.get_legend_handles_labels()
-            if item_dist_panel:
-                dist_handles, dist_labels = ax_item_dist.get_legend_handles_labels()
-                legend_handles += dist_handles
-                legend_labels += dist_labels
-            if facet_dist_ax is not None and not overlay_facet and not facet_labels:
-                fdist_handles, fdist_labels = ax_facet.get_legend_handles_labels()
-                legend_handles += fdist_handles
-                legend_labels += fdist_labels
-            legend_loc = "upper left" if person_sign < 0 else "upper right"
-            ax.legend(legend_handles, legend_labels, loc=legend_loc)
-
-            # Stretch panel(s) -- bolted onto the right of the whole
-            # figure, after everything else is built and sized. omega
-            # isn't a logit value (see the comment by stretch_omega's own
-            # definition above), so it gets its own axis/scale entirely,
-            # centred on 1 rather than 0, one bar per rater in plain
-            # facet-name order (unrelated to whatever order the shift
-            # panel's own binning happened to place them in). bistretch
-            # gets two such panels, stacked (omega_items above
-            # omega_thresholds), sharing the same rater order/x-axis.
-            if stretch_omega is not None and show_stretch:
-                stretch_main_axes = [ax] + extra_axes
-                stretch_orig_w, stretch_orig_h = fig.get_size_inches()
-
-                stretch_gap_in = 0.073
-                stretch_margin_in = 0.55
-                n_stretch = len(stretch_omega)
-                raters_order = list(next(iter(stretch_omega.values())).index)
-                n_raters = len(raters_order)
-                stretch_col_w_in = max(1.8, 0.35 * n_raters)
-
-                stretch_extra_w_in = stretch_gap_in + stretch_col_w_in + stretch_margin_in
-                stretch_new_w = stretch_orig_w + stretch_extra_w_in
-                fig.set_size_inches(stretch_new_w, stretch_orig_h)
-                stretch_shrink = stretch_orig_w / stretch_new_w
-                for a in stretch_main_axes:
-                    pos = a.get_position()
-                    a.set_position(
-                        [pos.x0 * stretch_shrink, pos.y0, pos.width * stretch_shrink, pos.height]
-                    )
-
-                stretch_tops = [a.get_position().y1 for a in stretch_main_axes]
-                stretch_bots = [a.get_position().y0 for a in stretch_main_axes]
-                stretch_y0, stretch_y1 = min(stretch_bots), max(stretch_tops)
-                x0_frac = 1 - (stretch_col_w_in + stretch_margin_in) / stretch_new_w
-                w_frac = stretch_col_w_in / stretch_new_w
-
-                expand_color = "gray" if black else "steelblue"
-                compress_color = "darkgray" if black else "indianred"
-                omega_symbols = {
-                    "omega": "$\\omega$",
-                    "omega_items": "$\\omega_{items}$",
-                    "omega_thresholds": "$\\omega_{thresholds}$",
-                }
-
-                row_gap_frac = 0.06 * (stretch_y1 - stretch_y0)
-                row_h = (stretch_y1 - stretch_y0 - row_gap_frac * (n_stretch - 1)) / n_stretch
-
-                # Shared y-limits across every stretch panel (e.g.
-                # bistretch's omega_items/omega_thresholds), so a bar's
-                # length is comparable panel to panel rather than each
-                # auto-scaling to its own data independently.
-                all_omega_vals = [
-                    v for s in stretch_omega.values() for v in s.values if v == v
-                ]
-                if all_omega_vals:
-                    om_lo, om_hi = min(all_omega_vals), max(all_omega_vals)
-                    om_pad = max((om_hi - om_lo) * 0.15, 0.05)
-                    shared_ylim = (min(om_lo, 1) - om_pad, max(om_hi, 1) + om_pad)
-                else:
-                    shared_ylim = (0.5, 1.5)
-
-                for i, (omega_key, omega_series) in enumerate(stretch_omega.items()):
-                    row_top = stretch_y1 - i * (row_h + row_gap_frac)
-                    ax_stretch = fig.add_axes([x0_frac, row_top - row_h, w_frac, row_h])
-                    bar_xs = list(range(n_raters))
-                    bar_vals = [omega_series.get(r, np.nan) for r in raters_order]
-                    bar_colors = [
-                        (compress_color if v < 1 else expand_color)
-                        if v == v else "lightgray"
-                        for v in bar_vals
-                    ]
-                    ax_stretch.bar(
-                        bar_xs,
-                        [(v - 1) if v == v else 0 for v in bar_vals],
-                        bottom=1,
-                        color=bar_colors,
-                        edgecolor=edge_color,
-                        width=0.6,
-                    )
-                    ax_stretch.axhline(1, color=edge_color, linewidth=1)
-                    ax_stretch.set_xlim(-0.6, n_raters - 0.4)
-                    ax_stretch.set_ylim(shared_ylim)
-                    ax_stretch.set_xticks(bar_xs)
-                    ax_stretch.set_ylabel(
-                        omega_symbols.get(omega_key, omega_key),
-                        fontsize=axis_font_size,
-                        fontweight="bold",
-                    )
-                    ax_stretch.yaxis.tick_right()
-                    ax_stretch.yaxis.set_label_position("right")
-                    ax_stretch.spines["top"].set_visible(False)
-                    ax_stretch.spines["left"].set_visible(False)
-                    ax_stretch.tick_params(axis="y", labelsize=labelsize)
-                    if i == n_stretch - 1:
-                        ax_stretch.set_xticklabels(
-                            raters_order,
-                            fontsize=facet_label_size,
-                            fontfamily=facet_font,
-                            rotation=90,
-                        )
-                    else:
-                        ax_stretch.tick_params(labelbottom=False)
-
-            if filename is not None:
-                fig.savefig(filename + f".{file_format}", dpi=dpi)
-
-            plt.show(block=False)
-            plt.pause(0.001)
-            plt.close(fig)
-
-    # Backwards-compatible aliases
-    def wright_map_global(self, **kw):
-        """Alias for wright_map(model='global'). See wright_map for full documentation."""
-        self.wright_map(model="global", **kw)
-
-    def wright_map_items(self, **kw):
-        """Alias for wright_map(model='items'). See wright_map for full documentation."""
-        self.wright_map(model="items", **kw)
-
-    def wright_map_thresholds(self, **kw):
-        """Alias for wright_map(model='thresholds'). See wright_map for full documentation."""
-        self.wright_map(model="thresholds", **kw)
-
-    def wright_map_matrix(self, **kw):
-        """Alias for wright_map(model='matrix'). See wright_map for full documentation."""
-        self.wright_map(model="matrix", **kw)
-
-    def wright_map_bivector(self, **kw):
-        """Alias for wright_map(model='bivector'). See wright_map for full documentation."""
-        self.wright_map(model="bivector", **kw)
-
-    def wright_map_centrality(self, **kw):
-        """Alias for wright_map(model='centrality'). See wright_map for full documentation."""
-        self.wright_map(model="centrality", **kw)
-
-    def wright_map_pseudo_halo(self, **kw):
-        """Alias for wright_map(model='pseudo_halo'). See wright_map for full documentation."""
-        self.wright_map(model="pseudo_halo", **kw)
-
-    def wright_map_bistretch(self, **kw):
-        """Alias for wright_map(model='bistretch'). See wright_map for full documentation."""
-        self.wright_map(model="bistretch", **kw)
+        return None

@@ -1,9 +1,12 @@
-from math import log
+from math import log, log10
 import warnings
 from scipy.stats import chi2, gaussian_kde, norm, t as t_dist
+from scipy.optimize import brentq
 
 import numpy as np
 import pandas as pd
+
+from raschpy import _rcl
 
 from sklearn.decomposition import PCA
 from matplotlib import pyplot as plt
@@ -13,7 +16,7 @@ from matplotlib.patches import Rectangle
 import seaborn as sns
 import matplotlib.patheffects as path_effects
 
-from raschpy.base import Rasch
+from raschpy.base import Rasch, _BootstrapWarnings, _save_table
 
 
 class RSM(Rasch):
@@ -110,8 +113,12 @@ class RSM(Rasch):
             Persons present in the exogenous data but not in responses.
         """
 
+        self.model = "RSM"
+
         # Sim-aware instantiation: store sim attributes in self.generating namespace
         from raschpy.simulation.rsm_sim import RSM_Sim
+        from raschpy.simulation.slm_sim import SLM_Sim
+        from raschpy.simulation.pcm_sim import PCM_Sim
         from raschpy.base import _SimParams
 
         if isinstance(responses, RSM_Sim):
@@ -127,6 +134,25 @@ class RSM(Rasch):
                 self.max_score = int(max_score)
             else:
                 self.max_score = int(sim.max_score)
+            responses = sim.responses
+        elif isinstance(responses, (SLM_Sim, PCM_Sim)):
+            # Cross-model construction -- lets recovery_stats() compare an
+            # RSM fit against another model class's generating data (e.g.
+            # for a person-recovery pseudo-estimate check, or an item/
+            # threshold nesting check when the pairing is genuinely
+            # comparable). RSM has no single max_score attribute on these
+            # sim classes to infer from, so it must be given explicitly.
+            sim = responses
+            self.generating = _SimParams()
+            for attr, value in vars(sim).items():
+                setattr(self.generating, attr, value)
+            if max_score is None:
+                raise ValueError(
+                    f"max_score must be given explicitly when constructing "
+                    f"RSM from a {type(sim).__name__} (RSM has no single "
+                    f"shared max_score to infer from one)."
+                )
+            self.max_score = int(max_score)
             responses = sim.responses
         else:
             self.max_score = (
@@ -208,38 +234,8 @@ class RSM(Rasch):
         if validate:
             self.connectivity_status = self.check_data_connectivity()
 
-            # THROW SYSTEM WARNING WITH MATHEMATICAL DETAILS IF DISCONNECTED
-            if not self.connectivity_status["connected"]:
-                warnings.warn(
-                    f"\n"
-                    f"⚠️  CRITICAL DATA INTEGRITY WARNING: The response data is disconnected into "
-                    f"{self.connectivity_status['components_count']} separate sub-networks.\n"
-                    f"Item location estimates will be problematic because there are no empirical "
-                    f"comparisons spanning across these isolated groups, the item parameter "
-                    f"estimates for each independent subset will separately sum to zero. This means items "
-                    f"belonging to different subsets cannot be compared or calibrated onto a single scale.",
-                    category=UserWarning,
-                    stacklevel=2,
-                )
-
-            # THROW SYSTEM WARNING FOR "FAKE CONNECTIVITY" — ITEMS THAT PASS THE
-            # STANDARD CHECK BUT WILL STILL BREAK CALIBRATE()'S DIRECTED MATRIX
-            directionally_isolated = self.connectivity_status.get(
-                "directionally_isolated_items", []
-            )
-            if directionally_isolated:
-                warnings.warn(
-                    f"\n"
-                    f"⚠️  DATA INTEGRITY WARNING: {len(directionally_isolated)} item(s) have a "
-                    f"structurally unresolvable zero in calibrate()'s directed pairwise matrix: "
-                    f"{directionally_isolated}.\n"
-                    f"These items pass the standard connectivity check (they have at least one "
-                    f"empirical comparison in some direction) but can silently produce NaN "
-                    f"or overflow during calibration rather than a clear error. Consider dropping "
-                    f"these items or gathering more responses before calibrating.",
-                    category=UserWarning,
-                    stacklevel=2,
-                )
+            # check_data_connectivity() itself warns about disconnection,
+            # structural zeros and weak connectivity (one warning per problem).
 
     # ------------------------------------------------------------------
     # Core probability / expected-score functions (scalar, used in plots)
@@ -409,7 +405,40 @@ class RSM(Rasch):
     # CPAT threshold estimation
     # ------------------------------------------------------------------
 
-    def _threshold_distance(self, threshold, item_locations, constant=0.1):
+    # Empty-category smoothing rules: lambda = a * w ** b, clipped to [lo, hi],
+    # where w is the estimated mean category width; fallback lambda when no
+    # width can be estimated (max_score=2).
+    _EMPTY_CATEGORY_RULES = {
+        "cpat-cml": (0.1767, -3.3579, 0.005, 3.0, 0.2),
+        "cpat-info-weighted": (0.0483, -4.0196, 0.001, 3.0, 0.07),
+    }
+    # The collapsed scale's mean width is about twice the true category width
+    # (each category next to the merged boundary absorbs half the empty one,
+    # and the merged step is twice as steep as the others).
+    _COLLAPSED_WIDTH_FACTOR = 0.5
+    _THRESHOLD_METHODS = ("cpat-cml", "cpat-info-weighted")
+
+    def _cpat_counts(self, threshold, responses=None):
+        """
+        CPAT comparison counts for the distance between thresholds k and k+1.
+
+        Returns num, den, each (I, I) with zero diagonals: num[i, j] counts
+        persons scoring k on both items i and j, den[i, j] persons scoring k-1
+        on item i and k+1 on item j. Same-item cells are not comparisons and
+        are excluded.
+        """
+        x = np.array(self.responses if responses is None else responses, dtype=np.float64)
+        at_k = (x == threshold).astype(np.float64)
+        at_km1 = (x == threshold - 1).astype(np.float64)
+        at_kp1 = (x == threshold + 1).astype(np.float64)
+        num = at_k.T @ at_k
+        den = at_km1.T @ at_kp1
+        np.fill_diagonal(num, 0.0)
+        np.fill_diagonal(den, 0.0)
+        return num, den
+
+    def _threshold_distance(self, threshold, item_locations, constant=0.03,
+                            threshold_method="cpat-cml"):
         """
         Estimate the distance between adjacent Rasch-Andrich thresholds (CPAT).
 
@@ -417,8 +446,12 @@ class RSM(Rasch):
           num[i,j]: persons scoring exactly k on both items i and j
           den[i,j]: persons scoring k-1 on item i and k+1 on item j
         Conditioning on these patterns removes person location, leaving a
-        contrast identifying the threshold location. Harmonic mean weighting
-        downweights near-zero counts. Vectorised via matrix multiplication.
+        contrast identifying the threshold distance. threshold_method selects
+        the estimator: 'cpat-cml' (conditional maximum likelihood) or
+        'cpat-info-weighted' (harmonic-mean information weighting, eq. 4.18).
+        This is the plain estimator for one distance; threshold_set() adds
+        the thin-data guard, empty-category smoothing and no-information
+        handling.
 
         Parameters
         ----------
@@ -426,8 +459,9 @@ class RSM(Rasch):
             1-based threshold index (1 to max_score-1).
         item_locations : pandas.Series
             Item location estimates indexed by item name.
-        constant : float, default 0.1
-            Additive smoothing constant for zero cells.
+        constant : float, default 0.03
+            Additive smoothing constant for observed item pairs.
+        threshold_method : {'cpat-cml', 'cpat-info-weighted'}, default 'cpat-cml'
 
         Returns
         -------
@@ -437,95 +471,307 @@ class RSM(Rasch):
         Raises
         ------
         ValueError
-            If no item pair has any adjacent-category co-occurrence for this
+            If no item pair has any of the comparison patterns for this
             threshold (no information anywhere in the data to estimate it).
-
-        Notes
-        -----
-        A cell (item pair) with no co-occurrence at all (num == den == 0)
-        carries no information and is dropped, as always. At ``constant=0``
-        a cell where only ONE side was observed (num == 0 xor den == 0) is
-        ALSO dropped — its log-ratio is undefined without smoothing, and
-        letting ``log(0) = -inf`` survive multiplication by its own
-        (correctly) zero weight would silently poison the whole weighted
-        average via ``0 * -inf = nan``. For ``constant > 0`` this changes
-        nothing: `num_s`/`den_s` are always > 0 wherever a pair is otherwise
-        valid.
         """
-        df_array = np.array(self.responses, dtype=np.float64)
+        num, den = self._cpat_counts(threshold)
+        est = item_locations.reindex(self.responses.columns).values.astype(float)
+        loc = est[:, None] - est[None, :]
+        if threshold_method == "cpat-info-weighted":
+            distance = self._cpat_info_distance(num, den, loc, constant)
+        else:
+            distance = self._cpat_cml_distance(num, den, loc, constant)
+        if not np.isfinite(distance):
+            raise ValueError(self._no_info_message(threshold))
+        return distance
 
-        # Build (N, I) indicator arrays for each relevant score value
-        at_k = (df_array == threshold).astype(np.float64)  # X == k
-        at_km1 = (df_array == threshold - 1).astype(np.float64)  # X == k-1
-        at_kp1 = (df_array == threshold + 1).astype(np.float64)  # X == k+1
+    def _no_info_message(self, threshold):
+        return (
+            f"CPAT threshold distance for threshold {threshold} could not be "
+            f"estimated: no pair of different items has any person scoring "
+            f"{threshold} on both, or {threshold - 1} on one and "
+            f"{threshold + 1} on the other, so the data contain no "
+            f"information on the distance between thresholds {threshold} and "
+            f"{threshold + 1}. The smoothing constant cannot supply it; a larger "
+            f"or better-targeted sample is needed."
+        )
 
-        # (I, I) count matrices via matrix multiplication
-        with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
-            num_matrix = at_k.T @ at_k  # count(X_i==k AND X_j==k)
-            den_matrix = at_km1.T @ at_kp1  # count(X_i==k-1 AND X_j==k+1)
+    def _threshold_total_weights(self, constant=0.1):
+        """
+        CPAT's own total_weight (the harmonic-mean information weight
+        _threshold_distance() sums over item pairs), for every threshold
+        1..max_score-1 -- the shared-vector analogue of PCM's
+        _pairwise_harmonic_weights(), used as the effective sample size for
+        dif_test's DCF dynamic SE cap (dcf_cap). Mirrors the information-
+        weighted estimator's own weight computation (not the distance itself),
+        so this is cheap relative to a full calibrate() and doesn't need item
+        locations.
 
-        valid = (num_matrix + den_matrix) > 0
-        num_s = np.where(valid, num_matrix + constant, 0.0)
-        den_s = np.where(valid, den_matrix + constant, 0.0)
-        finite = valid & (num_s > 0) & (den_s > 0)
+        Parameters
+        ----------
+        constant : float, default 0.1
+            Additive smoothing constant, matching threshold_constant from
+            calibrate()/std_errors() for internal consistency.
 
-        # Location contrast matrix: delta_i - delta_j  shape (I, I)
-        estimates = item_locations.values
-        item_location_matrix = estimates[:, None] - estimates[None, :]
-
-        with np.errstate(divide="ignore", invalid="ignore"):
-            safe_num = np.where(finite, num_s, 1.0)
-            safe_den = np.where(finite, den_s, 1.0)
-            log_ratio = np.log(safe_num) - np.log(safe_den)
-            # Harmonic mean weight: 2*a*b/(a+b), zero where not finite
+        Returns
+        -------
+        pandas.Series
+            total_weight per threshold, indexed 1..max_score-1 (matching
+            cat_width_se's own indexing convention).
+        """
+        weights = {}
+        for threshold in range(1, self.max_score):
+            num_matrix, den_matrix = self._cpat_counts(threshold)
+            valid = (num_matrix + den_matrix) > 0
+            num_s = np.where(valid, num_matrix + constant, 0.0)
+            den_s = np.where(valid, den_matrix + constant, 0.0)
+            finite = valid & (num_s > 0) & (den_s > 0)
             weight_matrix = np.where(finite, 2.0 * num_s * den_s / (num_s + den_s), 0.0)
+            weights[threshold] = weight_matrix.sum()
+        return pd.Series(weights)
 
-        total_weight = weight_matrix.sum()
-        if total_weight == 0:
-            raise ValueError(
-                f"CPAT threshold distance for threshold {threshold} could not be "
-                f"estimated: no pair of items has any adjacent-category "
-                f"co-occurrence at constant={constant}. Use a larger sample, "
-                f"a non-zero `constant`, or drop this threshold from the data."
+    def _collapsed_category_width(self, empty):
+        """
+        Mean category width from a quick fit with the empty middle categories
+        merged into the category above (scores above each empty category
+        shifted down by one). NaN if the collapsed scale has fewer than two
+        thresholds.
+        """
+        new_max = self.max_score - len(empty)
+        if new_max < 2:
+            return np.nan
+        collapsed = self.responses.copy()
+        for category in sorted(empty, reverse=True):
+            collapsed = collapsed.where(~(collapsed > category), collapsed - 1)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            probe = RSM(collapsed, max_score=new_max, validate=False)
+            probe.calibrate(
+                estimation="pair-cpat",
+                constant=getattr(self, "constant", 0.1),
+                threshold_constant=0.03,
+                threshold_method="cpat-cml",
             )
+        widths = np.abs(np.diff(probe.thresholds.values.astype(float)))
+        return float(np.mean(widths)) if len(widths) else np.nan
 
-        return (weight_matrix * (log_ratio + item_location_matrix)).sum() / total_weight
-
-    def threshold_set(self, item_locations, constant=0.1):
+    def threshold_set(self, item_locations, constant=0.03, threshold_method="cpat-cml",
+                      no_info="mean"):
         """
         Compute the Rasch-Andrich threshold vector from CPAT distances.
 
-        Chains the m-1 CPAT distances via cumulative sum and mean-centres the
-        result. Called by calibrate().
+        Estimates each distance between adjacent thresholds, chains them via
+        cumulative sum and mean-centres the result. Called by calibrate().
+
+        With threshold_method='cpat-cml', a distance whose comparison
+        patterns are observed fewer than CPAT_THIN_COUNT (20) times in total,
+        summed over ordered pairs of different items, is estimated with the
+        information-weighted estimator instead, which is more stable when
+        the counts are that thin.
+
+        If a middle score category has no responses, the three distances
+        touching it are not identified by the data. They are estimated with
+        a larger, targeted smoothing constant, lambda times the mean pair
+        total, with lambda set by the estimated width of the other
+        categories (narrower categories get more smoothing). This keeps the
+        rest of the scale intact; only the point where the category
+        response curves of the two categories either side of the empty one
+        intersect is identified, not the two thresholds around it
+        separately. A UserWarning describes the problem and the
+        options.
 
         Parameters
         ----------
         item_locations : pandas.Series
             Item locations from Stage 1 (PAIR), indexed by item name.
-        constant : float, default 0.1
-            Additive smoothing constant passed to _threshold_distance() for
-            every adjacent-threshold link.
+        constant : float, default 0.03
+            Additive smoothing constant for every adjacent-threshold link not
+            touching an empty category.
+        threshold_method : {'cpat-cml', 'cpat-info-weighted'}, default 'cpat-cml'
+            'cpat-cml': conditional maximum likelihood (recommended).
+            'cpat-info-weighted': the harmonic-mean information-weighted
+            estimator of Elliott & Buttery (2022, eq. 4.18), which compresses
+            the scale slightly in thin data.
+        no_info : {'mean', 'raise'}, default 'mean'
+            What to do if a distance has no information at all (no pair of
+            different items with either comparison pattern). 'mean' sets it
+            to the mean of the estimable distances (0 if none) and warns;
+            'raise' raises a ValueError.
 
         Returns
         -------
         numpy.ndarray
             Threshold vector of length max_score, centred at 0.
         """
-        thresh_distances = [
-            self._threshold_distance(threshold + 1, item_locations, constant)
-            for threshold in range(self.max_score - 1)
-        ]
+        if threshold_method not in self._THRESHOLD_METHODS:
+            raise ValueError(
+                f"threshold_method must be one of {self._THRESHOLD_METHODS}, "
+                f"got {threshold_method!r}."
+            )
+        if no_info not in ("mean", "raise"):
+            raise ValueError(f"no_info must be 'mean' or 'raise', got {no_info!r}.")
+        K = self.max_score
+        x = np.array(self.responses, dtype=np.float64)
+        est = item_locations.reindex(self.responses.columns).values.astype(float)
+        loc = est[:, None] - est[None, :]
+        counts = np.array([(x == j).sum() for j in range(K + 1)])
+        empty = [j for j in range(1, K) if counts[j] == 0]
 
-        # Chain distances: thresh[k] = sum of distances[0..k-1]
-        thresholds = np.array(
-            [sum(thresh_distances[:t]) for t in range(self.max_score)]
-        )
-        thresholds -= np.mean(thresholds)
+        links = []
+        for k in range(1, K):
+            num, den = self._cpat_counts(k, x)
+            total = num + den
+            links.append(dict(
+                num=num, den=den, observations=float(total.sum()),
+                mean_pair_total=float(total[total > 0].mean()) if (total > 0).any() else 1.0,
+                affected=bool(set(empty) & {k - 1, k, k + 1}),
+            ))
+
+        def plain(link, c):
+            if threshold_method == "cpat-cml" and link["observations"] >= self.CPAT_THIN_COUNT:
+                return self._cpat_cml_distance(link["num"], link["den"], loc, c)
+            return self._cpat_info_distance(link["num"], link["den"], loc, c)
+
+        lam = None
+        if empty:
+            # Category width from the distances not touching an empty
+            # category; failing that, from a fit with the empty ones merged.
+            first = [abs(plain(l, constant)) for l in links if not l["affected"]]
+            first = [w for w in first if np.isfinite(w)]
+            if first:
+                width = float(np.mean(first))
+            else:
+                width = self._COLLAPSED_WIDTH_FACTOR * self._collapsed_category_width(empty)
+            a, b, lo, hi, fallback = self._EMPTY_CATEGORY_RULES[threshold_method]
+            if np.isfinite(width) and width > 0:
+                lam = float(np.clip(a * width ** b, lo, hi))
+            else:
+                lam = fallback
+
+        distances, thin, no_information = [], [], []
+        for k, link in enumerate(links, start=1):
+            if link["affected"]:
+                c = lam * link["mean_pair_total"]
+                if threshold_method == "cpat-cml":
+                    d = self._cpat_cml_distance(link["num"], link["den"], loc, c)
+                else:
+                    d = self._cpat_info_distance(link["num"], link["den"], loc, c)
+            else:
+                d = plain(link, constant)
+                if 0 < link["observations"] < self.CPAT_THIN_COUNT:
+                    thin.append(k)
+            if not np.isfinite(d):
+                if no_info == "raise":
+                    raise ValueError(self._no_info_message(k))
+                no_information.append(k)
+            distances.append(d)
+
+        distances = np.array(distances, dtype=float)
+        if no_information:
+            ok = np.isfinite(distances)
+            distances[~ok] = distances[ok].mean() if ok.any() else 0.0
+            self._warn_no_information(no_information)
+        if thin:
+            self._warn_thin_distances(
+                thin,
+                " {these} estimated with the information-weighted estimator, which is more stable "
+                "than 'cpat-cml' on so few observations." if threshold_method == "cpat-cml" else "",
+            )
+        if empty:
+            self._warn_empty_categories(empty)
+
+        thresholds = np.concatenate([[0.0], np.cumsum(distances)])
+        thresholds -= thresholds.mean()
         return thresholds
+
+    def _warn_no_information(self, no_information):
+        """Warn that the distances in no_information (k: between thresholds k
+        and k+1) have no comparison patterns and were set to a placeholder."""
+        pairs = ", ".join(f"{k} and {k + 1}" for k in no_information)
+        many = len(no_information) > 1
+        warnings.warn(
+            f"The data contain no information on the distance{'s' if many else ''} "
+            f"between thresholds {pairs}: no pair of different items has any person "
+            f"scoring k on both, or k-1 on one and k+1 on the other. The "
+            f"distance{'s have' if many else ' has'} been set to the mean of the "
+            f"other distances (0 if there are none), as a placeholder; the thresholds "
+            f"involved are not estimated by the data. Options: collapse "
+            f"sparsely used categories, or collect a larger or better-"
+            f"targeted sample. Pass no_info='raise' to stop instead.",
+            UserWarning,
+            stacklevel=4,
+        )
+
+    def _warn_thin_distances(self, thin, note=""):
+        """Warn that the distances in thin are poorly informed. note may
+        contain '{these}', filled with 'These distances were'/'This distance
+        was'."""
+        pairs = ", ".join(f"{k} and {k + 1}" for k in thin)
+        many = len(thin) > 1
+        note = note.format(these="These distances were" if many else "This distance was")
+        warnings.warn(
+            f"The distance{'s' if many else ''} between thresholds {pairs} "
+            f"{'are' if many else 'is'} poorly informed: "
+            f"{'their' if many else 'its'} comparison patterns (k on two different items, or k-1 on "
+            f"one and k+1 on another) are observed fewer than "
+            f"{self.CPAT_THIN_COUNT} times in total.{note} Treat these "
+            f"thresholds with caution. Options: collapse sparsely used "
+            f"categories, or collect a larger or better-targeted sample.",
+            UserWarning,
+            stacklevel=4,
+        )
+
+    def _warn_empty_categories(self, empty):
+        cats = ", ".join(str(j) for j in empty)
+        plural = len(empty) > 1
+        if self.max_score == 2:
+            advice = (
+                "With max_score=2, every observed response is 0 or 2, so the "
+                "items are effectively dichotomous, scored 0/2; collapsing the "
+                "category would leave nothing to estimate. Consider whether "
+                "category 1 is a genuine response option. If not, the items "
+                "can be analysed as dichotomous (SLM) after recoding 2 to 1, "
+                "which changes the unit of the scale."
+            )
+        else:
+            advice = (
+                "If the categor" + ("ies were" if plural else "y was") + " never a "
+                "genuine response option, or the scores may be miscoded, "
+                "collapse or rescore (shift the scores above it down by one "
+                "and reduce max_score). Otherwise the estimates stand, and a "
+                "larger or better-targeted sample may observe the "
+                "categor" + ("ies." if plural else "y.")
+            )
+        warnings.warn(
+            f"Score categor{'ies' if plural else 'y'} {cats} {'have' if plural else 'has'} "
+            f"no responses. Under the rating scale model an empty category "
+            f"implies that the two thresholds around it are disordered, and "
+            f"the data identify only the point where the category response "
+            f"curves of the categories either side of it intersect, not the two "
+            f"thresholds separately. The distances "
+            f"touching the empty categor{'ies' if plural else 'y'} have been "
+            f"estimated with extra smoothing targeted at them, which keeps the "
+            f"rest of the scale intact; treat the individual thresholds around "
+            f"{'each' if plural else 'the'} empty category as placeholders. "
+            f"{advice}",
+            UserWarning,
+            stacklevel=3,
+        )
 
     # ------------------------------------------------------------------
     # Calibration
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _default_constant(no_of_persons, no_of_items, max_score):
+        """
+        Data-adaptive default item-stage smoothing constant for
+        calibrate(constant=None): SLM's rule with N replaced by N * max_score,
+        min(1.0, 0.548 * I ** (-0.2 * log10(N * K))), since RSM's pairwise
+        counts pool the max_score adjacent-category comparisons. Chosen by
+        simulation on person-measurement error and validated out of sample.
+        """
+        return min(1.0, 0.548 * no_of_items ** (-0.2 * log10(max(no_of_persons * max_score, 1))))
 
     def _build_pairwise_matrix(self):
         """
@@ -548,27 +794,61 @@ class RSM(Rasch):
         return matrix, np.array(self.item_names)
 
     def calibrate(
-        self, constant=None, threshold_constant=None, method="log-lik",
-        matrix_power=None, log_lik_tol=0.000001):
+        self, constant=None, threshold_constant=None, method=None,
+        matrix_power=None, log_lik_tol=None, threshold_method=None,
+        no_info="mean", estimation=None):
         """
-        Two-stage RSM calibration: PAIR item locations + CPAT thresholds.
+        Calibrate item locations and the shared Rasch-Andrich thresholds.
 
-        Stage 1: Builds a pairwise contingency matrix (entry (i,j) = count of
-        persons scoring one point higher on item i than j), resolves structural
-        zeroes via matrix powers, and extracts item locations with
-        priority_vector().
+        estimation='cp-full-rcl' (default): regularised composite likelihood on all
+        response-pattern pairs. For two items, every pair of response
+        patterns (a, b) and (a-1, b+1) with the same total is a
+        binomial comparison whose log-odds depend only on the two items'
+        locations and two thresholds (the person cancels). All of them are
+        fitted jointly, as one composite likelihood, by Newton-Raphson.
+        Additive smoothing constants go on the item comparisons and on
+        CPAT's threshold patterns only; the other patterns are left
+        unsmoothed (pulling them towards even odds would compress the
+        thresholds). These other patterns are most informative for item
+        pairs far apart in difficulty, where CPAT's adjacent patterns are
+        lopsided.
 
-        Stage 2: Given item locations, estimates adjacent-threshold distances
-        via CPAT (_threshold_distance()), chains them, and centres the result.
+        estimation='cpat-rcl': the same composite likelihood restricted to
+        CPAT's patterns: odd totals give the item comparisons (persons
+        scoring one point higher on one item than another), even totals the
+        threshold patterns ((k, k) against (k-1, k+1) on two items).
+
+        Both RCL methods use additive smoothing constants on the pattern
+        counts as above. A category width
+        with fewer than 20 threshold patterns, or with all its patterns on
+        one side, is pulled toward the mean of the other widths by a ridge
+        of 0.5 * (1 - T/20) (0.5 if one-sided), T its pattern count. The
+        widths next to an empty middle category are not identified by
+        their own patterns: they are left out of the joint fit and
+        estimated by the cpat-cml rule of threshold_set(), given the item
+        locations from the joint fit.
+
+        estimation='pair-cpat': the two-stage method used before v1.4.0
+        (Elliott & Buttery, 2022). Stage 1 builds a pairwise contingency
+        matrix (entry (i,j) = count of persons scoring one point higher on
+        item i than j), resolves structural zeroes via matrix powers, and
+        extracts item locations with priority_vector(). Stage 2, given the
+        item locations, estimates adjacent-threshold distances via CPAT
+        (threshold_set()), chains them, and centres the result.
 
         Issues a UserWarning if only one item is present or if the resolved
-        Stage 1 constant is 0 and any item has all-maximum scores.
+        item constant is 0 and any item has all-maximum scores.
 
         Parameters
         ----------
         constant : float or None, default None
-            Additive smoothing constant for the Stage 1 (item pairwise) matrix.
-            ``None`` resolves to 0.1. If ``threshold_constant`` is left ``None``
+            Additive smoothing constant for the item comparisons, per item
+            pair (with estimation='cp-full-rcl' (or 'cpat-rcl'), spread over the K boundaries:
+            constant / K on each observed (item pair, boundary) cell).
+            ``None`` resolves to the data-adaptive
+            ``min(1, 0.548 * I ** (-0.2 * log10(N * K)))``, with N the number
+            of persons with at least one response, I the number of items and
+            K = max_score. If ``threshold_constant`` is left ``None``
             it also sets the Stage 2 (CPAT threshold) constant: to 0.03 when
             ``constant`` is ``None``, or to the same explicit value otherwise.
             Use 0 to disable Stage 1 smoothing (item estimation then fails if
@@ -588,16 +868,42 @@ class RSM(Rasch):
             slope-bias optimum at or below 0.03 in the edge and disordered
             regimes, with the well-conditioned curve flat to within ~1% across
             [0.03, 0.15].
-        method : str, default 'log-lik'
-            Priority vector extraction method.
+        method : str or None, default None
+            estimation='pair-cpat' only: priority vector extraction method.
+            None resolves to 'log-lik'.
         matrix_power : int or None, default None
-            Initial matrix power before checking for structural zeroes.
-            None resolves to 0 for method='log-lik' (no powering), else 5.
-        log_lik_tol : float, default 0.000001
-            Log-likelihood convergence tolerance for priority vector extraction.
+            estimation='pair-cpat' only: initial matrix power before checking
+            for structural zeroes. None resolves to 0 for method='log-lik'
+            (no powering), else 5.
+        log_lik_tol : float or None, default None
+            estimation='pair-cpat' only: log-likelihood convergence tolerance
+            for priority vector extraction. None resolves to 0.000001.
+        threshold_method : {'cpat-cml', 'cpat-info-weighted'} or None, default None
+            estimation='pair-cpat' only: estimator for the Stage 2 threshold
+            distances. None resolves to
+            'cpat-cml', conditional maximum likelihood, which does not
+            compress the scale; distances observed fewer than 20 times fall
+            back to the information-weighted estimator. 'cpat-info-weighted'
+            is the harmonic-mean information-weighted estimator of Elliott &
+            Buttery (2022, eq. 4.18), used before v1.4.0, which compresses
+            the scale slightly in thin data. See threshold_set().
+        no_info : {'mean', 'raise'}, default 'mean'
+            Handling of a threshold distance with no information at all; see
+            threshold_set().
+        estimation : {'cp-full-rcl', 'cpat-rcl', 'pair-cpat'} or None, default None
+            Estimation method; see above. None resolves to the method of the
+            object's last calibration, or 'cp-full-rcl' for the first one.
+            method, matrix_power, log_lik_tol and threshold_method apply to
+            'pair-cpat' only; other values passed with 'cp-full-rcl' or 'cpat-rcl'
+            are ignored, with a UserWarning.
 
         Attributes set
         --------------
+        estimation : str
+            The estimation method used.
+        convergence : dict or None
+            estimation='cp-full-rcl' or 'cpat-rcl': Newton-Raphson iterations and
+            whether the fit converged. None for 'pair-cpat'.
         items : pandas.Series
             Item location estimates, zero-centred.
         thresholds : pandas.Series
@@ -620,12 +926,18 @@ class RSM(Rasch):
             )
 
         # Resolve the two-stage smoothing constants:
-        #   constant=None                     -> item 0.1
+        #   constant=None                     -> item: data-adaptive (_default_constant)
         #   constant=c                        -> item c
         #   threshold_constant=None           -> threshold follows `constant`
         #                                        (0.03 if constant is None, else c)
         #   threshold_constant=t              -> threshold t (independent)
-        item_constant = 0.1 if constant is None else float(constant)
+        if constant is None:
+            no_of_persons = int(self.responses.notna().any(axis=1).sum())
+            item_constant = self._default_constant(
+                no_of_persons, self.responses.shape[1], self.max_score
+            )
+        else:
+            item_constant = float(constant)
         if threshold_constant is not None:
             thresh_constant = float(threshold_constant)
         elif constant is None:
@@ -634,6 +946,43 @@ class RSM(Rasch):
             thresh_constant = float(constant)
         self.constant = item_constant
         self.threshold_constant = thresh_constant
+        if estimation is None:
+            estimation = getattr(self, "estimation", "cp-full-rcl")
+        if estimation not in ("cp-full-rcl", "cpat-rcl", "pair-cpat"):
+            raise ValueError(
+                f"estimation must be 'cp-full-rcl', 'cpat-rcl', 'pair-cpat' or None, got {estimation!r}."
+            )
+        self.estimation = estimation
+        if estimation in ("cp-full-rcl", "cpat-rcl"):
+            ignored = [
+                f"{name}={value!r}" for name, value, default in (
+                    ("method", method, "log-lik"), ("matrix_power", matrix_power, None),
+                    ("log_lik_tol", log_lik_tol, 0.000001), ("threshold_method", threshold_method, "cpat-cml"),
+                ) if value is not None and value != default
+            ]
+            if ignored:
+                warnings.warn(
+                    f"{', '.join(ignored)} {'applies' if len(ignored) == 1 else 'apply'} to "
+                    f"estimation='pair-cpat' only and {'is' if len(ignored) == 1 else 'are'} "
+                    f"ignored with estimation='{estimation}'.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            self._calibrate_rcl(item_constant, thresh_constant, no_info, full=estimation == "cp-full-rcl")
+            return
+        self.convergence = None
+        if method is None:
+            method = "log-lik"
+        if log_lik_tol is None:
+            log_lik_tol = 0.000001
+        if threshold_method is None:
+            threshold_method = "cpat-cml"
+        if threshold_method not in self._THRESHOLD_METHODS:
+            raise ValueError(
+                f"threshold_method must be one of {self._THRESHOLD_METHODS} or None, "
+                f"got {threshold_method!r}."
+            )
+        self.threshold_method = threshold_method
 
         if item_constant == 0:
             # Unsmoothed PAIR: re-run the structural connectivity check on the
@@ -645,8 +994,9 @@ class RSM(Rasch):
             # graph and still returns an answer for the rest of the items).
             self.check_data_connectivity()
 
-        self.null_persons = self.responses.index[self.responses.isnull().all(1)]
-        self.responses = self.responses.drop(self.null_persons)
+        self.null_persons = self.responses.index[self.responses.isnull().all(axis=1)]
+        if len(self.null_persons):  # drop() copies the whole table even when there is nothing to drop
+            self.responses = self.responses.drop(self.null_persons)
         self.no_of_persons = self.responses.shape[0]
 
         matrix, _ = self._build_pairwise_matrix()
@@ -681,9 +1031,67 @@ class RSM(Rasch):
 
         # Stage 2: CPAT threshold estimation
         self.thresholds = pd.Series(
-            self.threshold_set(self.items, constant=thresh_constant),
+            self.threshold_set(
+                self.items, constant=thresh_constant,
+                threshold_method=threshold_method, no_info=no_info,
+            ),
             index=range(1, self.max_score + 1),
         )
+
+    def _calibrate_rcl(self, item_constant, thresh_constant, no_info="mean", full=True):
+        """RCL calibration (see calibrate()): items and category widths fitted jointly, on the full pattern set
+        (estimation='cp-full-rcl') or CPAT's patterns ('cpat-rcl')."""
+        self.threshold_method = None
+        if item_constant == 0:
+            self.check_data_connectivity()
+        self.null_persons = self.responses.index[self.responses.isnull().all(axis=1)]
+        if len(self.null_persons):  # drop() copies the whole table even when there is nothing to drop
+            self.responses = self.responses.drop(self.null_persons)
+        self.no_of_persons = self.responses.shape[0]
+        K, I = self.max_score, self.no_of_items
+        X = np.array(self.responses, dtype=np.float64)[None]
+        counts = _rcl.pattern_counts(X, K)
+        cat_counts = _rcl.category_counts(X, K)
+        split = _rcl.empty_widths(cat_counts, K)
+        rho = _rcl.width_ridges(counts[1], counts[2], K, exclude=split)
+        x = X[0]
+        observations = {k: float(sum(a.sum() for a in self._cpat_counts(k, x))) for k in range(1, K)}
+        no_information = [k for k in range(1, K) if observations[k] == 0 and k - 1 not in split]
+        thin = [k for k in range(1, K) if 0 < observations[k] < self.CPAT_THIN_COUNT and k - 1 not in split]
+        if no_information and no_info == "raise":
+            raise ValueError(self._no_info_message(no_information[0]))
+        cm, theta, info = _rcl.fit_cell(
+            "global", counts, 1, I, K, item_constant / K, thresh_constant, 0.0,
+            width_rho=rho, fixed_widths={k: 0.0 for k in split},
+            full=dict(X=X, empty=_rcl.empty_categories(cat_counts)) if full else None,
+        )
+        if no_information:
+            self._warn_no_information(no_information)
+        if thin:
+            self._warn_thin_distances(
+                thin,
+                " {these} pulled toward the mean of the other distances, more strongly the "
+                "fewer the observations." if K > 2 else "",
+            )
+        parts = cm.parts(theta)
+        self.items = pd.Series(parts["delta"], index=self.responses.columns)
+        widths = np.diff(parts["tau"])
+        if split:
+            shipped = self.threshold_set(
+                self.items, constant=thresh_constant, threshold_method="cpat-cml", no_info=no_info
+            )
+            widths[split] = np.diff(np.asarray(shipped, dtype=float))[split]
+        tau = np.concatenate([[0.0], np.cumsum(widths)])
+        self.thresholds = pd.Series(tau - tau.mean(), index=range(1, K + 1))
+        self._rcl_fit = (cm, theta, info)
+        self.convergence = dict(iterations=info["iterations"], converged=info["converged"])
+        if not info["converged"]:
+            warnings.warn(
+                f"RCL-CPAT calibration did not converge in {info['iterations']} "
+                f"Newton-Raphson iterations; the estimates may be unreliable.",
+                UserWarning,
+                stacklevel=3,
+            )
 
     # ------------------------------------------------------------------
     # Anchor calibration
@@ -716,6 +1124,8 @@ class RSM(Rasch):
         matrix_power=None,
         log_lik_tol=0.000001,
         seed=None,
+        estimation=None,
+        threshold_method=None,
     ):
         """
         Anchor item location estimates onto externally-supplied values.
@@ -891,6 +1301,9 @@ class RSM(Rasch):
         constant, method, matrix_power, log_lik_tol : floats
             Calibration kwargs, used only if calibrate is triggered, or if
             cat_width_se needs to be computed for the per-category test.
+        estimation, threshold_method : str or None, default None
+            As for calibrate(), used only if calibrate is triggered. None
+            resolves as in calibrate().
 
         Attributes set
         --------------
@@ -954,137 +1367,20 @@ class RSM(Rasch):
                 method=method,
                 matrix_power=matrix_power,
                 log_lik_tol=log_lik_tol,
+                estimation=estimation,
+                threshold_method=threshold_method,
             )
 
-        n_common = len(anchors.index.intersection(self.items.index))
-
-        if adj is not None:
-            tc = adj
-            self.anchor_selection = None
-            self.anchor_selected_items = None
-            self.anchor_dropped_items = None
-            self.anchor_original_corr = None
-            self.anchor_original_sd_ratio = None
-            self.anchor_corr = None
-            self.anchor_sd_ratio = None
-        elif selection_method == "wald":
-            if not hasattr(self, "item_se"):
-                self.std_errors(
-                    no_of_samples=no_of_samples,
-                    constant=constant,
-                    threshold_constant=threshold_constant,
-                    method=method,
-                    matrix_power=matrix_power,
-                    log_lik_tol=log_lik_tol,
-                    seed=seed,
-                )
-            result = self._wald_anchor_selection(
-                anchors,
-                self.items,
-                self.item_se,
-                alpha=wald_alpha,
-                min_anchors=min_anchors,
-            )
-            tc = result["tc"]
-            self.anchor_selection = result["table"]
-            self.anchor_selected_items = result["selected_anchors"]
-            self.anchor_dropped_items = result["dropped_anchors"]
-            self.anchor_original_corr = result["original_anchor_corr"]
-            self.anchor_original_sd_ratio = result["original_anchor_sd_ratio"]
-            self.anchor_corr = result["anchor_corr"]
-            self.anchor_sd_ratio = result["anchor_sd_ratio"]
-        elif selection_method == "robust_z":
-            result = self._robust_anchor_selection(
-                anchors,
-                self.items,
-                corr_tol=corr_tol,
-                sd_ratio_tol=sd_ratio_tol,
-                min_anchors=min_anchors,
-            )
-            tc = result["tc"]
-            self.anchor_selection = result["table"]
-            self.anchor_selected_items = result["selected_anchors"]
-            self.anchor_dropped_items = result["dropped_anchors"]
-            self.anchor_original_corr = result["original_anchor_corr"]
-            self.anchor_original_sd_ratio = result["original_anchor_sd_ratio"]
-            self.anchor_corr = result["anchor_corr"]
-            self.anchor_sd_ratio = result["anchor_sd_ratio"]
-        else:
-            common = anchors.index.intersection(self.items.index)
-            if len(common) == 0:
-                raise ValueError(
-                    "No items are common to both anchors and this dataset's "
-                    "items — cannot compute a translation constant."
-                )
-            tc = anchors.loc[common].mean() - self.items.loc[common].mean()
-            self.anchor_selection = None
-            self.anchor_selected_items = None
-            self.anchor_dropped_items = None
-            self.anchor_original_corr = None
-            self.anchor_original_sd_ratio = None
-            self.anchor_corr = None
-            self.anchor_sd_ratio = None
-
-        self.anchor_adj = tc
-        self.anchor_item_names = anchors.index
-        self.anchor_items = self.items + tc
-
-        common_anchor_items = anchors.index.intersection(self.items.index)
-
-        if overwrite_anchors == "all":
-            keep_given = pd.Index([])
-        elif overwrite_anchors == "rejected":
-            if self.anchor_selected_items is not None:
-                keep_given = common_anchor_items.intersection(
-                    self.anchor_selected_items
-                )
-            else:
-                warnings.warn(
-                    "overwrite_anchors='rejected' has no selected/rejected "
-                    "distinction to act on here (selection_method='none' or "
-                    "adj was supplied directly). Falling back to keeping all "
-                    "anchor items at their supplied value, as with "
-                    "overwrite_anchors='none'.",
-                    UserWarning,
-                    stacklevel=2,
-                )
-                keep_given = common_anchor_items
-        else:
-            keep_given = common_anchor_items
-
-        self.anchor_items.loc[keep_given] = anchors.loc[keep_given]
-
-        n_selected = (
-            len(self.anchor_selected_items)
-            if self.anchor_selected_items is not None
-            else n_common
+        self._calibrate_anchor_core(
+            anchors, selection_method, corr_tol, sd_ratio_tol, min_anchors,
+            wald_alpha, no_of_samples, adj, overwrite_anchors, plot, plot_kwargs,
+            seed,
+            std_errors_kwargs=dict(
+                constant=constant, threshold_constant=threshold_constant,
+                method=method, matrix_power=matrix_power,
+                log_lik_tol=log_lik_tol,
+            ),
         )
-        n_dropped = (
-            len(self.anchor_dropped_items)
-            if self.anchor_dropped_items is not None
-            else 0
-        )
-        self.anchor_summary = pd.Series(
-            {
-                "Anchors supplied": len(anchors),
-                "Anchors common": n_common,
-                "Anchors selected": n_selected,
-                "Anchors dropped": n_dropped,
-                "Original corr": self.anchor_original_corr,
-                "Original SD ratio": self.anchor_original_sd_ratio,
-                "Final corr": self.anchor_corr,
-                "Final SD ratio": self.anchor_sd_ratio,
-                "Translation constant": tc,
-            },
-            name="Anchor calibration",
-        )
-
-        if plot and self.anchor_selection is not None:
-            self.anchor_plot = self.plot_anchor_selection(
-                self.anchor_selection, **(plot_kwargs or {})
-            )
-        else:
-            self.anchor_plot = None
 
         if anchor_thresholds is not None:
             if not isinstance(anchor_thresholds, pd.Series):
@@ -1199,28 +1495,12 @@ class RSM(Rasch):
             self.anchor_threshold_test = None
             self.anchor_category_width_test = None
 
-        # Snapshot this run keyed by the anchors supplied, so results from an
-        # earlier calibrate_anchor() call survive a later call with a
-        # different anchor set instead of being overwritten in place.
-        from types import SimpleNamespace
-        if not hasattr(self, "calibrate_anchor_runs"):
-            self.calibrate_anchor_runs = {}
-        key = tuple(sorted(anchors.items()))
-        self.calibrate_anchor_runs[key] = SimpleNamespace(
-            anchor_items=self.anchor_items,
-            anchor_item_names=self.anchor_item_names,
-            anchor_adj=self.anchor_adj,
-            anchor_selection=self.anchor_selection,
-            anchor_selected_items=self.anchor_selected_items,
-            anchor_dropped_items=self.anchor_dropped_items,
-            anchor_original_corr=self.anchor_original_corr,
-            anchor_original_sd_ratio=self.anchor_original_sd_ratio,
-            anchor_corr=self.anchor_corr,
-            anchor_sd_ratio=self.anchor_sd_ratio,
-            anchor_summary=self.anchor_summary,
-            anchor_plot=self.anchor_plot,
-            anchor_threshold_test=self.anchor_threshold_test,
-            anchor_category_width_test=self.anchor_category_width_test,
+        self._snapshot_calibrate_anchor_run(
+            anchors,
+            extra=dict(
+                anchor_threshold_test=self.anchor_threshold_test,
+                anchor_category_width_test=self.anchor_category_width_test,
+            ),
         )
 
     def _threshold_structure_ll(
@@ -1256,6 +1536,200 @@ class RSM(Rasch):
     # Standard errors (bootstrap)
     # ------------------------------------------------------------------
 
+    def _sandwich_obstacle(self):
+        """None if sandwich standard errors apply; otherwise a description of
+        what the threshold estimates rely on that the sandwich does not
+        model (an unused category, a thin or uninformative category width,
+        or the information-weighted estimator). With estimation='cp-full-rcl' (or 'cpat-rcl')
+        thin widths are part of the penalised composite likelihood, so only
+        an unused category is an obstacle."""
+        if getattr(self, "estimation", "pair-cpat") in ("cp-full-rcl", "cpat-rcl"):
+            x = np.array(self.responses, dtype=np.float64)
+            unused = [c for c in range(self.max_score + 1) if (x == c).sum() == 0]
+            if unused:
+                return ("; ".join(f"category {c} has 0 responses across all items" for c in unused))
+            if not self.convergence["converged"]:
+                return "the calibration did not converge, and the sandwich assumes it did"
+            cm, theta, info = self._rcl_fit
+            try:
+                undetermined = _rcl.cell_null(cm, theta, info).shape[1]
+            except _rcl.SandwichTooLarge as ex:
+                return (f"the design is too large to form the analytic standard errors' "
+                        f"information matrix ({ex})")
+            if undetermined:
+                _rcl.release_state(info)
+                return (
+                    "the data do not identify some of the estimates (for example the locations "
+                    "of items not linked to the others), whose bootstrap standard errors reflect "
+                    "the smoothing rather than the data"
+                )
+            return None
+        if getattr(self, "threshold_method", "cpat-cml") != "cpat-cml":
+            return "threshold_method='cpat-info-weighted' was used"
+        x = np.array(self.responses, dtype=np.float64)
+        unused = [c for c in range(self.max_score + 1) if (x == c).sum() == 0]
+        if unused:
+            return ("; ".join(f"category {c} has 0 responses across all items" for c in unused))
+        thin = []
+        for k in range(1, self.max_score):
+            num, den = self._cpat_counts(k, x)
+            total = int((num + den).sum())
+            if total < self.CPAT_THIN_COUNT:
+                thin.append(
+                    f"the distance between thresholds {k} and {k + 1} has {total} comparison "
+                    f"observations (responses of {k} on two different items, or {k - 1} on "
+                    f"one and {k + 1} on another; fewer than {self.CPAT_THIN_COUNT})"
+                )
+        if thin:
+            return "; ".join(thin)
+        return None
+
+    def _sandwich_covariance(self, full=False, small_sample=False):
+        """
+        Sandwich covariance of (item locations, category widths) for the
+        stacked estimating equations: Bradley-Terry scores of the PAIR item
+        stage (adjacent-category wins, persons as units) and cpat-cml scores
+        of each category width, with the item differences as offsets. The
+        bread is block lower-triangular (widths depend on items, not the
+        reverse); the item block has the usual one-dimensional null space
+        (location origin), handled with a pseudo-inverse.
+        Returns (V_items, V_widths), I x I and (K-1) x (K-1); with full=True,
+        the whole (I + K - 1) square covariance of (item locations, widths).
+        small_sample=True applies the Kauermann-Carroll correction to the
+        stacked scores (see _kc_scores()).
+
+        With estimation='cp-full-rcl' (or 'cpat-rcl'), the bread is the negative Hessian of the
+        penalised composite log-likelihood at the estimates and the meat the
+        sum over persons of their score outer products (see _rcl).
+        """
+        if getattr(self, "estimation", "pair-cpat") in ("cp-full-rcl", "cpat-rcl"):
+            return self._rcl_sandwich_covariance(full=full, small_sample=small_sample)
+        K = self.max_score
+        X = np.array(self.responses, dtype=np.float64)
+        N, I = X.shape
+        E = [np.nan_to_num((X == c).astype(float)) for c in range(K + 1)]
+        b = -self.items.reindex(self.responses.columns).values.astype(float)
+        D = np.diff(self.thresholds.values.astype(float))
+        off = 1.0 - np.eye(I)
+        with np.errstate(over="ignore"):
+            pi = 1.0 / (1.0 + np.exp(-(b[:, None] - b[None, :])))
+        P1 = pi * off
+        psi = np.zeros((N, I))
+        wins = np.zeros((I, I))
+        for c in range(K):
+            hi, lo = E[c + 1], E[c]
+            psi += hi * (lo @ off.T) - (hi * (lo @ P1.T) + lo * (hi @ P1.T))
+            wins += hi.T @ lo
+        w = (wins + wins.T) * off * pi * (1 - pi)
+        L = np.diag(w.sum(axis=1)) - w
+        s = np.zeros((N, K - 1))
+        H = np.zeros(K - 1)
+        cross = np.zeros((K - 1, I))
+        for k in range(1, K):
+            with np.errstate(over="ignore"):
+                p = off / (1.0 + np.exp(-(D[k - 1] + (b[:, None] - b[None, :]))))
+            ek, ekm, ekp = E[k], E[k - 1], E[k + 1]
+            s[:, k - 1] = (ek.sum(axis=1) ** 2 - (ek ** 2).sum(axis=1)
+                           - ((ek @ p) * ek).sum(axis=1) - ((ekm @ p) * ekp).sum(axis=1))
+            v = (ek.T @ ek + ekm.T @ ekp) * off * p * (1 - p)
+            H[k - 1] = v.sum()
+            cross[k - 1] = v.sum(axis=1) - v.sum(axis=0)
+        U = np.hstack([psi, s])
+        Lp = self._origin_pinv(L)
+        A = np.zeros((I + K - 1, I + K - 1))
+        A[:I, :I] = Lp
+        A[I:, I:] = np.diag(1.0 / H)
+        A[I:, :I] = -np.diag(1.0 / H) @ cross @ Lp
+        if small_sample:
+            v_items = off * pi * (1 - pi)
+            v_widths = []
+            for k in range(1, K):
+                with np.errstate(over="ignore"):
+                    p = off / (1.0 + np.exp(-(D[k - 1] + (b[:, None] - b[None, :]))))
+                v_widths.append(off * p * (1 - p))
+
+            def person_bread(sl):
+                # rows/columns: item strengths, then widths; the bread is
+                # block lower-triangular, as above
+                n = sl.stop - sl.start
+                Bn = np.zeros((n, I + K - 1, I + K - 1))
+                Bn[:, :I, :I] = self._bt_person_curvature(
+                    [(E[c + 1][sl], E[c][sl]) for c in range(K)], v_items)
+                for k in range(1, K):
+                    ek, ekm, ekp = E[k][sl], E[k - 1][sl], E[k + 1][sl]
+                    vn = (ek[:, :, None] * ek[:, None, :]
+                          + ekm[:, :, None] * ekp[:, None, :]) * v_widths[k - 1][None]
+                    Bn[:, I + k - 1, I + k - 1] = vn.sum(axis=(1, 2))
+                    Bn[:, I + k - 1, :I] = vn.sum(axis=2) - vn.sum(axis=1)
+                return Bn
+
+            U = self._kc_scores(U, person_bread, A)
+        V = A @ (U.T @ U) @ A.T
+        if full:
+            # computed in Bradley-Terry strengths b = -delta: flip the item
+            # block's sign so the item-width cross-covariance refers to item
+            # locations (the diagonal blocks are unaffected)
+            sgn = np.concatenate([-np.ones(I), np.ones(K - 1)])
+            return V * np.outer(sgn, sgn)
+        return V[:I, :I], V[I:, I:]
+
+    def _rcl_sandwich_covariance(self, full=False, small_sample=False):
+        """RCL-CPAT counterpart of _sandwich_covariance() (same return values)."""
+        cm, theta, info = self._rcl_fit
+        K, I = self.max_score, self.no_of_items
+        X = np.array(self.responses, dtype=np.float64)[None]
+        V, free, null = _rcl.cell_sandwich(cm, theta, info, X, K, small_sample=small_sample,
+                                           kc_scores=self._kc_scores)
+        _rcl.release_state(info)
+        Vfull = np.full((cm.p, cm.p), np.nan)
+        Vfull[np.ix_(free, free)] = V
+        sd, st = cm.slices["delta"], cm.slices["tau"]
+        Mmap = np.zeros((I + K - 1, cm.p))
+        Mmap[:I, sd] = cm._NI
+        Mmap[I:, st] = np.eye(K - 1)
+        Vout = Mmap @ np.nan_to_num(Vfull) @ Mmap.T
+        if null.shape[1]:
+            # directions the data do not identify: no standard error
+            hit = np.abs(Mmap[:, free] @ null).max(axis=1) > 1e-8
+            Vout[hit, :] = np.nan
+            Vout[:, hit] = np.nan
+            _rcl.warn_unidentified(stacklevel=4)
+        if (~free).any():
+            fixed = I + np.nonzero(~free[st])[0]
+            Vout[fixed, :] = np.nan
+            Vout[:, fixed] = np.nan
+        if full:
+            return Vout
+        return Vout[:I, :I], Vout[I:, I:]
+
+    def _sandwich_std_errors(self, interval):
+        """Set the std_errors() attributes from the sandwich covariance."""
+        K = self.max_score
+        V_items, V_widths = self._sandwich_covariance()
+        cols = self.responses.columns
+        M = np.vstack([np.zeros(K - 1), np.tril(np.ones((K - 1, K - 1)))])
+        M = M - M.mean(axis=0)  # thresholds = centred cumulative widths
+        self.item_se = pd.Series(np.sqrt(np.clip(np.diag(V_items), 0, None)), index=cols)
+        self.threshold_se = np.sqrt(np.clip(np.diag(M @ V_widths @ M.T), 0, None))
+        width_se = np.sqrt(np.clip(np.diag(V_widths), 0, None))
+        self.cat_width_se = pd.Series(width_se, index=range(1, K))
+        self.se_covariance = dict(items=pd.DataFrame(V_items, index=cols, columns=cols),
+                                  cat_widths=pd.DataFrame(V_widths, index=range(1, K), columns=range(1, K)))
+        self.item_bootstrap = self.threshold_bootstrap = self.cat_width_bootstrap = None
+        if interval is not None:
+            z = norm.ppf(0.5 + interval / 2)
+            items = self.items.reindex(cols)
+            self.item_low, self.item_high = items - z * self.item_se, items + z * self.item_se
+            thr = self.thresholds.values.astype(float)
+            self.threshold_low, self.threshold_high = thr - z * self.threshold_se, thr + z * self.threshold_se
+            widths = np.diff(thr)
+            self.cat_width_low = {k: widths[k - 1] - z * width_se[k - 1] for k in range(1, K)}
+            self.cat_width_high = {k: widths[k - 1] + z * width_se[k - 1] for k in range(1, K)}
+        else:
+            self.item_low = self.item_high = None
+            self.threshold_low = self.threshold_high = None
+            self.cat_width_low = self.cat_width_high = None
+
     def std_errors(
         self,
         interval=None,
@@ -1266,13 +1740,35 @@ class RSM(Rasch):
         matrix_power=None,
         log_lik_tol=0.000001,
         seed=None,
+        se_method=None,
     ):
         """
-        Estimate bootstrap standard errors for item locations and thresholds.
+        Estimate standard errors for item locations, thresholds and category widths.
 
-        Draws no_of_samples bootstrap resamples of person-level response data,
-        calibrates each, and computes SDs of item location and threshold
-        estimates across samples. Also computes category width SEs.
+        se_method='sandwich' computes analytic standard errors from the
+        calibrated estimates: a sandwich (robust) covariance for the stacked
+        estimating equations of both stages -- the Bradley-Terry equations of
+        the PAIR item stage and the cpat-cml equations of the threshold
+        stage -- with persons as the independent units. Stacking carries the
+        item-location uncertainty into the thresholds. In simulation its
+        standard errors were within a few percent of the true sampling
+        standard deviation (and of the bootstrap) for items and thresholds,
+        at about the cost of one calibration.
+
+        se_method='bootstrap' draws no_of_samples bootstrap resamples of
+        person-level response data, calibrates each, and computes SDs of the
+        estimates across samples.
+
+        se_method=None (default) uses the sandwich unless the threshold
+        estimates rely on something it does not model -- an unused score
+        category (targeted smoothing); with estimation='pair-cpat', also a
+        poorly informed or uninformative category width (information-
+        weighted fallback or placeholder), or threshold_method=
+        'cpat-info-weighted' -- or, with estimation='cp-full-rcl' (or 'cpat-rcl'), the
+        calibration did not converge or the data do not identify some
+        estimates; in which case it uses the bootstrap, with a UserWarning
+        giving the reason. So standard errors are always produced.
+        self.se_method records the method used.
 
         Parameters
         ----------
@@ -1282,7 +1778,7 @@ class RSM(Rasch):
             Number of bootstrap resamples.
         constant : float or None, default None
             Smoothing constant for bootstrap calibrations, passed to
-            calibrate(); None resolves to 0.1.
+            calibrate(); None resolves to the data-adaptive default (see calibrate()).
         threshold_constant : float or None, default None
             Passed to calibrate() as the Stage 2 CPAT constant; None
             follows `constant` (0.03 when constant is None). See calibrate().
@@ -1296,11 +1792,17 @@ class RSM(Rasch):
         seed : int or None, default None
             Seed for the bootstrap resampling RNG. Pass an int for fully
             reproducible standard errors; None (default) draws fresh entropy.
+        se_method : {None, 'sandwich', 'bootstrap'}, default None
+            Standard error method; see above. With 'sandwich', confidence
+            intervals are estimate +/- z * SE, and the bootstrap attributes
+            are None.
 
         Attributes set
         --------------
+        se_method : str
+            'sandwich' or 'bootstrap', the method actually used.
         item_se : pandas.Series
-            Bootstrap SE for each item location.
+            SE for each item location.
         threshold_se : numpy.ndarray
             Bootstrap SE for each threshold (length max_score).
         cat_width_se : pandas.Series
@@ -1314,22 +1816,57 @@ class RSM(Rasch):
         threshold_bootstrap : pandas.DataFrame
             Bootstrap threshold estimates, shape (no_of_samples, max_score).
         cat_width_bootstrap : pandas.DataFrame
-            Bootstrap category width estimates.
+            Bootstrap category width estimates (None with the sandwich).
         """
-        rng = np.random.default_rng(seed)
-        samples = [
-            RSM(self.responses.sample(frac=1, replace=True, random_state=rng), max_score=self.max_score)
-            for _ in range(no_of_samples)
-        ]
-
-        for sample in samples:
-            sample.calibrate(
-                constant=constant,
-                threshold_constant=threshold_constant,
-                method=method,
-                matrix_power=matrix_power,
-                log_lik_tol=log_lik_tol,
+        if se_method not in (None, "sandwich", "bootstrap"):
+            raise ValueError(
+                f"se_method must be None, 'sandwich' or 'bootstrap', got {se_method!r}."
             )
+        if not hasattr(self, "thresholds"):
+            self.calibrate(
+                constant=constant, threshold_constant=threshold_constant, method=method,
+                matrix_power=matrix_power, log_lik_tol=log_lik_tol,
+            )
+        if se_method is None:
+            obstacle = self._sandwich_obstacle()
+            se_method = "sandwich" if obstacle is None else "bootstrap"
+            if obstacle is not None:
+                sparse = not obstacle.startswith(("the calibration", "the data do not"))
+                warnings.warn(
+                    f"Standard errors computed by bootstrap rather than analytically "
+                    f"(sandwich), because {obstacle}"
+                    + (": the threshold estimates then rely on smoothing or a fallback "
+                       "estimator that the analytic standard errors do not account for. This "
+                       "usually indicates sparse data in some categories; consider collapsing "
+                       "sparsely used categories or collecting more data." if sparse else ".")
+                    + " Pass se_method= to choose the method explicitly.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+        self.se_method = se_method
+        if se_method == "sandwich":
+            self._sandwich_std_errors(interval)
+            return
+
+        rng = np.random.default_rng(seed)
+        samples = []
+        collector = _BootstrapWarnings()
+        for _ in range(no_of_samples):
+            with collector.resample():
+                sample = RSM(
+                    self.responses.sample(frac=1, replace=True, random_state=rng),
+                    max_score=self.max_score,
+                )
+                sample.calibrate(estimation=getattr(self, "estimation", None),
+                    constant=constant,
+                    threshold_constant=threshold_constant,
+                    threshold_method=getattr(self, "threshold_method", "cpat-cml"),
+                    method=method,
+                    matrix_power=matrix_power,
+                    log_lik_tol=log_lik_tol,
+                )
+            samples.append(sample)
+        collector.emit()
 
         item_ests = np.array([s.items.values for s in samples])  # (B, I)
         threshold_ests = np.array([s.thresholds.values for s in samples])  # (B, K)
@@ -1408,13 +1945,18 @@ class RSM(Rasch):
         items : str, list, or None, default None
             Item subset. None uses all items.
         warm_corr : bool, default True
-            Warm bias correction.
+            If True, returns Warm's (1989) weighted likelihood estimate, found by
+            solving the weighted likelihood equation directly (bracketed
+            Newton). If False, returns the plain ML estimate.
         tolerance : float, default 0.00001
             Convergence criterion per person.
         max_iters : int, default 100
             Maximum iterations. Non-converged persons set to NaN.
         ext_score_adjustment : float, default 0.5
-            Adjustment for extreme scores.
+            Amount added to a score of 0 (or subtracted from a maximum score)
+            for plain ML (warm_corr=False), which has no finite estimate for
+            extreme scores; also sets the starting value. Has no effect on
+            Warm estimates, which are finite for extreme scores.
 
         Returns
         -------
@@ -1500,13 +2042,17 @@ class RSM(Rasch):
                 estimates[active] = np.nan
 
             if warm_corr:
-                valid = estimates.notna()
-                if valid.any():
-                    estimates[valid] += self.warm(
-                        estimates[valid],
-                        items,
-                        person_filter.loc[estimates.index[valid]],
-                    )
+                pf_arr = person_filter.loc[estimates.index].values
+                estimates = pd.Series(
+                    self._solve_wle(
+                        person_data.loc[estimates.index].sum(axis=1).values,
+                        estimates.values,
+                        lambda t, rows: self._wle_moments(t, item_location_arr, pf_arr[rows]),
+                        tolerance,
+                        max_iters,
+                    ),
+                    index=estimates.index,
+                )
 
         except Exception as e:
             warnings.warn(
@@ -1630,9 +2176,16 @@ class RSM(Rasch):
             iters += 1
 
         if warm_corr:
-            pf = pd.DataFrame(1.0, columns=items, index=[score])
-            estimate += float(
-                self.warm(pd.Series({score: estimate}), items, pf).iloc[0]
+            item_location_arr = item_locations.values
+            pf_arr = np.ones((1, len(items)))
+            estimate = float(
+                self._solve_wle(
+                    [float(score)],
+                    [estimate],
+                    lambda t, rows: self._wle_moments(t, item_location_arr, pf_arr[rows]),
+                    tolerance,
+                    max_iters,
+                )[0]
             )
 
         if iters >= max_iters:
@@ -1653,6 +2206,8 @@ class RSM(Rasch):
         tolerance=0.00001,
         max_iters=100,
         ext_score_adjustment=0.5,
+        filename=None,
+        file_format="csv",
     ):
         """
         Build a score-to-location lookup table for all possible raw scores.
@@ -1671,11 +2226,22 @@ class RSM(Rasch):
             Maximum iterations.
         ext_score_adjustment : float, default 0.5
             Adjustment for extreme scores.
+        filename : str or None, default None
+            If given, also saves the returned table to
+            ``{filename}.{file_format}`` (path without extension, as for
+            the plotting methods).
+        file_format : {'csv', 'xlsx'}, default 'csv'
+            File format used when filename is given.
 
         Attributes set
         --------------
         person_table : pandas.Series
             Person location estimate for each possible raw score, indexed by score.
+
+        Returns
+        -------
+        pandas.Series
+            The table, also stored as the attribute listed above.
         """
         if isinstance(items, str) and items in ("all", "none"):
             items = None
@@ -1725,10 +2291,34 @@ class RSM(Rasch):
             iters += 1
 
         if warm_corr:
-            pf = pd.DataFrame(1.0, columns=items, index=scores)
-            estimates += self.warm(estimates, items, pf)
+            pf_arr = np.ones((len(scores), no_of_items))
+            estimates = pd.Series(
+                self._solve_wle(
+                    scores,
+                    estimates.values,
+                    lambda t, rows: self._wle_moments(t, item_location_arr, pf_arr[rows]),
+                    tolerance,
+                    max_iters,
+                ),
+                index=scores,
+            )
 
         self.score_table = estimates
+        _save_table(self.score_table, filename, file_format)
+        return self.score_table
+
+    def _wle_moments(self, person_locations, item_locations, person_filter):
+        """
+        Expected score, information, and third and fourth cumulants of the
+        total score at the given person locations, for _solve_wle().
+
+        person_locations : array (N,); item_locations : array (I,);
+        person_filter : array (N, I), 1 = observed, 0 or NaN = missing.
+        """
+        probs, cats_arr = self._cat_probs_matrix(
+            np.asarray(person_locations, dtype=float), item_locations, self.thresholds
+        )
+        return self._polytomous_moments(probs, cats_arr, person_filter)
 
     def warm(self, person_locations, items, person_filter):
         """
@@ -1877,7 +2467,9 @@ class RSM(Rasch):
     # Descriptive / count methods
     # ------------------------------------------------------------------
 
-    def category_counts_df(self, persons=None, items=None, counts_name=None):
+    def category_counts_df(
+        self, persons=None, items=None, counts_name=None, filename=None, file_format="csv"
+    ):
         """
         Build a response frequency table for one or more persons, across
         one or more items.
@@ -1905,6 +2497,12 @@ class RSM(Rasch):
             valid Python identifier) -- so a succession of tables (e.g.
             one per exogenous-variable group) can be kept side by side
             for comparison rather than overwriting each other.
+        filename : str or None, default None
+            If given, also saves the returned table to
+            ``{filename}.{file_format}`` (path without extension, as for
+            the plotting methods).
+        file_format : {'csv', 'xlsx'}, default 'csv'
+            File format used when filename is given.
 
         Returns
         -------
@@ -1946,6 +2544,7 @@ class RSM(Rasch):
                 self.counts = _Namespace()
             self.counts[counts_name] = df
 
+        _save_table(df, filename, file_format)
         return df
 
     # ------------------------------------------------------------------
@@ -2020,7 +2619,7 @@ class RSM(Rasch):
         method : str, default 'log-lik'
             Priority vector extraction method.
         constant : float or None, default None
-            Smoothing constant, passed to calibrate(); None resolves to 0.1.
+            Smoothing constant, passed to calibrate(); None resolves to the data-adaptive default (see calibrate()).
         threshold_constant : float or None, default None
             Passed to calibrate() as the Stage 2 CPAT constant; None
             follows `constant` (0.03 when constant is None). See calibrate().
@@ -2467,6 +3066,37 @@ class RSM(Rasch):
     # Residual correlation / PCA
     # ------------------------------------------------------------------
 
+    def _global_fit_subset(self, idx):
+        """Calibrated RSM on a subset of persons (global_fit())."""
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            m = RSM(self.responses.loc[idx], max_score=self.max_score, validate=False)
+            m.calibrate(estimation=getattr(self, "estimation", None), threshold_method=getattr(self, "threshold_method", "cpat-cml"))
+        return m
+
+    @staticmethod
+    def _global_fit_params(m, small_sample=False):
+        """(labels, estimates, covariance, comparable mask, location blocks) for
+        global_fit(): item locations (centred) and category widths, with the
+        full stacked sandwich covariance. Widths needing a fallback in this
+        group (an unused category next to them, or fewer than CPAT_THIN_COUNT
+        comparison observations) are marked not comparable."""
+        names = list(m.responses.columns)
+        I, K = len(names), m.max_score
+        items = m.items.reindex(names).values.astype(float)
+        est = np.concatenate([items - items.mean(), np.diff(m.thresholds.values.astype(float))])
+        V = m._sandwich_covariance(full=True, small_sample=small_sample)
+        x = np.array(m.responses, dtype=np.float64)
+        ok = np.ones(I + K - 1, bool)
+        # an item scored the same by everyone in this group is not estimable here
+        ok[:I] = [len(np.unique(x[~np.isnan(x[:, i]), i])) > 1 for i in range(I)]
+        for k in range(1, K):
+            num, den = m._cpat_counts(k, x)
+            empty_near = any((x == c).sum() == 0 for c in (k - 1, k, k + 1))
+            ok[I + k - 1] = (not empty_near) and (num + den).sum() >= m.CPAT_THIN_COUNT
+        labels = names + [f"Category width {k}" for k in range(1, K)]
+        return labels, est, V, ok, [np.arange(I)]
+
     def andersen_lr_test(
         self,
         split_by="person_location",
@@ -2485,7 +3115,7 @@ class RSM(Rasch):
         Andersen (1973) likelihood ratio test of parameter invariance.
 
         split_by='person_location'/'score' (general model-fit / invariance testing)
-        is DISABLED as of 2026-07-06 — see NotImplementedError raised below.
+        is disabled (raises NotImplementedError).
         split_by='exogenous' (DIF testing) is unaffected and remains fully
         supported.
 
@@ -2540,6 +3170,14 @@ class RSM(Rasch):
         andersen_summary : pandas.Series
             LR statistic, df, and p-value.
         """
+        warnings.warn(
+            "andersen_lr_test() is deprecated; use global_fit() (Wald), which is "
+            "calibrated for any split, including split='exogenous' with "
+            "covariate=. global_fit(method='andersen-lr') is reserved for "
+            "conditional maximum likelihood estimates (planned).",
+            FutureWarning,
+            stacklevel=2,
+        )
         from raschpy.rsm import RSM
 
         if split_by not in ("person_location", "score", "exogenous"):
@@ -2605,9 +3243,10 @@ class RSM(Rasch):
 
         # Re-estimate full model on combined subset so the LR comparison is fair
         m_full = RSM(self.responses.loc[combined_idx], max_score=self.max_score)
-        m_full.calibrate(
+        m_full.calibrate(estimation=getattr(self, "estimation", None),
             constant=constant,
             threshold_constant=threshold_constant,
+            threshold_method=getattr(self, "threshold_method", "cpat-cml"),
             method=method,
             matrix_power=matrix_power,
             log_lik_tol=log_lik_tol,
@@ -2624,9 +3263,10 @@ class RSM(Rasch):
         group_models = {}
         for name, idx in group_idx.items():
             m = RSM(self.responses.loc[idx], max_score=self.max_score)
-            m.calibrate(
+            m.calibrate(estimation=getattr(self, "estimation", None),
                 constant=constant,
                 threshold_constant=threshold_constant,
+                threshold_method=getattr(self, "threshold_method", "cpat-cml"),
                 method=method,
                 matrix_power=matrix_power,
                 log_lik_tol=log_lik_tol,
@@ -2674,6 +3314,7 @@ class RSM(Rasch):
         welch=False,
         size_adjust=False,
         reference_n=100,
+        dcf_cap=80000,
         correction="bh",
         alpha=0.05,
         logit_threshold=0.43,
@@ -2783,6 +3424,8 @@ class RSM(Rasch):
             The existing 'Flagged' column in dif_table always reflects the
             Wald test; 'Flagged_LR' is added when test is 'lr' or 'both'.
             Does not affect threshold_dif_table.
+            test='lr'/'both' is mildly liberal; test='wald' (the default)
+            is preferred.
         omnibus : bool, default True
             If True, also runs an Andersen-style omnibus LR test
             (reference vs. focal, every item jointly) per focal group for
@@ -2812,22 +3455,60 @@ class RSM(Rasch):
         size_adjust : bool, default False
             If True, rescales each group's own SE (item location AND
             threshold — same scope as welch, unlike category below) to
-            what it would be at a standard reference sample size
-            (Tristán, 2006, Rasch Measurement Transactions 20:3 — the
-            opposite problem from welch's: at very large N, SE shrinks
-            enough that trivial differences become "significant",
-            swamping the logit-magnitude thresholds' intent). Each
-            group's own SE is rescaled independently by
-            sqrt(actual_n / reference_n) using that group's own person
-            count, then combined as usual. Applied to the Wald/Welch
-            test, the category tests, and (if welch=True) the Welch-
-            Satterthwaite df, which then also uses reference_n rather
-            than each group's actual n, for internal consistency.
+            guard against the opposite problem from welch's: at very
+            large N, SE shrinks enough that trivial differences become
+            "significant", swamping the logit-magnitude thresholds'
+            intent. The two components use different mechanisms, because
+            they were found to need them (see reference_n/dcf_cap below):
+            item-location SE is rescaled by sqrt(actual_n / reference_n)
+            unconditionally (Tristán, 2006, Rasch Measurement Transactions
+            20:3); threshold (DCF) SE is rescaled by a per-threshold
+            dynamic cap on its own CPAT total_weight (dcf_cap), applied
+            only above the cap. Each group's own SE is rescaled
+            independently, then combined as usual. Applied to the
+            Wald/Welch test, the category tests, and (if welch=True) the
+            Welch-Satterthwaite df, which then also uses the adjusted n
+            rather than each group's actual n, for internal consistency.
         reference_n : int, default 100
-            Reference sample size for size_adjust=True. 100 is Tristán's own
+            Reference sample size for size_adjust=True's item-location
+            component only (dif_table) — does not affect threshold_dif_table,
+            which uses dcf_cap instead (see below). 100 is Tristán's own
             default recommendation; ~60 is suggested there for closer
             alignment with the ETS Category B boundary specifically
-            (100*(0.43/0.55)**2). Unused unless size_adjust=True.
+            (100*(0.43/0.55)**2). Unused unless size_adjust=True. Checked
+            directly by simulation (500-6000/group, 0.8-logit item-location
+            shift): no practical power blind spot in that range, unlike the
+            fixed-reference_n approach this package used for threshold
+            (DCF) SE before dcf_cap replaced it (see dcf_cap).
+        dcf_cap : float, default 80000
+            Cap, in CPAT total_weight units (NOT a person count, unlike
+            reference_n), for size_adjust=True's threshold (DCF) component
+            only — does not affect dif_table. Per threshold, independently
+            for each group: effective_weight = min(total_weight, dcf_cap);
+            se_adjusted = se_actual * max(1, sqrt(total_weight/dcf_cap)),
+            where total_weight is that threshold's own CPAT harmonic-mean
+            information weight, summed across every item pair (see
+            _threshold_total_weights — the same weighting _threshold_distance
+            itself uses, Elliott & Buttery 2022). Below the cap, no
+            adjustment at all — unlike reference_n's unconditional rescale,
+            an ordinary-sized study's own SE is used as-is. This replaces
+            an earlier design (a single fixed reference_n shared with
+            dif_table) that was found by direct simulation to make DCF
+            power collapse at real effect sizes as N grows, because
+            threshold information doesn't scale with raw person count the
+            way item-location information does, and no single fixed
+            reference_n could serve both. Calibrated by simulation across
+            max_score in {3, 5, 8} (I=15, 0.8-logit category-width shift,
+            N in {500,...,6000}/group) — total_weight runs roughly 5-6x
+            larger than PCM's own analogous per-cell weight at matched N
+            (RSM pools information across every item into one shared
+            vector), so dcf_cap is correspondingly larger than PCM's own
+            default. Power-saturation and Type-I-nominal cap ranges were
+            stable across all three max_score values tested at matched N —
+            see the raschpy_dynamic_n_calibration project notes for the
+            full simulation record. Not yet recalibrated for designs far
+            outside that swept range — 80000 is a reasonable, validated
+            default, not a provably-universal one.
         correction : 'bh', 'bonferroni', or None, default 'bh'
             Multiple-comparison correction applied across items (within
             each focal-group comparison) and, separately, across
@@ -2942,71 +3623,19 @@ class RSM(Rasch):
         """
         from raschpy.rsm import RSM
 
-        if correction not in ("bh", "bonferroni", None):
-            raise ValueError("correction must be 'bh', 'bonferroni', or None")
-        if selection_method not in ("wald", "robust_z", "none"):
-            raise ValueError("selection_method must be 'wald', 'robust_z', or 'none'")
-        if test not in ("wald", "lr", "both"):
-            raise ValueError("test must be 'wald', 'lr', or 'both'")
-        if len(category_thresholds) != 2 or category_thresholds[0] >= category_thresholds[1]:
-            raise ValueError(
-                "category_thresholds must be (b_threshold, c_threshold) with "
-                "b_threshold < c_threshold."
-            )
-        if reference_n <= 1:
-            raise ValueError("reference_n must be greater than 1.")
-
-        if getattr(self, "exogenous", None) is None:
-            raise ValueError(
-                "No exogenous data available. Pass exogenous= to the "
-                "constructor before calling dif_test()."
-            )
-        if covariate not in self.exogenous.columns:
-            raise ValueError(f"'{covariate}' is not a column in self.exogenous.")
+        self._dif_validate(
+            correction, selection_method, test, category_thresholds, reference_n,
+            dcf_cap=dcf_cap,
+        )
 
         # Non-extreme persons, matching andersen_lr_test's convention
         scores = self.responses.sum(axis=1)
         max_scores = self.responses.notna().sum(axis=1) * self.max_score
         non_extreme = self.responses.index[(scores > 0) & (scores < max_scores)]
 
-        cov_values = self.exogenous.loc[non_extreme, covariate].dropna()
-        n_missing = len(non_extreme) - len(cov_values)
-
-        levels = cov_values.value_counts()
-        if len(levels) < 2:
-            raise ValueError(
-                f"'{covariate}' has fewer than 2 distinct non-null values "
-                f"among non-extreme persons — cannot run a DIF test."
-            )
-
-        if reference is None:
-            reference = levels.index[0]
-        elif reference not in levels.index:
-            raise ValueError(f"reference='{reference}' is not a value of '{covariate}'.")
-
-        focal_levels = [lvl for lvl in levels.index if lvl != reference]
-        if len(focal_levels) > 1:
-            warnings.warn(
-                f"'{covariate}' has {len(levels)} levels. dif_test() compares "
-                f"each focal level to the reference level '{reference}' "
-                f"individually (reference-group design); all-pairwise "
-                f"comparisons between non-reference levels are not supported.",
-                UserWarning,
-                stacklevel=2,
-            )
-
-        group_sizes = {reference: int(levels.loc[reference])}
-        for focal in focal_levels:
-            group_sizes[focal] = int(levels.loc[focal])
-
-        if n_missing > 0:
-            warnings.warn(
-                f"{n_missing} non-extreme person(s) have a missing value for "
-                f"'{covariate}' and were excluded. Group sizes used: "
-                f"{group_sizes}.",
-                UserWarning,
-                stacklevel=2,
-            )
+        cov_values, reference, focal_levels, group_sizes, n_missing = self._dif_group_setup(
+            non_extreme, covariate, reference
+        )
 
         needs_ll = test in ("lr", "both") or omnibus
         pe_kw = dict(
@@ -3016,8 +3645,8 @@ class RSM(Rasch):
 
         ref_idx = cov_values.index[cov_values == reference]
         ref_model = RSM(self.responses.loc[ref_idx], max_score=self.max_score)
-        ref_model.calibrate(
-            constant=constant, threshold_constant=threshold_constant, method=method, matrix_power=matrix_power,
+        ref_model.calibrate(estimation=getattr(self, "estimation", None),
+            constant=constant, threshold_constant=threshold_constant, threshold_method=getattr(self, "threshold_method", "cpat-cml"), method=method, matrix_power=matrix_power,
             log_lik_tol=log_lik_tol,
         )
         ref_model.std_errors(
@@ -3027,6 +3656,10 @@ class RSM(Rasch):
         if needs_ll:
             ref_model.person_estimates(**pe_kw)
             ll_ref = ref_model._log_likelihood()
+        ref_total_weights = (
+            ref_model._threshold_total_weights(constant=ref_model.threshold_constant)
+            if size_adjust else None
+        )
 
         all_item_rows = []
         all_threshold_rows = []
@@ -3039,8 +3672,8 @@ class RSM(Rasch):
         for focal in focal_levels:
             focal_idx = cov_values.index[cov_values == focal]
             focal_model = RSM(self.responses.loc[focal_idx], max_score=self.max_score)
-            focal_model.calibrate(
-                constant=constant, threshold_constant=threshold_constant, method=method, matrix_power=matrix_power,
+            focal_model.calibrate(estimation=getattr(self, "estimation", None),
+                constant=constant, threshold_constant=threshold_constant, threshold_method=getattr(self, "threshold_method", "cpat-cml"), method=method, matrix_power=matrix_power,
                 log_lik_tol=log_lik_tol,
             )
             focal_model.std_errors(
@@ -3052,98 +3685,33 @@ class RSM(Rasch):
                 ll_focal = focal_model._log_likelihood()
 
             # --- Item-location DIF ---
-            if selection_method == "wald":
-                anchor_result = self._wald_anchor_selection(
-                    ref_model.items, focal_model.items, focal_model.item_se,
-                    alpha=wald_alpha, min_anchors=min_anchors,
-                )
-                tc = anchor_result["tc"]
-                selected = anchor_result["selected_anchors"]
-                anchor_selection_dict[focal] = anchor_result["table"]
-            elif selection_method == "robust_z":
-                anchor_result = self._robust_anchor_selection(
-                    ref_model.items, focal_model.items,
-                    corr_tol=corr_tol, sd_ratio_tol=sd_ratio_tol,
-                    min_anchors=min_anchors,
-                )
-                tc = anchor_result["tc"]
-                selected = anchor_result["selected_anchors"]
-                anchor_selection_dict[focal] = anchor_result["table"]
-            else:
-                common = ref_model.items.index.intersection(focal_model.items.index)
-                tc = (
-                    ref_model.items.loc[common].mean()
-                    - focal_model.items.loc[common].mean()
-                )
-                selected = common
-                anchor_selection_dict[focal] = None
-
-            focal_shifted = focal_model.items + tc
-
-            common_items = ref_model.items.index.intersection(focal_model.items.index)
-            diff = focal_shifted.loc[common_items] - ref_model.items.loc[common_items]
-
-            ref_se_item = ref_model.item_se.loc[common_items]
-            focal_se_item = focal_model.item_se.loc[common_items]
-            ref_n_item = ref_model.no_of_persons
-            focal_n_item = focal_model.no_of_persons
-            if size_adjust:
-                ref_se_item = ref_se_item * np.sqrt(ref_n_item / reference_n)
-                focal_se_item = focal_se_item * np.sqrt(focal_n_item / reference_n)
-                ref_n_item = focal_n_item = reference_n
-
-            se = np.sqrt(ref_se_item ** 2 + focal_se_item ** 2)
-            if welch:
-                z_vals, df_vals, p_vals = self._welch_satterthwaite(
-                    diff.values,
-                    ref_se_item.values, ref_n_item,
-                    focal_se_item.values, focal_n_item,
-                )
-                z = pd.Series(z_vals, index=common_items)
-                item_welch_df = pd.Series(df_vals, index=common_items)
-                p = pd.Series(p_vals, index=common_items)
-            else:
-                z = diff / se
-                p = pd.Series(2 * norm.sf(np.abs(z.values)), index=common_items)
-
-            if correction == "bonferroni":
-                p_corrected = (p * len(p)).clip(upper=1.0)
-            elif correction == "bh":
-                p_corrected = self._bh_correction(p)
-            else:
-                p_corrected = p
-
-            flagged = (p_corrected < alpha) & (diff.abs() >= logit_threshold)
-
-            if category:
-                b_thr, c_thr = category_thresholds
-                abs_diff = diff.abs()
-                boundary_stat = (abs_diff.values - b_thr) / se.values
-                if welch:
-                    p_boundary = pd.Series(
-                        t_dist.cdf(-boundary_stat, item_welch_df.values), index=common_items
-                    )
-                else:
-                    p_boundary = pd.Series(norm.cdf(-boundary_stat), index=common_items)
-
-                item_category_col = []
-                for item in common_items:
-                    if abs_diff[item] >= c_thr and p_boundary[item] < category_alpha:
-                        base = "C"
-                    elif abs_diff[item] >= b_thr and p[item] < category_alpha:
-                        base = "B"
-                    else:
-                        base = "A"
-                    item_category_col.append(
-                        base if base == "A" else base + ("+" if diff[item] > 0 else "-")
-                    )
-                item_category_col = pd.Series(item_category_col, index=common_items)
+            wald_result = self._dif_item_wald_block(
+                ref_model, focal_model, ref_model.item_bootstrap, focal_model.item_bootstrap,
+                selection_method, corr_tol, sd_ratio_tol, min_anchors, wald_alpha,
+                size_adjust, reference_n, welch, correction, alpha, logit_threshold,
+                category, category_thresholds, category_alpha,
+                ref_cov=ref_model.se_covariance['items'] if ref_model.se_method == 'sandwich' else None,
+                focal_cov=focal_model.se_covariance['items'] if focal_model.se_method == 'sandwich' else None,
+            )
+            common_items = wald_result["common_items"]
+            tc = wald_result["tc"]
+            focal_shifted = wald_result["focal_shifted"]
+            diff = wald_result["diff"]
+            se = wald_result["se"]
+            z = wald_result["z"]
+            p = wald_result["p"]
+            p_corrected = wald_result["p_corrected"]
+            flagged = wald_result["flagged"]
+            selected = wald_result["selected"]
+            item_welch_df = wald_result["welch_df"]
+            item_category_col = wald_result["category_col"]
+            anchor_selection_dict[focal] = wald_result["anchor_table"]
 
             if omnibus:
                 combined_idx = ref_idx.append(focal_idx)
                 m_full = RSM(self.responses.loc[combined_idx], max_score=self.max_score)
-                m_full.calibrate(
-                    constant=constant, threshold_constant=threshold_constant, method=method, matrix_power=matrix_power,
+                m_full.calibrate(estimation=getattr(self, "estimation", None),
+                    constant=constant, threshold_constant=threshold_constant, threshold_method=getattr(self, "threshold_method", "cpat-cml"), method=method, matrix_power=matrix_power,
                     log_lik_tol=log_lik_tol,
                 )
                 m_full.person_estimates(**pe_kw)
@@ -3173,7 +3741,7 @@ class RSM(Rasch):
                     pooled = (
                         w_ref * ref_model.items[item] + w_focal * focal_shifted[item]
                     ) / (w_ref + w_focal)
-                    pooled_focal_scale = pooled - tc
+                    pooled_focal_scale = pooled - tc[item]
 
                     ref_scratch.items = ref_model.items.copy()
                     ref_scratch.items[item] = pooled
@@ -3188,42 +3756,17 @@ class RSM(Rasch):
                     lr_i = max(0.0, 2 * (ll_h1 - (ll_ref_h0 + ll_focal_h0)))
                     lr_rows[item] = {"LR": lr_i, "p_LR": float(chi2.sf(lr_i, 1))}
 
-                lr_table = pd.DataFrame(lr_rows).T.loc[common_items]
-                if correction == "bonferroni":
-                    lr_table["p_LR (corrected)"] = (
-                        lr_table["p_LR"] * len(lr_table)
-                    ).clip(upper=1.0)
-                elif correction == "bh":
-                    lr_table["p_LR (corrected)"] = self._bh_correction(lr_table["p_LR"])
-                else:
-                    lr_table["p_LR (corrected)"] = lr_table["p_LR"]
-                lr_table["Flagged_LR"] = (lr_table["p_LR (corrected)"] < alpha) & (
-                    diff.abs() >= logit_threshold
+                lr_table = self._dif_lr_table(
+                    lr_rows, common_items, correction, alpha, diff, logit_threshold
                 )
 
-            item_table = pd.DataFrame(
-                {
-                    "Group": focal,
-                    "Reference": ref_model.items.loc[common_items],
-                    "Focal": focal_model.items.loc[common_items],
-                    "Focal (purified)": focal_shifted.loc[common_items],
-                    "Difference": diff,
-                    "SE": se,
-                    "z": z,
-                    "p": p,
-                    "p (corrected)": p_corrected,
-                    "Selected": common_items.isin(selected),
-                    "Flagged": flagged,
-                },
-                index=common_items,
+            item_table = self._dif_item_table(
+                focal, ref_model, focal_model, common_items, focal_shifted,
+                diff, se, z, p, p_corrected, selected, flagged,
+                welch_df=item_welch_df if welch else None,
+                category_col=item_category_col if category else None,
+                lr_table=lr_table if test in ("lr", "both") else None,
             )
-            item_table.index.name = "Item"
-            if welch:
-                item_table["df"] = item_welch_df
-            if category:
-                item_table["Category"] = item_category_col
-            if test in ("lr", "both"):
-                item_table = item_table.join(lr_table)
 
             # --- Threshold-structure DIF (DCF: category widths, shared vector,
             # no purification) ---
@@ -3246,9 +3789,28 @@ class RSM(Rasch):
             ref_n_thr = ref_model.no_of_persons
             focal_n_thr = focal_model.no_of_persons
             if size_adjust:
-                ref_se_thr = ref_se_thr * np.sqrt(ref_n_thr / reference_n)
-                focal_se_thr = focal_se_thr * np.sqrt(focal_n_thr / reference_n)
-                ref_n_thr = focal_n_thr = reference_n
+                # DCF dynamic cap: per-threshold CPAT total_weight (not raw
+                # person count) is the effective n here, capped rather than
+                # pinned -- see dcf_cap docstring for why a fixed reference_n
+                # (as used for item-location DIF above) was found to make
+                # DCF power collapse at real sample sizes instead.
+                focal_total_weights = focal_model._threshold_total_weights(
+                    constant=focal_model.threshold_constant
+                )
+                ref_tw = ref_total_weights.reindex(thr_index).values
+                focal_tw = focal_total_weights.reindex(thr_index).values
+                ref_eff = np.minimum(ref_tw, dcf_cap)
+                focal_eff = np.minimum(focal_tw, dcf_cap)
+                ref_se_thr = pd.Series(
+                    ref_se_thr.reindex(thr_index).values * np.sqrt(ref_tw / ref_eff),
+                    index=thr_index,
+                )
+                focal_se_thr = pd.Series(
+                    focal_se_thr.reindex(thr_index).values * np.sqrt(focal_tw / focal_eff),
+                    index=thr_index,
+                )
+                ref_n_thr = ref_eff
+                focal_n_thr = focal_eff
 
             thr_se = pd.Series(
                 np.sqrt(ref_se_thr ** 2 + focal_se_thr ** 2).values, index=thr_index
@@ -3364,6 +3926,11 @@ class RSM(Rasch):
             shared threshold vector. Applied as PCM preferred only if the
             test's own condition holds AND effect >= min_effect; RSM is
             retained otherwise. Default 0 disables (never gates).
+            min_effect is optional and a matter of taste: in simulation the
+            tests alone classify well, so the gate expresses a judgement of
+            practical importance rather than improving accuracy. If wanted,
+            0.43 and 0.64 mirror the ETS DIF category boundaries (moderate
+            and large).
         sampling : None, 'dynamic', or int, default 'dynamic'
             Controls subsampling of non-extreme persons before computing
             log-likelihoods (parameters are always estimated on the full
@@ -3418,7 +3985,7 @@ class RSM(Rasch):
         # Fit PCM on full data (parameters used for both full and sampled LL)
         pcm = PCM(self.responses)
         # PCM takes a single scalar constant; use the item-stage value.
-        pcm.calibrate(constant=(0.1 if constant is None else constant), method=method, log_lik_tol=log_lik_tol)
+        pcm.calibrate(constant=constant, method=method, log_lik_tol=log_lik_tol)
         pcm.person_estimates(
             warm_corr=warm_corr,
             tolerance=tolerance,
@@ -3547,7 +4114,7 @@ class RSM(Rasch):
         ext_score_adjustment : float, default 0.5
             Extreme score adjustment.
         constant : float or None, default None
-            Smoothing constant, passed to calibrate(); None resolves to 0.1.
+            Smoothing constant, passed to calibrate(); None resolves to the data-adaptive default (see calibrate()).
         threshold_constant : float or None, default None
             Passed to calibrate() as the Stage 2 CPAT constant; None
             follows `constant` (0.03 when constant is None). See calibrate().
@@ -3655,6 +4222,8 @@ class RSM(Rasch):
         no_of_samples=500,
         interval=None,
         seed=None,
+        filename=None,
+        file_format="csv",
     ):
         """
         Build and store the item statistics summary table.
@@ -3688,7 +4257,7 @@ class RSM(Rasch):
         method : str, default 'log-lik'
             Priority vector extraction method.
         constant : float or None, default None
-            Smoothing constant, passed to calibrate(); None resolves to 0.1.
+            Smoothing constant, passed to calibrate(); None resolves to the data-adaptive default (see calibrate()).
         threshold_constant : float or None, default None
             Passed to calibrate() as the Stage 2 CPAT constant; None
             follows `constant` (0.03 when constant is None). See calibrate().
@@ -3706,6 +4275,12 @@ class RSM(Rasch):
             Seed passed through to the internal std_errors()/fit_statistics()
             calls (only used if not already computed). None draws fresh
             entropy each call.
+        filename : str or None, default None
+            If given, also saves the returned table to
+            ``{filename}.{file_format}`` (path without extension, as for
+            the plotting methods).
+        file_format : {'csv', 'xlsx'}, default 'csv'
+            File format used when filename is given.
 
         Attributes set
         --------------
@@ -3713,6 +4288,11 @@ class RSM(Rasch):
             Item statistics with items as rows. Always contains Estimate,
             Count, Facility, Infit MS, Outfit MS. Optional: SE and CI
             bounds (if se=True).
+
+        Returns
+        -------
+        pandas.DataFrame
+            The table, also stored as the attribute listed above.
         """
 
         if full:
@@ -3774,6 +4354,8 @@ class RSM(Rasch):
             stats["PM corr"] = self.point_measure.round(dp)
             stats["Exp PM corr"] = self.exp_point_measure.round(dp)
         self.item_stats = stats
+        _save_table(self.item_stats, filename, file_format)
+        return self.item_stats
 
     def threshold_stats_df(
         self,
@@ -3791,6 +4373,8 @@ class RSM(Rasch):
         threshold_constant=None,
         no_of_samples=500,
         interval=None,
+        filename=None,
+        file_format="csv",
     ):
         """
         Build and store the threshold statistics summary table.
@@ -3823,7 +4407,7 @@ class RSM(Rasch):
         method : str, default 'log-lik'
             Priority vector extraction method.
         constant : float or None, default None
-            Smoothing constant, passed to calibrate(); None resolves to 0.1.
+            Smoothing constant, passed to calibrate(); None resolves to the data-adaptive default (see calibrate()).
         threshold_constant : float or None, default None
             Passed to calibrate() as the Stage 2 CPAT constant; None
             follows `constant` (0.03 when constant is None). See calibrate().
@@ -3831,6 +4415,12 @@ class RSM(Rasch):
             Bootstrap samples.
         interval : float or None, default None
             CI width.
+        filename : str or None, default None
+            If given, also saves the returned table to
+            ``{filename}.{file_format}`` (path without extension, as for
+            the plotting methods).
+        file_format : {'csv', 'xlsx'}, default 'csv'
+            File format used when filename is given.
 
         Attributes set
         --------------
@@ -3842,6 +4432,11 @@ class RSM(Rasch):
             questions (a zero-summed threshold vector only has
             max_score-1 true degrees of freedom, so per-threshold SEs
             here are correlated, not independent).
+
+        Returns
+        -------
+        pandas.DataFrame
+            The table, also stored as the attribute listed above.
         """
 
         if full:
@@ -3883,6 +4478,8 @@ class RSM(Rasch):
             stats["PM corr"] = self.threshold_point_measure.values.round(dp)
             stats["Exp PM corr"] = self.threshold_exp_point_measure.values.round(dp)
         self.threshold_stats = stats
+        _save_table(self.threshold_stats, filename, file_format)
+        return self.threshold_stats
 
     def category_stats_df(
         self,
@@ -3895,6 +4492,8 @@ class RSM(Rasch):
         no_of_samples=500,
         interval=None,
         seed=None,
+        filename=None,
+        file_format="csv",
     ):
         """
         Build and store the category width statistics summary table.
@@ -3941,6 +4540,12 @@ class RSM(Rasch):
         seed : int or None, default None
             Seed for std_errors(), used only if it hasn't already been
             run.
+        filename : str or None, default None
+            If given, also saves the returned table to
+            ``{filename}.{file_format}`` (path without extension, as for
+            the plotting methods).
+        file_format : {'csv', 'xlsx'}, default 'csv'
+            File format used when filename is given.
 
         Attributes set
         --------------
@@ -3958,6 +4563,11 @@ class RSM(Rasch):
             supported (Prop disordered close to 0.5) vs. robust, or a
             False that's nonetheless uncertain (Prop disordered not
             small) vs. clear-cut.
+
+        Returns
+        -------
+        pandas.DataFrame
+            The table, also stored as the attribute listed above.
         """
         if not hasattr(self, "thresholds"):
             self.calibrate(
@@ -3985,10 +4595,14 @@ class RSM(Rasch):
                 list(self.cat_width_high.values())
             ).round(dp)
         stats["Disordered"] = cat_widths.values < 0
-        stats["Prop disordered"] = (
-            (self.cat_width_bootstrap < 0).mean(axis=0).values.round(dp)
-        )
+        if getattr(self, "cat_width_bootstrap", None) is not None:
+            prop = (self.cat_width_bootstrap < 0).mean(axis=0).values
+        else:  # sandwich SEs: normal-approximation probability of a negative width
+            prop = norm.cdf(-cat_widths.values / self.cat_width_se.values)
+        stats["Prop disordered"] = prop.round(dp)
         self.category_stats = stats
+        _save_table(self.category_stats, filename, file_format)
+        return self.category_stats
 
     def person_stats_df(
         self,
@@ -4003,6 +4617,8 @@ class RSM(Rasch):
         method="log-lik",
         constant=None,
         threshold_constant=None,
+        filename=None,
+        file_format="csv",
     ):
         """
         Build and store the person statistics summary table.
@@ -4034,10 +4650,16 @@ class RSM(Rasch):
         method : str, default 'log-lik'
             Priority vector extraction method.
         constant : float or None, default None
-            Smoothing constant, passed to calibrate(); None resolves to 0.1.
+            Smoothing constant, passed to calibrate(); None resolves to the data-adaptive default (see calibrate()).
         threshold_constant : float or None, default None
             Passed to calibrate() as the Stage 2 CPAT constant; None
             follows `constant` (0.03 when constant is None). See calibrate().
+        filename : str or None, default None
+            If given, also saves the returned table to
+            ``{filename}.{file_format}`` (path without extension, as for
+            the plotting methods).
+        file_format : {'csv', 'xlsx'}, default 'csv'
+            File format used when filename is given.
 
         Attributes set
         --------------
@@ -4045,6 +4667,11 @@ class RSM(Rasch):
             Person statistics with persons as rows. Contains Estimate, CSEM,
             Score, Max score, p, Infit MS, Infit Z, Outfit MS, Outfit Z.
             Optional: RSEM.
+
+        Returns
+        -------
+        pandas.DataFrame
+            The table, also stored as the attribute listed above.
         """
 
         if not hasattr(self, "person_infit_ms"):
@@ -4082,6 +4709,8 @@ class RSM(Rasch):
             stats.loc[src.index, col] = src.round(dp).values
 
         self.person_stats = stats
+        _save_table(self.person_stats, filename, file_format)
+        return self.person_stats
 
     def test_stats_df(
         self,
@@ -4095,6 +4724,8 @@ class RSM(Rasch):
         threshold_constant=None,
         alpha=False,
         seed=None,
+        filename=None,
+        file_format="csv",
     ):
         """
         Build and store the test-level summary statistics table.
@@ -4118,7 +4749,7 @@ class RSM(Rasch):
         method : str, default 'log-lik'
             Priority vector extraction method.
         constant : float or None, default None
-            Smoothing constant, passed to calibrate(); None resolves to 0.1.
+            Smoothing constant, passed to calibrate(); None resolves to the data-adaptive default (see calibrate()).
         threshold_constant : float or None, default None
             Passed to calibrate() as the Stage 2 CPAT constant; None
             follows `constant` (0.03 when constant is None). See calibrate().
@@ -4132,12 +4763,23 @@ class RSM(Rasch):
         seed : int or None, default None
             Seed passed through to the internal fit_statistics() call (only
             used if not already computed). None draws fresh entropy.
+        filename : str or None, default None
+            If given, also saves the returned table to
+            ``{filename}.{file_format}`` (path without extension, as for
+            the plotting methods).
+        file_format : {'csv', 'xlsx'}, default 'csv'
+            File format used when filename is given.
 
         Attributes set
         --------------
         test_stats : pandas.DataFrame
             Two-column table (Items, Persons) with rows:
             Mean, SD, Separation ratio, Strata, Reliability.
+
+        Returns
+        -------
+        pandas.DataFrame
+            The table, also stored as the attribute listed above.
         """
 
         if not hasattr(self, "psi"):
@@ -4169,6 +4811,8 @@ class RSM(Rasch):
             {"Items": items_col, "Persons": persons_col}, index=index
         )
         self.test_stats = self.test_stats.round(dp)
+        _save_table(self.test_stats, filename, file_format)
+        return self.test_stats
 
     def save_stats(
         self,
@@ -4207,7 +4851,7 @@ class RSM(Rasch):
         method : str, default 'log-lik'
             Priority vector extraction method.
         constant : float or None, default None
-            Smoothing constant, passed to calibrate(); None resolves to 0.1.
+            Smoothing constant, passed to calibrate(); None resolves to the data-adaptive default (see calibrate()).
         threshold_constant : float or None, default None
             Passed to calibrate() as the Stage 2 CPAT constant; None
             follows `constant` (0.03 when constant is None). See calibrate().
@@ -4336,7 +4980,7 @@ class RSM(Rasch):
         method : str, default 'log-lik'
             Priority vector extraction method.
         constant : float or None, default None
-            Smoothing constant, passed to calibrate(); None resolves to 0.1.
+            Smoothing constant, passed to calibrate(); None resolves to the data-adaptive default (see calibrate()).
         threshold_constant : float or None, default None
             Passed to calibrate() as the Stage 2 CPAT constant; None
             follows `constant` (0.03 when constant is None). See calibrate().
@@ -6132,7 +6776,8 @@ class RSM(Rasch):
         labelsize=12,
         filename=None,
         file_format="png",
-        plot_density=300,
+        dpi=300,
+        plot_density=None,
     ):
         """
         Plot a histogram of standardised residuals.
@@ -6175,6 +6820,12 @@ class RSM(Rasch):
         -------
         matplotlib.figure.Figure
         """
+        if plot_density is not None:
+            warnings.warn(
+                "plot_density= is deprecated and will be removed in a future version; use dpi= instead.",
+                FutureWarning, stacklevel=2,
+            )
+            dpi = plot_density
         if isinstance(items, str) and items in ("all", "none"):
             items = None
         elif isinstance(items, str):
@@ -6200,2282 +6851,281 @@ class RSM(Rasch):
             labelsize=labelsize,
             filename=filename,
             file_format=file_format,
-            plot_density=plot_density,
+            plot_density=dpi,
         )
 
-    def wright_map(
-        self,
-        person_names=None,
-        item_names=None,
-        item_level="items",
-        orientation="vertical",
-        map_type="hist",
-        item_labels=False,
-        item_strip=False,
-        item_distribution=False,
-        strip_thickness=2.0,
-        strip_alpha=0.3,
-        sort="location",
-        palette="colorblind multi",
-        neutral_extremes=False,
-        item_row_height=None,
-        narrow_font=False,
-        edge_padding=0.5,
-        distribution_markers=False,
-        group_by=None,
-        group_colors=None,
-        stack=True,
-        blend=False,
-        prop=False,
-        person_lim=None,
-        item_lim=None,
-        person_scaling=1,
-        no_of_bins=20,
-        pad=False,
-        plot_range=None,
-        kde_points=500,
-        bw_method="scott",
-        line_width=1,
-        figsize=None,
-        title=None,
-        plot_style="white",
-        edge_color="black",
-        person_color="skyblue",
-        item_color="salmon",
-        person_line_color="black",
-        item_line_color="black",
-        marker_color="darkred",
-        alpha=0.6,
-        black=False,
-        font="Times New Roman",
-        title_font_size=15,
-        axis_font_size=12,
-        labelsize=12,
-        item_label_size=8,
-        tick_interval=1,
-        filename=None,
-        file_format="png",
-        dpi=300,
+    # ------------------------------------------------------------------
+    # Simulation recovery diagnostics
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _category_widths(thresholds):
+        """
+        Category widths (tau_{k+1} - tau_k) from a threshold Series indexed
+        1..max_score, relabelled 1..max_score-1 to match cat_width_se's
+        own indexing convention (std_errors(), rsm.py).
+        """
+        widths = thresholds.diff().dropna()
+        widths.index = range(1, len(thresholds))
+        return widths
+
+    def recovery_stats(
+        self, anchor=False, alpha=0.05, correction="bh", divergence_tol=0.1,
+        plot=True, **plot_kwargs,
     ):
         """
-        Plot a Wright map showing person and item location distributions.
+        Compare recovered parameter estimates against the true generating
+        values from the simulation this object was constructed from.
 
-        Displays the distribution of person locations alongside item
-        difficulties on the same logit scale. Items can either mirror the
-        person distribution on the opposite side of a zero baseline (as
-        back-to-back histograms or KDE curves), or be listed by name in a
-        dedicated panel, Winsteps-style, aligned to the same location axis.
+        No-op (warns, returns None) unless this object was built from a
+        simulation (self.generating exists) -- NOT restricted to
+        self.generating.model == 'RSM'. Person recovery is valid across
+        any appropriate model pairing (e.g. this RSM's persons compared
+        against pseudo-estimates built from PCM_Sim-generated data), so
+        it's always attempted. Item recovery is always attempted too
+        (item difficulties are comparable across SLM/PCM/RSM regardless
+        of threshold structure).
+
+        The RSM<->PCM pairing specifically is stricter than a per-
+        parameter-type skip: if the generating side is a PCM_Sim, NOTHING
+        fires at all (the whole method no-ops, not just thresholds)
+        unless EVERY max score matches -- PCM_Sim's own max_score_vector
+        must be constant across items AND equal this RSM's own max_score.
+        A partial mismatch means the two models aren't testing the same
+        category structure at all, not merely a threshold-shape mismatch,
+        so allowing items/persons through while just skipping thresholds
+        would be misleading. When every max score does match, thresholds/
+        category_widths are compared against the mean of PCM's per-item
+        centred thresholds (all rows should already be identical/near-
+        identical if the true structure is genuinely RSM-nested). Against
+        SLM-generated data (no thresholds at all), thresholds/
+        category_widths are skipped with a warning
+        (self.recovery.thresholds/.category_widths left as None,
+        items/persons still proceed) rather than raising or fabricating a
+        meaningless comparison -- unlike the PCM case above, SLM doesn't
+        trigger a whole-method no-op, since SLM's items are still directly
+        comparable regardless of its lack of thresholds.
+
+        Person recovery does NOT compare self.persons directly against
+        self.generating.persons -- that would conflate item/threshold
+        estimation and model-specification error with the irreducible
+        stochastic noise of a single finite response pattern (even a
+        perfect model, perfectly calibrated, shows nonzero residuals
+        against true theta, purely from response-pattern discreteness).
+        Instead, following Elliott & Buttery (2022a), a pseudo-estimate is
+        computed: the same Newton-Raphson person() procedure re-run on the
+        same self.responses, but using the TRUE generating item locations
+        and thresholds in place of the estimated ones. The persons table's
+        'error' column is (recovered estimate - pseudo-estimate), not
+        (recovered estimate - true theta) -- both share the same actual
+        response-pattern noise, so differencing cancels that shared
+        stochastic component. What remains is the COMBINED effect of (a)
+        item/threshold parameter estimation error and (b) any model
+        misspecification (fitting a model form that doesn't match how the
+        data were actually generated) on person measurement -- this method
+        does not, and cannot, separate those two; Elliott & Buttery (2022a)
+        used exactly this construction to demonstrate the person-
+        measurement impact of (b), not just (a) -- e.g. fitting a model
+        without threshold effects to data generated with them. Its
+        'generating' column holds this pseudo-estimate, not the raw true
+        theta -- unlike every other parameter type's 'generating' column,
+        which does hold the actual true value.
 
         Parameters
         ----------
-        person_names : str, list, or None, default None
-            Person subset to include. None uses all persons.
-        item_names : str, list, or None, default None
-            Item subset to include. None uses all items.
-        item_level : str, default 'items'
-            'items' plots one point per item at its central location.
-            'thresholds' plots one point per Rasch-Andrich threshold
-            instead (RSM: delta_i + tau_k; PCM: thresholds_uncentred),
-            flattened across all items. Ignored when item_strip=True,
-            which always needs each item's full threshold set regardless
-            of this setting.
-        orientation : str, default 'vertical'
-            'vertical' places location on the x-axis, persons above the
-            baseline. 'horizontal' places location on the y-axis, persons
-            to the left of the baseline.
-        map_type : str, default 'hist'
-            'hist' plots (back-to-back, when item_labels=False) histograms.
-            'kde' plots smoothed kernel density estimate curves instead.
-            Only governs the person side once item_labels=True, since the
-            item side becomes a label panel rather than a distribution.
-        item_labels : bool, default False
-            If True, items are listed by name in a dedicated panel next to
-            the person distribution (grouped into no_of_bins location bins,
-            stacked as rows within a bin, ordered by location) rather than
-            mirrored as a second distribution sharing the same axis.
-        item_strip : bool, default False
-            If True, draws each item as a Winsteps-style divided strip --
-            one row per item, spanning its own threshold range, divided
-            into coloured category segments with a boundary line at each
-            threshold. Implies item_labels=True.
-        item_distribution : bool, default False
-            If True, adds a third panel -- a plain (non-mirrored) hist or
-            KDE of item (or threshold, per item_level) locations -- between
-            the person panel and the item_labels panel. Implies
-            item_labels=True.
-        strip_thickness : float, default 2.0
-            Multiplier on the physical height (vertical orientation) or
-            width (horizontal orientation) of each item's strip row. Only
-            used when item_strip=True.
-        strip_alpha : float, default 0.3
-            Fill transparency for the strip's category segments. Only used
-            when item_strip=True.
-        sort : str, default 'location'
-            Ordering of item strip rows. 'location' sorts by each item's
-            lowest threshold. 'order' preserves self.items' own index
-            order. Only used when item_strip=True.
-        palette : str or None, default 'dark multi'
-            Named colour palette for the strip's category segments,
-            reusing the same palette_dict convention as plot_data(). None
-            uses a flat item_color fill with no per-category distinction.
-            Only used when item_strip=True.
-        neutral_extremes : bool, default False
-            The strip's open (unbounded) top and bottom categories always
-            draw out to the location axis limits (there's no real boundary
-            to stop short at). If True, they fade from a neutral cream
-            colour toward the real threshold instead of using a flat fill
-            in the category palette -- de-emphasising the open-ended
-            extremes rather than drawing the viewer's eye to an arbitrary
-            width. Only used when item_strip=True.
-        item_row_height : float or None, default None
-            Physical height, in inches, allocated per stacked item-label
-            row. If None, measured automatically from the longest item
-            name at the given font size. Only used when item_labels=True.
-        narrow_font : bool, default False
-            If True, item labels (and, with item_strip=True, the row
-            labels beside the strip) are set in 'Arial Narrow' instead of
-            font. A condensed font renders each name shorter, so it needs
-            less stacked row height -- useful when item names are long
-            and many end up sharing a bin or crowding the strip. Falls
-            back to matplotlib's usual font substitution if 'Arial
-            Narrow' isn't installed. Only affects item_labels=True;
-            everything else (axis text, legend, title) still uses font.
-        edge_padding : float, default 0.5
-            Extra padding, in inches, added around the item-label margin
-            (left of the axes in vertical orientation, below the axes in
-            horizontal orientation) beyond what's needed to fit the
-            longest item name. The same value produces matching-looking
-            margins in both orientations. Only used when item_labels=True.
-        distribution_markers : bool, default False
-            If True, overlays mean/+-1SD/+-2SD reference marks (labelled
-            mu, mu+-sigma, mu+-2sigma) for persons and items, in their
-            respective colours.
-        group_by : pandas.Series or None, default None
-            Person-level grouping (e.g. a DIF group), indexed like
-            self.persons, used to split the person distribution into one
-            sub-distribution per unique value. None plots persons as a
-            single series.
-        group_colors : dict or None, default None
-            Mapping from each group_by value to a colour. If None, colours
-            are drawn from the 'tab10' colormap in sorted group order.
-        stack : bool, default True
-            When group_by is set: for map_type='hist', True draws one
-            segmented column per bin (each group's count stacked within
-            the bar); False draws separate columns per group (dodged, or
-            alpha-blended if blend=True). For map_type='kde', True draws
-            curves cumulatively stacked (streamgraph-style); False overlays
-            each group's curve from zero.
-        blend : bool, default False
-            Only relevant when group_by is set, map_type='hist', and
-            stack=False. If True, draws each group as full-height,
-            alpha-blended overlapping bars instead of dodged (side-by-side)
-            bars.
-        prop : bool, default False
-            If True, normalises each distribution to proportions/density
-            rather than raw counts.
-        person_lim : float or None, default None
-            One-sided magnitude for persons' own Count/Density axis (e.g.
-            person_lim=30 shows 0 to 30). If None, chosen automatically
-            from persons' own natural peak, independently of items' own
-            scale. Persons' own panel always keeps its full physical
-            size regardless of this value -- items' own panel (when
-            item_distribution=True) is sized proportionally against it,
-            so a given Count/Density value reads at the same physical
-            scale in both.
-        item_lim : float or None, default None
-            One-sided magnitude for items' own Count/Density axis. Same
-            semantics as person_lim, for whichever panel items end up in
-            (mirrored onto the same axis as persons when
-            item_labels=False, or their own item_distribution panel).
-        person_scaling : float, default 1
-            Rebalances the item distribution against the person
-            distribution: with person_scaling=10 the item side reads 10x
-            larger per Count/Density unit than the person side, so the
-            item distribution takes 10x more of the plot. Useful when far
-            more persons than items otherwise leave the item distribution
-            a flat, uninformative squiggle at the persons' scale. Both
-            sides keep their true tick-label values either way. Applies
-            wherever both distributions are drawn as hist/KDE. In the
-            mirrored single-axis map (item_labels=False) the zero
-            baseline simply shifts to give the item side more of the
-            shared axis, at the same figure size -- the person side is
-            compressed to make room. With a dedicated item_distribution
-            panel (item_distribution=True) that panel is instead grown to
-            match, enlarging the figure. No effect when items are shown
-            only as labels (item_labels=True, item_distribution=False),
-            where there is no item distribution to rebalance against.
-        no_of_bins : int, default 20
-            Number of histogram bins spanning the location range. Also
-            defines the location-binning grid used for item_labels=True.
-        pad : bool, default False
-            If True, adds 5% padding to either end of the location axis
-            limits. If False, the location axis is bounded exactly to the
-            plotted range.
-        plot_range : tuple of (float, float) or None, default None
-            (lo, hi) limits for the location axis. If None, uses the floor
-            of the combined minimum and the ceiling of the combined maximum
-            of persons and items.
-        kde_points : int, default 500
-            Number of points at which each KDE curve is evaluated. Only
-            used when map_type='kde'.
-        bw_method : str, scalar, or callable, default 'scott'
-            Bandwidth selection method passed to scipy.stats.gaussian_kde.
-            Only used when map_type='kde'.
-        line_width : float, default 1
-            Line width of the KDE curves. Only used when map_type='kde'.
-        figsize : tuple of (float, float) or None, default None
-            Base figure size in inches for the person distribution. If
-            None, defaults to (8, 6) for orientation='vertical' or (4, 8)
-            for orientation='horizontal'. When item_labels=True, the person
-            panel gets half of this (matching how much space it occupied
-            in the original mirrored layout), and the figure grows further
-            to fit however many stacked item rows are needed -- the person
-            distribution's own size is never reduced to make room.
-        title : str or None, default None
-            Plot title. If None, no title is shown.
-        plot_style : str, default 'white'
-            Plot background style: 'white' or 'dark'.
-        edge_color : str, default 'black'
-            Edge colour of the histogram bars. Only used when
-            map_type='hist' and group_by is None.
-        person_color : str, default 'skyblue'
-            Fill colour for the person distribution. Ignored when group_by
-            is set (each group uses group_colors instead). Overridden by a
-            grey shade when black=True.
-        item_color : str, default 'salmon'
-            Fill colour for the item distribution. Only used when
-            item_labels=False. Overridden by a grey shade when black=True.
-        person_line_color : str, default 'black'
-            Line colour for the person KDE curve. Only used when
-            map_type='kde' and group_by is None.
-        item_line_color : str, default 'black'
-            Colour for item labels (item_labels=True) or the item KDE
-            curve line (item_labels=False, map_type='kde').
-        marker_color : str, default 'darkred'
-            Colour of the tick marks and labels drawn when
-            distribution_markers=True. Only used for the single-series
-            (group_by=None) case -- grouped marks use each group's own
-            colour instead, to stay identifiable against its distribution.
-        alpha : float, default 0.6
-            Fill transparency for the distributions.
-        black : bool, default False
-            If True, renders person_color/item_color as grey shades
-            instead. Has no effect on group_by colours.
-        font : str, default 'Times New Roman'
-            Font family for all plot text.
-        title_font_size : int, default 15
-            Title font size in points.
-        axis_font_size : int, default 12
-            Axis label font size in points.
-        labelsize : int, default 12
-            Tick label font size in points.
-        item_label_size : int, default 8
-            Font size, in points, for item names in the item_labels
-            panel.
-        tick_interval : float, default 1
-            Spacing between Location axis ticks. Ticks are evenly spaced
-            at multiples of this value across the plotted range, rather
-            than using matplotlib's own automatic tick choice (which can
-            land on an irregular spacing once the exact data min/max are
-            also forced in as ticks).
-        filename : str or None, default None
-            If provided, saves the plot to this path. No file extension
-            needed.
-        file_format : str, default 'png'
-            Output file format.
-        dpi : int, default 300
-            Output resolution in dots per inch.
+        anchor : bool, default False
+            If True, compare self.anchor_items (from calibrate_anchor())
+            against self.generating.items, instead of self.items. Raises
+            ValueError if calibrate_anchor() has not been run. RSM's
+            shared threshold vector is never anchored by calibrate_anchor
+            (only item locations translate), so thresholds/category_widths
+            and person recovery are unaffected by this flag either way.
+        alpha : float, default 0.05
+            Significance threshold for the per-parameter z-test
+            (Flagged/Flagged_corrected).
+        correction : {'bh', 'bonferroni', None}, default 'bh'
+            Multiple-comparison correction, applied within each parameter
+            type's own family of tests (matches dif_test's convention).
+        divergence_tol : float, default 0.1
+            Threshold for the OLS-vs-Huber slope divergence flag.
+        plot : bool, default True
+            If True, also produce a recovery plot per parameter type via
+            self._recovery_plot().
+        **plot_kwargs
+            Forwarded to _recovery_plot() (filename, file_format, dpi,
+            plot_style, font, title_font_size, axis_font_size, labelsize,
+            figsize).
 
         Returns
         -------
         None
-            Displays and closes the figure. Use filename to save.
+            Results are stored in self.recovery, not returned directly --
+            a namespace with .items/.persons/.thresholds/.category_widths,
+            each holding .table (a per-parameter DataFrame: generating,
+            estimated, SE, error, abs_error, z, p, p_corrected, Flagged,
+            Flagged_corrected) and .summary (a DataFrame, column
+            'Overall': RMSE, MAE, bias, r, r_squared, SD_ratio, OLS_slope,
+            OLS_intercept, Huber_slope, Huber_intercept, Divergence_flag,
+            Prop_flagged). Also sets
+            self.recovery.parameter_estimation_residual (float, or None
+            when thresholds/category_widths are skipped): the Elliott &
+            Buttery (2022) expected-score-space RMS residual between
+            generating and estimated item location + shared thresholds at
+            the true generating theta -- see _parameter_estimation_residual.
         """
+        from raschpy.base import _SimParams
 
-        if black:
-            person_color = "lightgray"
-            item_color = "darkgray"
+        if not hasattr(self, "generating"):
+            warnings.warn(
+                "recovery_stats() is a no-op: this object was not built "
+                "from a simulation (no self.generating found).",
+                UserWarning,
+                stacklevel=2,
+            )
+            return None
 
-        if not hasattr(self, "persons"):
-            self.person_estimates()
+        if anchor and not hasattr(self, "anchor_items"):
+            raise ValueError(
+                "anchor=True requires calibrate_anchor() to have been run "
+                "first (no self.anchor_items found)."
+            )
 
-        persons = (
-            self.persons if person_names is None else self.persons.loc[person_names]
+        gen_model = self.generating.model
+        if gen_model == "PCM":
+            # Cross-model RSM<->PCM comparison: nothing fires at all
+            # (not just thresholds) unless EVERY max score matches --
+            # PCM's own per-item max scores must be constant AND equal
+            # this RSM object's own max_score. A partial mismatch means
+            # the two models aren't testing the same category structure
+            # at all, not just a threshold-shape mismatch.
+            msv = self.generating.max_score_vector
+            if len(set(msv)) != 1 or list(set(msv))[0] != self.max_score:
+                warnings.warn(
+                    "recovery_stats() is a no-op: RSM<->PCM comparison "
+                    "requires every max score to match -- PCM_Sim's "
+                    f"max_score_vector={list(msv)} must be constant and "
+                    f"equal this RSM's max_score={self.max_score}.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                return None
+        elif gen_model == "SLM" and self.max_score != 1:
+            # SLM_Sim's data is genuinely dichotomous -- only a valid
+            # nested comparison when this RSM object's own max_score is
+            # also 1 (same "every max score must match" rule as the PCM
+            # case above, SLM implicitly being max_score=1).
+            warnings.warn(
+                "recovery_stats() is a no-op: SLM_Sim-generated data is "
+                "dichotomous, only a valid nested comparison when this "
+                f"RSM's own max_score is also 1 (got {self.max_score}).",
+                UserWarning,
+                stacklevel=2,
+            )
+            return None
+
+        # interval=0.95 here (not strictly needed by recovery_stats() itself,
+        # which only reads item_se/csem_vector) so a later full=True call to
+        # item_stats_df()/etc. doesn't crash: those check hasattr(self,
+        # "item_se") to decide whether to (re-)bootstrap, and would otherwise
+        # find item_se already set but item_low/item_high still missing --
+        # a real crash discovered via testing, not a hypothetical.
+        if not hasattr(self, "item_se"):
+            self.std_errors(interval=0.95)
+        if not hasattr(self, "csem_vector"):
+            self.fit_statistics(interval=0.95)
+
+        self.recovery = _SimParams()
+
+        est_items = self.anchor_items if anchor else self.items
+        items_table, items_summary = self._parameter_recovery_table(
+            self.generating.items, est_items, se=self.item_se, alpha=alpha,
+            correction=correction, divergence_tol=divergence_tol,
         )
+        self.recovery.items = _SimParams()
+        self.recovery.items.table = items_table
+        self.recovery.items.summary = items_summary
 
-        # a strip needs every item's full threshold set regardless of
-        # item_level (it draws the whole operating range, not one point),
-        # so it also implies item_labels -- friendlier than raising when
-        # someone passes item_strip=True on its own
-        if item_strip:
-            item_labels = True
+        gen_thresholds = None
+        if gen_model == "RSM":
+            gen_thresholds = self.generating.thresholds
+        elif gen_model == "PCM":
+            # Max-score match already verified above -- safe to proceed.
+            gen_thresholds = self.generating.thresholds.mean(axis=0)
+            gen_thresholds.index = range(1, self.max_score + 1)
+        else:
+            warnings.warn(
+                f"recovery_stats(): thresholds/category_widths skipped "
+                f"-- generating model {gen_model!r} has no threshold "
+                f"structure comparable to RSM's.",
+                UserWarning,
+                stacklevel=2,
+            )
 
-        # a plain item/threshold hist or KDE panel only makes sense as a
-        # third panel alongside the labelled one -- on its own it's just
-        # the old mirrored mode with item_labels=False
-        if item_distribution:
-            item_labels = True
+        self.recovery.thresholds = None
+        self.recovery.category_widths = None
+        gen_widths = est_widths = None
+        if gen_thresholds is not None:
+            threshold_se = pd.Series(
+                self.threshold_se, index=range(1, self.max_score + 1)
+            )
+            thresholds_table, thresholds_summary = self._parameter_recovery_table(
+                gen_thresholds, self.thresholds, se=threshold_se,
+                alpha=alpha, correction=correction,
+                divergence_tol=divergence_tol,
+            )
+            self.recovery.thresholds = _SimParams()
+            self.recovery.thresholds.table = thresholds_table
+            self.recovery.thresholds.summary = thresholds_summary
 
-        base_items = self.items if item_names is None else self.items.loc[item_names]
+            gen_widths = self._category_widths(gen_thresholds)
+            est_widths = self._category_widths(self.thresholds)
+            widths_table, widths_summary = self._parameter_recovery_table(
+                gen_widths, est_widths, se=self.cat_width_se, alpha=alpha,
+                correction=correction, divergence_tol=divergence_tol,
+            )
+            self.recovery.category_widths = _SimParams()
+            self.recovery.category_widths.table = widths_table
+            self.recovery.category_widths.summary = widths_summary
 
-        # the mirrored / item_distribution hist/KDE draws Rasch-Andrich
-        # thresholds rather than item central locations whenever item_level
-        # asks for them (or item_strip forces the per-threshold
-        # flattening) -- label its legend entry to match.
-        item_dist_label = (
-            "Thresholds" if (item_level == "thresholds" or item_strip) else "Items"
+        # Persons -- pseudo-estimate construction (Elliott & Buttery, 2022a).
+        # Dispatches on self.generating.model, so this works even when the
+        # generating structure came from a different model class (see
+        # _pseudo_estimate_persons).
+        pseudo_estimate = self._pseudo_estimate_persons()
+
+        persons_table, persons_summary = self._parameter_recovery_table(
+            pseudo_estimate, self.persons, se=self.csem_vector, alpha=alpha,
+            correction=correction, divergence_tol=divergence_tol,
         )
+        self.recovery.persons = _SimParams()
+        self.recovery.persons.table = persons_table
+        self.recovery.persons.summary = persons_summary
 
-        if item_level == "items" and not item_strip:
-            items = base_items
-        else:
-            # one entry per Rasch-Andrich threshold rather than one per item.
-            # RSM shares a single threshold set (self.thresholds is a Series
-            # of step values tau_k): delta_i + tau_k as one outer-sum matrix.
-            # PCM has its own threshold set per item, already on the shared
-            # absolute scale -- but as thresholds_uncentred, not
-            # self.thresholds (which is centred *within* each item, so its
-            # row means are ~0 and aren't comparable to self.items/persons
-            # at all). Either way the result is a wide (item x threshold
-            # number) frame.
-            if isinstance(self.thresholds, pd.Series):
-                matrix = pd.DataFrame(
-                    base_items.values[:, None] + self.thresholds.values[None, :],
-                    index=base_items.index,
-                    columns=self.thresholds.index,
-                )
-            else:
-                matrix = self.thresholds_uncentred.loc[base_items.index]
-
-            # pandas' stack() stopped dropping NaN by default as of the
-            # 2.1+ implementation, so drop the short items' padding NaNs
-            # explicitly rather than relying on stack()'s own default
-            stacked = matrix.stack().dropna()
-            items = stacked.set_axis(
-                [f"{item} (τ{k})" for item, k in stacked.index]
+        # Parameter-estimation residual (Elliott & Buttery, 2022): RMS
+        # expected-score residual between (generating item location,
+        # generating shared thresholds) and (estimated item location,
+        # estimated shared thresholds), jointly -- at the true generating
+        # theta throughout. Only meaningful when thresholds/category_widths
+        # themselves were (gen_thresholds is not None) -- see
+        # _parameter_estimation_residual.
+        self.recovery.parameter_estimation_residual = None
+        if gen_thresholds is not None:
+            gen_items_ = self.generating.items
+            self.recovery.parameter_estimation_residual = self._parameter_estimation_residual(
+                self.generating.persons,
+                lambda theta, item: self.exp_score(theta, gen_items_[item], gen_thresholds),
+                lambda theta, item: self.exp_score(theta, est_items[item], self.thresholds),
             )
 
-            if item_strip:
-                # kept grouped by item (not flattened) for the strip
-                # renderer, which needs each item's own ordered threshold
-                # list rather than one independent point per threshold.
-                # Segments are the item's own *most probable category*
-                # map -- the theta interval where each category actually
-                # has the highest response probability -- rather than
-                # just the interval between two raw threshold values.
-                # Category k's (unnormalised) log-response-odds relative
-                # to category 0 is S_k(theta) = k*theta - T_k, a straight
-                # line in theta (T_k = the cumulative sum of thresholds
-                # 1..k in their own natural, possibly disordered, order);
-                # "most probable category" is exactly whichever line is
-                # highest, so the segments are the upper envelope of
-                # these lines. For ordered thresholds this reduces to
-                # exactly the interval between adjacent thresholds (each
-                # category's own probability curve is a single unimodal
-                # "bump" peaking between its neighbours' crossings); when
-                # disordered, a category whose bump never rises above its
-                # neighbours' is correctly dropped from the envelope
-                # entirely, rather than drawn as a spurious sliver.
-                def _most_probable_category_segments(thresholds_natural):
-                    m = len(thresholds_natural)
-                    T = np.concatenate([[0.0], np.cumsum(thresholds_natural)])
-                    hull = []
-
-                    def redundant(l1, l2, l3):
-                        m1, b1 = l1
-                        m2, b2 = l2
-                        m3, b3 = l3
-                        return (b3 - b1) * (m1 - m2) <= (b2 - b1) * (m1 - m3)
-
-                    # slopes (category numbers 0..m) are already sorted
-                    # ascending regardless of threshold order, which is
-                    # what lets this single-pass stack (the sorted-slope
-                    # convex-hull trick) work without re-sorting anything
-                    for h in range(m + 1):
-                        line = (h, -T[h])
-                        while len(hull) >= 2 and redundant(hull[-2], hull[-1], line):
-                            hull.pop()
-                        hull.append(line)
-                    segs = []
-                    for i, (slope, intercept) in enumerate(hull):
-                        seg_lo = (
-                            None
-                            if i == 0
-                            else (intercept - hull[i - 1][1])
-                            / (hull[i - 1][0] - slope)
-                        )
-                        seg_hi = (
-                            None
-                            if i == len(hull) - 1
-                            else (hull[i + 1][1] - intercept)
-                            / (slope - hull[i + 1][0])
-                        )
-                        segs.append((seg_lo, seg_hi, slope))
-                    return segs
-
-                item_thresholds_natural = {
-                    item: row.dropna().values for item, row in matrix.iterrows()
-                }
-                item_segments = {
-                    item: _most_probable_category_segments(t)
-                    for item, t in item_thresholds_natural.items()
-                }
-                # a category missing from its item's segments never has
-                # the highest response probability anywhere -- exactly
-                # what disordered Rasch-Andrich thresholds mean
-                # geometrically (its own probability "bump" never rises
-                # above its neighbours')
-                item_missing_categories = {
-                    item: sorted(
-                        set(range(len(t) + 1))
-                        - {lab for _, _, lab in item_segments[item]}
-                    )
-                    for item, t in item_thresholds_natural.items()
-                }
-                disordered_items = [
-                    item
-                    for item, missing in item_missing_categories.items()
-                    if missing
-                ]
-                if disordered_items:
-                    warnings.warn(
-                        "Disordered thresholds for item(s) "
-                        f"{', '.join(str(i) for i in disordered_items)}. "
-                        "Only categories that are most probable for some "
-                        "range of the trait shown. For more detailed "
-                        "inspection of threshold structure, run self.crcs() "
-                        "plot and/or self.threshold_stats_df()."
-                    )
-
-        no_of_items = len(items)
-
-        if group_by is not None:
-            group_by = group_by.reindex(persons.index)
-            person_group_values = sorted(group_by.dropna().unique(), key=str)
-            if group_colors is None:
-                cmap = plt.get_cmap("tab10")
-                group_colors = {
-                    g: cmap(i % 10) for i, g in enumerate(person_group_values)
-                }
-
-        if plot_range is None:
-            combined = np.concatenate([persons.values, items.values])
-            span_lo, span_hi = float(combined.min()), float(combined.max())
-            if distribution_markers:
-                # the μ±2σ ticks (and their rotated labels) are drawn at
-                # mean ± 2·SD of each plotted distribution and can fall
-                # outside its raw data extent when that distribution is
-                # wide or heavy-tailed — fold them into the range so they
-                # stay on-canvas rather than being clipped at the spine
-                marker_values = [items.values]
-                if group_by is not None:
-                    marker_values += [
-                        persons.values[group_by.values == g]
-                        for g in person_group_values
-                    ]
-                else:
-                    marker_values.append(persons.values)
-                for mv in marker_values:
-                    if len(mv):
-                        mv_mean, mv_sd = float(np.mean(mv)), float(np.std(mv))
-                        span_lo = min(span_lo, mv_mean - 2 * mv_sd)
-                        span_hi = max(span_hi, mv_mean + 2 * mv_sd)
-            lo = np.floor(span_lo)
-            hi = np.ceil(span_hi)
-        else:
-            lo, hi = plot_range[0], plot_range[1]
-
-        bins = np.linspace(lo, hi, no_of_bins + 1)
-
-        # each distribution's own natural peak, computed analytically (no
-        # plotting needed) so panel sizing/axis ranges can be resolved
-        # before the figure is even built. Computed independently per
-        # distribution -- deliberately NOT sharing a single "widest"
-        # value across persons/items, since a small item set with a very
-        # different natural scale would otherwise force persons' own
-        # well-populated distribution onto a needlessly inflated (or
-        # cramped) scale
-        def _natural_max(values, n):
-            if map_type == "hist":
-                counts, _ = np.histogram(values, bins=bins)
-                peak = counts.max() if len(counts) else 0
-                return peak / n if prop else peak
-            kde_vals = gaussian_kde(values, bw_method=bw_method)(
-                np.linspace(lo, hi, kde_points)
-            )
-            peak = kde_vals.max() if len(kde_vals) else 0
-            return peak if prop else peak * n
-
-        person_natural_max = _natural_max(persons.values, len(persons))
-        item_natural_max = _natural_max(items.values, no_of_items)
-
-        # rounds a natural peak up to a "neat" ceiling -- 1/1.5/2/2.5/3/
-        # 4/5/6/8/10 x a power of 10 -- and picks a tick step that
-        # divides it exactly, from a matching per-fraction divisor,
-        # rather than leaving the step to a separately-chosen locator
-        # that has no reason to land on a divisor of this specific
-        # ceiling (which previously left the axis's own true top edge
-        # short of its last drawn tick, e.g. ticks 0..28 against a
-        # ceiling of 30). The 10% pad before searching guarantees the
-        # chosen ceiling sits visibly above the true peak even when that
-        # peak already IS a neat number itself (a small integer count,
-        # for instance) -- without it, the tallest bar/curve would land
-        # flush against the axis's own edge, with no headroom at all.
-        _nice_fractions = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10]
-        _nice_divisors = {1: 4, 1.5: 3, 2: 4, 2.5: 5, 3: 3, 4: 4, 5: 5, 6: 3, 8: 4, 10: 5}
-
-        def _nice_ceil_and_step(x, integer):
-            if x <= 0:
-                return 0, (1 if integer else 0.1)
-            x = x * 1.1
-            exponent = np.floor(np.log10(x))
-            fraction = x / 10**exponent
-            nice_fraction = next(f for f in _nice_fractions if f >= fraction - 1e-9)
-            ceiling = nice_fraction * 10**exponent
-            step = ceiling / _nice_divisors[nice_fraction]
-            if integer:
-                step = max(1, round(step))
-                ceiling = step * np.ceil(x / step)
-            return ceiling, step
-
-        def _nice_step_for(ceiling, integer):
-            # an explicit *_lim is used exactly as given (the ceiling
-            # itself isn't adjusted), but still gets a step matched to
-            # whichever known "nice" fraction it's closest to, so it at
-            # least *usually* divides evenly -- an arbitrary user value
-            # isn't guaranteed to, the way an auto-computed ceiling is
-            if ceiling <= 0:
-                return 1 if integer else 0.1
-            exponent = np.floor(np.log10(ceiling))
-            fraction = ceiling / 10**exponent
-            nice_fraction = min(_nice_fractions, key=lambda f: abs(f - fraction))
-            step = ceiling / _nice_divisors[nice_fraction]
-            if integer:
-                step = max(1, round(step))
-            return step
-
-        _integer_counts = map_type == "hist" and not prop
-
-        if person_lim is not None:
-            person_range = person_lim
-            person_step = _nice_step_for(person_lim, _integer_counts)
-        else:
-            person_range, person_step = _nice_ceil_and_step(
-                person_natural_max, _integer_counts
-            )
-        if item_lim is not None:
-            item_range = item_lim
-            item_step = _nice_step_for(item_lim, _integer_counts)
-        else:
-            item_range, item_step = _nice_ceil_and_step(item_natural_max, _integer_counts)
-
-        # In the mirrored single-axis map (item_labels=False) persons and
-        # items share one count axis, so person_scaling has no separate
-        # panel to resize the way it does with item_distribution=True.
-        # Instead it enlarges the item side of that shared axis by this
-        # factor: the item distribution ends up person_scaling x larger
-        # relative to persons, with the figure size unchanged (the person
-        # side is compressed to make room). 1 elsewhere, so the
-        # item_labels / item_distribution paths are untouched.
-        mirror_item_scale = person_scaling if not item_labels else 1
-
-        # breathing room reserved before row 0 of the item panel (used for
-        # both the boundary_margin below and, when distribution_markers
-        # draws a tick alongside each item-side mark, for keeping that
-        # tick inside the margin and clear of row 0's own text -- shared
-        # so the two stay consistent if this value ever changes)
-        item_row_margin = 0.45
-
-        # shared physical sizing for distribution_markers' ticks: a fixed
-        # gap (inches) between a tick and its own label, and a fixed tick
-        # length (rows) on the item side -- both fixed in real inches
-        # rather than a fraction of whatever data range is being plotted,
-        # so the two sides (persons' count-axis-based scale vs items'
-        # row-based scale) end up visually consistent instead of drifting
-        # apart depending on the dataset
-        mark_gap_in = 0.065
-        mark_tick_rows = 0.15
-        # physical breathing room (inches) between the widest mark's own
-        # label and where item names start -- separate from the +0.5-row
-        # collision buffer below (that one exists purely to stop an
-        # item's own centred text reaching back into the mark's text; this
-        # one is just visual spacing between the two blocks of text)
-        item_label_gap_in = 0.08
-
-        # when item_labels shows a dedicated item panel (rather than
-        # item_distribution's separate histogram/KDE), distribution_markers'
-        # item-side marks are drawn straight into that panel's own row
-        # grid, all at row 0 -- items then start uniformly at row 1,
-        # regardless of which bin(s) the marks themselves land in. Every
-        # mark sitting at the same row is what keeps their own starting
-        # point aligned with each other (not just with the items); if two
-        # marks happened to share a bin and got stacked into different
-        # rows instead, their own gap to the boundary would no longer
-        # match, even though items would still be fine. Only meaningful
-        # for the binned (non-strip) item panel -- item_strip rows are
-        # one-per-item already, not shared with anything.
-        item_mark_rows = {}
-        mark_row_depth = 0
-        if distribution_markers and item_labels and not item_distribution and not item_strip:
-            item_mean = items.mean()
-            item_sd = items.std()
-            for mark_label, mark_loc in (
-                ("μ", item_mean),
-                ("μ−σ", item_mean - item_sd),
-                ("μ+σ", item_mean + item_sd),
-                ("μ−2σ", item_mean - 2 * item_sd),
-                ("μ+2σ", item_mean + 2 * item_sd),
-            ):
-                item_mark_rows[mark_label] = mark_loc
-            mark_row_depth = 1
-
-        if figsize is None:
-            base_w, base_h = (8, 6) if orientation == "vertical" else (4, 8)
-        else:
-            base_w, base_h = figsize
-
-        style_overrides = {"font.family": font, "font.size": axis_font_size}
-
-        with plt.rc_context(style_overrides):
-
-            if plot_style != "white":
-                self._apply_plot_style(plot_style)
-
-            label_margin_in = 0.0
-            item_font = "Arial Narrow" if narrow_font else font
-
-            if item_labels and item_strip:
-                # divided-strip layout: each item is one row spanning its
-                # own threshold range. Row labels are drawn once per row,
-                # like a tick label, so each item always gets its own row
-                # (no packing) to keep that labelling unambiguous.
-                strip_ext = (hi - lo) * 0.03
-
-                def _draw_bounds(segs):
-                    # extend the open top/bottom categories by the width
-                    # of the adjacent *bounded* segment (falling back to
-                    # the small strip_ext buffer when there's only the
-                    # pair of extreme segments to work with -- either a
-                    # genuinely single-threshold item, or one where every
-                    # intermediate category has been dropped as
-                    # disordered, leaving nothing to borrow a width from)
-                    if len(segs) >= 3:
-                        return (
-                            segs[0][1] - (segs[1][1] - segs[1][0]),
-                            segs[-1][0] + (segs[-2][1] - segs[-2][0]),
-                        )
-                    return segs[0][1] - strip_ext, segs[-1][0] + strip_ext
-
-                item_spans = {
-                    name: _draw_bounds(segs) for name, segs in item_segments.items()
-                }
-
-                if sort == "location":
-                    ordered_names = sorted(item_spans, key=lambda name: item_spans[name][0])
-                else:
-                    ordered_names = list(item_thresholds_natural.keys())
-
-                item_rows = {name: i for i, name in enumerate(ordered_names)}
-                max_depth = len(ordered_names)
-
-                # names are labelled like axis ticks -- one label per row,
-                # at a fixed position outside the plot area, rather than
-                # inline after each item's own (variably-positioned) bar.
-                row_names = {}
-                for name in ordered_names:
-                    row_names.setdefault(item_rows[name], []).append(name)
-                row_labels = {row: ", ".join(names) for row, names in row_names.items()}
-
-                widest_label = max(row_labels.values(), key=len)
-                probe_fig = plt.figure()
-                probe_ax = probe_fig.add_subplot(111)
-                label_rotation = 0 if orientation == "vertical" else 90
-                probe_text = probe_ax.text(
-                    0,
-                    0,
-                    widest_label,
-                    fontsize=labelsize,
-                    fontfamily=item_font,
-                    rotation=label_rotation,
-                    rotation_mode="anchor",
+        if plot:
+            self._recovery_plot(self.generating.items, est_items, "items", **plot_kwargs)
+            if gen_thresholds is not None:
+                self._recovery_plot(
+                    gen_thresholds, self.thresholds, "thresholds", **plot_kwargs
                 )
-                probe_fig.canvas.draw()
-                bbox = probe_text.get_window_extent(
-                    renderer=probe_fig.canvas.get_renderer()
+                self._recovery_plot(
+                    gen_widths, est_widths, "category widths", **plot_kwargs
                 )
-                label_dim = bbox.width if orientation == "vertical" else bbox.height
-                label_margin_in = label_dim / probe_fig.dpi + edge_padding
-                plt.close(probe_fig)
+            self._recovery_plot(pseudo_estimate, self.persons, "persons", **plot_kwargs)
 
-                if item_row_height is None:
-                    # strip rows use horizontal (unrotated) text, so row
-                    # height only depends on font line-height, not on how
-                    # long any given item name is
-                    probe_fig = plt.figure()
-                    probe_ax = probe_fig.add_subplot(111)
-                    probe_text = probe_ax.text(
-                        0, 0, "Ag", fontsize=labelsize, fontfamily=item_font
-                    )
-                    probe_fig.canvas.draw()
-                    bbox = probe_text.get_window_extent(
-                        renderer=probe_fig.canvas.get_renderer()
-                    )
-                    # row spacing/bar_half stay fixed in data-units; giving
-                    # each row more physical inches (via strip_thickness)
-                    # is what actually makes the bar thicker on screen --
-                    # scaling bar_half instead would just repartition the
-                    # same physical row into a bigger bar/smaller gap, with
-                    # no net change to how thick it looks
-                    row_height_in = bbox.height / probe_fig.dpi * 1.6 * strip_thickness
-                    plt.close(probe_fig)
-                else:
-                    row_height_in = item_row_height * strip_thickness
-
-                # the axis itself later spans (max_depth + 0.1 +
-                # boundary_margin) row-units, not just max_depth -- sizing
-                # the panel to only max_depth*row_height_in would leave
-                # every row rendered slightly smaller than row_height_in
-                # actually intended, quietly eating into the buffer built
-                # into row_height_in's own measurement
-                item_panel_in = (
-                    max_depth + 0.1 + (0.7 if distribution_markers else 0.45)
-                ) * row_height_in
-
-            elif item_labels:
-                # Winsteps-style: bin items onto the histogram grid and
-                # stack names as rows within each occupied bin. Figuring
-                # out how many rows are needed happens up front, before any
-                # figure is created, so the item panel can be sized in real
-                # inches rather than measured and solved for after the fact
-                # -- no circular dependency, and it scales to any number of
-                # items.
-                bin_idx = np.clip(
-                    np.digitize(items.values, bins) - 1, 0, no_of_bins - 1
-                )
-                bin_centers = (bins[:-1] + bins[1:]) / 2
-                item_groups = {}
-                for (name, loc), b in zip(items.items(), bin_idx):
-                    item_groups.setdefault(b, []).append((loc, name))
-
-                if item_row_height is None:
-                    # a rotated string's rendered length depends on how
-                    # many characters it has -- measure the longest name
-                    # once, on a throwaway probe figure using the same font
-                    # context, entirely separate from the real figure, so
-                    # there's no risk of the measurement going stale when
-                    # the real figure's size is set afterward
-                    longest_name = max((str(n) for n in items.index), key=len)
-                    probe_fig = plt.figure()
-                    probe_ax = probe_fig.add_subplot(111)
-                    probe_text = probe_ax.text(
-                        0,
-                        0,
-                        longest_name,
-                        rotation=90,
-                        fontsize=item_label_size,
-                        fontfamily=item_font,
-                        rotation_mode="anchor",
-                    )
-                    probe_fig.canvas.draw()
-                    bbox = probe_text.get_window_extent(
-                        renderer=probe_fig.canvas.get_renderer()
-                    )
-                    row_height_in = bbox.height / probe_fig.dpi * 1.3
-                    plt.close(probe_fig)
-                else:
-                    row_height_in = item_row_height
-
-                if item_mark_rows:
-                    # marks are now left/top-anchored at row 0 (see the
-                    # distribution_markers block below) rather than
-                    # centred, so the widest one ("mu+2sigma") reaches a
-                    # full row_height_in-equivalent into row-space, not
-                    # just half of it -- mark_row_depth has to cover that
-                    # full reach, rounded up to a whole row, or a long
-                    # mark's own label can run into row 1's item text.
-                    # Item names are themselves centred on their own row
-                    # (below), reaching back up to half a row from their
-                    # centre, so padding by that same half-row is what
-                    # actually keeps the two apart, not just the mark's
-                    # own raw length.
-                    probe_fig = plt.figure()
-                    probe_ax = probe_fig.add_subplot(111)
-                    probe_text = probe_ax.text(
-                        0, 0, "μ+2σ", rotation=90, fontsize=labelsize,
-                        rotation_mode="anchor",
-                    )
-                    probe_fig.canvas.draw()
-                    bbox = probe_text.get_window_extent(
-                        renderer=probe_fig.canvas.get_renderer()
-                    )
-                    mark_label_in = bbox.height / probe_fig.dpi
-                    plt.close(probe_fig)
-                    # marks' own text starts right after their tick (which
-                    # sits flush with the panel's outer edge at
-                    # -item_row_margin, plus its own length and a fixed
-                    # physical gap converted to rows) -- not at row 0;
-                    # row 0 is only where item names start stacking. See
-                    # mark_gap_in/mark_tick_rows above and the drawing
-                    # code below, which both need this same value. Left
-                    # as a float (not rounded up to a whole row): items
-                    # stack in whole-row steps relative to *each other*
-                    # via i + mark_row_depth, which works just as well
-                    # from a fractional starting depth, and rounding up
-                    # here only wastes up to a full row of empty space
-                    # that was never actually needed
-                    mark_gap_rows = mark_gap_in / row_height_in
-                    mark_text_row = -item_row_margin + mark_tick_rows + mark_gap_rows
-                    # item_label_gap_in is purely visual spacing on top of
-                    # the collision buffer -- without it, the buffer alone
-                    # can leave the mark's text and the item names
-                    # touching with no breathing room
-                    mark_row_depth = max(
-                        1.0,
-                        mark_text_row
-                        + mark_label_in / row_height_in
-                        + item_label_gap_in / row_height_in
-                        + 0.5,
-                    )
-                else:
-                    # exact same formula as mark_text_row above with the
-                    # mark-specific terms (mark_tick_rows, mark_gap_rows,
-                    # the mark's own text reach) zeroed out, since there's
-                    # no mark here to reach past -- the earlier version of
-                    # this branch dropped the leading -item_row_margin
-                    # entirely, which mark_text_row always includes, so it
-                    # was measuring the gap from row 0 rather than from
-                    # the actual boundary and came out several times too
-                    # big. Same +0.5 collision buffer as above, for the
-                    # same reason (an item's own centred text reaching
-                    # back half a row from its centre)
-                    mark_row_depth = (
-                        -item_row_margin + item_label_gap_in / row_height_in + 0.5
-                    )
-
-                # every bin's items start after the same mark_row_depth
-                # band (see above), so the deepest bin sets the panel's
-                # depth regardless of which specific bin(s) hold marks
-                max_depth = max(
-                    max((len(v) for v in item_groups.values()), default=0)
-                    + mark_row_depth,
-                    1,
-                )
-                # the axis itself later spans (max_depth + 0.1 +
-                # item_row_margin) row-units, not just max_depth -- sizing
-                # the panel to only max_depth*row_height_in would leave
-                # every row rendered slightly smaller than row_height_in
-                # actually intended, quietly eating into the buffer built
-                # into row_height_in's own measurement (most visible on
-                # whichever item lands in the last row, right against the
-                # panel's outer edge)
-                item_panel_in = (max_depth + 0.1 + item_row_margin) * row_height_in
-            else:
-                item_panel_in = 0
-
-            # figsize originally described the whole mirrored plot (persons
-            # above, items below, sharing base_h/base_w). Now that items
-            # get their own panel, persons only need the half of that
-            # budget they used to occupy -- and persons' own panel always
-            # gets that full share regardless of person_range, per the
-            # docstring's promise that it never shrinks to make room.
-            # item_distribution's panel (always alongside a one-sided ax,
-            # since item_distribution implies item_labels=True) is sized
-            # proportionally to item_range vs person_range, so a given
-            # Count/Density value ends up at the same physical scale in
-            # both -- e.g. an item panel needing half of persons' own
-            # range gets half of persons' own physical size, not a fixed
-            # fraction of the whole figure regardless of what it needs.
-            person_panel_h = base_h / 2 if item_labels else base_h
-            person_panel_w = base_w / 2 if item_labels else base_w
-            item_dist_panel_h = (
-                person_panel_h * (item_range / person_range) * person_scaling
-                if item_distribution and person_range > 0
-                else (person_panel_h if item_distribution else 0)
-            )
-            item_dist_panel_w = (
-                person_panel_w * (item_range / person_range) * person_scaling
-                if item_distribution and person_range > 0
-                else (person_panel_w if item_distribution else 0)
-            )
-
-            # The persons panel always gets its full intended size -- adding
-            # the item panel(s) grows the figure, it never shrinks the
-            # distribution's own space. height_ratios/width_ratios alone
-            # only fix the *ratio* between panels within whatever plottable
-            # area matplotlib's default margins leave -- they don't pin
-            # absolute inches, so pinning top/bottom (or left/right)
-            # margins in inches is needed to make the split exact.
-            if not item_labels:
-                fig, ax = plt.subplots(figsize=(base_w, base_h))
-                ax_items = None
-                ax_item_dist = None
-            elif orientation == "vertical":
-                # extra top margin makes room for the duplicate Location
-                # tick row now drawn on ax's own top edge, alongside the
-                # title, plus a bit more breathing room below the title
-                # itself. Sized (empirically, against the horizontal
-                # branch's own margin below) so the title-to-content gap
-                # matches horizontal's despite the tick row eating into
-                # this orientation's margin budget that horizontal doesn't
-                # have to spend.
-                margin_top_in, margin_bottom_in = 1.0, 0.6
-                # right edge gets the same plain edge_padding as any other
-                # side with nothing to fit -- without an explicit value
-                # here, matplotlib's own default leftover-space margin
-                # takes over and is usually much bigger than the other
-                # three sides
-                margin_right_in = edge_padding
-                fig_w = base_w + label_margin_in + margin_right_in
-                fig_h = (
-                    person_panel_h
-                    + item_dist_panel_h
-                    + item_panel_in
-                    + margin_top_in
-                    + margin_bottom_in
-                )
-                fig = plt.figure(figsize=(fig_w, fig_h))
-                if item_distribution:
-                    nrows = 3
-                    height_ratios = [person_panel_h, item_dist_panel_h, item_panel_in]
-                else:
-                    nrows = 2
-                    height_ratios = [person_panel_h, item_panel_in]
-                gridspec_kwargs = dict(
-                    height_ratios=height_ratios,
-                    hspace=0,
-                    top=1 - margin_top_in / fig_h,
-                    bottom=margin_bottom_in / fig_h,
-                    right=1 - margin_right_in / fig_w,
-                )
-                if label_margin_in:
-                    # room for the strip's row labels, drawn just left of
-                    # the axes like a column of y-tick labels
-                    gridspec_kwargs["left"] = label_margin_in / fig_w
-                gs = fig.add_gridspec(nrows, 1, **gridspec_kwargs)
-                ax = fig.add_subplot(gs[0])
-                if item_distribution:
-                    ax_item_dist = fig.add_subplot(gs[1], sharex=ax)
-                    ax_items = fig.add_subplot(gs[2], sharex=ax)
-                else:
-                    ax_item_dist = None
-                    ax_items = fig.add_subplot(gs[1], sharex=ax)
-            else:
-                # right margin matches left: ax_items' Location scale (ticks
-                # + title) now lives on its outer (right) edge, mirroring
-                # ax's own Location scale on the left, so it needs the same
-                # amount of room
-                margin_left_in, margin_right_in = 0.7, 0.7
-                # top margin was previously unreserved -- fine while the
-                # title sat on ax's own axes, but now that it's a
-                # figure-wide suptitle (see below, so it centres over the
-                # whole figure rather than just the persons panel) it
-                # needs real room. Sized for a 50% bigger title-to-plot
-                # gap than the original unreserved default gave.
-                margin_top_in = 0.67
-                fig_w = (
-                    person_panel_w
-                    + item_dist_panel_w
-                    + item_panel_in
-                    + margin_left_in
-                    + margin_right_in
-                )
-                fig_h = base_h + label_margin_in + margin_top_in
-                fig = plt.figure(figsize=(fig_w, fig_h))
-                if item_distribution:
-                    ncols = 3
-                    width_ratios = [person_panel_w, item_dist_panel_w, item_panel_in]
-                else:
-                    ncols = 2
-                    width_ratios = [person_panel_w, item_panel_in]
-                gridspec_kwargs = dict(
-                    width_ratios=width_ratios,
-                    wspace=0,
-                    left=margin_left_in / fig_w,
-                    right=1 - margin_right_in / fig_w,
-                    top=1 - margin_top_in / fig_h,
-                )
-                if label_margin_in:
-                    # room for the strip's row labels, drawn just below
-                    # the axes like a row of x-tick labels. Same formula as
-                    # vertical's left margin below -- both are driven
-                    # purely by label_margin_in (text width/height plus
-                    # edge_padding), so the two orientations' edge gaps
-                    # match rather than horizontal getting an extra fixed
-                    # 0.3in on top.
-                    gridspec_kwargs["bottom"] = label_margin_in / fig_h
-                gs = fig.add_gridspec(1, ncols, **gridspec_kwargs)
-                ax = fig.add_subplot(gs[0])
-                if item_distribution:
-                    ax_item_dist = fig.add_subplot(gs[1], sharey=ax)
-                    ax_items = fig.add_subplot(gs[2], sharey=ax)
-                else:
-                    ax_item_dist = None
-                    ax_items = fig.add_subplot(gs[1], sharey=ax)
-
-            # Persons always plot using the same back-to-back convention,
-            # whether or not there's a dedicated item panel: zero-at-
-            # boundary, bulk growing away from it. In horizontal
-            # orientation the boundary with any item panel (item_labels or
-            # item_distribution) sits on persons' right, so unflipped
-            # (sign=+1) would put persons' zero at its own outer-left edge
-            # instead -- the opposite of the back-to-back look. Flipping
-            # (sign=-1) puts persons' zero at the boundary, matching item
-            # panels and back-to-back histograms alike. Vertical orientation
-            # never needs this: persons' natural zero-at-bottom already
-            # sits at its boundary with any panel below.
-            person_sign = 1 if orientation == "vertical" else -1
-
-            # items draw on their own axis in two cases: the old mirrored
-            # single-axes mode (item_labels=False), or the new
-            # item_distribution panel -- both flip the sign the same way
-            # (downward for vertical, rightward for horizontal) so the
-            # item_distribution panel reads as the same "flipped" shape as
-            # the old SLM-style mirrored map, just moved into its own
-            # panel instead of sharing ax with persons. Otherwise
-            # (item_labels=True, item_distribution=False) there's no item
-            # hist/kde at all -- just the labelled panel below.
-            item_sign = -1 if orientation == "vertical" else 1
-            if not item_labels:
-                item_ax = ax
-            elif item_distribution:
-                item_ax = ax_item_dist
-            else:
-                item_ax = None
-                item_sign = None
-
-            if map_type == "kde":
-                x_grid = np.linspace(lo, hi, kde_points)
-
-            if group_by is None:
-                person_groups = [("Persons", persons, person_color, person_line_color)]
-            else:
-                person_groups = [
-                    (str(g), persons[group_by == g], group_colors[g], group_colors[g])
-                    for g in person_group_values
-                ]
-
-            if map_type == "hist":
-                if stack or group_by is None:
-                    # single series, or one segmented column per bin
-                    data = [sub for _, sub, _, _ in person_groups]
-                    weights = [
-                        person_sign * np.ones_like(sub) / (len(sub) if prop else 1)
-                        for sub in data
-                    ]
-                    bar_colors = [c for _, _, c, _ in person_groups]
-                    group_labels = [label for label, _, _, _ in person_groups]
-
-                    ax.hist(
-                        data,
-                        weights=weights,
-                        bins=bins,
-                        color=bar_colors,
-                        edgecolor=edge_color,
-                        label=group_labels,
-                        alpha=alpha,
-                        orientation=orientation,
-                        stacked=True,
-                    )
-
-                elif not blend:
-                    # dodged: matplotlib's native side-by-side bars for
-                    # multiple datasets in one hist() call -- each group
-                    # gets its own slice of the bin width, no colour
-                    # blending to interpret
-                    data = [sub for _, sub, _, _ in person_groups]
-                    weights = [
-                        person_sign * np.ones_like(sub) / (len(sub) if prop else 1)
-                        for sub in data
-                    ]
-                    bar_colors = [c for _, _, c, _ in person_groups]
-                    group_labels = [label for label, _, _, _ in person_groups]
-
-                    ax.hist(
-                        data,
-                        weights=weights,
-                        bins=bins,
-                        color=bar_colors,
-                        edgecolor=edge_color,
-                        label=group_labels,
-                        alpha=alpha,
-                        orientation=orientation,
-                        stacked=False,
-                    )
-
-                else:
-                    # blend: each group's own full-height bars,
-                    # alpha-blended on top of each other rather than
-                    # dodged or stacked
-                    for label, sub, fill_color, line_color in person_groups:
-                        weights = person_sign * np.ones_like(sub)
-                        if prop:
-                            weights = weights / len(sub)
-
-                        ax.hist(
-                            sub,
-                            weights=weights,
-                            bins=bins,
-                            color=fill_color,
-                            edgecolor=edge_color,
-                            label=label,
-                            alpha=alpha,
-                            orientation=orientation,
-                        )
-
-            else:
-                cumulative = np.zeros_like(x_grid)
-                for label, sub, fill_color, line_color in person_groups:
-                    n_sub = len(sub)
-                    kde_sub = gaussian_kde(sub, bw_method=bw_method)(x_grid)
-                    curve = person_sign * (kde_sub if prop else kde_sub * n_sub)
-
-                    if stack:
-                        # streamgraph-style: each group's fill runs from the
-                        # running total up to running total + its own
-                        # curve, rather than every curve overlaying from
-                        # zero
-                        base, top = cumulative, cumulative + curve
-                        cumulative = top
-                    else:
-                        base, top = np.zeros_like(x_grid), curve
-
-                    if orientation == "vertical":
-                        ax.plot(x_grid, top, color=line_color, linewidth=line_width)
-                        ax.fill_between(
-                            x_grid,
-                            base,
-                            top,
-                            color=fill_color,
-                            alpha=alpha,
-                            edgecolor=line_color,
-                            linewidth=line_width,
-                            label=label,
-                        )
-                    else:
-                        ax.plot(top, x_grid, color=line_color, linewidth=line_width)
-                        ax.fill_betweenx(
-                            x_grid,
-                            base,
-                            top,
-                            color=fill_color,
-                            alpha=alpha,
-                            edgecolor=line_color,
-                            linewidth=line_width,
-                            label=label,
-                        )
-
-            # --- items: a hist/kde on their own axis (either the old
-            # mirrored ax, sign-flipped, or the new item_distribution
-            # panel, unflipped), or labelled rows in a dedicated panel, or
-            # both at once ---
-            if item_ax is not None:
-                if map_type == "hist":
-                    item_weights = item_sign * mirror_item_scale * np.ones_like(items)
-                    if prop:
-                        item_weights = item_weights / no_of_items
-
-                    item_ax.hist(
-                        items,
-                        weights=item_weights,
-                        bins=bins,
-                        color=item_color,
-                        edgecolor=edge_color,
-                        label=item_dist_label,
-                        alpha=alpha,
-                        orientation=orientation,
-                    )
-
-                else:
-                    kde_items = gaussian_kde(items, bw_method=bw_method)(x_grid)
-                    item_curve = item_sign * mirror_item_scale * (
-                        kde_items if prop else kde_items * no_of_items
-                    )
-
-                    if orientation == "vertical":
-                        item_ax.plot(
-                            x_grid,
-                            item_curve,
-                            color=item_line_color,
-                            linewidth=line_width,
-                        )
-                        item_ax.fill_between(
-                            x_grid,
-                            0,
-                            item_curve,
-                            color=item_color,
-                            alpha=alpha,
-                            edgecolor=item_line_color,
-                            linewidth=line_width,
-                            label=item_dist_label,
-                        )
-                    else:
-                        item_ax.plot(
-                            item_curve,
-                            x_grid,
-                            color=item_line_color,
-                            linewidth=line_width,
-                        )
-                        item_ax.fill_betweenx(
-                            x_grid,
-                            0,
-                            item_curve,
-                            color=item_color,
-                            alpha=alpha,
-                            edgecolor=item_line_color,
-                            linewidth=line_width,
-                            label=item_dist_label,
-                        )
-
-            if item_distribution:
-                # item_dist sits between the persons panel above and the
-                # labelled panel below -- drop its near-side spine (facing
-                # ax) for the same reason ax_items drops its own further
-                # down, and hide its shared location-axis tick labels since
-                # the bottom-most panel (ax_items) is the one that shows
-                # them
-                if orientation == "vertical":
-                    ax_item_dist.spines["top"].set_visible(False)
-                    ax_item_dist.tick_params(labelbottom=False)
-                else:
-                    ax_item_dist.spines["left"].set_visible(False)
-                    ax_item_dist.tick_params(labelleft=False)
-
-            # the labelled panel is independent of whether item_ax drew a
-            # hist/kde above -- item_distribution can add that panel on
-            # top of either labelling style, so this is its own if/elif
-            # rather than chained onto the item_ax branch above
-            if item_labels and item_strip:
-                # row 0 sits nearest the boundary with the persons panel,
-                # deeper rows move further away. Widened when
-                # distribution_markers=True so row 0 doesn't crowd the
-                # item mu/sigma marks overhanging from the persons panel
-                # just above.
-                boundary_margin = 0.7 if distribution_markers else 0.45
-                if orientation == "vertical":
-                    ax_items.set_ylim(max_depth + 0.1, -boundary_margin)
-                else:
-                    ax_items.set_xlim(-boundary_margin, max_depth + 0.1)
-
-                # palette=None: flat fill, no per-category distinction
-                # beyond the divider lines. palette=<name>: reuse the exact
-                # same named-palette -> colormap mechanism plot_data() uses
-                # for category response curves elsewhere in RaschPy, so a
-                # given palette name looks the same on this plot as on a
-                # crcs()/icc() plot.
-                if palette is not None:
-                    palette_dict = {
-                        "dark blue": ["dark", "royalblue"],
-                        "light blue": ["light", "cornflowerblue"],
-                        "dark red": ["dark", "firebrick"],
-                        "light red": ["light", "indianred"],
-                        "dark green": ["dark", "forestgreen"],
-                        "light green": ["light", "mediumseagreen"],
-                        "dark grey": ["dark", "dimgrey"],
-                        "light grey": ["light", "darkgrey"],
-                        "dark multi": ["dark", "dark"],
-                        "light multi": ["light", "muted"],
-                        "colorblind multi": ["dark", "colorblind"],
-                    }
-                    shade, base_color = palette_dict[palette]
-                    if palette == "colorblind multi":
-                        # Okabe & Ito (2008) -- colour-vision-deficiency-safe
-                        # qualitative palette, the scientific-publishing standard.
-                        # The 8th (black) entry is swapped for white on dark
-                        # backgrounds, where it would otherwise be invisible.
-                        color_map = [
-                            "#E69F00", "#56B4E9", "#009E73", "#F0E442",
-                            "#0072B2", "#D55E00", "#CC79A7",
-                            "#FFFFFF" if plot_style in self._DARK_BACKGROUND_STYLES else "#000000",
-                        ]
-                    elif shade == "dark":
-                        color_map = (
-                            sns.color_palette("dark", as_cmap=True)
-                            if palette == "dark multi"
-                            else sns.dark_palette(base_color, reverse=True, as_cmap=True)
-                        )
-                    else:
-                        color_map = (
-                            sns.color_palette("muted", as_cmap=True)
-                            if palette == "light multi"
-                            else sns.light_palette(
-                                base_color, reverse=True, as_cmap=True
-                            )
-                        )
-                    max_categories = (
-                        max(len(t) for t in item_thresholds_natural.values()) + 1
-                    )
-                    cNorm = colors.Normalize(vmin=0, vmax=max_categories + 2)
-                    if "multi" not in palette:
-                        scalar_map = cmx.ScalarMappable(norm=cNorm, cmap=color_map)
-
-                    def category_color(k):
-                        return (
-                            scalar_map.to_rgba(k)
-                            if "multi" not in palette
-                            else color_map[k]
-                        )
-
-                else:
-
-                    def category_color(k):
-                        return item_color
-
-                bar_half = 0.3
-                min_label_width = (hi - lo) * 0.02
-
-                for name, segs in item_segments.items():
-                    row = item_rows[name]
-                    # the open (unbounded) top/bottom categories always draw
-                    # out to the panel edge -- there's no real boundary to
-                    # stop at, so stopping partway (at item_spans' own
-                    # adjacent-width bound) just left an unexplained gap of
-                    # blank background between the strip and the axis edge.
-                    # neutral_extremes only controls whether that edge fill
-                    # is a flat block in the category colour (False) or
-                    # fades to a neutral colour (True), not whether it
-                    # reaches the edge at all.
-                    edge_lo, edge_hi = lo, hi
-
-                    n_segs = len(segs)
-                    for i, (seg_lo, seg_hi, k) in enumerate(segs):
-                        x0 = edge_lo if seg_lo is None else seg_lo
-                        x1 = edge_hi if seg_hi is None else seg_hi
-                        is_extreme = neutral_extremes and (i == 0 or i == n_segs - 1)
-
-                        if is_extreme:
-                            # fade a neutral colour in from the open (outer)
-                            # edge toward the real threshold it borders,
-                            # rather than a flat opaque block -- reads as
-                            # "this category has no far boundary" instead
-                            # of asserting a hard edge that isn't real
-                            fade_steps = 8
-                            neutral_color = "#EDE6D6"
-                            slice_width = (x1 - x0) / fade_steps
-                            for s in range(fade_steps):
-                                sx0 = x0 + s * slice_width
-                                sx1 = sx0 + slice_width
-                                frac = (
-                                    (s + 1) / fade_steps
-                                    if k == 0
-                                    else (fade_steps - s) / fade_steps
-                                )
-                                slice_alpha = strip_alpha * frac
-                                if orientation == "vertical":
-                                    ax_items.add_patch(
-                                        Rectangle(
-                                            (sx0, row - bar_half),
-                                            sx1 - sx0,
-                                            2 * bar_half,
-                                            facecolor=neutral_color,
-                                            alpha=slice_alpha,
-                                            edgecolor="none",
-                                        )
-                                    )
-                                else:
-                                    ax_items.add_patch(
-                                        Rectangle(
-                                            (row - bar_half, sx0),
-                                            2 * bar_half,
-                                            sx1 - sx0,
-                                            facecolor=neutral_color,
-                                            alpha=slice_alpha,
-                                            edgecolor="none",
-                                        )
-                                    )
-                            # one clean outline over the whole segment,
-                            # since the faded slices have none of their own
-                            if orientation == "vertical":
-                                ax_items.add_patch(
-                                    Rectangle(
-                                        (x0, row - bar_half),
-                                        x1 - x0,
-                                        2 * bar_half,
-                                        facecolor="none",
-                                        edgecolor="black",
-                                        linewidth=0.5,
-                                        alpha=strip_alpha,
-                                    )
-                                )
-                            else:
-                                ax_items.add_patch(
-                                    Rectangle(
-                                        (row - bar_half, x0),
-                                        2 * bar_half,
-                                        x1 - x0,
-                                        facecolor="none",
-                                        edgecolor="black",
-                                        linewidth=0.5,
-                                        alpha=strip_alpha,
-                                    )
-                                )
-                        else:
-                            color = category_color(k)
-                            if orientation == "vertical":
-                                ax_items.add_patch(
-                                    Rectangle(
-                                        (x0, row - bar_half),
-                                        x1 - x0,
-                                        2 * bar_half,
-                                        facecolor=color,
-                                        alpha=strip_alpha,
-                                        edgecolor="black",
-                                        linewidth=0.5,
-                                    )
-                                )
-                            else:
-                                ax_items.add_patch(
-                                    Rectangle(
-                                        (row - bar_half, x0),
-                                        2 * bar_half,
-                                        x1 - x0,
-                                        facecolor=color,
-                                        alpha=strip_alpha,
-                                        edgecolor="black",
-                                        linewidth=0.5,
-                                    )
-                                )
-
-                        label_color = "dimgrey" if is_extreme else "black"
-                        seg_center = (x0 + x1) / 2
-
-                        if x1 - x0 > min_label_width:
-                            if orientation == "vertical":
-                                ax_items.text(
-                                    seg_center,
-                                    row,
-                                    str(k),
-                                    ha="center",
-                                    va="center",
-                                    fontsize=labelsize,
-                                    fontweight="bold",
-                                    color=label_color,
-                                )
-                            else:
-                                # unrotated (unlike the item name labels,
-                                # which run along the column) -- these sit
-                                # inside a narrow column but read better
-                                # upright than sideways. center_baseline
-                                # (rather than center) reads as properly
-                                # centred for digit-only text, which has no
-                                # descenders for "center" to allow for.
-                                ax_items.text(
-                                    row,
-                                    seg_center,
-                                    str(k),
-                                    ha="center",
-                                    va="center_baseline",
-                                    fontsize=labelsize,
-                                    fontweight="bold",
-                                    color=label_color,
-                                )
-                        else:
-                            # too narrow for the number to sit inside its
-                            # own segment -- draw it just outside instead,
-                            # with a short leader connecting it back, using
-                            # the inter-row gap so it doesn't intrude on
-                            # the neighbouring row
-                            # starts a third of the way into the bar
-                            # itself (rather than right at its edge) so
-                            # the leader visibly originates from the
-                            # segment it's labelling
-                            leader_len = bar_half * 0.35
-                            leader_start = row + bar_half / 3
-                            leader_end = row + bar_half + leader_len
-                            if orientation == "vertical":
-                                ax_items.plot(
-                                    [seg_center, seg_center],
-                                    [leader_start, leader_end],
-                                    color=label_color,
-                                    linewidth=0.6,
-                                )
-                                ax_items.text(
-                                    seg_center,
-                                    leader_end,
-                                    str(k),
-                                    ha="center",
-                                    va="top",
-                                    fontsize=labelsize * 0.75,
-                                    fontweight="bold",
-                                    color=label_color,
-                                )
-                            else:
-                                ax_items.plot(
-                                    [leader_start, leader_end],
-                                    [seg_center, seg_center],
-                                    color=label_color,
-                                    linewidth=0.6,
-                                )
-                                ax_items.text(
-                                    leader_end,
-                                    seg_center,
-                                    str(k),
-                                    ha="left",
-                                    va="center_baseline",
-                                    fontsize=labelsize * 0.75,
-                                    fontweight="bold",
-                                    color=label_color,
-                                )
-
-                # one label per packed row, positioned like a tick label
-                # just outside the axes, rather than inline after each
-                # item's own bar (which put labels at wildly different
-                # positions depending on where that item's own range fell)
-                for label_row, label_text in row_labels.items():
-                    row_disordered = any(
-                        n in disordered_items for n in row_names[label_row]
-                    )
-                    label_kwargs = (
-                        {"color": "firebrick", "fontweight": "bold"}
-                        if row_disordered
-                        else {"color": item_line_color}
-                    )
-                    if orientation == "vertical":
-                        ax_items.text(
-                            -0.015,
-                            label_row,
-                            f"{label_text} ",
-                            transform=ax_items.get_yaxis_transform(),
-                            ha="right",
-                            va="center",
-                            fontsize=labelsize,
-                            fontfamily=item_font,
-                            clip_on=False,
-                            **label_kwargs,
-                        )
-                    else:
-                        ax_items.text(
-                            label_row,
-                            -0.015,
-                            f"{label_text} ",
-                            transform=ax_items.get_xaxis_transform(),
-                            ha="right",
-                            va="center",
-                            fontsize=labelsize,
-                            fontfamily=item_font,
-                            rotation=90,
-                            rotation_mode="anchor",
-                            clip_on=False,
-                            **label_kwargs,
-                        )
-
-                if orientation == "vertical":
-                    ax_items.spines["top"].set_visible(False)
-                    ax_items.set_yticks([])
-                    # ax's own bottom edge is an interior boundary (touches
-                    # item_dist or ax_items), not a useful place for
-                    # Location labels -- show a duplicate scale on ax's
-                    # outer (top) edge instead, so a tall figure has
-                    # Location ticks to read at both ends
-                    ax.tick_params(
-                        axis="x", bottom=False, top=True, labelbottom=False, labeltop=True
-                    )
-                else:
-                    ax_items.spines["left"].set_visible(False)
-                    ax_items.set_xticks([])
-                    # ax is the leftmost panel here, so its default (left)
-                    # tick side is already the figure's outer edge -- no
-                    # repositioning needed, just leave it showing
-
-            elif item_labels:
-                # row 0 sits nearest the boundary with the persons panel,
-                # deeper rows move further away -- inverted ylim for
-                # vertical (row 0 at the top, closest to the persons panel
-                # above) achieves that directly. Asymmetric margins: a
-                # little breathing room near the x-axis boundary
-                # (item_row_margin), and just enough at the panel's outer
-                # edge (0.1) to keep the last row off the border.
-                boundary_margin = item_row_margin
-                if orientation == "vertical":
-                    ax_items.set_ylim(max_depth + 0.1, -boundary_margin)
-                else:
-                    ax_items.set_xlim(-boundary_margin, max_depth + 0.1)
-
-                for b, entries in item_groups.items():
-                    x = bin_centers[b]
-                    # sort by actual location, not name -- a real map
-                    # orders items by where they fall
-                    for i, (loc, name) in enumerate(sorted(entries)):
-                        # rows 0..mark_row_depth-1 are the marks' own
-                        # reserved band (see item_mark_rows) -- every
-                        # item starts stacking uniformly above it
-                        level = i + mark_row_depth
-                        if orientation == "vertical":
-                            # va='top' (not 'center') anchors every
-                            # item's own near edge at its row, matching
-                            # ha='left' below for horizontal -- centring
-                            # let a short name like "Item_2" sit with a
-                            # different-looking start than a long one
-                            # like "Item_19" even at the identical row,
-                            # since centring keeps the middle fixed while
-                            # the two ends move with the string's length
-                            ax_items.text(
-                                x,
-                                level,
-                                str(name),
-                                color=item_line_color,
-                                rotation=90,
-                                ha="center",
-                                va="top",
-                                fontsize=item_label_size,
-                                fontfamily=item_font,
-                            )
-                        else:
-                            # ha='left' (not 'center') anchors every
-                            # item's own near edge at its row, rather
-                            # than its centre -- see the vertical branch
-                            # above for why
-                            ax_items.text(
-                                level,
-                                x,
-                                str(name),
-                                color=item_line_color,
-                                ha="left",
-                                va="center",
-                                fontsize=item_label_size,
-                                fontfamily=item_font,
-                            )
-
-                # the item panel is a label area, not a real data axis --
-                # strip its own ticks (no meaningful scale to read off),
-                # and keep three of its four spines. The panel sits flush
-                # against the persons panel (hspace/wspace=0), so its
-                # near-side spine (top for vertical, left for horizontal)
-                # would stack directly on top of the persons panel's own
-                # boundary spine and the explicit axhline/axvline -- three
-                # overlapping lines reading as one heavy, slightly blurred
-                # one. Dropping the item panel's near-side spine leaves a
-                # single clean boundary while still closing the other
-                # three sides.
-                if orientation == "vertical":
-                    ax_items.spines["top"].set_visible(False)
-                    ax_items.set_yticks([])
-                    # ax's own bottom edge is an interior boundary (touches
-                    # item_dist or ax_items), not a useful place for
-                    # Location labels -- show a duplicate scale on ax's
-                    # outer (top) edge instead, so a tall figure has
-                    # Location ticks to read at both ends
-                    ax.tick_params(
-                        axis="x", bottom=False, top=True, labelbottom=False, labeltop=True
-                    )
-                else:
-                    ax_items.spines["left"].set_visible(False)
-                    ax_items.set_xticks([])
-                    # ax is the leftmost panel here, so its default (left)
-                    # tick side is already the figure's outer edge -- no
-                    # repositioning needed, just leave it showing
-
-            if distribution_markers:
-
-                # freeze ax's own count-axis limits before drawing
-                # anything into it, pre-expanded to match the "nice"
-                # round tick matplotlib's own locator will pick for this
-                # range -- that expansion normally happens much later
-                # (the set_xticks call below, which snaps the outer edge
-                # out to the locator's outermost tick, e.g. -77.7 -> -80)
-                # well after this block has already computed and drawn
-                # the marks. Replicating it here first means _in_per_unit
-                # sees the axis's true final scale instead of a
-                # provisional one that's about to change size under it --
-                # marks are also, like any other artist, still their own
-                # small source of autoscale drift once drawn (clip_on=
-                # False), which this same freeze heads off
-                if orientation == "vertical":
-                    y0, y1 = ax.get_ylim()
-                    nice_ticks = ax.get_yticks()
-                    if len(nice_ticks):
-                        y1 = max(y1, max(nice_ticks))
-                    ax.set_ylim(y0, y1)
-                else:
-                    x0, x1 = ax.get_xlim()
-                    nice_ticks = ax.get_xticks()
-                    if len(nice_ticks):
-                        x0 = min(x0, min(nice_ticks))
-                    ax.set_xlim(x0, x1)
-
-                def _mark_len(target_ax):
-                    if orientation == "vertical":
-                        _, y1 = target_ax.get_ylim()
-                        return 0.015 * y1
-                    else:
-                        x0, _ = target_ax.get_xlim()
-                        return 0.015 * abs(x0)
-
-                # same size as the axis tick labels
-                marker_fontsize = labelsize
-
-                def _in_per_unit(target_ax):
-                    # exact data-unit -> inch conversion for this axis.
-                    # Built from the axes' own pixel bbox (fixed by the
-                    # gridspec layout, stable regardless of xlim/ylim)
-                    # together with x0/y1 -- the *stable* side of this
-                    # axis's own extent, the same side _mark_len already
-                    # reads. The other side (the boundary shared with the
-                    # item panel) still gets pinned to exactly 0 further
-                    # below, after distribution_markers runs, to correct
-                    # for autoscale drift the marks' own overhang causes
-                    # -- reading it here, before that pin, would use a
-                    # transform that's about to change and mismatch
-                    # whatever the item side's tick actually renders at
-                    bbox = target_ax.get_window_extent(
-                        renderer=fig.canvas.get_renderer()
-                    )
-                    if orientation == "vertical":
-                        _, y1 = target_ax.get_ylim()
-                        return (bbox.height / fig.dpi) / y1
-                    else:
-                        x0, _ = target_ax.get_xlim()
-                        return (bbox.width / fig.dpi) / abs(x0)
-
-                def add_distribution_markers(values, sign, color, target_ax, mark_len):
-                    mean = values.mean()
-                    sd = values.std()
-                    marks = [
-                        ("μ", mean),
-                        ("μ−σ", mean - sd),
-                        ("μ+σ", mean + sd),
-                        ("μ−2σ", mean - 2 * sd),
-                        ("μ+2σ", mean + 2 * sd),
-                    ]
-                    # fixed physical gap between the tick's own end and
-                    # its label, matching the item side's mark_gap_in
-                    # instead of a fraction of mark_len -- mark_len itself
-                    # already varies with the count axis's own range, so
-                    # multiplying it wouldn't give a gap of consistent
-                    # physical size
-                    gap = mark_gap_in / _in_per_unit(target_ax)
-                    text_offset = sign * (mark_len + gap)
-
-                    for label, loc in marks:
-                        if orientation == "vertical":
-                            target_ax.plot(
-                                [loc, loc],
-                                [0, sign * mark_len],
-                                color=color,
-                                linewidth=1,
-                                # matplotlib's default line cap
-                                # ("projecting") extends a line by half
-                                # its own width past each endpoint -- with
-                                # this tick's zorder placing it above the
-                                # boundary line, that projection is what
-                                # was visibly poking through to the other
-                                # side, not the tick's own coordinates
-                                solid_capstyle="butt",
-                                clip_on=False,
-                                zorder=6,
-                            )
-                            target_ax.text(
-                                loc,
-                                text_offset,
-                                label,
-                                color=color,
-                                ha="center",
-                                va="bottom" if sign > 0 else "top",
-                                fontsize=marker_fontsize,
-                                clip_on=False,
-                                zorder=6,
-                            )
-                        else:
-                            target_ax.plot(
-                                [0, sign * mark_len],
-                                [loc, loc],
-                                color=color,
-                                linewidth=1,
-                                solid_capstyle="butt",
-                                clip_on=False,
-                                zorder=6,
-                            )
-                            target_ax.text(
-                                text_offset,
-                                loc,
-                                label,
-                                color=color,
-                                ha="left" if sign > 0 else "right",
-                                va="center",
-                                fontsize=marker_fontsize,
-                                clip_on=False,
-                                zorder=6,
-                            )
-
-                # match the item side's own fixed physical tick length
-                # when there's an item panel to match -- _mark_len's
-                # fraction-of-count-range formula varies with whatever
-                # dataset is plotted, so left alone it drifts arbitrarily
-                # far from the item side's fixed length instead of
-                # tracking it
-                if item_mark_rows:
-                    # matched to ax_items' own *realized* inches-per-row
-                    # -- not row_height_in, since ax_items' actual
-                    # xlim/ylim span is max_depth + 0.1 + item_row_margin,
-                    # not just max_depth, so row_height_in alone slightly
-                    # overstates how many inches one row really occupies.
-                    # Uses the panel's full span (not _in_per_unit's
-                    # stable-side-only logic -- that assumes an axis
-                    # anchored at 0, which ax_items isn't); ax_items' own
-                    # xlim/ylim is already final at this point, so there's
-                    # no pending-pin instability to work around here
-                    items_bbox = ax_items.get_window_extent(
-                        renderer=fig.canvas.get_renderer()
-                    )
-                    if orientation == "vertical":
-                        y0i, y1i = ax_items.get_ylim()
-                        items_in_per_row = (items_bbox.height / fig.dpi) / abs(
-                            y1i - y0i
-                        )
-                    else:
-                        x0i, x1i = ax_items.get_xlim()
-                        items_in_per_row = (items_bbox.width / fig.dpi) / abs(
-                            x1i - x0i
-                        )
-                    person_mark_len = (
-                        mark_tick_rows * items_in_per_row
-                    ) / _in_per_unit(ax)
-                else:
-                    person_mark_len = _mark_len(ax)
-                if group_by is None:
-                    add_distribution_markers(
-                        persons, person_sign, marker_color, ax, person_mark_len
-                    )
-                else:
-                    # each group gets its own mean/SD marks in its own
-                    # colour -- a single overall mark wouldn't mean much
-                    # once the distribution's been split
-                    for label, sub, fill_color, line_color in person_groups:
-                        add_distribution_markers(
-                            sub, person_sign, line_color, ax, person_mark_len
-                        )
-
-                # with its own item_distribution panel, item marks belong
-                # on that panel's own scale (still flipped, matching the
-                # hist/kde bars there) rather than overhanging into the
-                # persons panel's boundary
-                if item_distribution:
-                    add_distribution_markers(
-                        items,
-                        item_sign,
-                        marker_color,
-                        ax_item_dist,
-                        _mark_len(ax_item_dist),
-                    )
-                elif item_labels and not item_strip:
-                    # drawn directly into the item panel's own row grid,
-                    # all at row 0 (see item_mark_rows) -- rather than
-                    # reaching in from ax's own count-axis scale. No item
-                    # can ever share row 0, by construction, and every
-                    # mark's own tick+label sits at exactly the same
-                    # depth as every other, rather than varying with
-                    # whatever bin it happens to land in. The tick itself
-                    # is flush with the boundary shared with the persons
-                    # panel (tick_near sits exactly at -item_row_margin,
-                    # the item panel's own edge), matching the persons
-                    # side's tick, which is flush with that same boundary
-                    # from its own side.
-                    tick_near = -item_row_margin
-                    tick_far = tick_near + mark_tick_rows
-                    for mark_label, mark_loc in item_mark_rows.items():
-                        if orientation == "vertical":
-                            ax_items.plot(
-                                [mark_loc, mark_loc],
-                                [tick_near, tick_far],
-                                color=marker_color,
-                                linewidth=1,
-                                solid_capstyle="butt",
-                                zorder=6,
-                            )
-                            # va='top' (not 'center') anchors every
-                            # label's own near edge at mark_text_row,
-                            # matching ha='left' below for horizontal --
-                            # centring would let a short label like "mu"
-                            # sit with more of a gap after the tick than
-                            # a long one like "mu+2sigma"
-                            ax_items.text(
-                                mark_loc,
-                                mark_text_row,
-                                mark_label,
-                                color=marker_color,
-                                rotation=90,
-                                ha="center",
-                                va="top",
-                                fontsize=marker_fontsize,
-                            )
-                        else:
-                            ax_items.plot(
-                                [tick_near, tick_far],
-                                [mark_loc, mark_loc],
-                                color=marker_color,
-                                linewidth=1,
-                                solid_capstyle="butt",
-                                zorder=6,
-                            )
-                            # ha='left' (not 'center') anchors every
-                            # label's own near edge at mark_text_row,
-                            # rather than its centre -- centring would
-                            # let a short label like "mu" sit with more
-                            # of a gap after the tick than a long one
-                            # like "mu+2sigma", which is exactly the
-                            # inconsistent-looking start this is fixing
-                            ax_items.text(
-                                mark_text_row,
-                                mark_loc,
-                                mark_label,
-                                color=marker_color,
-                                ha="left",
-                                va="center",
-                                fontsize=marker_fontsize,
-                            )
-                else:
-                    add_distribution_markers(
-                        items,
-                        -person_sign if item_labels else item_sign,
-                        marker_color,
-                        ax,
-                        person_mark_len,
-                    )
-
-            # ax's and ax_item_dist's own Count/Density limits are set
-            # explicitly further below (from person_range/item_range),
-            # which fully supersedes pinning just one side of each to 0
-            # here.
-
-            padding = (hi - lo) * 0.05 if pad else 0
-            loc_axis = ax_items if (item_labels and orientation == "vertical") else ax
-            loc_axis_h = (
-                ax_items if (item_labels and orientation == "horizontal") else ax
-            )
-
-            if item_labels and orientation == "horizontal":
-                # ax_items is the rightmost panel, but a y-axis's ticks
-                # default to its own left side -- an interior boundary
-                # here, not the figure's outer edge. Move them (and the
-                # "Location" title) to the right so the primary scale
-                # lands at the outer edge, mirroring how ax_items' bottom
-                # edge is already the outer edge in vertical orientation.
-                ax_items.yaxis.set_ticks_position("right")
-                ax_items.yaxis.set_label_position("right")
-
-            # evenly spaced at tick_interval across the plotted range --
-            # matplotlib's own automatic tick choice, unioned with the
-            # exact data min/max (the previous approach), could land the
-            # min/max on an irregular in-between spacing rather than the
-            # regular grid the rest of the ticks follow
-            def _regular_loc_ticks(axis_lo, axis_hi):
-                start = np.ceil(axis_lo / tick_interval) * tick_interval
-                n = int(np.floor((axis_hi - start) / tick_interval + 1e-9)) + 1
-                return [start + i * tick_interval for i in range(max(n, 0))]
-
-            if orientation == "vertical":
-                ax.set_xlim(lo - padding, hi + padding)
-                loc_ticks = _regular_loc_ticks(lo - padding, hi + padding)
-                loc_axis.set_xticks(loc_ticks)
-                if item_distribution:
-                    # keeps this panel's gridlines aligned with the other
-                    # two, even though its own tick labels stay hidden
-                    ax_item_dist.set_xticks(loc_ticks)
-            else:
-                ax.set_ylim(lo - padding, hi + padding)
-                loc_ticks = _regular_loc_ticks(lo - padding, hi + padding)
-                loc_axis_h.set_yticks(loc_ticks)
-                if item_distribution:
-                    ax_item_dist.set_yticks(loc_ticks)
-
-            if item_labels:
-                # ax's own boundary spine is redundant with the explicit
-                # axhline/axvline drawn further below -- both nominally
-                # sit at data 0, but as different Artist types (Spine vs
-                # Line2D) they can each round to a very slightly
-                # different sub-pixel position even at the identical
-                # data coordinate, leaving a faint second line just next
-                # to the axhline/axvline rather than exactly under it.
-                # Hiding the spine outright, rather than trying to
-                # position it to coincide, removes that mismatch instead
-                # of chasing sub-pixel alignment. Persons is always
-                # flipped in horizontal orientation now, so the boundary
-                # is always ax's right spine, never left.
-                if orientation == "vertical":
-                    ax.spines["bottom"].set_visible(False)
-                else:
-                    ax.spines["right"].set_visible(False)
-
-            is_vertical = orientation == "vertical"
-
-            # each panel's own (lo, hi) limits, set directly from
-            # person_range/item_range (an explicit *_lim override, or
-            # each distribution's own natural peak, resolved earlier)
-            # rather than left to independent autoscale -- this is also
-            # exactly what panel sizing above already assumed, so the
-            # rendered axis and the physical space allocated for it
-            # always agree. When persons and items still mirror onto the
-            # same ax (item_labels=False), each of its own two sides
-            # gets its own real range rather than a shared one.
-            if item_labels:
-                ax_lo = -person_range if person_sign < 0 else 0
-                ax_hi = person_range if person_sign > 0 else 0
-            else:
-                item_extent = item_range * mirror_item_scale
-                ax_lo = -(person_range if person_sign < 0 else item_extent)
-                ax_hi = person_range if person_sign > 0 else item_extent
-            if is_vertical:
-                ax.set_ylim(ax_lo, ax_hi)
-            else:
-                ax.set_xlim(ax_lo, ax_hi)
-
-            if item_distribution:
-                dist_lo = -item_range if item_sign < 0 else 0
-                dist_hi = item_range if item_sign > 0 else 0
-                if is_vertical:
-                    ax_item_dist.set_ylim(dist_lo, dist_hi)
-                else:
-                    ax_item_dist.set_xlim(dist_lo, dist_hi)
-
-            def _side_ticks(reach, step):
-                # evenly spaced ticks from 0 to reach inclusive, using
-                # exactly the step already resolved (together with
-                # reach itself) to divide it evenly -- generated
-                # explicitly rather than left to a locator, which has no
-                # reason to land on a divisor of this specific ceiling
-                if reach <= 0 or step <= 0:
-                    return [0.0]
-                n = int(round(reach / step))
-                return [i * step for i in range(n + 1)]
-
-            def _relabel(
-                ax_obj,
-                pos_reach,
-                pos_step,
-                neg_reach,
-                neg_step,
-                drop_zero=False,
-                pos_scale=1.0,
-                neg_scale=1.0,
-            ):
-                # (tick position, label value) pairs: a side whose count
-                # axis was stretched by mirror_item_scale keeps its tick
-                # *labels* at the true counts, only spaced further apart
-                # (pos_scale / neg_scale = 1 everywhere else).
-                pairs = {(t * pos_scale, t) for t in _side_ticks(pos_reach, pos_step)}
-                pairs |= {(-t * neg_scale, -t) for t in _side_ticks(neg_reach, neg_step)}
-                pairs = sorted(pairs)
-                # item_dist's own zero always sits exactly at the
-                # boundary shared with persons -- in horizontal
-                # orientation that boundary is a narrow vertical seam
-                # with both panels' own "0" label sitting right next to
-                # it, close enough to visually collide. Dropping
-                # item_dist's own redundant zero (ax's own stays) avoids
-                # that; not an issue in vertical orientation, where the
-                # seam is horizontal and the two labels don't compete
-                # for the same space.
-                if drop_zero and not is_vertical:
-                    pairs = [pl for pl in pairs if pl[0] != 0]
-                positions = [p for p, _ in pairs]
-                labels = (
-                    [f"{abs(v):.2f}" for _, v in pairs]
-                    if prop
-                    else [str(int(round(abs(v)))) for _, v in pairs]
-                )
-                if is_vertical:
-                    ax_obj.set_yticks(positions)
-                    ax_obj.set_yticklabels(labels, fontsize=labelsize)
-                else:
-                    ax_obj.set_xticks(positions)
-                    ax_obj.set_xticklabels(labels, fontsize=labelsize)
-
-            if item_labels:
-                if person_sign > 0:
-                    _relabel(ax, person_range, person_step, 0, 1)
-                else:
-                    _relabel(ax, 0, 1, person_range, person_step)
-            elif person_sign > 0:
-                # vertical: items are the negative side of the shared axis
-                _relabel(
-                    ax,
-                    person_range,
-                    person_step,
-                    item_range,
-                    item_step,
-                    neg_scale=mirror_item_scale,
-                )
-            else:
-                # horizontal: items are the positive side of the shared axis
-                _relabel(
-                    ax,
-                    item_range,
-                    item_step,
-                    person_range,
-                    person_step,
-                    pos_scale=mirror_item_scale,
-                )
-
-            if item_distribution:
-                if item_sign > 0:
-                    _relabel(ax_item_dist, item_range, item_step, 0, 1, drop_zero=True)
-                else:
-                    _relabel(ax_item_dist, 0, 1, item_range, item_step, drop_zero=True)
-
-            # explicit boundary line at 0, replacing (not just visually
-            # stacked on top of) the regular gridline that would
-            # otherwise also be drawn there -- relying on this line's own
-            # width/zorder to fully cover that gridline was fragile: as
-            # two separately-rendered Line2D objects, sub-pixel rounding
-            # can put them at very slightly different pixel positions
-            # even at the same data coordinate 0, leaving a faint grey
-            # sliver just next to the black line rather than under it.
-            # Both this and the "hide the gridline that would otherwise
-            # sit right under it" cleanup need the *final* tick set from
-            # _relabel above -- doing this earlier (against whatever
-            # ticks autoscale had chosen before the real limits were
-            # even set) hid whichever gridline happened to occupy that
-            # position in the stale tick list, not necessarily the one
-            # actually at 0.
-            if orientation == "vertical":
-                ax.axhline(0, color="black", linewidth=1.3, zorder=5)
-                for tick, gridline in zip(ax.get_yticks(), ax.yaxis.get_gridlines()):
-                    if tick == 0:
-                        gridline.set_visible(False)
-                # ax's own axhline is clipped to ax's own box, so its
-                # rendered width only ever eats into the persons side --
-                # the item panel's side of that same boundary is left
-                # with no black pixels to reach into at all, which is
-                # what actually made the two sides look asymmetric (one
-                # side's tick visibly "covers" part of the boundary,
-                # the other's just abuts a boundary that was never
-                # there on its side to begin with), even though both
-                # ticks are the same true length. Mirroring the line on
-                # ax_items, clipped to *its* own box, gives the item
-                # side an equal, equally-covered sliver instead
-                if item_labels:
-                    ax_items.axhline(
-                        -item_row_margin, color="black", linewidth=1.3, zorder=5
-                    )
-            else:
-                ax.axvline(0, color="black", linewidth=1.3, zorder=5)
-                if item_labels:
-                    ax_items.axvline(
-                        -item_row_margin, color="black", linewidth=1.3, zorder=5
-                    )
-                for tick, gridline in zip(ax.get_xticks(), ax.xaxis.get_gridlines()):
-                    if tick == 0:
-                        gridline.set_visible(False)
-
-            if orientation == "vertical":
-                loc_axis.set_xlabel(
-                    "Location", fontsize=axis_font_size, fontweight="bold"
-                )
-                ax.set_ylabel(
-                    "Density" if prop else "Count",
-                    fontsize=axis_font_size,
-                    fontweight="bold",
-                )
-                if item_distribution:
-                    # one shared "Count"/"Density" label instead of one per
-                    # panel -- re-centre ax's own label (rather than also
-                    # labelling ax_item_dist) across both panels' combined
-                    # span, computed in ax's own axes-fraction coordinates
-                    # since item_dist sits directly below it. The x offset
-                    # has to clear whichever panel's tick labels are wider.
-                    # Measuring the tick labels' own rendered extent
-                    # directly (rather than reading label.get_position()
-                    # after a draw, which returns a display-space value
-                    # from matplotlib's internal auto-layout transform,
-                    # not a reusable axes-fraction one) and converting
-                    # that through transAxes is what actually round-trips
-                    # correctly into set_label_coords.
-                    fig.canvas.draw()
-                    renderer = fig.canvas.get_renderer()
-
-                    def _leftmost_tick_x(target_ax):
-                        return min(
-                            t.get_window_extent(renderer=renderer).x0
-                            for t in target_ax.yaxis.get_ticklabels()
-                            if t.get_text()
-                        )
-
-                    left_px = min(_leftmost_tick_x(ax), _leftmost_tick_x(ax_item_dist))
-                    label_x = ax.transAxes.inverted().transform((left_px, 0))[0]
-                    # a little further out again, in axes-fraction, so the
-                    # label doesn't sit flush against the tick numbers
-                    label_x -= 0.03 * 0.6
-                    mid_y = 0.5 * (1 - item_dist_panel_h / person_panel_h)
-                    ax.yaxis.set_label_coords(label_x, mid_y)
-            else:
-                loc_axis_h.set_ylabel(
-                    "Location", fontsize=axis_font_size, fontweight="bold"
-                )
-                ax.set_xlabel(
-                    "Density" if prop else "Count",
-                    fontsize=axis_font_size,
-                    fontweight="bold",
-                )
-                if item_distribution:
-                    # one shared "Count"/"Density" label instead of one per
-                    # panel -- re-centre ax's own label across both panels'
-                    # combined span (in ax's own axes-fraction coordinates,
-                    # since item_dist sits directly to its right) instead
-                    # of also labelling ax_item_dist. Measured the same way
-                    # as the vertical case above, for the same reason:
-                    # label.get_position() after a draw returns a display-
-                    # space value from matplotlib's internal auto-layout
-                    # transform, not one set_label_coords can reuse.
-                    fig.canvas.draw()
-                    renderer = fig.canvas.get_renderer()
-
-                    def _bottommost_tick_y(target_ax):
-                        return min(
-                            t.get_window_extent(renderer=renderer).y0
-                            for t in target_ax.xaxis.get_ticklabels()
-                            if t.get_text()
-                        )
-
-                    bottom_px = min(_bottommost_tick_y(ax), _bottommost_tick_y(ax_item_dist))
-                    label_y = ax.transAxes.inverted().transform((0, bottom_px))[1]
-                    label_y -= 0.05 * 0.6
-                    mid_x = 0.5 * (1 + item_dist_panel_w / person_panel_w)
-                    ax.xaxis.set_label_coords(mid_x, label_y)
-
-            ax.tick_params(axis="x", labelsize=labelsize)
-            ax.tick_params(axis="y", labelsize=labelsize)
-            if item_labels:
-                loc_axis.tick_params(axis="x", labelsize=labelsize)
-                loc_axis_h.tick_params(axis="y", labelsize=labelsize)
-            if item_distribution:
-                ax_item_dist.tick_params(axis="x", labelsize=labelsize)
-                ax_item_dist.tick_params(axis="y", labelsize=labelsize)
-
-            if title is not None:
-                if item_labels:
-                    # ax.set_title() centres over just the persons panel,
-                    # which is only part of the figure width in horizontal
-                    # orientation (reading as left-aligned) -- a figure-
-                    # level suptitle centres over the whole figure instead,
-                    # giving consistent placement in both orientations.
-                    # Pulling y down from its 0.4-of-the-margin default
-                    # leaves clearance below the title before the axes.
-                    title_y = 1 - (margin_top_in * 0.4) / fig_h
-                    fig.suptitle(
-                        title, fontsize=title_font_size, fontweight="bold", y=title_y
-                    )
-                else:
-                    ax.set_title(title, fontsize=title_font_size, fontweight="bold")
-
-            # a legend can show handles from any axes, not just its own --
-            # pooling persons' and item_dist's handles onto one legend
-            # drawn on ax keeps a single legend box in the persons panel
-            # instead of a second one competing for space (and fighting
-            # "best" placement) inside item_dist
-            legend_handles, legend_labels = ax.get_legend_handles_labels()
-            if item_distribution:
-                dist_handles, dist_labels = ax_item_dist.get_legend_handles_labels()
-                legend_handles += dist_handles
-                legend_labels += dist_labels
-            # low-count locations sit near whichever side person_sign's
-            # baseline is on -- normally that's the left (unflipped), so
-            # "upper right" is clear. Flipped (horizontal + item_distribution)
-            # puts the baseline on the right instead, so the empty corner
-            # swaps to upper left.
-            legend_loc = "upper left" if person_sign < 0 else "upper right"
-            ax.legend(legend_handles, legend_labels, loc=legend_loc)
-
-            if filename is not None:
-                fig.savefig(filename + f".{file_format}", dpi=dpi)
-
-            plt.show(block=False)
-            plt.pause(0.001)
-            plt.close(fig)
+        return None

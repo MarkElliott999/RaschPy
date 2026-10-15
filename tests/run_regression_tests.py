@@ -7,6 +7,12 @@ First run — generate known-good fixtures:
     python run_regression_tests.py --generate
     python run_regression_tests.py --generate --model slm   # single model
 
+RSM/MFRM run under all three estimation methods by default ('pair-cpat' fixtures
+in regression_data/<model>/, 'cp-full-rcl' in regression_data/cp-full-rcl/<model>/, 'cpat-rcl' in
+regression_data/cpat-rcl/<model>/); --estimation cp-full-rcl|cpat-rcl|pair-cpat selects
+one, e.g.
+    python run_regression_tests.py --generate --estimation cp-full-rcl
+
 Subsequent runs — assert against fixtures:
     python run_regression_tests.py
     python run_regression_tests.py -v
@@ -57,8 +63,24 @@ RATER_RANGE   = 1.0
 ATOL          = 1e-6
 RECOVERY_R_MIN = 0.85   # minimum Pearson r for parameter recovery checks
 
-FIXTURE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                           'regression_data')
+BASE_FIXTURE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                'regression_data')
+FIXTURE_DIR = BASE_FIXTURE_DIR
+
+# RSM and MFRM have three estimation methods. 'pair-cpat' uses the original
+# fixtures (regression_data/<model>/); 'cp-full-rcl' and 'cpat-rcl' their own sets
+# (regression_data/<estimation>/<model>/). SLM and PCM have one method.
+ESTIMATIONS = ('cp-full-rcl', 'cpat-rcl', 'pair-cpat')
+ESTIMATED_RUNNERS = ('rsm', 'mfrm', 'bivector')
+ESTIMATION = 'cp-full-rcl'
+
+
+def set_estimation(estimation):
+    """Select the RSM/MFRM estimation method and its fixture directory."""
+    global ESTIMATION, FIXTURE_DIR
+    ESTIMATION = estimation
+    FIXTURE_DIR = (BASE_FIXTURE_DIR if estimation == 'pair-cpat'
+                   else os.path.join(BASE_FIXTURE_DIR, estimation))
 
 MFRM_MODELS = [
     ('Global',     'global',     MFRM_Sim_Global),
@@ -154,14 +176,38 @@ def load_json(path):
         return json.load(f)
 
 
-def save_plot_lines(axes, path):
+def capture_plot_lines(call):
+    """Run a plotting call and return line/bar data from the figure it returns.
+
+    Plot methods close their figure (``plt.close(fig)``) before returning it,
+    so ``plt.gcf()`` would hand back a fresh, empty figure. Lines are taken
+    from the returned figure only, never from global pyplot state.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.figure import Figure
+    from matplotlib.patches import Rectangle
+
+    plt.close('all')
+    try:
+        fig = call()
+    finally:
+        plt.close('all')
+    if not isinstance(fig, Figure):
+        raise TypeError(f'plot call returned {type(fig).__name__}, '
+                        'expected matplotlib Figure')
     data = {}
-    for ax_idx, ax in enumerate(axes):
+    for ax_idx, ax in enumerate(fig.get_axes()):
         for line_idx, line in enumerate(ax.lines):
             key = f'ax{ax_idx}_line{line_idx}'
-            data[key] = {'x': line.get_xdata().tolist(),
-                         'y': line.get_ydata().tolist()}
-    save_json(data, path)
+            data[key] = {'x': np.asarray(line.get_xdata(), dtype=float).tolist(),
+                         'y': np.asarray(line.get_ydata(), dtype=float).tolist()}
+        # Bar/histogram rectangles (e.g. std_residuals_plot draws no lines
+        # unless normal=True): left edges as x, heights as y.
+        bars = [p for p in ax.patches if isinstance(p, Rectangle)]
+        if bars:
+            data[f'ax{ax_idx}_bars'] = {'x': [float(p.get_x()) for p in bars],
+                                        'y': [float(p.get_height()) for p in bars]}
+    return data
 
 
 # ── Assertion helpers ─────────────────────────────────────────────────────────
@@ -225,18 +271,14 @@ def run_plot_checks(plot_calls, base, verbose):
     """Generate plots, compare line data against JSON fixtures."""
     import matplotlib
     matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
 
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         for plot_name, call in plot_calls:
             fixture = os.path.join(base, 'plots', f'{plot_name}.json')
             try:
-                call()
-                axes = plt.gcf().get_axes()
-                plt.close('all')
+                current = capture_plot_lines(call)
             except Exception:
-                plt.close('all')
                 check(f'plot/{plot_name} — renders', False,
                       traceback.format_exc(), verbose)
                 continue
@@ -248,12 +290,11 @@ def run_plot_checks(plot_calls, base, verbose):
                       f'fixture not found: {fixture}', verbose)
                 continue
 
-            current = {}
-            for ax_idx, ax in enumerate(axes):
-                for line_idx, line in enumerate(ax.lines):
-                    key = f'ax{ax_idx}_line{line_idx}'
-                    current[key] = {'x': line.get_xdata().tolist(),
-                                    'y': line.get_ydata().tolist()}
+            # An empty reference would make every comparison pass vacuously.
+            if not ref:
+                check(f'plot/{plot_name} — fixture non-empty', False,
+                      f'fixture has no lines: {fixture}', verbose)
+                continue
 
             keys_match = set(ref.keys()) == set(current.keys())
             check(f'plot/{plot_name} — line count', keys_match,
@@ -284,20 +325,20 @@ def save_plot_fixtures(plot_calls, base):
     """Generate plots and save line data as JSON fixtures."""
     import matplotlib
     matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
 
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         for plot_name, call in plot_calls:
             try:
-                call()
-                axes = plt.gcf().get_axes()
-                save_plot_lines(axes,
-                    os.path.join(base, 'plots', f'{plot_name}.json'))
-                plt.close('all')
+                data = capture_plot_lines(call)
             except Exception:
-                plt.close('all')
                 print(f'  WARNING: could not save plot fixture for {plot_name}')
+                continue
+            if not data:
+                print(f'  WARNING: {plot_name} produced no lines; '
+                      'fixture not saved')
+                continue
+            save_json(data, os.path.join(base, 'plots', f'{plot_name}.json'))
 
 
 # ── SLM ───────────────────────────────────────────────────────────────────────
@@ -496,7 +537,7 @@ def build_rsm():
     sim = RSM_Sim(no_of_items=N_ITEMS, no_of_persons=N_PERSONS,
                   max_score=MAX_SCORE, seed=SIM_SEED)
     m   = rp.RSM(sim.responses, max_score=MAX_SCORE)
-    m.calibrate()
+    m.calibrate(estimation=ESTIMATION)
     m.item_stats_df(seed=SIM_SEED)
     m.person_stats_df()
     m.test_stats_df(seed=SIM_SEED)
@@ -581,7 +622,7 @@ def build_rsm_dif():
         index=sim.responses.index,
     )
     m = rp.RSM(sim.responses, max_score=MAX_SCORE, exogenous=exogenous)
-    m.calibrate()
+    m.calibrate(estimation=ESTIMATION)
 
     m.andersen_lr_test(split_by='exogenous', covariate='Group')
 
@@ -616,7 +657,7 @@ def build_mfrm(sim_cls, model_name):
                   no_of_facet_elements=N_RATERS, max_score=MAX_SCORE,
                   seed=SIM_SEED, **range_kw)
     m = rp.MFRM(sim.responses, max_score=MAX_SCORE)
-    m.calibrate(model=model_name)
+    m.calibrate(model=model_name, estimation=ESTIMATION)
     m.item_stats_df(model=model_name, seed=SIM_SEED)
     m.threshold_stats_df(model=model_name, seed=SIM_SEED)
     m.person_stats_df(model=model_name)
@@ -880,7 +921,7 @@ def build_bivector():
         no_of_facet_elements=N_RATERS, max_score=MAX_SCORE, seed=SIM_SEED,
     )
     m = rp.MFRM(sim.responses, max_score=MAX_SCORE)
-    m.calibrate(model='bivector')
+    m.calibrate(model='bivector', estimation=ESTIMATION)
     m.person_estimates(model='bivector')
     m.fit_statistics(model='bivector', seed=SIM_SEED)
     return sim, m
@@ -915,7 +956,7 @@ def generate_bivector(sim, m):
         no_of_facet_elements=N_RATERS, max_score=MAX_SCORE, seed=SIM_SEED,
     )
     m_mat = rp.MFRM(sim2.responses, max_score=MAX_SCORE)
-    m_mat.calibrate(model='matrix')
+    m_mat.calibrate(model='matrix', estimation=ESTIMATION)
     r_diffs, _ = pearsonr(m.items.values, m_mat.items.values)
     with open(os.path.join(base, 'consistency.json'), 'w') as f:
         json.dump({'r_items_vs_matrix': r_diffs}, f)
@@ -963,7 +1004,7 @@ def assert_bivector(sim, m, verbose=False):
         no_of_facet_elements=N_RATERS, max_score=MAX_SCORE, seed=SIM_SEED,
     )
     m_mat = rp.MFRM(sim2.responses, max_score=MAX_SCORE)
-    m_mat.calibrate(model='matrix')
+    m_mat.calibrate(model='matrix', estimation=ESTIMATION)
     r_diffs, _ = pearsonr(m.items.values, m_mat.items.values)
     check('[Bivector] item difficulties r vs matrix >= 0.95',
           r_diffs >= 0.95, f'r={r_diffs:.3f}', verbose)
@@ -1000,9 +1041,12 @@ def main():
                         help='Print each passing check')
     parser.add_argument('--model', choices=list(RUNNERS), default=None,
                         help='Run only this model (default: all)')
+    parser.add_argument('--estimation', choices=list(ESTIMATIONS) + ['both'], default='both',
+                        help="RSM/MFRM estimation method(s) to test (default: both)")
     args = parser.parse_args()
 
     to_run = [args.model] if args.model else list(RUNNERS)
+    estimations = list(ESTIMATIONS) if args.estimation == 'both' else [args.estimation]
 
     print(f'\n{"=" * 60}')
     if args.generate:
@@ -1012,10 +1056,13 @@ def main():
         print(f'  RaschPy regression tests — {", ".join(r.upper() for r in to_run)}')
     print(f'{"=" * 60}')
 
-    os.makedirs(FIXTURE_DIR, exist_ok=True)
-
     for name in to_run:
-        RUNNERS[name](generate=args.generate, verbose=args.verbose)
+        for est in (estimations if name in ESTIMATED_RUNNERS else ['pair-cpat']):
+            set_estimation(est)
+            os.makedirs(FIXTURE_DIR, exist_ok=True)
+            if name in ESTIMATED_RUNNERS:
+                print(f'\n  [estimation={est}]')
+            RUNNERS[name](generate=args.generate, verbose=args.verbose)
 
     if args.generate:
         print(f'\n{"=" * 60}')

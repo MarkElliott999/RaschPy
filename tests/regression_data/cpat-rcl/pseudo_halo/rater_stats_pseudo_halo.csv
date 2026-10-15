@@ -1,0 +1,5 @@
+,lambda | Estimate,lambda | SE,omega | Estimate,omega | SE,Overall statistics | Count,Overall statistics | Infit MS,Overall statistics | Outfit MS
+Rater_1,0.15,0.045,0.529,0.065,1200.0,0.983,0.983
+Rater_2,-0.565,0.053,1.301,0.059,1200.0,0.956,0.945
+Rater_3,0.466,0.046,1.151,0.057,1200.0,0.935,0.947
+Rater_4,-0.051,0.046,1.019,0.068,1200.0,0.958,0.956

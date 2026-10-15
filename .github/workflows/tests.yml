@@ -1,0 +1,70 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  tests:
+    name: pytest (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # Editable install is load-bearing, not cosmetic: without it,
+      # tests/run_*.py's `import raschpy` can silently resolve to a
+      # stale PyPI/wheel install elsewhere on sys.path instead of this
+      # checkout. See tests/conftest.py and CONTRIBUTING.md.
+      - name: Install raschpy (editable) + dev dependencies
+        run: python -m pip install -e ".[dev]"
+
+      - name: Run smoke, regression, and edge-case suites
+        run: >
+          python -m pytest tests/ -v
+          --cov=raschpy --cov-report=term-missing --cov-report=xml
+
+      - name: Upload coverage report
+        if: matrix.python-version == '3.12'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+
+  lint:
+    name: lint (flake8 + black)
+    runs-on: ubuntu-latest
+    # Informational only for now: the codebase has real, pre-existing
+    # flake8/black drift (see RaschPy_remediation_plan.docx, item 6 —
+    # documentation/formatting cleanup). Flip to blocking once that's
+    # cleared, by removing continue-on-error below.
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install lint tools
+        run: python -m pip install flake8 black
+
+      - name: flake8
+        run: python -m flake8 raschpy/
+
+      - name: black --check
+        run: python -m black --check --diff raschpy/

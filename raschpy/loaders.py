@@ -481,12 +481,12 @@ def loadup_mfrm_multiple(
 
 def loadup_exogenous(filename, person_names=True):
     """
-    Load person-level exogenous covariates (e.g. Gender, Nationality or Age)
+    Load person-level exogenous variables (e.g. Gender, Nationality or Age)
     for DIF analysis.
 
     Reads a person-indexed covariate table from CSV, Excel (.xlsx), or JSON.
     Unlike the response loaders, values are not coerced to numeric or
-    validated against a score range — exogenous covariates are typically
+    validated against a score range — exogenous variables are typically
     categorical labels (e.g. 'Female', 'Chinese'), although they may be
     numerical (e.g. for Age) and are kept as supplied. Loaded independently
     of the response file rather than as extra columns in it, so a covariate

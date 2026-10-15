@@ -1,4 +1,4 @@
 ,Estimate,SE,Infit MS,Outfit MS
-Threshold 1,-2.461,0.066,0.931,0.837
-Threshold 2,0.121,0.045,0.992,0.98
-Threshold 3,2.339,0.061,0.939,0.86
+Threshold 1,-2.543,0.08,0.958,0.876
+Threshold 2,0.193,0.051,0.996,0.984
+Threshold 3,2.349,0.073,0.931,0.851

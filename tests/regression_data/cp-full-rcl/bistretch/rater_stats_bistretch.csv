@@ -1,0 +1,5 @@
+,lambda | Estimate,lambda | SE,omega_items | Estimate,omega_items | SE,omega_thresholds | Estimate,omega_thresholds | SE,Overall statistics | Count,Overall statistics | Infit MS,Overall statistics | Outfit MS
+Rater_1,0.182,0.044,0.565,0.055,0.593,0.027,1200.0,0.943,0.959
+Rater_2,-0.583,0.047,1.348,0.071,0.987,0.035,1200.0,0.967,0.954
+Rater_3,0.461,0.042,1.104,0.059,0.865,0.03,1200.0,0.948,0.958
+Rater_4,-0.06,0.057,0.983,0.082,1.555,0.044,1200.0,0.963,0.955

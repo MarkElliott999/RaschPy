@@ -239,6 +239,21 @@ def run_slm(verbose=False):
             plt.close('all')
             check(f'{tag} plot/{plot_name}', False, traceback.format_exc(), verbose)
 
+    # SLM is dichotomous (no threshold structure) -- item_level='thresholds'
+    # and item_strip=True must fail clearly rather than crash with a raw
+    # AttributeError on a missing self.thresholds.
+    try:
+        m.wright_map(item_strip=True)
+        plt.close('all')
+        check(f'{tag} plot/wright_map/item_strip raises on SLM', False,
+              'did not raise', verbose)
+    except ValueError:
+        check(f'{tag} plot/wright_map/item_strip raises on SLM', True, verbose=verbose)
+    except Exception:
+        plt.close('all')
+        check(f'{tag} plot/wright_map/item_strip raises on SLM', False,
+              traceback.format_exc(), verbose)
+
 
 # ── PCM ───────────────────────────────────────────────────────────────────────
 
@@ -370,6 +385,7 @@ def run_pcm(verbose=False):
         ('wright_map/horiz+scaling',     lambda: m.wright_map(orientation='horizontal', person_scaling=5)),
         ('wright_map/item_labels',       lambda: m.wright_map(item_labels=True, person_scaling=5)),
         ('wright_map/item_distribution', lambda: m.wright_map(item_distribution=True, person_scaling=5)),
+        ('wright_map/item_strip',         lambda: m.wright_map(item_strip=True, person_scaling=5)),
     ]:
         try:
             call(); plt.close('all')
@@ -500,6 +516,7 @@ def run_rsm(verbose=False):
         ('wright_map/horiz+scaling',     lambda: m.wright_map(orientation='horizontal', person_scaling=5)),
         ('wright_map/item_labels',       lambda: m.wright_map(item_labels=True, person_scaling=5)),
         ('wright_map/item_distribution', lambda: m.wright_map(item_distribution=True, person_scaling=5)),
+        ('wright_map/item_strip',         lambda: m.wright_map(item_strip=True, person_scaling=5)),
     ]:
         try:
             call(); plt.close('all')
@@ -691,6 +708,10 @@ def run_mfrm_model(label, model_name, sim_cls, verbose=False):
         ('wright_map/overlay+scaling',  lambda: m.wright_map(model_name, overlay_facet=True, person_scaling=5)),
         ('wright_map/prop+scaling',     lambda: m.wright_map(model_name, prop=True, person_scaling=3)),
         ('wright_map/item_labels',      lambda: m.wright_map(model_name, item_labels=True, person_scaling=5)),
+        ('wright_map/item_distribution', lambda: m.wright_map(model_name, item_distribution=True, person_scaling=5)),
+        ('wright_map/item_strip',       lambda: m.wright_map(model_name, item_strip=True, person_scaling=5)),
+        ('wright_map/facet_labels',     lambda: m.wright_map(model_name, facet_labels=True, person_scaling=5)),
+        ('wright_map/expand_model',     lambda: m.wright_map(model_name, expand_model=True, item_level='thresholds', person_scaling=5)),
     ]:
         try:
             with warnings.catch_warnings():
@@ -941,6 +962,7 @@ def run_bivector(verbose=False):
         ('wright_map',                 lambda: m.wright_map('bivector')),
         ('wright_map/person_scaling',  lambda: m.wright_map('bivector', person_scaling=5)),
         ('wright_map/overlay+scaling', lambda: m.wright_map('bivector', overlay_facet=True, person_scaling=5)),
+        ('wright_map/expand_model',    lambda: m.wright_map('bivector', expand_model=True, item_level='thresholds', person_scaling=5)),
     ]:
         try:
             call()
@@ -969,42 +991,38 @@ def run_wright_map_scaling(verbose=False):
     def _capture(make_plot):
         """Return dict of figure/axis metrics for one mirrored wright map.
 
-        Reads ax.dataLim (the raw data extent, before autoscale margins) so
-        the person-side max and item-side min are directly comparable across
-        person_scaling values regardless of how each model sets its limits.
+        Metrics come from the figure the plot call returns (plot methods
+        close their figure before returning it, so global pyplot state
+        can't be relied on). Reads ax.dataLim (the raw data extent, before
+        autoscale margins) so the person-side max and item-side min are
+        directly comparable across person_scaling values regardless of how
+        each model sets its limits.
         """
-        grabbed = {}
-        real_close = plt.close
-
-        def spy(fig=None):
-            f = fig if hasattr(fig, 'get_size_inches') else plt.gcf()
-            if 'size' not in grabbed and getattr(f, 'axes', None):
-                ax0 = f.axes[0]
-                dl = ax0.dataLim
-                grabbed['size'] = tuple(round(v, 4) for v in f.get_size_inches())
-                grabbed['data_lo'] = round(dl.y0, 6)   # item side (negative)
-                grabbed['data_hi'] = round(dl.y1, 6)   # person side (positive)
-                # largest labelled value on the item side (negative ticks) --
-                # must stay a TRUE count, never the person_scaling-inflated one
-                item_vals = []
-                for pos, lab in zip(ax0.get_yticks(), ax0.get_yticklabels()):
-                    txt = lab.get_text().replace('−', '-').strip()
-                    if pos < -1e-9 and txt:
-                        try:
-                            item_vals.append(abs(float(txt)))
-                        except ValueError:
-                            pass
-                grabbed['item_label_max'] = max(item_vals) if item_vals else 0.0
-            return real_close(fig)
-
-        plt.close = spy
+        plt.close('all')
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore')
-                make_plot()
+                f = make_plot()
         finally:
-            plt.close = real_close
-            real_close('all')
+            plt.close('all')
+        grabbed = {}
+        if getattr(f, 'axes', None):
+            ax0 = f.axes[0]
+            dl = ax0.dataLim
+            grabbed['size'] = tuple(round(v, 4) for v in f.get_size_inches())
+            grabbed['data_lo'] = round(dl.y0, 6)   # item side (negative)
+            grabbed['data_hi'] = round(dl.y1, 6)   # person side (positive)
+            # largest labelled value on the item side (negative ticks) --
+            # must stay a TRUE count, never the person_scaling-inflated one
+            item_vals = []
+            for pos, lab in zip(ax0.get_yticks(), ax0.get_yticklabels()):
+                txt = lab.get_text().replace('−', '-').strip()
+                if pos < -1e-9 and txt:
+                    try:
+                        item_vals.append(abs(float(txt)))
+                    except ValueError:
+                        pass
+            grabbed['item_label_max'] = max(item_vals) if item_vals else 0.0
         return grabbed
 
     K = 4
@@ -1012,7 +1030,7 @@ def run_wright_map_scaling(verbose=False):
     builders = []
     try:
         np.random.seed(SIM_SEED)
-        s = rp.SLM(SLM_Sim(no_of_items=N_ITEMS, no_of_persons=N_PERSONS).responses)
+        s = rp.SLM(SLM_Sim(no_of_items=N_ITEMS, no_of_persons=N_PERSONS, seed=SIM_SEED).responses)
         s.calibrate()
         builders.append(('SLM', lambda ps: s.wright_map(person_scaling=ps)))
     except Exception:
@@ -1022,7 +1040,7 @@ def run_wright_map_scaling(verbose=False):
         np.random.seed(SIM_SEED)
         max_score_vec = [MAX_SCORE] * N_ITEMS
         p = rp.PCM(PCM_Sim(no_of_items=N_ITEMS, no_of_persons=N_PERSONS,
-                           max_score_vector=max_score_vec).responses,
+                           max_score_vector=max_score_vec, seed=SIM_SEED).responses,
                    max_score_vector=max_score_vec)
         p.calibrate()
         builders.append(('PCM', lambda ps: p.wright_map(person_scaling=ps)))
@@ -1032,7 +1050,7 @@ def run_wright_map_scaling(verbose=False):
     try:
         np.random.seed(SIM_SEED)
         r = rp.RSM(RSM_Sim(no_of_items=N_ITEMS, no_of_persons=N_PERSONS,
-                           max_score=MAX_SCORE).responses, max_score=MAX_SCORE)
+                           max_score=MAX_SCORE, seed=SIM_SEED).responses, max_score=MAX_SCORE)
         r.calibrate()
         builders.append(('RSM', lambda ps: r.wright_map(person_scaling=ps)))
     except Exception:
@@ -1042,7 +1060,7 @@ def run_wright_map_scaling(verbose=False):
         np.random.seed(SIM_SEED)
         mm = rp.MFRM(MFRM_Sim_Global(no_of_items=N_ITEMS, no_of_persons=N_PERSONS,
                                      no_of_facet_elements=N_RATERS,
-                                     max_score=MAX_SCORE).responses,
+                                     max_score=MAX_SCORE, seed=SIM_SEED).responses,
                      max_score=MAX_SCORE)
         mm.calibrate(model='global')
         builders.append(('MFRM', lambda ps: mm.wright_map('global', overlay_facet=True,

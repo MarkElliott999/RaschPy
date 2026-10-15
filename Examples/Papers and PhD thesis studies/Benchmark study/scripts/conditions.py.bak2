@@ -1,0 +1,151 @@
+"""
+The 33-condition, one-at-a-time benchmark grid agreed 2026-09-20 (see the
+project_raschpy_benchmark_scope memory file for the full design record).
+
+Each condition is a dict of Sim-class kwargs plus a 'missing_prop' (0 or
+0.5, cell-level MCAR) and, for PCM, an optional 'mixed_k' item-level
+max_score_vector overriding the uniform one.
+"""
+
+import hashlib
+
+REPS = 50
+
+SLM_CONDITIONS = [
+    dict(label="baseline", no_of_items=15, no_of_persons=500, missing_prop=0.0),
+    dict(label="n_small", no_of_items=15, no_of_persons=150, missing_prop=0.0),
+    dict(label="n_large", no_of_items=15, no_of_persons=2000, missing_prop=0.0),
+    dict(label="items_small", no_of_items=10, no_of_persons=500, missing_prop=0.0),
+    dict(label="items_large", no_of_items=30, no_of_persons=500, missing_prop=0.0),
+    dict(label="missing_50pct", no_of_items=15, no_of_persons=500, missing_prop=0.5),
+]
+
+PCM_CONDITIONS = [
+    dict(label="baseline", no_of_items=15, no_of_persons=500, max_score=4, missing_prop=0.0),
+    dict(label="n_small", no_of_items=15, no_of_persons=150, max_score=4, missing_prop=0.0),
+    dict(label="n_large", no_of_items=15, no_of_persons=2000, max_score=4, missing_prop=0.0),
+    dict(label="items_small", no_of_items=6, no_of_persons=500, max_score=4, missing_prop=0.0),
+    dict(label="items_large", no_of_items=30, no_of_persons=500, max_score=4, missing_prop=0.0),
+    dict(label="k_small", no_of_items=15, no_of_persons=500, max_score=2, missing_prop=0.0),
+    dict(label="k_large", no_of_items=15, no_of_persons=500, max_score=7, missing_prop=0.0),
+    dict(label="missing_50pct", no_of_items=15, no_of_persons=500, max_score=4, missing_prop=0.5),
+    # Mixed-K: 5/5/5 split across K=2/4/7 within the 15-item baseline set.
+    dict(
+        label="mixed_k", no_of_items=15, no_of_persons=500, max_score=4,
+        missing_prop=0.0,
+        mixed_k=[2] * 5 + [4] * 5 + [7] * 5,
+    ),
+]
+
+RSM_CONDITIONS = [
+    dict(label="baseline", no_of_items=15, no_of_persons=500, max_score=4, missing_prop=0.0),
+    dict(label="n_small", no_of_items=15, no_of_persons=150, max_score=4, missing_prop=0.0),
+    dict(label="n_large", no_of_items=15, no_of_persons=2000, max_score=4, missing_prop=0.0),
+    dict(label="items_small", no_of_items=6, no_of_persons=500, max_score=4, missing_prop=0.0),
+    dict(label="items_large", no_of_items=30, no_of_persons=500, max_score=4, missing_prop=0.0),
+    dict(label="k_small", no_of_items=15, no_of_persons=500, max_score=2, missing_prop=0.0),
+    dict(label="k_large", no_of_items=15, no_of_persons=500, max_score=7, missing_prop=0.0),
+    dict(label="missing_50pct", no_of_items=15, no_of_persons=500, max_score=4, missing_prop=0.5),
+]
+
+MFRM_CONDITIONS = [
+    dict(label="baseline", no_of_items=10, no_of_persons=200, max_score=4,
+         no_of_facet_elements=5, missing_prop=0.0),
+    dict(label="n_small", no_of_items=10, no_of_persons=80, max_score=4,
+         no_of_facet_elements=5, missing_prop=0.0),
+    dict(label="n_large", no_of_items=10, no_of_persons=800, max_score=4,
+         no_of_facet_elements=5, missing_prop=0.0),
+    dict(label="items_small", no_of_items=5, no_of_persons=200, max_score=4,
+         no_of_facet_elements=5, missing_prop=0.0),
+    dict(label="items_large", no_of_items=20, no_of_persons=200, max_score=4,
+         no_of_facet_elements=5, missing_prop=0.0),
+    dict(label="k_small", no_of_items=10, no_of_persons=200, max_score=2,
+         no_of_facet_elements=5, missing_prop=0.0),
+    # K=7, matching PCM/RSM's own k_large exactly (was 6 -- an
+    # unjustified inconsistency from initial grid design that let
+    # tam_mfr dodge the single most severe TAM-MML stress trigger found
+    # mid-run; see the benchmark-scope memory's "why does tam_mfr look
+    # so much better" note).
+    dict(label="k_large", no_of_items=10, no_of_persons=200, max_score=7,
+         no_of_facet_elements=5, missing_prop=0.0),
+    dict(label="raters_small", no_of_items=10, no_of_persons=200, max_score=4,
+         no_of_facet_elements=2, missing_prop=0.0),
+    dict(label="raters_large", no_of_items=10, no_of_persons=200, max_score=4,
+         no_of_facet_elements=10, missing_prop=0.0),
+    dict(label="missing_50pct", no_of_items=10, no_of_persons=200, max_score=4,
+         no_of_facet_elements=5, missing_prop=0.5),
+    # Diagnostic addition (2026-09-20): isolates the effective-sample-size
+    # mechanism from K -- N=100 x 5 raters = 500 total ratings, matching
+    # PCM/RSM's own baseline N=500 exactly, at K=4 (not K=7) so this
+    # variable is tested alone. See the benchmark-scope memory's
+    # "why does tam_mfr look so much better" note for why this matters --
+    # K=7 alone (the fixed k_large condition above) did NOT reproduce
+    # TAM-MML's PCM/RSM instability, so effective-N is the next candidate.
+    dict(label="small_effective_n", no_of_items=10, no_of_persons=100, max_score=4,
+         no_of_facet_elements=5, missing_prop=0.0),
+    # N=100 (500 total ratings) showed no instability at all -- user's
+    # point: a realistic "small" MFRM sample in practice is more like 20
+    # persons (e.g. a modest performance-assessment study), not 100.
+    # N=20 x 5 raters = 100 total ratings -- genuinely small.
+    dict(label="realistic_small_n", no_of_items=10, no_of_persons=20, max_score=4,
+         no_of_facet_elements=5, missing_prop=0.0),
+    # Neither K=7 alone nor small-N alone reproduced TAM-MML's PCM/RSM
+    # instability -- decisive combined test, both factors together.
+    dict(label="k7_and_small_n", no_of_items=10, no_of_persons=20, max_score=7,
+         no_of_facet_elements=5, missing_prop=0.0),
+]
+
+# Non-normal person distributions (added 2026-10-02), each at its model's
+# baseline design, rescaled to mean 0 and SD 1.5 (the Sim default) so
+# only the shape differs: fat-tailed (Student t, 3 df), uniform, bimodal
+# (equal mixture at +/-0.9 SD). MML assumes normal persons; CML and
+# PAIR/CPAT make no assumption about the person distribution.
+for _conds in (SLM_CONDITIONS, PCM_CONDITIONS, RSM_CONDITIONS, MFRM_CONDITIONS):
+    _base = next(c for c in _conds if c["label"] == "baseline")
+    for _dist in ("fat_tail", "uniform", "bimodal"):
+        _conds.append(dict(_base, label=f"persons_{_dist}", person_dist=_dist))
+
+# PCM category widths (added 2026-10-03): PCM_Sim's default category_base
+# (2 logits) left score categories unused in 6-100% of datasets across the
+# PCM conditions (all of K=7 and mixed-K), so their thresholds were not
+# identified by the data. 0.8 logits keeps every category used in >= 97% of
+# datasets in every condition.
+for _c in PCM_CONDITIONS:
+    _c.setdefault("category_base", 0.8)
+
+CONDITIONS = {
+    "slm": SLM_CONDITIONS,
+    "pcm": PCM_CONDITIONS,
+    "rsm": RSM_CONDITIONS,
+    "mfrm": MFRM_CONDITIONS,
+}
+
+# Algorithms applicable per model -- eRm has no facet model at all;
+# pairwise and TAM's plain mml/jml likewise have no rater-facet support.
+# MFRM (global only) is comparable against TAM-MML alone.
+ALGORITHMS = {
+    # psychotools_cml added 2026-09-20 -- a second, genuinely independent
+    # CML implementation (not a wrapper around eRm/TAM, unlike RDigram --
+    # confirmed by checking psychotools::raschmodel/pcmodel/rsmodel's own
+    # source, they're standalone). Prompted by a spot-check: it fit the
+    # exact PCM missing_50pct/rep1 dataset that made eRm hit its 300s
+    # timeout in 10.6s -- see the benchmark-scope memory for the full
+    # investigation.
+    "slm": ["erm_cml", "tam_mml", "tam_jml", "pairwise", "psychotools_cml", "mirt_mml"],
+    "pcm": ["erm_cml", "tam_mml", "tam_jml", "pairwise", "psychotools_cml", "mirt_mml"],
+    "rsm": ["erm_cml", "tam_mml", "tam_jml", "pairwise", "psychotools_cml", "mirt_mml"],
+    "mfrm": ["tam_mfr"],
+}
+
+
+def condition_seed(model, label, rep):
+    """
+    Deterministic, reproducible seed for a given (model, condition, rep).
+
+    Python's built-in hash() is NOT reproducible across processes (salted
+    by PYTHONHASHSEED by default) -- md5 is used instead so the same
+    (model, label, rep) always yields the same seed, run to run, machine
+    to machine.
+    """
+    key = f"{model}:{label}:{rep}".encode("utf-8")
+    return int(hashlib.md5(key).hexdigest(), 16) % (2**31 - 1)

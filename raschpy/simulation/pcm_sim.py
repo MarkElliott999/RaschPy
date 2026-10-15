@@ -53,6 +53,18 @@ class PCM_Sim(Rasch_Sim):
     seed : int or None, default None
         Seed for the random number generator. Pass an int for a fully
         reproducible simulation; None (default) draws fresh entropy each run.
+        This seed only affects this simulation's own local random generator
+        (numpy.random.default_rng(seed)), not the global numpy.random.seed()
+        state -- a prior call to numpy.random.seed(N) has no effect on this
+        simulation's output. Always pass seed= directly here for a
+        reproducible run.
+    missing_method : {'bernoulli', 'exact'}, default 'bernoulli'
+        How `missing` is applied. 'bernoulli' makes each response missing
+        independently with probability `missing`, so the realised proportion
+        varies around it. 'exact' makes exactly round(missing * cells)
+        responses missing. Both use the same random draws, so observed scores
+        are identical and the missing patterns differ only in the few cells
+        nearest the cut-off; seeded results are reproducible either way.
 
     Attributes set
     --------------
@@ -63,12 +75,12 @@ class PCM_Sim(Rasch_Sim):
         True person location parameters, indexed by person.
     items : pandas.Series
         True item difficulty parameters (central difficulties), indexed by item.
-    thresholds : dict
-        {item: numpy.ndarray} of centred Rasch-Andrich threshold offsets per item,
-        length max_score_vector[i] + 1, with index 0 = 0.
-    thresholds_uncentred : dict
-        {item: numpy.ndarray} of uncentred (absolute) thresholds per item,
-        length max_score_vector[i].
+    thresholds : pandas.DataFrame
+        Centred Rasch-Andrich threshold offsets, items x threshold index,
+        NaN-padded beyond each item's max score.
+    thresholds_uncentred : pandas.DataFrame
+        Uncentred (absolute) thresholds, items x threshold index, NaN-padded
+        beyond each item's max score.
     cat_probs : dict
         {cat: DataFrame} of category probabilities used for simulation.
     person_names : list of str
@@ -100,6 +112,7 @@ class PCM_Sim(Rasch_Sim):
         manual_person_names=None,
         manual_item_names=None,
         seed=None,
+        missing_method="bernoulli",
     ):
         """
         Instantiate and run a PCM simulation.
@@ -110,6 +123,7 @@ class PCM_Sim(Rasch_Sim):
         """
 
         self._rng = np.random.default_rng(seed)
+        self.model = "PCM"
         self.no_of_items = int(no_of_items)
         self.no_of_persons = int(no_of_persons)
         self.item_range = item_range
@@ -119,6 +133,7 @@ class PCM_Sim(Rasch_Sim):
         self.max_disorder = max_disorder
         self.offset = offset
         self.missing = missing
+        self._check_missing_method(missing_method)
         self.persons = manual_persons
         self.items = manual_items
         self.person_names = manual_person_names
@@ -256,49 +271,59 @@ class PCM_Sim(Rasch_Sim):
             {item: pd.Series(unc_dict[item]) for item in self.item_names}
         ).T
 
-        # Calculate category probabilities for each person-item combination
-
-        max_max_score = max(self.max_score_vector)
-
-        self.cat_probs = {
-            cat: pd.DataFrame(0, index=self.person_names, columns=self.item_names)
-            for cat in range(max_max_score + 1)
-        }
-
-        for i, item in enumerate(self.item_names):
-            for cat in range(self.max_score_vector[item] + 1):
-                self.cat_probs[cat][item] = (self.persons * cat) - sum(
-                    self.thresholds_uncentred.loc[item].dropna().iloc[:cat]
-                )
-                self.cat_probs[cat][item] = np.exp(self.cat_probs[cat][item])
-
-            den_vector = sum(self.cat_probs.values())[item]
-
-            for cat in range(self.max_score_vector[item] + 1):
-                self.cat_probs[cat][item] /= den_vector
-
         # Calculate scores and apply missing data
 
-        scoring_randoms = pd.DataFrame(
-            self.randoms(), columns=self.item_names, index=self.person_names
+        max_max_score = max(self.max_score_vector)
+        self._theta = self.persons.to_numpy()
+        self._item_max = self.max_score_vector.to_numpy()
+        # _tau_sums[cat, i]: sum of item i's first `cat` uncentred thresholds
+        # (NaN where cat exceeds the item's max score)
+        self._tau_sums = np.full((max_max_score + 1, self.no_of_items), np.nan)
+        for i, item in enumerate(self.item_names):
+            unc = self.thresholds_uncentred.loc[item].dropna()
+            for cat in range(self._item_max[i] + 1):
+                self._tau_sums[cat, i] = sum(unc.iloc[:cat])
+        self._prob_labels = (list(self.person_names), list(self.item_names))
+        self._cat_probs = None
+
+        scores = self._draw_scores(self.no_of_persons, self._cat_prob_rows)
+        self.responses = self._responses_frame(
+            scores, self._missing_mask(), self.person_names
         )
 
-        cum_probs = {
-            cat
-            + 1: sum(
-                self.cat_probs[category]
-                for category in range(cat + 1, max_max_score + 1)
-            )
-            for cat in range(max_max_score)
-        }
+    def _cat_prob_rows(self, start, stop):
+        """
+        Category probabilities [P(X=0), ..., P(X=K)] for persons start:stop,
+        K the largest max score; zero above each item's own max score.
+        """
+        theta = self._theta[start:stop, None]
+        num = []
+        for cat in range(len(self._tau_sums)):
+            x = np.exp(theta * cat - self._tau_sums[cat][None, :])
+            num.append(np.where(cat <= self._item_max, x, 0.0))
+        den = num[0].copy()
+        for x in num[1:]:
+            den += x
+        return [x / den for x in num]
 
-        self.responses = {
-            cat + 1: scoring_randoms < cum_probs[cat + 1]
-            for cat in range(max_max_score)
-        }
-        self.responses = sum(self.responses.values())
+    @property
+    def cat_probs(self):
+        """
+        {cat: DataFrame} of category probabilities (computed on first access).
+        Columns for items whose max score is below `cat` hold integer zeros.
+        """
+        if self._cat_probs is None:
+            index, columns = self._prob_labels
+            probs = self._cat_prob_rows(0, self.no_of_persons)
+            self._cat_probs = {}
+            for cat, p in enumerate(probs):
+                df = pd.DataFrame(p, index=index, columns=columns)
+                above = [c for c, m in zip(columns, self._item_max) if cat > m]
+                if above:
+                    df = df.astype({c: np.int64 for c in above})
+                self._cat_probs[cat] = df
+        return self._cat_probs
 
-        missing_randoms = pd.DataFrame(
-            self.randoms(), columns=self.item_names, index=self.person_names
-        )
-        self.responses[missing_randoms < self.missing] = np.nan
+    @cat_probs.setter
+    def cat_probs(self, value):
+        self._cat_probs = value

@@ -49,6 +49,18 @@ class RSM_Sim(Rasch_Sim):
     seed : int or None, default None
         Seed for the random number generator. Pass an int for a fully
         reproducible simulation; None (default) draws fresh entropy each run.
+        This seed only affects this simulation's own local random generator
+        (numpy.random.default_rng(seed)), not the global numpy.random.seed()
+        state -- a prior call to numpy.random.seed(N) has no effect on this
+        simulation's output. Always pass seed= directly here for a
+        reproducible run.
+    missing_method : {'bernoulli', 'exact'}, default 'bernoulli'
+        How `missing` is applied. 'bernoulli' makes each response missing
+        independently with probability `missing`, so the realised proportion
+        varies around it. 'exact' makes exactly round(missing * cells)
+        responses missing. Both use the same random draws, so observed scores
+        are identical and the missing patterns differ only in the few cells
+        nearest the cut-off; seeded results are reproducible either way.
 
     Attributes set
     --------------
@@ -93,6 +105,7 @@ class RSM_Sim(Rasch_Sim):
         manual_person_names=None,
         manual_item_names=None,
         seed=None,
+        missing_method="bernoulli",
     ):
         """
         Instantiate and run an RSM simulation.
@@ -103,6 +116,7 @@ class RSM_Sim(Rasch_Sim):
         """
 
         self._rng = np.random.default_rng(seed)
+        self.model = "RSM"
         self.no_of_items = int(no_of_items)
         self.no_of_persons = int(no_of_persons)
         self.item_range = item_range
@@ -112,6 +126,7 @@ class RSM_Sim(Rasch_Sim):
         self.max_disorder = max_disorder
         self.offset = offset
         self.missing = missing
+        self._check_missing_method(missing_method)
         self.persons = manual_persons
         self.items = manual_items
         self.thresholds = manual_thresholds
@@ -195,38 +210,40 @@ class RSM_Sim(Rasch_Sim):
             assert np.isclose(sum(manual_thresholds), 0), "Manual thresholds must sum to zero."
             self.thresholds = pd.Series(np.array(self.thresholds), index=range(1, self.max_score + 1))
 
-        # Calculate category probabilities for each person-item combination
-
-        c_p_df = {item: self.persons - self.items[item] for item in self.item_names}
-        c_p_df = pd.DataFrame(c_p_df)
-
-        self.cat_probs = {
-            cat: (cat * c_p_df) - sum(self.thresholds.iloc[:cat])
-            for cat in range(self.max_score + 1)
-        }
-        for cat in range(self.max_score + 1):
-            self.cat_probs[cat] = np.exp(self.cat_probs[cat])
-
-        den = sum(self.cat_probs[cat] for cat in range(self.max_score + 1))
-
-        for cat in range(self.max_score + 1):
-            self.cat_probs[cat] /= den
-
         # Calculate scores and apply missing data
 
-        scoring_randoms = pd.DataFrame(
-            self.randoms(), columns=self.item_names, index=self.person_names
+        self._theta = self.persons.to_numpy()
+        self._delta = self.items.to_numpy()
+        self._tau_sums = [sum(self.thresholds.iloc[:cat]) for cat in range(self.max_score + 1)]
+        self._prob_labels = (self.persons.index, list(self.item_names))
+        self._cat_probs = None
+
+        scores = self._draw_scores(self.no_of_persons, self._cat_prob_rows)
+        self.responses = self._responses_frame(
+            scores, self._missing_mask(), self.person_names
         )
 
-        self.responses = sum(
-            scoring_randoms
-            < sum(
-                self.cat_probs[category] for category in range(cat, self.max_score + 1)
-            )
-            for cat in range(1, self.max_score + 1)
-        )
+    def _cat_prob_rows(self, start, stop):
+        """Category probabilities [P(X=0), ..., P(X=K)] for persons start:stop."""
+        c_p = self._theta[start:stop, None] - self._delta[None, :]
+        num = [np.exp(cat * c_p - self._tau_sums[cat]) for cat in range(self.max_score + 1)]
+        den = num[0].copy()
+        for x in num[1:]:
+            den += x
+        return [x / den for x in num]
 
-        missing_randoms = pd.DataFrame(
-            self.randoms(), columns=self.item_names, index=self.person_names
-        )
-        self.responses[missing_randoms < self.missing] = np.nan
+    @property
+    def cat_probs(self):
+        """{cat: DataFrame} of category probabilities (computed on first access)."""
+        if self._cat_probs is None:
+            index, columns = self._prob_labels
+            probs = self._cat_prob_rows(0, self.no_of_persons)
+            self._cat_probs = {
+                cat: pd.DataFrame(p, index=index, columns=columns)
+                for cat, p in enumerate(probs)
+            }
+        return self._cat_probs
+
+    @cat_probs.setter
+    def cat_probs(self, value):
+        self._cat_probs = value

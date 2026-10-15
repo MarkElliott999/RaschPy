@@ -22,3 +22,6 @@ dist/
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Local planning docs
+rasch_test_gaps.xlsx
