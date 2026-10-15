@@ -176,7 +176,8 @@ class PCM_Sim(Rasch_Sim):
             self.persons = np.array(self.persons)
 
         self.persons = {
-            person: location for person, location in zip(self.person_names, self.persons)
+            person: location
+            for person, location in zip(self.person_names, self.persons)
         }
         self.persons = pd.Series(self.persons)
 
@@ -232,7 +233,9 @@ class PCM_Sim(Rasch_Sim):
                 len(manual_thresholds) == self.no_of_items
             ), "No of sets of manual thresholds must match number of items."
             for item in range(no_of_items):
-                assert len(manual_thresholds[item]) == self.max_score_vector.iloc[item], (
+                assert (
+                    len(manual_thresholds[item]) == self.max_score_vector.iloc[item]
+                ), (
                     "All sets of item thresholds "
                     + "in manual thresholds must be max score vector for the corresponding item."
                 )

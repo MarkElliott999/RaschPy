@@ -213,7 +213,9 @@ class MFRM_Sim(Rasch_Sim):
         # manual_raters is a convenience alias: dict {name: facet_effect_array} → manual_facet_effects
         if manual_raters is not None:
             if manual_facet_effects is not None:
-                raise ValueError("Pass manual_raters or manual_facet_effects, not both.")
+                raise ValueError(
+                    "Pass manual_raters or manual_facet_effects, not both."
+                )
             if manual_facet_names is None and hasattr(manual_raters, "keys"):
                 manual_facet_names = list(manual_raters.keys())
             if no_of_facet_elements is None:
@@ -232,8 +234,13 @@ class MFRM_Sim(Rasch_Sim):
             self.facets_label_eg = "facet elements (e.g. raters)"
         else:
             self.facet_label = facet
-            self.facets_label = facet_plural if facet_plural is not None else facet + "s"
-            self.facet_label_eg, self.facets_label_eg = self.facet_label, self.facets_label
+            self.facets_label = (
+                facet_plural if facet_plural is not None else facet + "s"
+            )
+            self.facet_label_eg, self.facets_label_eg = (
+                self.facet_label,
+                self.facets_label,
+            )
         self.facet = facet
         self.facets = facet_plural if facet_plural is not None else facet + "s"
         setattr(self, f"no_of_{self.facets}", self.no_of_facet_elements)
@@ -307,8 +314,12 @@ class MFRM_Sim(Rasch_Sim):
             assert (
                 len(manual_thresholds) == self.max_score
             ), "Number of manual thresholds must equal max_score."
-            assert np.isclose(sum(manual_thresholds), 0), "Manual thresholds must sum to zero."
-            self.thresholds = pd.Series(np.array(manual_thresholds), index=range(1, self.max_score + 1))
+            assert np.isclose(
+                sum(manual_thresholds), 0
+            ), "Manual thresholds must sum to zero."
+            self.thresholds = pd.Series(
+                np.array(manual_thresholds), index=range(1, self.max_score + 1)
+            )
         else:
             cat_widths = self._rng.uniform(
                 self.max_disorder,
@@ -401,7 +412,9 @@ class MFRM_Sim(Rasch_Sim):
                                 f"or (item_vec, thresh_vec) tuple."
                             )
                     blocks.append(
-                        pd.DataFrame(mat, index=self.item_names, columns=range(1, K + 1))
+                        pd.DataFrame(
+                            mat, index=self.item_names, columns=range(1, K + 1)
+                        )
                     )
                 mi = pd.MultiIndex.from_product(
                     [list(manual_raters.keys()), self.item_names],
@@ -437,7 +450,10 @@ class MFRM_Sim(Rasch_Sim):
     # ------------------------------------------------------------------
 
     def _generate_facet_effects(
-        self, manual_facet_effects, manual_item_effects=None, manual_threshold_effects=None
+        self,
+        manual_facet_effects,
+        manual_item_effects=None,
+        manual_threshold_effects=None,
     ):
         """Generate or validate facet_element effect parameters for the given model."""
 
@@ -448,7 +464,9 @@ class MFRM_Sim(Rasch_Sim):
                 ), "Length of manual facet_effects must match number of facet_elements."
                 sev = np.array(manual_facet_effects)
             else:
-                sev = truncnorm.rvs(-1.96, 1.96, size=self.no_of_facet_elements, random_state=self._rng)
+                sev = truncnorm.rvs(
+                    -1.96, 1.96, size=self.no_of_facet_elements, random_state=self._rng
+                )
                 sev *= self.facet_range / (sev.max() - sev.min())
                 sev -= sev.mean()
             return pd.Series(
@@ -464,7 +482,9 @@ class MFRM_Sim(Rasch_Sim):
             else:
                 sev = np.array(
                     [
-                        truncnorm.rvs(-1.96, 1.96, size=self.no_of_items, random_state=self._rng)
+                        truncnorm.rvs(
+                            -1.96, 1.96, size=self.no_of_items, random_state=self._rng
+                        )
                         for _ in range(self.no_of_facet_elements)
                     ]
                 )  # (R, I)
@@ -485,7 +505,9 @@ class MFRM_Sim(Rasch_Sim):
             else:
                 sev = np.array(
                     [
-                        truncnorm.rvs(-1.96, 1.96, size=self.max_score, random_state=self._rng)
+                        truncnorm.rvs(
+                            -1.96, 1.96, size=self.max_score, random_state=self._rng
+                        )
                         for _ in range(self.no_of_facet_elements)
                     ]
                 )  # (R, K)
@@ -496,7 +518,9 @@ class MFRM_Sim(Rasch_Sim):
                 # per-threshold bias against the (correctly zero-centred) estimates.
                 for k in range(self.max_score):
                     sev[:, k] -= sev[:, k].mean()
-                return pd.DataFrame(sev, index=self.facet_names, columns=range(1, self.max_score + 1))
+                return pd.DataFrame(
+                    sev, index=self.facet_names, columns=range(1, self.max_score + 1)
+                )
 
         elif self.model == "matrix":
             if manual_facet_effects is not None:
@@ -509,7 +533,9 @@ class MFRM_Sim(Rasch_Sim):
                 sev = np.array(
                     [
                         [
-                            truncnorm.rvs(-1.96, 1.96, size=self.max_score, random_state=self._rng)
+                            truncnorm.rvs(
+                                -1.96, 1.96, size=self.max_score, random_state=self._rng
+                            )
                             for _ in range(self.no_of_items)
                         ]
                         for _ in range(self.no_of_facet_elements)
@@ -527,7 +553,11 @@ class MFRM_Sim(Rasch_Sim):
                 mi = pd.MultiIndex.from_product(
                     [self.facet_names, self.item_names], names=["facet_element", "item"]
                 )
-                return pd.DataFrame(sev.reshape(-1, self.max_score), index=mi, columns=range(1, self.max_score + 1))
+                return pd.DataFrame(
+                    sev.reshape(-1, self.max_score),
+                    index=mi,
+                    columns=range(1, self.max_score + 1),
+                )
 
         elif self.model == "bivector":
             # Item effects — (R, I): free mean per facet_element, centred per item.
@@ -539,13 +569,17 @@ class MFRM_Sim(Rasch_Sim):
             else:
                 raw = np.array(
                     [
-                        truncnorm.rvs(-1.96, 1.96, size=self.no_of_items, random_state=self._rng)
+                        truncnorm.rvs(
+                            -1.96, 1.96, size=self.no_of_items, random_state=self._rng
+                        )
                         for _ in range(self.no_of_facet_elements)
                     ]
                 )  # (R, I)
                 raw *= self.item_facet_range / (raw.max() - raw.min())
                 raw -= raw.mean(axis=0, keepdims=True)
-                item_effects = pd.DataFrame(raw, index=self.facet_names, columns=self.item_names)
+                item_effects = pd.DataFrame(
+                    raw, index=self.facet_names, columns=self.item_names
+                )
 
             # Threshold effects — (R, K). Generated with per-threshold (axis 0)
             # centring, then canonicalised below to the exact representation the
@@ -558,7 +592,9 @@ class MFRM_Sim(Rasch_Sim):
             else:
                 raw = np.array(
                     [
-                        truncnorm.rvs(-1.96, 1.96, size=self.max_score, random_state=self._rng)
+                        truncnorm.rvs(
+                            -1.96, 1.96, size=self.max_score, random_state=self._rng
+                        )
                         for _ in range(self.no_of_facet_elements)
                     ]
                 )  # (R, K)
@@ -626,7 +662,9 @@ class MFRM_Sim(Rasch_Sim):
         if self.model == "global":
             self._effects = effects.loc[self.facet_names].to_numpy()  # (R,)
         elif self.model == "items":
-            self._effects = effects.loc[self.facet_names, self.item_names].to_numpy()  # (R, I)
+            self._effects = effects.loc[
+                self.facet_names, self.item_names
+            ].to_numpy()  # (R, I)
         else:
             if self.model == "thresholds":
                 arr = effects.loc[self.facet_names].to_numpy()  # (R, K)
@@ -662,7 +700,8 @@ class MFRM_Sim(Rasch_Sim):
         """Category probabilities [P(X=0), ..., P(X=K)] for stacked rows start:stop."""
         N = self.no_of_persons
         num = [
-            np.empty((stop - start, self.no_of_items)) for _ in range(self.max_score + 1)
+            np.empty((stop - start, self.no_of_items))
+            for _ in range(self.max_score + 1)
         ]
         for r in range(start // N, (stop - 1) // N + 1):
             a, b = max(start, r * N), min(stop, (r + 1) * N)
@@ -681,7 +720,9 @@ class MFRM_Sim(Rasch_Sim):
         """{cat: DataFrame} of category probabilities (computed on first access)."""
         if self._cat_probs is None:
             index, columns = self._prob_labels
-            probs = self._cat_prob_rows(0, self.no_of_facet_elements * self.no_of_persons)
+            probs = self._cat_prob_rows(
+                0, self.no_of_facet_elements * self.no_of_persons
+            )
             self._cat_probs = {
                 cat: pd.DataFrame(p, index=index, columns=columns)
                 for cat, p in enumerate(probs)
@@ -727,12 +768,23 @@ class MFRM_Sim(Rasch_Sim):
                     f"which must be 'thin', 'extreme' or a list of {self.facet_label_eg} names."
                 )
             if which == "thin":
-                rated = self.responses.notna().any(axis=1).groupby(level=0, sort=False).sum()
-                which = [fe for fe in self.facet_names if rated.get(fe, 0) < min_persons]
+                rated = (
+                    self.responses.notna()
+                    .any(axis=1)
+                    .groupby(level=0, sort=False)
+                    .sum()
+                )
+                which = [
+                    fe for fe in self.facet_names if rated.get(fe, 0) < min_persons
+                ]
             else:
                 lo = self.responses.min(axis=1).groupby(level=0, sort=False).min()
                 hi = self.responses.max(axis=1).groupby(level=0, sort=False).max()
-                which = [fe for fe in self.facet_names if hi.get(fe) == 0 or lo.get(fe) == self.max_score]
+                which = [
+                    fe
+                    for fe in self.facet_names
+                    if hi.get(fe) == 0 or lo.get(fe) == self.max_score
+                ]
         else:
             which = list(which)
             unknown = [fe for fe in which if fe not in self.facet_names]
@@ -747,7 +799,9 @@ class MFRM_Sim(Rasch_Sim):
             if isinstance(obj, (pd.Series, pd.DataFrame)):
                 setattr(self, name, obj.loc[keep])
         setattr(self, f"{self.facets}_effects", self.facet_effects)
-        self.responses = self.responses[~self.responses.index.get_level_values(0).isin(which)]
+        self.responses = self.responses[
+            ~self.responses.index.get_level_values(0).isin(which)
+        ]
         self.facet_names = [fe for fe in self.facet_names if fe not in which]
         self.rater_names = self.facet_names  # alias for default facet
         self.facet_ids = self.facet_names
@@ -764,8 +818,12 @@ class MFRM_Sim(Rasch_Sim):
             self._cat_probs = None
         self.dropped_facet_elements = self.dropped_facet_elements + which
         setattr(self, f"dropped_{self.facets}", self.dropped_facet_elements)
-        warnings.warn(f"{len(which)} {self.facet_label_eg if len(which) == 1 else self.facets_label_eg} "
-                      f"removed: {which}.", UserWarning, stacklevel=2)
+        warnings.warn(
+            f"{len(which)} {self.facet_label_eg if len(which) == 1 else self.facets_label_eg} "
+            f"removed: {which}.",
+            UserWarning,
+            stacklevel=2,
+        )
 
     # ------------------------------------------------------------------
     # Rename utilities
@@ -802,8 +860,15 @@ class MFRM_Sim(Rasch_Sim):
         ):
             self._relabel("facet", dict(zip(self.facet_names, new_names)))
 
-    _FACET_PARAMS = ("facet_effects", "item_effects", "threshold_effects",
-                     "lambda_", "omega", "omega_items", "omega_thresholds")
+    _FACET_PARAMS = (
+        "facet_effects",
+        "item_effects",
+        "threshold_effects",
+        "lambda_",
+        "omega",
+        "omega_items",
+        "omega_thresholds",
+    )
 
 
 # ------------------------------------------------------------------
@@ -1094,16 +1159,21 @@ class MFRM_Sim_Centrality(MFRM_Sim):
 
         tau = prelim.thresholds.values
         implied_raters = {
-            r: lam[i] + (omega[i] - 1.0) * tau
-            for i, r in enumerate(prelim.facet_names)
+            r: lam[i] + (omega[i] - 1.0) * tau for i, r in enumerate(prelim.facet_names)
         }
 
         # Already captured into prelim (and re-supplied explicitly below) --
         # drop from kw so a caller who passed these directly doesn't hit a
         # "got multiple values for keyword argument" TypeError.
-        for key in ("manual_items", "manual_thresholds", "manual_persons",
-                    "manual_item_names", "manual_person_names",
-                    "manual_facet_names", "manual_raters"):
+        for key in (
+            "manual_items",
+            "manual_thresholds",
+            "manual_persons",
+            "manual_item_names",
+            "manual_person_names",
+            "manual_facet_names",
+            "manual_raters",
+        ):
             kw.pop(key, None)
 
         super().__init__(
@@ -1275,9 +1345,15 @@ class MFRM_Sim_PseudoHalo(MFRM_Sim):
         # Already captured into prelim (and re-supplied explicitly below) --
         # drop from kw so a caller who passed these directly doesn't hit a
         # "got multiple values for keyword argument" TypeError.
-        for key in ("manual_items", "manual_thresholds", "manual_persons",
-                    "manual_item_names", "manual_person_names",
-                    "manual_facet_names", "manual_raters"):
+        for key in (
+            "manual_items",
+            "manual_thresholds",
+            "manual_persons",
+            "manual_item_names",
+            "manual_person_names",
+            "manual_facet_names",
+            "manual_raters",
+        ):
             kw.pop(key, None)
 
         super().__init__(
@@ -1468,18 +1544,12 @@ class MFRM_Sim_Bistretch(MFRM_Sim):
         tau = prelim.thresholds.values
 
         implied_item_effects = pd.DataFrame(
-            [
-                lam[i] + (omega_items[i] - 1.0) * delta
-                for i in range(R)
-            ],
+            [lam[i] + (omega_items[i] - 1.0) * delta for i in range(R)],
             index=prelim.facet_names,
             columns=prelim.item_names,
         )
         implied_threshold_effects = pd.DataFrame(
-            [
-                (omega_thresholds[i] - 1.0) * tau
-                for i in range(R)
-            ],
+            [(omega_thresholds[i] - 1.0) * tau for i in range(R)],
             index=prelim.facet_names,
             columns=range(1, prelim.max_score + 1),
         )
@@ -1487,10 +1557,16 @@ class MFRM_Sim_Bistretch(MFRM_Sim):
         # Already captured into prelim (and re-supplied explicitly below) --
         # drop from kw so a caller who passed these directly doesn't hit a
         # "got multiple values for keyword argument" TypeError.
-        for key in ("manual_items", "manual_thresholds", "manual_persons",
-                    "manual_item_names", "manual_person_names",
-                    "manual_facet_names", "manual_item_effects",
-                    "manual_threshold_effects"):
+        for key in (
+            "manual_items",
+            "manual_thresholds",
+            "manual_persons",
+            "manual_item_names",
+            "manual_person_names",
+            "manual_facet_names",
+            "manual_item_effects",
+            "manual_threshold_effects",
+        ):
             kw.pop(key, None)
 
         super().__init__(

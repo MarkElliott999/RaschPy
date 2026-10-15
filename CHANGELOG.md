@@ -2,6 +2,11 @@
 
 All notable changes to RaschPy are documented in this file.
 
+## [Unreleased]
+
+### Changed
+- **Code formatting and lint clean-up, no functional changes:** the package is formatted with `black`, unused imports and variables are removed, and the CI lint job (`flake8` + `black --check`, pinned versions) now blocks. `E741` is ignored, so `I` can denote the number of items.
+
 ## [1.4.0] - 2026-10-15
 
 ### Added

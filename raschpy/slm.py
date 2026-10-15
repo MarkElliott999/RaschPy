@@ -1,6 +1,6 @@
 from math import log, log10
 import warnings
-from scipy.stats import chi2, gaussian_kde, norm, t as t_dist
+from scipy.stats import chi2, norm
 
 import numpy as np
 import pandas as pd
@@ -420,7 +420,9 @@ class SLM(Rasch):
 
         # 1. Clean up entirely empty rows (persons with zero data)
         self.null_persons = self.responses.index[self.responses.isnull().all(axis=1)]
-        if len(self.null_persons):  # drop() copies the whole table even when there is nothing to drop
+        if len(
+            self.null_persons
+        ):  # drop() copies the whole table even when there is nothing to drop
             self.responses = self.responses.drop(self.null_persons)
 
         # 2. VECTORISED PAIRWISE COMPARISON MATRIX
@@ -647,12 +649,24 @@ class SLM(Rasch):
             )
 
         self._calibrate_anchor_core(
-            anchors, selection_method, corr_tol, sd_ratio_tol, min_anchors,
-            wald_alpha, no_of_samples, adj, overwrite_anchors, plot, plot_kwargs,
+            anchors,
+            selection_method,
+            corr_tol,
+            sd_ratio_tol,
+            min_anchors,
+            wald_alpha,
+            no_of_samples,
+            adj,
+            overwrite_anchors,
+            plot,
+            plot_kwargs,
             seed,
             std_errors_kwargs=dict(
-                constant=constant, robust=robust, method=method,
-                matrix_power=matrix_power, log_lik_tol=log_lik_tol,
+                constant=constant,
+                robust=robust,
+                method=method,
+                matrix_power=matrix_power,
+                log_lik_tol=log_lik_tol,
             ),
         )
         self._snapshot_calibrate_anchor_run(anchors)
@@ -683,7 +697,8 @@ class SLM(Rasch):
         if small_sample:
             v = off * pi * (1 - pi)
             psi = self._kc_scores(
-                psi, lambda sl: self._bt_person_curvature([(one[sl], zero[sl])], v), Lp)
+                psi, lambda sl: self._bt_person_curvature([(one[sl], zero[sl])], v), Lp
+            )
         return Lp @ (psi.T @ psi) @ Lp
 
     def std_errors(
@@ -765,10 +780,17 @@ class SLM(Rasch):
             keyed by 'Sample_1', 'Sample_2', etc. (None with the sandwich).
         """
         if se_method not in ("sandwich", "bootstrap"):
-            raise ValueError(f"se_method must be 'sandwich' or 'bootstrap', got {se_method!r}.")
+            raise ValueError(
+                f"se_method must be 'sandwich' or 'bootstrap', got {se_method!r}."
+            )
         if not hasattr(self, "items"):
-            self.calibrate(constant=constant, robust=robust, method=method,
-                           matrix_power=matrix_power, log_lik_tol=log_lik_tol)
+            self.calibrate(
+                constant=constant,
+                robust=robust,
+                method=method,
+                matrix_power=matrix_power,
+                log_lik_tol=log_lik_tol,
+            )
         self.se_method = se_method
         if se_method == "sandwich":
             V = self._sandwich_covariance()
@@ -778,7 +800,10 @@ class SLM(Rasch):
             if interval is not None:
                 z = norm.ppf(0.5 + interval / 2)
                 est = self.items.reindex(names)
-                self.item_low, self.item_high = est - z * self.item_se, est + z * self.item_se
+                self.item_low, self.item_high = (
+                    est - z * self.item_se,
+                    est + z * self.item_se,
+                )
             else:
                 self.item_low = self.item_high = None
             self.item_bootstrap = None
@@ -939,7 +964,9 @@ class SLM(Rasch):
 
         try:
             estimates = (
-                np.log(scores) - np.log(ext_scores - scores) + item_location_df.mean(axis=1)
+                np.log(scores)
+                - np.log(ext_scores - scores)
+                + item_location_df.mean(axis=1)
             )
             changes = pd.Series({person: 1 for person in persons})
             iters = 0
@@ -1236,7 +1263,8 @@ class SLM(Rasch):
             exp_score_df = pd.DataFrame(
                 1
                 / (
-                    1 + np.exp(item_locations.values[None, :] - estimates.values[:, None])
+                    1
+                    + np.exp(item_locations.values[None, :] - estimates.values[:, None])
                 ),
                 index=scores,
                 columns=item_locations.index,
@@ -1280,7 +1308,10 @@ class SLM(Rasch):
         """
         with np.errstate(over="ignore"):
             p = 1.0 / (
-                1.0 + np.exp(item_locations[None, :] - np.asarray(person_locations)[:, None])
+                1.0
+                + np.exp(
+                    item_locations[None, :] - np.asarray(person_locations)[:, None]
+                )
             )
         pf = np.nan_to_num(np.asarray(person_filter, dtype=float))
         q = p * (1.0 - p)
@@ -1327,7 +1358,13 @@ class SLM(Rasch):
             return j / (2 * i**2)
 
         exp_score_df = pd.DataFrame(
-            1 / (1 + np.exp(item_locations.values[None, :] - person_locations.values[:, None])),
+            1
+            / (
+                1
+                + np.exp(
+                    item_locations.values[None, :] - person_locations.values[:, None]
+                )
+            ),
             index=person_locations.index,
             columns=item_locations.index,
         )
@@ -1416,7 +1453,12 @@ class SLM(Rasch):
         return pd.Series(1.0 / np.sqrt(total_info), index=persons)
 
     def category_counts_df(
-        self, persons=None, items=None, counts_name=None, filename=None, file_format="csv"
+        self,
+        persons=None,
+        items=None,
+        counts_name=None,
+        filename=None,
+        file_format="csv",
     ):
         """
         Build a response frequency table for one or more persons, across
@@ -1475,18 +1517,13 @@ class SLM(Rasch):
         subset = self.responses.loc[persons, items]
 
         cat_counts_dict = {
-            item: subset[item]
-            .value_counts()
-            .reindex([0, 1], fill_value=0)
-            .astype(int)
+            item: subset[item].value_counts().reindex([0, 1], fill_value=0).astype(int)
             for item in items
         }
         category_counts_df = pd.DataFrame(cat_counts_dict).T
 
         category_counts_df["Total"] = subset.count()
-        category_counts_df["Missing"] = (
-            len(persons) - category_counts_df["Total"]
-        )
+        category_counts_df["Missing"] = len(persons) - category_counts_df["Total"]
 
         category_counts_df = category_counts_df.astype(int)
 
@@ -1836,7 +1873,9 @@ class SLM(Rasch):
                 # E[var of a resample's items] = var(estimates) + error
                 # variance, so the bootstrap ratio minus 1 is
                 # var(estimates) / mean squared SE.
-                self.isi = np.sqrt(np.var(self.items.values, ddof=1) / np.mean(self.item_se.values ** 2))
+                self.isi = np.sqrt(
+                    np.var(self.items.values, ddof=1) / np.mean(self.item_se.values**2)
+                )
 
             self.item_strata = (4 * self.isi + 1) / 3
             self.item_reliability = self.isi**2 / (1 + self.isi**2)
@@ -1869,7 +1908,12 @@ class SLM(Rasch):
         # or all incorrect) has comparisons in one direction only; its
         # estimate then rests on the smoothing constant, so it is not compared.
         x = np.array(m.responses.loc[:, names], dtype=np.float64)
-        ok = np.array([(x[:, i] == 1).sum() > 0 and (x[:, i] == 0).sum() > 0 for i in range(len(names))])
+        ok = np.array(
+            [
+                (x[:, i] == 1).sum() > 0 and (x[:, i] == 0).sum() > 0
+                for i in range(len(names))
+            ]
+        )
         V = m._sandwich_covariance(small_sample=small_sample)
         return names, est - est.mean(), V, ok, [np.arange(len(names))]
 
@@ -1955,7 +1999,9 @@ class SLM(Rasch):
         from raschpy.slm import SLM
 
         if split_by not in ("person_location", "score", "exogenous"):
-            raise ValueError("split_by must be 'person_location', 'score', or 'exogenous'")
+            raise ValueError(
+                "split_by must be 'person_location', 'score', or 'exogenous'"
+            )
 
         if split_by in ("person_location", "score"):
             raise NotImplementedError(
@@ -2014,7 +2060,9 @@ class SLM(Rasch):
         )
 
         # Full-model LL restricted to persons in either group
-        combined_idx = group_idx[list(group_idx)[0]].append(group_idx[list(group_idx)[1]])
+        combined_idx = group_idx[list(group_idx)[0]].append(
+            group_idx[list(group_idx)[1]]
+        )
         # Re-estimate full model on combined subset so the LR comparison is fair
         m_full = SLM(self.responses.loc[combined_idx])
         m_full.calibrate(
@@ -2355,32 +2403,44 @@ class SLM(Rasch):
         """
         from raschpy.slm import SLM
 
-        self._dif_validate(correction, selection_method, test, category_thresholds, reference_n)
+        self._dif_validate(
+            correction, selection_method, test, category_thresholds, reference_n
+        )
 
         # Non-extreme persons, matching andersen_lr_test's convention
         scores = self.responses.sum(axis=1)
         max_scores = self.responses.notna().sum(axis=1)
         non_extreme = self.responses.index[(scores > 0) & (scores < max_scores)]
 
-        cov_values, reference, focal_levels, group_sizes, n_missing = self._dif_group_setup(
-            non_extreme, covariate, reference
+        cov_values, reference, focal_levels, group_sizes, n_missing = (
+            self._dif_group_setup(non_extreme, covariate, reference)
         )
 
         needs_ll = test in ("lr", "both") or omnibus
         pe_kw = dict(
-            warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
+            warm_corr=warm_corr,
+            tolerance=tolerance,
+            max_iters=max_iters,
             ext_score_adjustment=ext_score_adjustment,
         )
 
         ref_idx = cov_values.index[cov_values == reference]
         ref_model = SLM(self.responses.loc[ref_idx], validate=False)
         ref_model.calibrate(
-            constant=constant, robust=robust, method=method, matrix_power=matrix_power,
+            constant=constant,
+            robust=robust,
+            method=method,
+            matrix_power=matrix_power,
             log_lik_tol=log_lik_tol,
         )
         ref_model.std_errors(
-            no_of_samples=no_of_samples, constant=constant, robust=robust, method=method,
-            matrix_power=matrix_power, log_lik_tol=log_lik_tol, seed=seed,
+            no_of_samples=no_of_samples,
+            constant=constant,
+            robust=robust,
+            method=method,
+            matrix_power=matrix_power,
+            log_lik_tol=log_lik_tol,
+            seed=seed,
         )
         if needs_ll:
             ref_model.person_estimates(**pe_kw)
@@ -2397,24 +2457,54 @@ class SLM(Rasch):
             focal_idx = cov_values.index[cov_values == focal]
             focal_model = SLM(self.responses.loc[focal_idx], validate=False)
             focal_model.calibrate(
-                constant=constant, robust=robust, method=method, matrix_power=matrix_power,
+                constant=constant,
+                robust=robust,
+                method=method,
+                matrix_power=matrix_power,
                 log_lik_tol=log_lik_tol,
             )
             focal_model.std_errors(
-                no_of_samples=no_of_samples, constant=constant, robust=robust, method=method,
-                matrix_power=matrix_power, log_lik_tol=log_lik_tol, seed=seed,
+                no_of_samples=no_of_samples,
+                constant=constant,
+                robust=robust,
+                method=method,
+                matrix_power=matrix_power,
+                log_lik_tol=log_lik_tol,
+                seed=seed,
             )
             if needs_ll:
                 focal_model.person_estimates(**pe_kw)
                 ll_focal = focal_model._log_likelihood()
 
             wald_result = self._dif_item_wald_block(
-                ref_model, focal_model, ref_model.item_bootstrap, focal_model.item_bootstrap,
-                selection_method, corr_tol, sd_ratio_tol, min_anchors, wald_alpha,
-                size_adjust, reference_n, welch, correction, alpha, logit_threshold,
-                category, category_thresholds, category_alpha,
-                ref_cov=ref_model.se_covariance if ref_model.se_method == 'sandwich' else None,
-                focal_cov=focal_model.se_covariance if focal_model.se_method == 'sandwich' else None,
+                ref_model,
+                focal_model,
+                ref_model.item_bootstrap,
+                focal_model.item_bootstrap,
+                selection_method,
+                corr_tol,
+                sd_ratio_tol,
+                min_anchors,
+                wald_alpha,
+                size_adjust,
+                reference_n,
+                welch,
+                correction,
+                alpha,
+                logit_threshold,
+                category,
+                category_thresholds,
+                category_alpha,
+                ref_cov=(
+                    ref_model.se_covariance
+                    if ref_model.se_method == "sandwich"
+                    else None
+                ),
+                focal_cov=(
+                    focal_model.se_covariance
+                    if focal_model.se_method == "sandwich"
+                    else None
+                ),
             )
             common_items = wald_result["common_items"]
             tc = wald_result["tc"]
@@ -2434,20 +2524,29 @@ class SLM(Rasch):
                 combined_idx = ref_idx.append(focal_idx)
                 m_full = SLM(self.responses.loc[combined_idx], validate=False)
                 m_full.calibrate(
-                    constant=constant, robust=robust, method=method, matrix_power=matrix_power,
+                    constant=constant,
+                    robust=robust,
+                    method=method,
+                    matrix_power=matrix_power,
                     log_lik_tol=log_lik_tol,
                 )
                 m_full.person_estimates(**pe_kw)
                 ll_full = m_full._log_likelihood()
                 pooled_ref_persons = m_full.persons.reindex(ref_model.responses.index)
-                pooled_focal_persons = m_full.persons.reindex(focal_model.responses.index)
+                pooled_focal_persons = m_full.persons.reindex(
+                    focal_model.responses.index
+                )
                 ll_ref_omni = ref_model._log_likelihood(persons=pooled_ref_persons)
-                ll_focal_omni = focal_model._log_likelihood(persons=pooled_focal_persons)
+                ll_focal_omni = focal_model._log_likelihood(
+                    persons=pooled_focal_persons
+                )
                 lr_omni = max(0.0, -2 * (ll_full - (ll_ref_omni + ll_focal_omni)))
                 df_omni = len(common_items) - 1
                 p_omni = float(chi2.sf(lr_omni, df_omni))
                 omnibus_rows[focal] = {
-                    "LR": lr_omni, "df": df_omni, "p": p_omni,
+                    "LR": lr_omni,
+                    "df": df_omni,
+                    "p": p_omni,
                     "Flagged": p_omni < alpha,
                 }
 
@@ -2482,8 +2581,18 @@ class SLM(Rasch):
                 )
 
             table = self._dif_item_table(
-                focal, ref_model, focal_model, common_items, focal_shifted,
-                diff, se, z, p, p_corrected, selected, flagged,
+                focal,
+                ref_model,
+                focal_model,
+                common_items,
+                focal_shifted,
+                diff,
+                se,
+                z,
+                p,
+                p_corrected,
+                selected,
+                flagged,
                 welch_df=welch_df if welch else None,
                 category_col=category_col if category else None,
                 lr_table=lr_table if test in ("lr", "both") else None,
@@ -2501,9 +2610,7 @@ class SLM(Rasch):
                 plot_dict[focal] = None
 
         self.dif_table = pd.concat(all_rows)
-        self.dif_omnibus_table = (
-            pd.DataFrame(omnibus_rows).T if omnibus else None
-        )
+        self.dif_omnibus_table = pd.DataFrame(omnibus_rows).T if omnibus else None
         self.dif_reference = reference
         self.dif_covariate = covariate
         self.dif_reference_model = ref_model
@@ -2799,9 +2906,9 @@ class SLM(Rasch):
             self.item_stats["SE"] = self.item_se.astype(float).round(dp)
 
             if interval is not None:
-                self.item_stats[f"{round((1 - interval) * 50, 1)}%"] = self.item_low.astype(
-                    float
-                ).round(dp)
+                self.item_stats[f"{round((1 - interval) * 50, 1)}%"] = (
+                    self.item_low.astype(float).round(dp)
+                )
                 self.item_stats[f"{round((1 + interval) * 50, 1)}%"] = (
                     self.item_high.astype(float).round(dp)
                 )
@@ -3635,8 +3742,13 @@ class SLM(Rasch):
             # The 8th (black) entry is swapped for white on dark
             # backgrounds, where it would otherwise be invisible.
             color_map = [
-                "#E69F00", "#56B4E9", "#009E73", "#F0E442",
-                "#0072B2", "#D55E00", "#CC79A7",
+                "#E69F00",
+                "#56B4E9",
+                "#009E73",
+                "#F0E442",
+                "#0072B2",
+                "#D55E00",
+                "#CC79A7",
                 "#FFFFFF" if plot_style in self._DARK_BACKGROUND_STYLES else "#000000",
             ]
 
@@ -3669,10 +3781,16 @@ class SLM(Rasch):
         # legible on a background/gridline colour close to its own --
         # white on the darker plot_style schemes, black otherwise.
         line_fx = (
-            [path_effects.withStroke(
-                linewidth=2.5,
-                foreground="white" if plot_style in self._DARK_BACKGROUND_STYLES else "black",
-            )]
+            [
+                path_effects.withStroke(
+                    linewidth=2.5,
+                    foreground=(
+                        "white"
+                        if plot_style in self._DARK_BACKGROUND_STYLES
+                        else "black"
+                    ),
+                )
+            ]
             if line_border
             else None
         )
@@ -3681,7 +3799,11 @@ class SLM(Rasch):
             for i in range(no_of_plots):
                 label = curve_labels[i] if curve_labels is not None else i + 1
                 ax.plot(
-                    x_data, y_data[:, i], "", label=label, color="black",
+                    x_data,
+                    y_data[:, i],
+                    "",
+                    label=label,
+                    color="black",
                     path_effects=line_fx,
                 )
 
@@ -3694,7 +3816,11 @@ class SLM(Rasch):
 
                 label = curve_labels[i] if curve_labels is not None else i + 1
                 ax.plot(
-                    x_data, y_data[:, i], "", color=colorVal, label=label,
+                    x_data,
+                    y_data[:, i],
+                    "",
+                    color=colorVal,
+                    label=label,
                     path_effects=line_fx,
                 )
 
@@ -3707,8 +3833,13 @@ class SLM(Rasch):
                     scalarMap.to_rgba(0) if "multi" not in palette else color_map[0]
                 )
                 ax.scatter(
-                    x_obs_data, y_obs_data, color=colorVal, s=40, alpha=0.7,
-                    edgecolors="k" if marker_border else "none", zorder=3,
+                    x_obs_data,
+                    y_obs_data,
+                    color=colorVal,
+                    s=40,
+                    alpha=0.7,
+                    edgecolors="k" if marker_border else "none",
+                    zorder=3,
                 )
             else:
                 no_of_obs_plots = y_obs_data.shape[1]
@@ -3719,8 +3850,13 @@ class SLM(Rasch):
                     else:
                         colorVal = color_map[k]
                     ax.scatter(
-                        x_obs_data, y_obs_data[:, j], color=colorVal, s=40,
-                        alpha=0.7, edgecolors="k" if marker_border else "none", zorder=3,
+                        x_obs_data,
+                        y_obs_data[:, j],
+                        color=colorVal,
+                        s=40,
+                        alpha=0.7,
+                        edgecolors="k" if marker_border else "none",
+                        zorder=3,
                     )
 
         if items is not None:
@@ -3906,11 +4042,17 @@ class SLM(Rasch):
                 for estimate in point_info_lines_item[1]:
                     info = self.variance(estimate, self.items[it])
                     plt.vlines(
-                        x=estimate, ymin=-100, ymax=info, color=colorVal,
+                        x=estimate,
+                        ymin=-100,
+                        ymax=info,
+                        color=colorVal,
                         linestyles="dashed",
                     )
                     plt.hlines(
-                        y=info, xmin=-100, xmax=estimate, color=colorVal,
+                        y=info,
+                        xmin=-100,
+                        xmax=estimate,
+                        color=colorVal,
                         linestyles="dashed",
                     )
                     if point_info_labels:
@@ -3921,8 +4063,10 @@ class SLM(Rasch):
                                 + idx * (x_max - x_min) * 0.03
                             )
                             plt.text(
-                                label_x, info + y_max / 50,
-                                f"{it}: {round(info, 3)}", color=colorVal,
+                                label_x,
+                                info + y_max / 50,
+                                f"{it}: {round(info, 3)}",
+                                color=colorVal,
                             )
                         else:
                             plt.text(
@@ -5010,7 +5154,8 @@ class SLM(Rasch):
         if plot_density is not None:
             warnings.warn(
                 "plot_density= is deprecated and will be removed in a future version; use dpi= instead.",
-                FutureWarning, stacklevel=2,
+                FutureWarning,
+                stacklevel=2,
             )
             dpi = plot_density
 
@@ -5057,8 +5202,13 @@ class SLM(Rasch):
     # ------------------------------------------------------------------
 
     def recovery_stats(
-        self, anchor=False, alpha=0.05, correction="bh", divergence_tol=0.1,
-        plot=True, **plot_kwargs,
+        self,
+        anchor=False,
+        alpha=0.05,
+        correction="bh",
+        divergence_tol=0.1,
+        plot=True,
+        **plot_kwargs,
     ):
         """
         Compare recovered parameter estimates against the true generating
@@ -5203,8 +5353,12 @@ class SLM(Rasch):
 
         est_items = self.anchor_items if anchor else self.items
         items_table, items_summary = self._parameter_recovery_table(
-            self.generating.items, est_items, se=self.item_se, alpha=alpha,
-            correction=correction, divergence_tol=divergence_tol,
+            self.generating.items,
+            est_items,
+            se=self.item_se,
+            alpha=alpha,
+            correction=correction,
+            divergence_tol=divergence_tol,
         )
         self.recovery.items = _SimParams()
         self.recovery.items.table = items_table
@@ -5217,8 +5371,12 @@ class SLM(Rasch):
         pseudo_estimate = self._pseudo_estimate_persons()
 
         persons_table, persons_summary = self._parameter_recovery_table(
-            pseudo_estimate, self.persons, se=self.csem_vector, alpha=alpha,
-            correction=correction, divergence_tol=divergence_tol,
+            pseudo_estimate,
+            self.persons,
+            se=self.csem_vector,
+            alpha=alpha,
+            correction=correction,
+            divergence_tol=divergence_tol,
         )
         self.recovery.persons = _SimParams()
         self.recovery.persons.table = persons_table
@@ -5230,14 +5388,18 @@ class SLM(Rasch):
         # _parameter_estimation_residual. SLM has no threshold structure,
         # so item locations are the whole story here.
         gen_items = self.generating.items
-        self.recovery.parameter_estimation_residual = self._parameter_estimation_residual(
-            self.generating.persons,
-            lambda theta, item: self.exp_score(theta, gen_items[item]),
-            lambda theta, item: self.exp_score(theta, est_items[item]),
+        self.recovery.parameter_estimation_residual = (
+            self._parameter_estimation_residual(
+                self.generating.persons,
+                lambda theta, item: self.exp_score(theta, gen_items[item]),
+                lambda theta, item: self.exp_score(theta, est_items[item]),
+            )
         )
 
         if plot:
-            self._recovery_plot(self.generating.items, est_items, "items", **plot_kwargs)
+            self._recovery_plot(
+                self.generating.items, est_items, "items", **plot_kwargs
+            )
             self._recovery_plot(pseudo_estimate, self.persons, "persons", **plot_kwargs)
 
         return None

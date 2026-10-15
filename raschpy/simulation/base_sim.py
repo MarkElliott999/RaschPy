@@ -153,7 +153,9 @@ class Rasch_Sim:
         if shared or n_blocks == 1:
             mask = self._missing_block(self.no_of_persons)
             return np.tile(mask, (n_blocks, 1)) if n_blocks > 1 else mask
-        return np.vstack([self._missing_block(self.no_of_persons) for _ in range(n_blocks)])
+        return np.vstack(
+            [self._missing_block(self.no_of_persons) for _ in range(n_blocks)]
+        )
 
     def _responses_frame(self, scores, mask, index):
         """
@@ -163,12 +165,16 @@ class Rasch_Sim:
         cells stay int64 (matching pandas' masked-assignment upcasting).
         """
         if mask is None or not mask.any():
-            return pd.DataFrame(scores, index=index, columns=self.item_names, copy=False)
+            return pd.DataFrame(
+                scores, index=index, columns=self.item_names, copy=False
+            )
         values = scores.astype(float)
         values[mask] = np.nan
         hit = mask.any(axis=0)
         if hit.all():
-            return pd.DataFrame(values, index=index, columns=self.item_names, copy=False)
+            return pd.DataFrame(
+                values, index=index, columns=self.item_names, copy=False
+            )
         return pd.DataFrame(
             {
                 item: (values[:, j] if hit[j] else scores[:, j])
@@ -227,14 +233,18 @@ class Rasch_Sim:
                 labels = set(labels)
             except TypeError:
                 return False
-            return bool(labels) and labels <= own and not any(labels <= o for o in others)
+            return (
+                bool(labels) and labels <= own and not any(labels <= o for o in others)
+            )
 
         def f(x):
             return mapping.get(x, x)
 
         def map_index(idx):
             if isinstance(idx, pd.MultiIndex):
-                return idx.set_levels([lvl.map(f) if is_axis(lvl) else lvl for lvl in idx.levels])
+                return idx.set_levels(
+                    [lvl.map(f) if is_axis(lvl) else lvl for lvl in idx.levels]
+                )
             return idx.map(f) if is_axis(idx) else idx
 
         def map_obj(o):
@@ -265,13 +275,29 @@ class Rasch_Sim:
     def _check_rename(self, label, current, old, new):
         """Warn and return False if renaming old -> new is not possible."""
         if old not in current:
-            warnings.warn(f"Old {label} name {old!r} not found in data.", UserWarning, stacklevel=3)
+            warnings.warn(
+                f"Old {label} name {old!r} not found in data.",
+                UserWarning,
+                stacklevel=3,
+            )
         elif old == new:
-            warnings.warn(f"New {label} name is the same as the old {label} name.", UserWarning, stacklevel=3)
+            warnings.warn(
+                f"New {label} name is the same as the old {label} name.",
+                UserWarning,
+                stacklevel=3,
+            )
         elif not isinstance(new, str):
-            warnings.warn(f"{label.capitalize()} names must be strings.", UserWarning, stacklevel=3)
+            warnings.warn(
+                f"{label.capitalize()} names must be strings.",
+                UserWarning,
+                stacklevel=3,
+            )
         elif new in current:
-            warnings.warn(f"New {label} name is a duplicate of an existing {label} name.", UserWarning, stacklevel=3)
+            warnings.warn(
+                f"New {label} name is a duplicate of an existing {label} name.",
+                UserWarning,
+                stacklevel=3,
+            )
         else:
             return True
         return False
@@ -279,7 +305,11 @@ class Rasch_Sim:
     def _check_rename_all(self, label, labels, current, new_names):
         """Warn and return False if new_names cannot replace current."""
         if len(new_names) != len(set(new_names)):
-            warnings.warn(f"List of new {label} names contains duplicates.", UserWarning, stacklevel=3)
+            warnings.warn(
+                f"List of new {label} names contains duplicates.",
+                UserWarning,
+                stacklevel=3,
+            )
         elif len(new_names) != len(current):
             warnings.warn(
                 f"Incorrect number of {label} names: {len(new_names)} provided, "
@@ -288,7 +318,11 @@ class Rasch_Sim:
                 stacklevel=3,
             )
         elif not all(isinstance(n, str) for n in new_names):
-            warnings.warn(f"{label.capitalize()} names must be strings.", UserWarning, stacklevel=3)
+            warnings.warn(
+                f"{label.capitalize()} names must be strings.",
+                UserWarning,
+                stacklevel=3,
+            )
         else:
             return True
         return False
@@ -346,7 +380,9 @@ class Rasch_Sim:
         new_names : list of str
             New person names in the same order as self.person_names.
         """
-        if self._check_rename_all("person", "persons", list(self.person_names), new_names):
+        if self._check_rename_all(
+            "person", "persons", list(self.person_names), new_names
+        ):
             self._relabel("person", dict(zip(self.person_names, new_names)))
 
     def produce_df(self, rows, columns, row_names=None, column_names=None):

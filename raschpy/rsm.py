@@ -1,7 +1,6 @@
 from math import log, log10
 import warnings
-from scipy.stats import chi2, gaussian_kde, norm, t as t_dist
-from scipy.optimize import brentq
+from scipy.stats import chi2, norm
 
 import numpy as np
 import pandas as pd
@@ -12,7 +11,6 @@ from sklearn.decomposition import PCA
 from matplotlib import pyplot as plt
 from matplotlib import colors as colors
 from matplotlib import cm as cmx
-from matplotlib.patches import Rectangle
 import seaborn as sns
 import matplotlib.patheffects as path_effects
 
@@ -427,7 +425,9 @@ class RSM(Rasch):
         on item i and k+1 on item j. Same-item cells are not comparisons and
         are excluded.
         """
-        x = np.array(self.responses if responses is None else responses, dtype=np.float64)
+        x = np.array(
+            self.responses if responses is None else responses, dtype=np.float64
+        )
         at_k = (x == threshold).astype(np.float64)
         at_km1 = (x == threshold - 1).astype(np.float64)
         at_kp1 = (x == threshold + 1).astype(np.float64)
@@ -437,8 +437,9 @@ class RSM(Rasch):
         np.fill_diagonal(den, 0.0)
         return num, den
 
-    def _threshold_distance(self, threshold, item_locations, constant=0.03,
-                            threshold_method="cpat-cml"):
+    def _threshold_distance(
+        self, threshold, item_locations, constant=0.03, threshold_method="cpat-cml"
+    ):
         """
         Estimate the distance between adjacent Rasch-Andrich thresholds (CPAT).
 
@@ -555,8 +556,9 @@ class RSM(Rasch):
         widths = np.abs(np.diff(probe.thresholds.values.astype(float)))
         return float(np.mean(widths)) if len(widths) else np.nan
 
-    def threshold_set(self, item_locations, constant=0.03, threshold_method="cpat-cml",
-                      no_info="mean"):
+    def threshold_set(
+        self, item_locations, constant=0.03, threshold_method="cpat-cml", no_info="mean"
+    ):
         """
         Compute the Rasch-Andrich threshold vector from CPAT distances.
 
@@ -621,14 +623,23 @@ class RSM(Rasch):
         for k in range(1, K):
             num, den = self._cpat_counts(k, x)
             total = num + den
-            links.append(dict(
-                num=num, den=den, observations=float(total.sum()),
-                mean_pair_total=float(total[total > 0].mean()) if (total > 0).any() else 1.0,
-                affected=bool(set(empty) & {k - 1, k, k + 1}),
-            ))
+            links.append(
+                dict(
+                    num=num,
+                    den=den,
+                    observations=float(total.sum()),
+                    mean_pair_total=(
+                        float(total[total > 0].mean()) if (total > 0).any() else 1.0
+                    ),
+                    affected=bool(set(empty) & {k - 1, k, k + 1}),
+                )
+            )
 
         def plain(link, c):
-            if threshold_method == "cpat-cml" and link["observations"] >= self.CPAT_THIN_COUNT:
+            if (
+                threshold_method == "cpat-cml"
+                and link["observations"] >= self.CPAT_THIN_COUNT
+            ):
                 return self._cpat_cml_distance(link["num"], link["den"], loc, c)
             return self._cpat_info_distance(link["num"], link["den"], loc, c)
 
@@ -641,10 +652,12 @@ class RSM(Rasch):
             if first:
                 width = float(np.mean(first))
             else:
-                width = self._COLLAPSED_WIDTH_FACTOR * self._collapsed_category_width(empty)
+                width = self._COLLAPSED_WIDTH_FACTOR * self._collapsed_category_width(
+                    empty
+                )
             a, b, lo, hi, fallback = self._EMPTY_CATEGORY_RULES[threshold_method]
             if np.isfinite(width) and width > 0:
-                lam = float(np.clip(a * width ** b, lo, hi))
+                lam = float(np.clip(a * width**b, lo, hi))
             else:
                 lam = fallback
 
@@ -674,8 +687,12 @@ class RSM(Rasch):
         if thin:
             self._warn_thin_distances(
                 thin,
-                " {these} estimated with the information-weighted estimator, which is more stable "
-                "than 'cpat-cml' on so few observations." if threshold_method == "cpat-cml" else "",
+                (
+                    " {these} estimated with the information-weighted estimator, which is more stable "
+                    "than 'cpat-cml' on so few observations."
+                    if threshold_method == "cpat-cml"
+                    else ""
+                ),
             )
         if empty:
             self._warn_empty_categories(empty)
@@ -708,7 +725,9 @@ class RSM(Rasch):
         was'."""
         pairs = ", ".join(f"{k} and {k + 1}" for k in thin)
         many = len(thin) > 1
-        note = note.format(these="These distances were" if many else "This distance was")
+        note = note.format(
+            these="These distances were" if many else "This distance was"
+        )
         warnings.warn(
             f"The distance{'s' if many else ''} between thresholds {pairs} "
             f"{'are' if many else 'is'} poorly informed: "
@@ -771,7 +790,10 @@ class RSM(Rasch):
         counts pool the max_score adjacent-category comparisons. Chosen by
         simulation on person-measurement error and validated out of sample.
         """
-        return min(1.0, 0.548 * no_of_items ** (-0.2 * log10(max(no_of_persons * max_score, 1))))
+        return min(
+            1.0,
+            0.548 * no_of_items ** (-0.2 * log10(max(no_of_persons * max_score, 1))),
+        )
 
     def _build_pairwise_matrix(self):
         """
@@ -794,9 +816,16 @@ class RSM(Rasch):
         return matrix, np.array(self.item_names)
 
     def calibrate(
-        self, constant=None, threshold_constant=None, method=None,
-        matrix_power=None, log_lik_tol=None, threshold_method=None,
-        no_info="mean", estimation=None):
+        self,
+        constant=None,
+        threshold_constant=None,
+        method=None,
+        matrix_power=None,
+        log_lik_tol=None,
+        threshold_method=None,
+        no_info="mean",
+        estimation=None,
+    ):
         """
         Calibrate item locations and the shared Rasch-Andrich thresholds.
 
@@ -955,10 +984,14 @@ class RSM(Rasch):
         self.estimation = estimation
         if estimation in ("cp-full-rcl", "cpat-rcl"):
             ignored = [
-                f"{name}={value!r}" for name, value, default in (
-                    ("method", method, "log-lik"), ("matrix_power", matrix_power, None),
-                    ("log_lik_tol", log_lik_tol, 0.000001), ("threshold_method", threshold_method, "cpat-cml"),
-                ) if value is not None and value != default
+                f"{name}={value!r}"
+                for name, value, default in (
+                    ("method", method, "log-lik"),
+                    ("matrix_power", matrix_power, None),
+                    ("log_lik_tol", log_lik_tol, 0.000001),
+                    ("threshold_method", threshold_method, "cpat-cml"),
+                )
+                if value is not None and value != default
             ]
             if ignored:
                 warnings.warn(
@@ -968,7 +1001,12 @@ class RSM(Rasch):
                     UserWarning,
                     stacklevel=2,
                 )
-            self._calibrate_rcl(item_constant, thresh_constant, no_info, full=estimation == "cp-full-rcl")
+            self._calibrate_rcl(
+                item_constant,
+                thresh_constant,
+                no_info,
+                full=estimation == "cp-full-rcl",
+            )
             return
         self.convergence = None
         if method is None:
@@ -995,7 +1033,9 @@ class RSM(Rasch):
             self.check_data_connectivity()
 
         self.null_persons = self.responses.index[self.responses.isnull().all(axis=1)]
-        if len(self.null_persons):  # drop() copies the whole table even when there is nothing to drop
+        if len(
+            self.null_persons
+        ):  # drop() copies the whole table even when there is nothing to drop
             self.responses = self.responses.drop(self.null_persons)
         self.no_of_persons = self.responses.shape[0]
 
@@ -1032,8 +1072,10 @@ class RSM(Rasch):
         # Stage 2: CPAT threshold estimation
         self.thresholds = pd.Series(
             self.threshold_set(
-                self.items, constant=thresh_constant,
-                threshold_method=threshold_method, no_info=no_info,
+                self.items,
+                constant=thresh_constant,
+                threshold_method=threshold_method,
+                no_info=no_info,
             ),
             index=range(1, self.max_score + 1),
         )
@@ -1045,7 +1087,9 @@ class RSM(Rasch):
         if item_constant == 0:
             self.check_data_connectivity()
         self.null_persons = self.responses.index[self.responses.isnull().all(axis=1)]
-        if len(self.null_persons):  # drop() copies the whole table even when there is nothing to drop
+        if len(
+            self.null_persons
+        ):  # drop() copies the whole table even when there is nothing to drop
             self.responses = self.responses.drop(self.null_persons)
         self.no_of_persons = self.responses.shape[0]
         K, I = self.max_score, self.no_of_items
@@ -1055,14 +1099,30 @@ class RSM(Rasch):
         split = _rcl.empty_widths(cat_counts, K)
         rho = _rcl.width_ridges(counts[1], counts[2], K, exclude=split)
         x = X[0]
-        observations = {k: float(sum(a.sum() for a in self._cpat_counts(k, x))) for k in range(1, K)}
-        no_information = [k for k in range(1, K) if observations[k] == 0 and k - 1 not in split]
-        thin = [k for k in range(1, K) if 0 < observations[k] < self.CPAT_THIN_COUNT and k - 1 not in split]
+        observations = {
+            k: float(sum(a.sum() for a in self._cpat_counts(k, x))) for k in range(1, K)
+        }
+        no_information = [
+            k for k in range(1, K) if observations[k] == 0 and k - 1 not in split
+        ]
+        thin = [
+            k
+            for k in range(1, K)
+            if 0 < observations[k] < self.CPAT_THIN_COUNT and k - 1 not in split
+        ]
         if no_information and no_info == "raise":
             raise ValueError(self._no_info_message(no_information[0]))
         cm, theta, info = _rcl.fit_cell(
-            "global", counts, 1, I, K, item_constant / K, thresh_constant, 0.0,
-            width_rho=rho, fixed_widths={k: 0.0 for k in split},
+            "global",
+            counts,
+            1,
+            I,
+            K,
+            item_constant / K,
+            thresh_constant,
+            0.0,
+            width_rho=rho,
+            fixed_widths={k: 0.0 for k in split},
             full=dict(X=X, empty=_rcl.empty_categories(cat_counts)) if full else None,
         )
         if no_information:
@@ -1070,21 +1130,30 @@ class RSM(Rasch):
         if thin:
             self._warn_thin_distances(
                 thin,
-                " {these} pulled toward the mean of the other distances, more strongly the "
-                "fewer the observations." if K > 2 else "",
+                (
+                    " {these} pulled toward the mean of the other distances, more strongly the "
+                    "fewer the observations."
+                    if K > 2
+                    else ""
+                ),
             )
         parts = cm.parts(theta)
         self.items = pd.Series(parts["delta"], index=self.responses.columns)
         widths = np.diff(parts["tau"])
         if split:
             shipped = self.threshold_set(
-                self.items, constant=thresh_constant, threshold_method="cpat-cml", no_info=no_info
+                self.items,
+                constant=thresh_constant,
+                threshold_method="cpat-cml",
+                no_info=no_info,
             )
             widths[split] = np.diff(np.asarray(shipped, dtype=float))[split]
         tau = np.concatenate([[0.0], np.cumsum(widths)])
         self.thresholds = pd.Series(tau - tau.mean(), index=range(1, K + 1))
         self._rcl_fit = (cm, theta, info)
-        self.convergence = dict(iterations=info["iterations"], converged=info["converged"])
+        self.convergence = dict(
+            iterations=info["iterations"], converged=info["converged"]
+        )
         if not info["converged"]:
             warnings.warn(
                 f"RCL-CPAT calibration did not converge in {info['iterations']} "
@@ -1372,12 +1441,23 @@ class RSM(Rasch):
             )
 
         self._calibrate_anchor_core(
-            anchors, selection_method, corr_tol, sd_ratio_tol, min_anchors,
-            wald_alpha, no_of_samples, adj, overwrite_anchors, plot, plot_kwargs,
+            anchors,
+            selection_method,
+            corr_tol,
+            sd_ratio_tol,
+            min_anchors,
+            wald_alpha,
+            no_of_samples,
+            adj,
+            overwrite_anchors,
+            plot,
+            plot_kwargs,
             seed,
             std_errors_kwargs=dict(
-                constant=constant, threshold_constant=threshold_constant,
-                method=method, matrix_power=matrix_power,
+                constant=constant,
+                threshold_constant=threshold_constant,
+                method=method,
+                matrix_power=matrix_power,
                 log_lik_tol=log_lik_tol,
             ),
         )
@@ -1504,7 +1584,11 @@ class RSM(Rasch):
         )
 
     def _threshold_structure_ll(
-        self, thresholds, warm_corr=True, tolerance=0.00001, max_iters=100,
+        self,
+        thresholds,
+        warm_corr=True,
+        tolerance=0.00001,
+        max_iters=100,
         ext_score_adjustment=0.5,
     ):
         """
@@ -1547,15 +1631,21 @@ class RSM(Rasch):
             x = np.array(self.responses, dtype=np.float64)
             unused = [c for c in range(self.max_score + 1) if (x == c).sum() == 0]
             if unused:
-                return ("; ".join(f"category {c} has 0 responses across all items" for c in unused))
+                return "; ".join(
+                    f"category {c} has 0 responses across all items" for c in unused
+                )
             if not self.convergence["converged"]:
-                return "the calibration did not converge, and the sandwich assumes it did"
+                return (
+                    "the calibration did not converge, and the sandwich assumes it did"
+                )
             cm, theta, info = self._rcl_fit
             try:
                 undetermined = _rcl.cell_null(cm, theta, info).shape[1]
             except _rcl.SandwichTooLarge as ex:
-                return (f"the design is too large to form the analytic standard errors' "
-                        f"information matrix ({ex})")
+                return (
+                    f"the design is too large to form the analytic standard errors' "
+                    f"information matrix ({ex})"
+                )
             if undetermined:
                 _rcl.release_state(info)
                 return (
@@ -1569,7 +1659,9 @@ class RSM(Rasch):
         x = np.array(self.responses, dtype=np.float64)
         unused = [c for c in range(self.max_score + 1) if (x == c).sum() == 0]
         if unused:
-            return ("; ".join(f"category {c} has 0 responses across all items" for c in unused))
+            return "; ".join(
+                f"category {c} has 0 responses across all items" for c in unused
+            )
         thin = []
         for k in range(1, self.max_score):
             num, den = self._cpat_counts(k, x)
@@ -1629,8 +1721,12 @@ class RSM(Rasch):
             with np.errstate(over="ignore"):
                 p = off / (1.0 + np.exp(-(D[k - 1] + (b[:, None] - b[None, :]))))
             ek, ekm, ekp = E[k], E[k - 1], E[k + 1]
-            s[:, k - 1] = (ek.sum(axis=1) ** 2 - (ek ** 2).sum(axis=1)
-                           - ((ek @ p) * ek).sum(axis=1) - ((ekm @ p) * ekp).sum(axis=1))
+            s[:, k - 1] = (
+                ek.sum(axis=1) ** 2
+                - (ek**2).sum(axis=1)
+                - ((ek @ p) * ek).sum(axis=1)
+                - ((ekm @ p) * ekp).sum(axis=1)
+            )
             v = (ek.T @ ek + ekm.T @ ekp) * off * p * (1 - p)
             H[k - 1] = v.sum()
             cross[k - 1] = v.sum(axis=1) - v.sum(axis=0)
@@ -1654,11 +1750,14 @@ class RSM(Rasch):
                 n = sl.stop - sl.start
                 Bn = np.zeros((n, I + K - 1, I + K - 1))
                 Bn[:, :I, :I] = self._bt_person_curvature(
-                    [(E[c + 1][sl], E[c][sl]) for c in range(K)], v_items)
+                    [(E[c + 1][sl], E[c][sl]) for c in range(K)], v_items
+                )
                 for k in range(1, K):
                     ek, ekm, ekp = E[k][sl], E[k - 1][sl], E[k + 1][sl]
-                    vn = (ek[:, :, None] * ek[:, None, :]
-                          + ekm[:, :, None] * ekp[:, None, :]) * v_widths[k - 1][None]
+                    vn = (
+                        ek[:, :, None] * ek[:, None, :]
+                        + ekm[:, :, None] * ekp[:, None, :]
+                    ) * v_widths[k - 1][None]
                     Bn[:, I + k - 1, I + k - 1] = vn.sum(axis=(1, 2))
                     Bn[:, I + k - 1, :I] = vn.sum(axis=2) - vn.sum(axis=1)
                 return Bn
@@ -1678,8 +1777,9 @@ class RSM(Rasch):
         cm, theta, info = self._rcl_fit
         K, I = self.max_score, self.no_of_items
         X = np.array(self.responses, dtype=np.float64)[None]
-        V, free, null = _rcl.cell_sandwich(cm, theta, info, X, K, small_sample=small_sample,
-                                           kc_scores=self._kc_scores)
+        V, free, null = _rcl.cell_sandwich(
+            cm, theta, info, X, K, small_sample=small_sample, kc_scores=self._kc_scores
+        )
         _rcl.release_state(info)
         Vfull = np.full((cm.p, cm.p), np.nan)
         Vfull[np.ix_(free, free)] = V
@@ -1709,22 +1809,36 @@ class RSM(Rasch):
         cols = self.responses.columns
         M = np.vstack([np.zeros(K - 1), np.tril(np.ones((K - 1, K - 1)))])
         M = M - M.mean(axis=0)  # thresholds = centred cumulative widths
-        self.item_se = pd.Series(np.sqrt(np.clip(np.diag(V_items), 0, None)), index=cols)
+        self.item_se = pd.Series(
+            np.sqrt(np.clip(np.diag(V_items), 0, None)), index=cols
+        )
         self.threshold_se = np.sqrt(np.clip(np.diag(M @ V_widths @ M.T), 0, None))
         width_se = np.sqrt(np.clip(np.diag(V_widths), 0, None))
         self.cat_width_se = pd.Series(width_se, index=range(1, K))
-        self.se_covariance = dict(items=pd.DataFrame(V_items, index=cols, columns=cols),
-                                  cat_widths=pd.DataFrame(V_widths, index=range(1, K), columns=range(1, K)))
+        self.se_covariance = dict(
+            items=pd.DataFrame(V_items, index=cols, columns=cols),
+            cat_widths=pd.DataFrame(V_widths, index=range(1, K), columns=range(1, K)),
+        )
         self.item_bootstrap = self.threshold_bootstrap = self.cat_width_bootstrap = None
         if interval is not None:
             z = norm.ppf(0.5 + interval / 2)
             items = self.items.reindex(cols)
-            self.item_low, self.item_high = items - z * self.item_se, items + z * self.item_se
+            self.item_low, self.item_high = (
+                items - z * self.item_se,
+                items + z * self.item_se,
+            )
             thr = self.thresholds.values.astype(float)
-            self.threshold_low, self.threshold_high = thr - z * self.threshold_se, thr + z * self.threshold_se
+            self.threshold_low, self.threshold_high = (
+                thr - z * self.threshold_se,
+                thr + z * self.threshold_se,
+            )
             widths = np.diff(thr)
-            self.cat_width_low = {k: widths[k - 1] - z * width_se[k - 1] for k in range(1, K)}
-            self.cat_width_high = {k: widths[k - 1] + z * width_se[k - 1] for k in range(1, K)}
+            self.cat_width_low = {
+                k: widths[k - 1] - z * width_se[k - 1] for k in range(1, K)
+            }
+            self.cat_width_high = {
+                k: widths[k - 1] + z * width_se[k - 1] for k in range(1, K)
+            }
         else:
             self.item_low = self.item_high = None
             self.threshold_low = self.threshold_high = None
@@ -1824,8 +1938,11 @@ class RSM(Rasch):
             )
         if not hasattr(self, "thresholds"):
             self.calibrate(
-                constant=constant, threshold_constant=threshold_constant, method=method,
-                matrix_power=matrix_power, log_lik_tol=log_lik_tol,
+                constant=constant,
+                threshold_constant=threshold_constant,
+                method=method,
+                matrix_power=matrix_power,
+                log_lik_tol=log_lik_tol,
             )
         if se_method is None:
             obstacle = self._sandwich_obstacle()
@@ -1835,10 +1952,14 @@ class RSM(Rasch):
                 warnings.warn(
                     f"Standard errors computed by bootstrap rather than analytically "
                     f"(sandwich), because {obstacle}"
-                    + (": the threshold estimates then rely on smoothing or a fallback "
-                       "estimator that the analytic standard errors do not account for. This "
-                       "usually indicates sparse data in some categories; consider collapsing "
-                       "sparsely used categories or collecting more data." if sparse else ".")
+                    + (
+                        ": the threshold estimates then rely on smoothing or a fallback "
+                        "estimator that the analytic standard errors do not account for. This "
+                        "usually indicates sparse data in some categories; consider collapsing "
+                        "sparsely used categories or collecting more data."
+                        if sparse
+                        else "."
+                    )
                     + " Pass se_method= to choose the method explicitly.",
                     UserWarning,
                     stacklevel=2,
@@ -1857,7 +1978,8 @@ class RSM(Rasch):
                     self.responses.sample(frac=1, replace=True, random_state=rng),
                     max_score=self.max_score,
                 )
-                sample.calibrate(estimation=getattr(self, "estimation", None),
+                sample.calibrate(
+                    estimation=getattr(self, "estimation", None),
                     constant=constant,
                     threshold_constant=threshold_constant,
                     threshold_method=getattr(self, "threshold_method", "cpat-cml"),
@@ -1989,7 +2111,9 @@ class RSM(Rasch):
         mean_item_location = item_locations.mean()
 
         try:
-            estimates = np.log(scores) - np.log(ext_scores - scores) + mean_item_location
+            estimates = (
+                np.log(scores) - np.log(ext_scores - scores) + mean_item_location
+            )
 
             # Per-person convergence mask — freeze persons once change < tolerance.
             # Without this, the log-sum-exp implementation (which gives numerically
@@ -2047,7 +2171,9 @@ class RSM(Rasch):
                     self._solve_wle(
                         person_data.loc[estimates.index].sum(axis=1).values,
                         estimates.values,
-                        lambda t, rows: self._wle_moments(t, item_location_arr, pf_arr[rows]),
+                        lambda t, rows: self._wle_moments(
+                            t, item_location_arr, pf_arr[rows]
+                        ),
                         tolerance,
                         max_iters,
                     ),
@@ -2166,10 +2292,12 @@ class RSM(Rasch):
 
         while abs(change) > tolerance and iters <= max_iters:
             result = sum(
-                self.exp_score(estimate, diff, self.thresholds) for diff in item_locations
+                self.exp_score(estimate, diff, self.thresholds)
+                for diff in item_locations
             )
             info = sum(
-                self.variance(estimate, diff, self.thresholds) for diff in item_locations
+                self.variance(estimate, diff, self.thresholds)
+                for diff in item_locations
             )
             change = max(-1.0, min(1.0, (result - used_score) / info))
             estimate -= change
@@ -2182,7 +2310,9 @@ class RSM(Rasch):
                 self._solve_wle(
                     [float(score)],
                     [estimate],
-                    lambda t, rows: self._wle_moments(t, item_location_arr, pf_arr[rows]),
+                    lambda t, rows: self._wle_moments(
+                        t, item_location_arr, pf_arr[rows]
+                    ),
                     tolerance,
                     max_iters,
                 )[0]
@@ -2296,7 +2426,9 @@ class RSM(Rasch):
                 self._solve_wle(
                     scores,
                     estimates.values,
-                    lambda t, rows: self._wle_moments(t, item_location_arr, pf_arr[rows]),
+                    lambda t, rows: self._wle_moments(
+                        t, item_location_arr, pf_arr[rows]
+                    ),
                     tolerance,
                     max_iters,
                 ),
@@ -2468,7 +2600,12 @@ class RSM(Rasch):
     # ------------------------------------------------------------------
 
     def category_counts_df(
-        self, persons=None, items=None, counts_name=None, filename=None, file_format="csv"
+        self,
+        persons=None,
+        items=None,
+        counts_name=None,
+        filename=None,
+        file_format="csv",
     ):
         """
         Build a response frequency table for one or more persons, across
@@ -2734,7 +2871,9 @@ class RSM(Rasch):
 
         exp_score = (cats_arr[:, None, None] * probs).sum(axis=0)  # (N, I)
         self.exp_score_df = (
-            pd.DataFrame(exp_score, index=person_locations.index, columns=self.item_names)
+            pd.DataFrame(
+                exp_score, index=person_locations.index, columns=self.item_names
+            )
             * missing_mask
         )
         self.exp_score_df[degenerate] = np.nan
@@ -2750,7 +2889,9 @@ class RSM(Rasch):
         self.info_df[degenerate] = np.nan
 
         self.kurtosis_df = (
-            pd.DataFrame(kurtosis, index=person_locations.index, columns=self.item_names)
+            pd.DataFrame(
+                kurtosis, index=person_locations.index, columns=self.item_names
+            )
             * missing_mask
         )
         self.kurtosis_df[degenerate] = np.nan
@@ -2962,7 +3103,11 @@ class RSM(Rasch):
         }
         exp_pm_num = pd.Series(
             {
-                t + 1: exp_pm_dict[t + 1].mul(person_location_deviation, axis=0).sum().sum()
+                t
+                + 1: exp_pm_dict[t + 1]
+                .mul(person_location_deviation, axis=0)
+                .sum()
+                .sum()
                 for t in range(self.max_score)
             }
         )
@@ -3071,7 +3216,10 @@ class RSM(Rasch):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             m = RSM(self.responses.loc[idx], max_score=self.max_score, validate=False)
-            m.calibrate(estimation=getattr(self, "estimation", None), threshold_method=getattr(self, "threshold_method", "cpat-cml"))
+            m.calibrate(
+                estimation=getattr(self, "estimation", None),
+                threshold_method=getattr(self, "threshold_method", "cpat-cml"),
+            )
         return m
 
     @staticmethod
@@ -3084,7 +3232,9 @@ class RSM(Rasch):
         names = list(m.responses.columns)
         I, K = len(names), m.max_score
         items = m.items.reindex(names).values.astype(float)
-        est = np.concatenate([items - items.mean(), np.diff(m.thresholds.values.astype(float))])
+        est = np.concatenate(
+            [items - items.mean(), np.diff(m.thresholds.values.astype(float))]
+        )
         V = m._sandwich_covariance(full=True, small_sample=small_sample)
         x = np.array(m.responses, dtype=np.float64)
         ok = np.ones(I + K - 1, bool)
@@ -3181,7 +3331,9 @@ class RSM(Rasch):
         from raschpy.rsm import RSM
 
         if split_by not in ("person_location", "score", "exogenous"):
-            raise ValueError("split_by must be 'person_location', 'score', or 'exogenous'")
+            raise ValueError(
+                "split_by must be 'person_location', 'score', or 'exogenous'"
+            )
 
         if split_by in ("person_location", "score"):
             raise NotImplementedError(
@@ -3239,11 +3391,14 @@ class RSM(Rasch):
         )
 
         # Full-model LL restricted to persons in either group
-        combined_idx = group_idx[list(group_idx)[0]].append(group_idx[list(group_idx)[1]])
+        combined_idx = group_idx[list(group_idx)[0]].append(
+            group_idx[list(group_idx)[1]]
+        )
 
         # Re-estimate full model on combined subset so the LR comparison is fair
         m_full = RSM(self.responses.loc[combined_idx], max_score=self.max_score)
-        m_full.calibrate(estimation=getattr(self, "estimation", None),
+        m_full.calibrate(
+            estimation=getattr(self, "estimation", None),
             constant=constant,
             threshold_constant=threshold_constant,
             threshold_method=getattr(self, "threshold_method", "cpat-cml"),
@@ -3263,7 +3418,8 @@ class RSM(Rasch):
         group_models = {}
         for name, idx in group_idx.items():
             m = RSM(self.responses.loc[idx], max_score=self.max_score)
-            m.calibrate(estimation=getattr(self, "estimation", None),
+            m.calibrate(
+                estimation=getattr(self, "estimation", None),
                 constant=constant,
                 threshold_constant=threshold_constant,
                 threshold_method=getattr(self, "threshold_method", "cpat-cml"),
@@ -3624,7 +3780,11 @@ class RSM(Rasch):
         from raschpy.rsm import RSM
 
         self._dif_validate(
-            correction, selection_method, test, category_thresholds, reference_n,
+            correction,
+            selection_method,
+            test,
+            category_thresholds,
+            reference_n,
             dcf_cap=dcf_cap,
         )
 
@@ -3633,32 +3793,45 @@ class RSM(Rasch):
         max_scores = self.responses.notna().sum(axis=1) * self.max_score
         non_extreme = self.responses.index[(scores > 0) & (scores < max_scores)]
 
-        cov_values, reference, focal_levels, group_sizes, n_missing = self._dif_group_setup(
-            non_extreme, covariate, reference
+        cov_values, reference, focal_levels, group_sizes, n_missing = (
+            self._dif_group_setup(non_extreme, covariate, reference)
         )
 
         needs_ll = test in ("lr", "both") or omnibus
         pe_kw = dict(
-            warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
+            warm_corr=warm_corr,
+            tolerance=tolerance,
+            max_iters=max_iters,
             ext_score_adjustment=ext_score_adjustment,
         )
 
         ref_idx = cov_values.index[cov_values == reference]
         ref_model = RSM(self.responses.loc[ref_idx], max_score=self.max_score)
-        ref_model.calibrate(estimation=getattr(self, "estimation", None),
-            constant=constant, threshold_constant=threshold_constant, threshold_method=getattr(self, "threshold_method", "cpat-cml"), method=method, matrix_power=matrix_power,
+        ref_model.calibrate(
+            estimation=getattr(self, "estimation", None),
+            constant=constant,
+            threshold_constant=threshold_constant,
+            threshold_method=getattr(self, "threshold_method", "cpat-cml"),
+            method=method,
+            matrix_power=matrix_power,
             log_lik_tol=log_lik_tol,
         )
         ref_model.std_errors(
-            no_of_samples=no_of_samples, constant=constant, threshold_constant=threshold_constant, method=method,
-            matrix_power=matrix_power, log_lik_tol=log_lik_tol, seed=seed,
+            no_of_samples=no_of_samples,
+            constant=constant,
+            threshold_constant=threshold_constant,
+            method=method,
+            matrix_power=matrix_power,
+            log_lik_tol=log_lik_tol,
+            seed=seed,
         )
         if needs_ll:
             ref_model.person_estimates(**pe_kw)
             ll_ref = ref_model._log_likelihood()
         ref_total_weights = (
             ref_model._threshold_total_weights(constant=ref_model.threshold_constant)
-            if size_adjust else None
+            if size_adjust
+            else None
         )
 
         all_item_rows = []
@@ -3672,13 +3845,23 @@ class RSM(Rasch):
         for focal in focal_levels:
             focal_idx = cov_values.index[cov_values == focal]
             focal_model = RSM(self.responses.loc[focal_idx], max_score=self.max_score)
-            focal_model.calibrate(estimation=getattr(self, "estimation", None),
-                constant=constant, threshold_constant=threshold_constant, threshold_method=getattr(self, "threshold_method", "cpat-cml"), method=method, matrix_power=matrix_power,
+            focal_model.calibrate(
+                estimation=getattr(self, "estimation", None),
+                constant=constant,
+                threshold_constant=threshold_constant,
+                threshold_method=getattr(self, "threshold_method", "cpat-cml"),
+                method=method,
+                matrix_power=matrix_power,
                 log_lik_tol=log_lik_tol,
             )
             focal_model.std_errors(
-                no_of_samples=no_of_samples, constant=constant, threshold_constant=threshold_constant, method=method,
-                matrix_power=matrix_power, log_lik_tol=log_lik_tol, seed=seed,
+                no_of_samples=no_of_samples,
+                constant=constant,
+                threshold_constant=threshold_constant,
+                method=method,
+                matrix_power=matrix_power,
+                log_lik_tol=log_lik_tol,
+                seed=seed,
             )
             if needs_ll:
                 focal_model.person_estimates(**pe_kw)
@@ -3686,12 +3869,34 @@ class RSM(Rasch):
 
             # --- Item-location DIF ---
             wald_result = self._dif_item_wald_block(
-                ref_model, focal_model, ref_model.item_bootstrap, focal_model.item_bootstrap,
-                selection_method, corr_tol, sd_ratio_tol, min_anchors, wald_alpha,
-                size_adjust, reference_n, welch, correction, alpha, logit_threshold,
-                category, category_thresholds, category_alpha,
-                ref_cov=ref_model.se_covariance['items'] if ref_model.se_method == 'sandwich' else None,
-                focal_cov=focal_model.se_covariance['items'] if focal_model.se_method == 'sandwich' else None,
+                ref_model,
+                focal_model,
+                ref_model.item_bootstrap,
+                focal_model.item_bootstrap,
+                selection_method,
+                corr_tol,
+                sd_ratio_tol,
+                min_anchors,
+                wald_alpha,
+                size_adjust,
+                reference_n,
+                welch,
+                correction,
+                alpha,
+                logit_threshold,
+                category,
+                category_thresholds,
+                category_alpha,
+                ref_cov=(
+                    ref_model.se_covariance["items"]
+                    if ref_model.se_method == "sandwich"
+                    else None
+                ),
+                focal_cov=(
+                    focal_model.se_covariance["items"]
+                    if focal_model.se_method == "sandwich"
+                    else None
+                ),
             )
             common_items = wald_result["common_items"]
             tc = wald_result["tc"]
@@ -3710,21 +3915,32 @@ class RSM(Rasch):
             if omnibus:
                 combined_idx = ref_idx.append(focal_idx)
                 m_full = RSM(self.responses.loc[combined_idx], max_score=self.max_score)
-                m_full.calibrate(estimation=getattr(self, "estimation", None),
-                    constant=constant, threshold_constant=threshold_constant, threshold_method=getattr(self, "threshold_method", "cpat-cml"), method=method, matrix_power=matrix_power,
+                m_full.calibrate(
+                    estimation=getattr(self, "estimation", None),
+                    constant=constant,
+                    threshold_constant=threshold_constant,
+                    threshold_method=getattr(self, "threshold_method", "cpat-cml"),
+                    method=method,
+                    matrix_power=matrix_power,
                     log_lik_tol=log_lik_tol,
                 )
                 m_full.person_estimates(**pe_kw)
                 ll_full = m_full._log_likelihood()
                 pooled_ref_persons = m_full.persons.reindex(ref_model.responses.index)
-                pooled_focal_persons = m_full.persons.reindex(focal_model.responses.index)
+                pooled_focal_persons = m_full.persons.reindex(
+                    focal_model.responses.index
+                )
                 ll_ref_omni = ref_model._log_likelihood(persons=pooled_ref_persons)
-                ll_focal_omni = focal_model._log_likelihood(persons=pooled_focal_persons)
+                ll_focal_omni = focal_model._log_likelihood(
+                    persons=pooled_focal_persons
+                )
                 lr_omni = max(0.0, -2 * (ll_full - (ll_ref_omni + ll_focal_omni)))
                 df_omni = len(common_items) - 1
                 p_omni = float(chi2.sf(lr_omni, df_omni))
                 omnibus_rows[focal] = {
-                    "LR": lr_omni, "df": df_omni, "p": p_omni,
+                    "LR": lr_omni,
+                    "df": df_omni,
+                    "p": p_omni,
                     "Flagged": p_omni < alpha,
                 }
 
@@ -3761,8 +3977,18 @@ class RSM(Rasch):
                 )
 
             item_table = self._dif_item_table(
-                focal, ref_model, focal_model, common_items, focal_shifted,
-                diff, se, z, p, p_corrected, selected, flagged,
+                focal,
+                ref_model,
+                focal_model,
+                common_items,
+                focal_shifted,
+                diff,
+                se,
+                z,
+                p,
+                p_corrected,
+                selected,
+                flagged,
                 welch_df=item_welch_df if welch else None,
                 category_col=item_category_col if category else None,
                 lr_table=lr_table if test in ("lr", "both") else None,
@@ -3806,19 +4032,23 @@ class RSM(Rasch):
                     index=thr_index,
                 )
                 focal_se_thr = pd.Series(
-                    focal_se_thr.reindex(thr_index).values * np.sqrt(focal_tw / focal_eff),
+                    focal_se_thr.reindex(thr_index).values
+                    * np.sqrt(focal_tw / focal_eff),
                     index=thr_index,
                 )
                 ref_n_thr = ref_eff
                 focal_n_thr = focal_eff
 
             thr_se = pd.Series(
-                np.sqrt(ref_se_thr ** 2 + focal_se_thr ** 2).values, index=thr_index
+                np.sqrt(ref_se_thr**2 + focal_se_thr**2).values, index=thr_index
             )
             if welch:
                 thr_z_vals, thr_df_vals, thr_p_vals = self._welch_satterthwaite(
-                    thr_diff.values, ref_se_thr.values, ref_n_thr,
-                    focal_se_thr.values, focal_n_thr,
+                    thr_diff.values,
+                    ref_se_thr.values,
+                    ref_n_thr,
+                    focal_se_thr.values,
+                    focal_n_thr,
                 )
                 thr_z = pd.Series(thr_z_vals, index=thr_index)
                 thr_welch_df = pd.Series(thr_df_vals, index=thr_index)
@@ -3834,7 +4064,9 @@ class RSM(Rasch):
             else:
                 thr_p_corrected = thr_p
 
-            thr_flagged = (thr_p_corrected < alpha) & (thr_diff.abs() >= logit_threshold)
+            thr_flagged = (thr_p_corrected < alpha) & (
+                thr_diff.abs() >= logit_threshold
+            )
 
             threshold_table = pd.DataFrame(
                 {
@@ -3867,9 +4099,7 @@ class RSM(Rasch):
                 plot_dict[focal] = None
 
         self.dif_table = pd.concat(all_item_rows)
-        self.dif_omnibus_table = (
-            pd.DataFrame(omnibus_rows).T if omnibus else None
-        )
+        self.dif_omnibus_table = pd.DataFrame(omnibus_rows).T if omnibus else None
         self.threshold_dif_table = pd.concat(all_threshold_rows, ignore_index=True)
         self.dif_reference = reference
         self.dif_covariate = covariate
@@ -3964,11 +4194,20 @@ class RSM(Rasch):
 
         if test not in ("LR", "AIC", "BIC"):
             raise ValueError("test must be 'LR', 'AIC', or 'BIC'")
-        if sampling is not None and sampling != "dynamic" and not isinstance(sampling, int):
+        if (
+            sampling is not None
+            and sampling != "dynamic"
+            and not isinstance(sampling, int)
+        ):
             raise ValueError("sampling must be None, 'dynamic', or an integer")
 
         if not hasattr(self, "thresholds"):
-            self.calibrate(constant=constant, threshold_constant=threshold_constant, method=method, log_lik_tol=log_lik_tol)
+            self.calibrate(
+                constant=constant,
+                threshold_constant=threshold_constant,
+                method=method,
+                log_lik_tol=log_lik_tol,
+            )
         if not hasattr(self, "persons"):
             self.person_estimates(
                 warm_corr=warm_corr,
@@ -4015,7 +4254,9 @@ class RSM(Rasch):
         k_rsm = (self.no_of_items - 1) + (self.max_score - 1)
         k_pcm = int(pcm.thresholds_uncentred.notna().sum().sum()) - 1
 
-        effect = float(pcm.thresholds.sub(self.thresholds, axis=1).abs().to_numpy().max())
+        effect = float(
+            pcm.thresholds.sub(self.thresholds, axis=1).abs().to_numpy().max()
+        )
         self.model_comparison_rsm_pcm_effect = effect
 
         if test == "LR":
@@ -4036,7 +4277,13 @@ class RSM(Rasch):
             self.model_comparison_rsm_pcm_p = p
             self.model_comparison_rsm_pcm_lr_preferred = preferred
             self.model_comparison_rsm_pcm_lr_summary = pd.Series(
-                {"LR statistic": lr, "df": df, "p-value": p, "Effect": effect, "Preferred": preferred},
+                {
+                    "LR statistic": lr,
+                    "df": df,
+                    "p-value": p,
+                    "Effect": effect,
+                    "Preferred": preferred,
+                },
                 name="RSM vs PCM LR test",
             )
 
@@ -4048,7 +4295,11 @@ class RSM(Rasch):
             if aic_sig_test:
                 delta = aic_rsm - aic_pcm
                 aic_p = float(np.exp(-abs(delta) / 2))
-                preferred = "PCM" if (delta > 0 and aic_p < alpha and effect >= min_effect) else "RSM"
+                preferred = (
+                    "PCM"
+                    if (delta > 0 and aic_p < alpha and effect >= min_effect)
+                    else "RSM"
+                )
                 self.model_comparison_rsm_pcm_aic_p = aic_p
                 self.model_comparison_rsm_pcm_aic_preferred = preferred
                 self.model_comparison_rsm_pcm_aic_summary = pd.Series(
@@ -4062,10 +4313,17 @@ class RSM(Rasch):
                     name="RSM vs PCM AIC comparison",
                 )
             else:
-                preferred = "PCM" if (aic_pcm < aic_rsm and effect >= min_effect) else "RSM"
+                preferred = (
+                    "PCM" if (aic_pcm < aic_rsm and effect >= min_effect) else "RSM"
+                )
                 self.model_comparison_rsm_pcm_aic_preferred = preferred
                 self.model_comparison_rsm_pcm_aic_summary = pd.Series(
-                    {"PCM AIC": aic_pcm, "RSM AIC": aic_rsm, "Effect": effect, "Preferred": preferred},
+                    {
+                        "PCM AIC": aic_pcm,
+                        "RSM AIC": aic_rsm,
+                        "Effect": effect,
+                        "Preferred": preferred,
+                    },
                     name="RSM vs PCM AIC comparison",
                 )
 
@@ -4076,7 +4334,12 @@ class RSM(Rasch):
             self.model_comparison_rsm_pcm_bic = {"PCM": bic_pcm, "RSM": bic_rsm}
             self.model_comparison_rsm_pcm_bic_preferred = preferred
             self.model_comparison_rsm_pcm_bic_summary = pd.Series(
-                {"PCM BIC": bic_pcm, "RSM BIC": bic_rsm, "Effect": effect, "Preferred": preferred},
+                {
+                    "PCM BIC": bic_pcm,
+                    "RSM BIC": bic_rsm,
+                    "Effect": effect,
+                    "Preferred": preferred,
+                },
                 name="RSM vs PCM BIC comparison",
             )
 
@@ -4571,14 +4834,22 @@ class RSM(Rasch):
         """
         if not hasattr(self, "thresholds"):
             self.calibrate(
-                constant=constant, threshold_constant=threshold_constant, method=method, matrix_power=matrix_power,
+                constant=constant,
+                threshold_constant=threshold_constant,
+                method=method,
+                matrix_power=matrix_power,
                 log_lik_tol=log_lik_tol,
             )
         if not hasattr(self, "cat_width_se"):
             self.std_errors(
-                interval=interval, no_of_samples=no_of_samples,
-                constant=constant, threshold_constant=threshold_constant, method=method, matrix_power=matrix_power,
-                log_lik_tol=log_lik_tol, seed=seed,
+                interval=interval,
+                no_of_samples=no_of_samples,
+                constant=constant,
+                threshold_constant=threshold_constant,
+                method=method,
+                matrix_power=matrix_power,
+                log_lik_tol=log_lik_tol,
+                seed=seed,
             )
 
         cat_widths = self.thresholds.diff().dropna()
@@ -4796,10 +5067,20 @@ class RSM(Rasch):
 
         # RSM test stats have no threshold separation row (thresholds are
         # shared, not item-specific, so threshold ISI is not meaningful here).
-        items_col = [self.items.mean(), self.items.std(), self.isi,
-                     self.item_strata, self.item_reliability]
-        persons_col = [self.persons.mean(), self.persons.std(), self.psi,
-                       self.person_strata, self.person_reliability]
+        items_col = [
+            self.items.mean(),
+            self.items.std(),
+            self.isi,
+            self.item_strata,
+            self.item_reliability,
+        ]
+        persons_col = [
+            self.persons.mean(),
+            self.persons.std(),
+            self.psi,
+            self.person_strata,
+            self.person_reliability,
+        ]
         index = ["Mean", "SD", "Separation ratio", "Strata", "Reliability"]
 
         if alpha:
@@ -5146,7 +5427,9 @@ class RSM(Rasch):
             mask_person_locations = person_location_df.unstack()
         else:
             mask_scores = df[item].dropna()
-            mask_person_locations = (person_locations - self.items[item]).reindex(mask_scores.index)
+            mask_person_locations = (person_locations - self.items[item]).reindex(
+                mask_scores.index
+            )
         q = mask_person_locations.quantile(
             [(i + 1) / no_of_classes for i in range(no_of_classes - 1)]
         )
@@ -5155,7 +5438,8 @@ class RSM(Rasch):
             f"class_{no_of_classes}": mask_person_locations >= q.values[-1],
             **{
                 f"class_{i + 2}": (
-                    (mask_person_locations >= q.values[i]) & (mask_person_locations < q.values[i + 1])
+                    (mask_person_locations >= q.values[i])
+                    & (mask_person_locations < q.values[i + 1])
                 )
                 for i in range(no_of_classes - 2)
             },
@@ -5208,7 +5492,9 @@ class RSM(Rasch):
         df = self.responses.copy()
 
         # Build person location DataFrame; subtract item location if not item-specific
-        person_location_df = pd.DataFrame({it: self.persons for it in self.responses.columns})
+        person_location_df = pd.DataFrame(
+            {it: self.persons for it in self.responses.columns}
+        )
         if item is None:
             for it in self.responses.columns:
                 person_location_df[it] -= self.items[it]
@@ -5240,10 +5526,15 @@ class RSM(Rasch):
 
             if item is None:
                 obs_df = pd.DataFrame(
-                    {"person_location": cond_person_locations.stack(), "score": cond_df.stack()}
+                    {
+                        "person_location": cond_person_locations.stack(),
+                        "score": cond_df.stack(),
+                    }
                 ).droplevel(level=1)
             else:
-                obs_df = pd.DataFrame({"person_location": cond_person_locations, "score": cond_df})
+                obs_df = pd.DataFrame(
+                    {"person_location": cond_person_locations, "score": cond_df}
+                )
 
             masks = make_masks(obs_df["person_location"])
             mean_person_locations.append(
@@ -5450,8 +5741,13 @@ class RSM(Rasch):
             # The 8th (black) entry is swapped for white on dark
             # backgrounds, where it would otherwise be invisible.
             color_map = [
-                "#E69F00", "#56B4E9", "#009E73", "#F0E442",
-                "#0072B2", "#D55E00", "#CC79A7",
+                "#E69F00",
+                "#56B4E9",
+                "#009E73",
+                "#F0E442",
+                "#0072B2",
+                "#D55E00",
+                "#CC79A7",
                 "#FFFFFF" if plot_style in self._DARK_BACKGROUND_STYLES else "#000000",
             ]
         elif shade == "dark":
@@ -5479,10 +5775,16 @@ class RSM(Rasch):
             # legible on a background/gridline colour close to its own --
             # white on the darker plot_style schemes, black otherwise.
             line_fx = (
-                [path_effects.withStroke(
-                    linewidth=2.5,
-                    foreground="white" if plot_style in self._DARK_BACKGROUND_STYLES else "black",
-                )]
+                [
+                    path_effects.withStroke(
+                        linewidth=2.5,
+                        foreground=(
+                            "white"
+                            if plot_style in self._DARK_BACKGROUND_STYLES
+                            else "black"
+                        ),
+                    )
+                ]
                 if line_border
                 else None
             )
@@ -5497,7 +5799,11 @@ class RSM(Rasch):
                 )
                 label = curve_labels[i] if curve_labels is not None else i + 1
                 ax.plot(
-                    x_data, y_data[:, i], "", color=col, label=label,
+                    x_data,
+                    y_data[:, i],
+                    "",
+                    color=col,
+                    label=label,
                     path_effects=line_fx,
                 )
 
@@ -5511,8 +5817,13 @@ class RSM(Rasch):
                         scalarMap.to_rgba(0) if "multi" not in palette else color_map[0]
                     )
                     ax.scatter(
-                        x_obs_data, y_obs_data, color=col, s=40, alpha=0.7,
-                        edgecolors="k" if marker_border else "none", zorder=3,
+                        x_obs_data,
+                        y_obs_data,
+                        color=col,
+                        s=40,
+                        alpha=0.7,
+                        edgecolors="k" if marker_border else "none",
+                        zorder=3,
                     )
                 else:
                     try:
@@ -5526,8 +5837,13 @@ class RSM(Rasch):
                             )
                             xd = x_obs_data if x_is_series else x_obs_data[:, j]
                             ax.scatter(
-                                xd, y_obs_data[:, j], color=col, s=40, alpha=0.7,
-                                edgecolors="k" if marker_border else "none", zorder=3,
+                                xd,
+                                y_obs_data[:, j],
+                                color=col,
+                                s=40,
+                                alpha=0.7,
+                                edgecolors="k" if marker_border else "none",
+                                zorder=3,
                             )
                     except Exception:
                         pass
@@ -5576,10 +5892,14 @@ class RSM(Rasch):
                     xval = 0 if it is None else self.items.loc[it]
                     ax.axvline(x=xval, color="darkred", linestyle="--")
                     label = (
-                        f"{it}: {round(xval, 2)}" if items_multi else str(round(xval, 2))
+                        f"{it}: {round(xval, 2)}"
+                        if items_multi
+                        else str(round(xval, 2))
                     )
                     if central_location_fit and items_multi:
-                        label_y = curve_peak + gap + label_h_data * (n_labels - idx - 0.5)
+                        label_y = (
+                            curve_peak + gap + label_h_data * (n_labels - idx - 0.5)
+                        )
                         label_x = xval - (x_max - x_min) / 100
                         ha = "right"
                     elif items_multi:
@@ -5661,7 +5981,9 @@ class RSM(Rasch):
                                     color=colorVal,
                                 )
                                 ax.text(
-                                    x_min + (x_max - x_min) / 100, s + y_max / 50, str(s),
+                                    x_min + (x_max - x_min) / 100,
+                                    s + y_max / 50,
+                                    str(s),
                                     color=colorVal,
                                 )
                 else:
@@ -5741,11 +6063,17 @@ class RSM(Rasch):
                     for estimate in point_info_lines_item[1]:
                         info = self.variance(estimate, self.items[it], self.thresholds)
                         ax.vlines(
-                            x=estimate, ymin=-100, ymax=info, color=colorVal,
+                            x=estimate,
+                            ymin=-100,
+                            ymax=info,
+                            color=colorVal,
                             linestyles="dashed",
                         )
                         ax.hlines(
-                            y=info, xmin=-100, xmax=estimate, color=colorVal,
+                            y=info,
+                            xmin=-100,
+                            xmax=estimate,
+                            color=colorVal,
                             linestyles="dashed",
                         )
                         if score_labels:
@@ -5756,8 +6084,10 @@ class RSM(Rasch):
                                     + idx * (x_max - x_min) * 0.03
                                 )
                                 ax.text(
-                                    label_x, info + y_max / 50,
-                                    f"{it}: {round(info, 3)}", color=colorVal,
+                                    label_x,
+                                    info + y_max / 50,
+                                    f"{it}: {round(info, 3)}",
+                                    color=colorVal,
                                 )
                             else:
                                 ax.text(
@@ -5993,7 +6323,9 @@ class RSM(Rasch):
                 xobsdata = None
                 yobs_cols = []
                 for it in item:
-                    mpl, om = self.class_intervals(items=[it], no_of_classes=no_of_classes)
+                    mpl, om = self.class_intervals(
+                        items=[it], no_of_classes=no_of_classes
+                    )
                     if xobsdata is None:
                         xobsdata = pd.Series(mpl)
                     yobs_cols.append(np.array(om))
@@ -6009,13 +6341,19 @@ class RSM(Rasch):
         if multi:
             y = np.column_stack(
                 [
-                    [self.exp_score(a, self.items[it], self.thresholds) for a in estimates]
+                    [
+                        self.exp_score(a, self.items[it], self.thresholds)
+                        for a in estimates
+                    ]
                     for it in item
                 ]
             )
         else:
             y = np.array(
-                [self.exp_score(a, self.items[item], self.thresholds) for a in estimates]
+                [
+                    self.exp_score(a, self.items[item], self.thresholds)
+                    for a in estimates
+                ]
             ).reshape(-1, 1)
 
         return self.plot_data(
@@ -6402,7 +6740,10 @@ class RSM(Rasch):
         if multi:
             y = np.column_stack(
                 [
-                    [self.variance(a, self.items[it], self.thresholds) for a in estimates]
+                    [
+                        self.variance(a, self.items[it], self.thresholds)
+                        for a in estimates
+                    ]
                     for it in item
                 ]
             )
@@ -6823,7 +7164,8 @@ class RSM(Rasch):
         if plot_density is not None:
             warnings.warn(
                 "plot_density= is deprecated and will be removed in a future version; use dpi= instead.",
-                FutureWarning, stacklevel=2,
+                FutureWarning,
+                stacklevel=2,
             )
             dpi = plot_density
         if isinstance(items, str) and items in ("all", "none"):
@@ -6870,8 +7212,13 @@ class RSM(Rasch):
         return widths
 
     def recovery_stats(
-        self, anchor=False, alpha=0.05, correction="bh", divergence_tol=0.1,
-        plot=True, **plot_kwargs,
+        self,
+        anchor=False,
+        alpha=0.05,
+        correction="bh",
+        divergence_tol=0.1,
+        plot=True,
+        **plot_kwargs,
     ):
         """
         Compare recovered parameter estimates against the true generating
@@ -7038,8 +7385,12 @@ class RSM(Rasch):
 
         est_items = self.anchor_items if anchor else self.items
         items_table, items_summary = self._parameter_recovery_table(
-            self.generating.items, est_items, se=self.item_se, alpha=alpha,
-            correction=correction, divergence_tol=divergence_tol,
+            self.generating.items,
+            est_items,
+            se=self.item_se,
+            alpha=alpha,
+            correction=correction,
+            divergence_tol=divergence_tol,
         )
         self.recovery.items = _SimParams()
         self.recovery.items.table = items_table
@@ -7069,8 +7420,11 @@ class RSM(Rasch):
                 self.threshold_se, index=range(1, self.max_score + 1)
             )
             thresholds_table, thresholds_summary = self._parameter_recovery_table(
-                gen_thresholds, self.thresholds, se=threshold_se,
-                alpha=alpha, correction=correction,
+                gen_thresholds,
+                self.thresholds,
+                se=threshold_se,
+                alpha=alpha,
+                correction=correction,
                 divergence_tol=divergence_tol,
             )
             self.recovery.thresholds = _SimParams()
@@ -7080,8 +7434,12 @@ class RSM(Rasch):
             gen_widths = self._category_widths(gen_thresholds)
             est_widths = self._category_widths(self.thresholds)
             widths_table, widths_summary = self._parameter_recovery_table(
-                gen_widths, est_widths, se=self.cat_width_se, alpha=alpha,
-                correction=correction, divergence_tol=divergence_tol,
+                gen_widths,
+                est_widths,
+                se=self.cat_width_se,
+                alpha=alpha,
+                correction=correction,
+                divergence_tol=divergence_tol,
             )
             self.recovery.category_widths = _SimParams()
             self.recovery.category_widths.table = widths_table
@@ -7094,8 +7452,12 @@ class RSM(Rasch):
         pseudo_estimate = self._pseudo_estimate_persons()
 
         persons_table, persons_summary = self._parameter_recovery_table(
-            pseudo_estimate, self.persons, se=self.csem_vector, alpha=alpha,
-            correction=correction, divergence_tol=divergence_tol,
+            pseudo_estimate,
+            self.persons,
+            se=self.csem_vector,
+            alpha=alpha,
+            correction=correction,
+            divergence_tol=divergence_tol,
         )
         self.recovery.persons = _SimParams()
         self.recovery.persons.table = persons_table
@@ -7111,14 +7473,22 @@ class RSM(Rasch):
         self.recovery.parameter_estimation_residual = None
         if gen_thresholds is not None:
             gen_items_ = self.generating.items
-            self.recovery.parameter_estimation_residual = self._parameter_estimation_residual(
-                self.generating.persons,
-                lambda theta, item: self.exp_score(theta, gen_items_[item], gen_thresholds),
-                lambda theta, item: self.exp_score(theta, est_items[item], self.thresholds),
+            self.recovery.parameter_estimation_residual = (
+                self._parameter_estimation_residual(
+                    self.generating.persons,
+                    lambda theta, item: self.exp_score(
+                        theta, gen_items_[item], gen_thresholds
+                    ),
+                    lambda theta, item: self.exp_score(
+                        theta, est_items[item], self.thresholds
+                    ),
+                )
             )
 
         if plot:
-            self._recovery_plot(self.generating.items, est_items, "items", **plot_kwargs)
+            self._recovery_plot(
+                self.generating.items, est_items, "items", **plot_kwargs
+            )
             if gen_thresholds is not None:
                 self._recovery_plot(
                     gen_thresholds, self.thresholds, "thresholds", **plot_kwargs

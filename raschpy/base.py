@@ -142,7 +142,9 @@ class _BootstrapWarnings:
 
     def emit(self, stacklevel=3):
         for (category, _), (count, message) in self._groups.items():
-            if issubclass(category, (DeprecationWarning, PendingDeprecationWarning, FutureWarning)):
+            if issubclass(
+                category, (DeprecationWarning, PendingDeprecationWarning, FutureWarning)
+            ):
                 # Library/API deprecations aren't about the resampled data,
                 # so pass them through once, unchanged.
                 warnings.warn(message, category, stacklevel=stacklevel)
@@ -343,7 +345,11 @@ class Rasch:
     # excludes 'dark' (seaborn darkgrid's light-grey background, against
     # which black remains perfectly legible).
     _DARK_BACKGROUND_STYLES = {
-        "black", "solarized-dark", "slate", "blueprint", "chalkboard",
+        "black",
+        "solarized-dark",
+        "slate",
+        "blueprint",
+        "chalkboard",
     }
 
     def _apply_plot_style(self, plot_style):
@@ -489,7 +495,9 @@ class Rasch:
         # warnings below are skipped when these explain them fully.
         explained = np.asarray(self._unused_category_rows(row_items), dtype=bool)
         unexplained_zero = structurally_zero_rows & ~explained
-        directionally_isolated_report = sorted(set(row_items[unexplained_zero].tolist()))
+        directionally_isolated_report = sorted(
+            set(row_items[unexplained_zero].tolist())
+        )
         if directionally_isolated_report:
             warnings.warn(
                 f"{len(directionally_isolated_report)} item(s) have a structurally "
@@ -551,16 +559,16 @@ class Rasch:
         scc_explained = False
         if not strongly_connected and explained.any():
             keep = ~explained
-            n_rest, _ = connected_components(directed[np.ix_(keep, keep)], directed=True, connection="strong")
+            n_rest, _ = connected_components(
+                directed[np.ix_(keep, keep)], directed=True, connection="strong"
+            )
             scc_explained = n_rest == 1
 
         if is_connected:
             if not strongly_connected and not scc_explained:
                 scc_groups = {}
                 for node_idx, label in enumerate(scc_labels):
-                    scc_groups.setdefault(label, set()).add(
-                        str(row_items[node_idx])
-                    )
+                    scc_groups.setdefault(label, set()).add(str(row_items[node_idx]))
                 scc_groups = sorted(
                     (sorted(group) for group in scc_groups.values()), key=len
                 )
@@ -789,9 +797,7 @@ class Rasch:
             max_iter = 10000
             for _ in range(max_iter):
                 np.maximum(weights, 1e-12, out=weights)
-                np.add(
-                    weights[:, np.newaxis], weights[np.newaxis, :], out=weight_pairs
-                )
+                np.add(weights[:, np.newaxis], weights[np.newaxis, :], out=weight_pairs)
                 np.divide(matrix_sum_sym, weight_pairs, out=term_matrix)
                 adjustment = term_matrix.sum(axis=1)
 
@@ -852,7 +858,9 @@ class Rasch:
         b = np.where(valid, den + constant, 0.0)
         finite = valid & (a > 0) & (b > 0)
         with np.errstate(divide="ignore", invalid="ignore"):
-            log_ratio = np.log(np.where(finite, a, 1.0)) - np.log(np.where(finite, b, 1.0))
+            log_ratio = np.log(np.where(finite, a, 1.0)) - np.log(
+                np.where(finite, b, 1.0)
+            )
             weight = np.where(finite, 2.0 * a * b / (a + b), 0.0)
         total = weight.sum()
         if total == 0:
@@ -1100,9 +1108,12 @@ class Rasch:
             outside = bracketed & ((new <= lo[a]) | (new >= hi[a]))
             new = np.where(outside, 0.5 * (lo[a] + hi[a]), new)
             # f undefined (information underflow far in a tail): back off
-            new = np.where(finite, new, np.where(bracketed, 0.5 * (lo[a] + hi[a]), t - np.sign(t)))
+            new = np.where(
+                finite, new, np.where(bracketed, 0.5 * (lo[a] + hi[a]), t - np.sign(t))
+            )
             done = finite & (
-                (np.abs(new - t) < tolerance) | (bracketed & (hi[a] - lo[a] < tolerance))
+                (np.abs(new - t) < tolerance)
+                | (bracketed & (hi[a] - lo[a] < tolerance))
             )
             th[a] = new
             active[a[done]] = False
@@ -1879,9 +1890,20 @@ class Rasch:
         }
 
     def _purification_loo_tc(
-        self, ref_col, focal_col, ref_se_col, focal_se_col,
-        selection_method, corr_tol, sd_ratio_tol, min_anchors, wald_alpha,
-        ref_boot=None, focal_boot=None, ref_cov=None, focal_cov=None,
+        self,
+        ref_col,
+        focal_col,
+        ref_se_col,
+        focal_se_col,
+        selection_method,
+        corr_tol,
+        sd_ratio_tol,
+        min_anchors,
+        wald_alpha,
+        ref_boot=None,
+        focal_boot=None,
+        ref_cov=None,
+        focal_cov=None,
     ):
         """
         Leave-one-out translation constant for each tested unit, and the two
@@ -1927,14 +1949,21 @@ class Rasch:
             w = None
             if selection_method == "wald":
                 ar = self._wald_anchor_selection(
-                    ref_o, focal_o, focal_se_o, alpha=wald_alpha, min_anchors=min_anchors,
+                    ref_o,
+                    focal_o,
+                    focal_se_o,
+                    alpha=wald_alpha,
+                    min_anchors=min_anchors,
                 )
                 sel = ar["selected_anchors"]
                 tc_per_unit[r] = ar["tc"]
                 w = 1.0 / focal_se_o.loc[sel] ** 2
             elif selection_method == "robust_z":
                 ar = self._robust_anchor_selection(
-                    ref_o, focal_o, corr_tol=corr_tol, sd_ratio_tol=sd_ratio_tol,
+                    ref_o,
+                    focal_o,
+                    corr_tol=corr_tol,
+                    sd_ratio_tol=sd_ratio_tol,
                     min_anchors=min_anchors,
                 )
                 sel = ar["selected_anchors"]
@@ -1945,10 +1974,13 @@ class Rasch:
             n_sel = len(sel)
 
             have_boot = (
-                ref_boot is not None and focal_boot is not None and n_sel > 0
+                ref_boot is not None
+                and focal_boot is not None
+                and n_sel > 0
                 and set(sel).issubset(ref_boot.columns)
                 and set(sel).issubset(focal_boot.columns)
-                and r in ref_boot.columns and r in focal_boot.columns
+                and r in ref_boot.columns
+                and r in focal_boot.columns
             )
             if have_boot:
                 if w is not None:
@@ -1963,17 +1995,30 @@ class Rasch:
                 ref_var_per_unit[r] = float(np.var(d_ref_b, ddof=1))
                 focal_var_per_unit[r] = float(np.var(d_focal_b, ddof=1))
             elif (
-                ref_cov is not None and focal_cov is not None and n_sel > 0
-                and set(sel).issubset(ref_cov.index) and set(sel).issubset(focal_cov.index)
-                and r in ref_cov.index and r in focal_cov.index
+                ref_cov is not None
+                and focal_cov is not None
+                and n_sel > 0
+                and set(sel).issubset(ref_cov.index)
+                and set(sel).issubset(focal_cov.index)
+                and r in ref_cov.index
+                and r in focal_cov.index
             ):
-                a = (w / w.sum()).reindex(sel).values if w is not None else np.full(n_sel, 1.0 / n_sel)
-                for cov, store in ((ref_cov, ref_var_per_unit), (focal_cov, focal_var_per_unit)):
+                a = (
+                    (w / w.sum()).reindex(sel).values
+                    if w is not None
+                    else np.full(n_sel, 1.0 / n_sel)
+                )
+                for cov, store in (
+                    (ref_cov, ref_var_per_unit),
+                    (focal_cov, focal_var_per_unit),
+                ):
                     Vss = cov.loc[sel, sel].values
                     Vsr = cov.loc[sel, r].values
                     store[r] = float(cov.loc[r, r] - 2.0 * a @ Vsr + a @ Vss @ a)
             elif n_sel > 0:
-                tc_var = float((ref_se_o.loc[sel] ** 2 + focal_se_o.loc[sel] ** 2).sum()) / (n_sel ** 2)
+                tc_var = float(
+                    (ref_se_o.loc[sel] ** 2 + focal_se_o.loc[sel] ** 2).sum()
+                ) / (n_sel**2)
                 ref_var_per_unit[r] = ref_se_col.loc[r] ** 2
                 focal_var_per_unit[r] = focal_se_col.loc[r] ** 2 + tc_var
             else:
@@ -1982,12 +2027,19 @@ class Rasch:
 
         if selection_method == "wald":
             ar_full = self._wald_anchor_selection(
-                ref_col, focal_col, focal_se_col, alpha=wald_alpha, min_anchors=min_anchors,
+                ref_col,
+                focal_col,
+                focal_se_col,
+                alpha=wald_alpha,
+                min_anchors=min_anchors,
             )
             selected, anchor_table = ar_full["selected_anchors"], ar_full["table"]
         elif selection_method == "robust_z":
             ar_full = self._robust_anchor_selection(
-                ref_col, focal_col, corr_tol=corr_tol, sd_ratio_tol=sd_ratio_tol,
+                ref_col,
+                focal_col,
+                corr_tol=corr_tol,
+                sd_ratio_tol=sd_ratio_tol,
                 min_anchors=min_anchors,
             )
             selected, anchor_table = ar_full["selected_anchors"], ar_full["table"]
@@ -1997,9 +2049,20 @@ class Rasch:
         return tc_per_unit, ref_var_per_unit, focal_var_per_unit, selected, anchor_table
 
     def _calibrate_anchor_core(
-        self, anchors, selection_method, corr_tol, sd_ratio_tol, min_anchors,
-        wald_alpha, no_of_samples, adj, overwrite_anchors, plot, plot_kwargs,
-        seed, std_errors_kwargs,
+        self,
+        anchors,
+        selection_method,
+        corr_tol,
+        sd_ratio_tol,
+        min_anchors,
+        wald_alpha,
+        no_of_samples,
+        adj,
+        overwrite_anchors,
+        plot,
+        plot_kwargs,
+        seed,
+        std_errors_kwargs,
     ):
         """
         Shared core of calibrate_anchor() across SLM/PCM/RSM.
@@ -2259,7 +2322,9 @@ class Rasch:
         p = 2 * t_dist.sf(np.abs(t_stat), df)
         return t_stat, df, p
 
-    def _resolve_andersen_groups(self, split_by, covariate, non_extreme, person_location_values, score_values):
+    def _resolve_andersen_groups(
+        self, split_by, covariate, non_extreme, person_location_values, score_values
+    ):
         """
         Shared group-splitting logic for andersen_lr_test (SLM/PCM/RSM).
 
@@ -2293,11 +2358,15 @@ class Rasch:
             split_by='exogenous'.
         """
         if split_by not in ("person_location", "score", "exogenous"):
-            raise ValueError("split_by must be 'person_location', 'score', or 'exogenous'")
+            raise ValueError(
+                "split_by must be 'person_location', 'score', or 'exogenous'"
+            )
 
         if split_by == "exogenous":
             if covariate is None:
-                raise ValueError("covariate must be specified when split_by='exogenous'")
+                raise ValueError(
+                    "covariate must be specified when split_by='exogenous'"
+                )
             if getattr(self, "exogenous", None) is None:
                 raise ValueError(
                     "No exogenous data available. Pass exogenous= to the "
@@ -2319,7 +2388,9 @@ class Rasch:
                 str(level): cov_values.index[cov_values == level] for level in levels
             }
 
-        split_var = (person_location_values if split_by == "person_location" else score_values).loc[non_extreme]
+        split_var = (
+            person_location_values if split_by == "person_location" else score_values
+        ).loc[non_extreme]
         median_val = split_var.median()
         return {
             "low": split_var.index[split_var < median_val],
@@ -2409,7 +2480,9 @@ class Rasch:
         if reference is None:
             reference = levels.index[0]
         elif reference not in levels.index:
-            raise ValueError(f"reference='{reference}' is not a value of '{covariate}'.")
+            raise ValueError(
+                f"reference='{reference}' is not a value of '{covariate}'."
+            )
 
         focal_levels = [lvl for lvl in levels.index if lvl != reference]
         if len(focal_levels) > 1:
@@ -2438,8 +2511,15 @@ class Rasch:
         return cov_values, reference, focal_levels, group_sizes, n_missing
 
     def _dif_category_column(
-        self, diff, se, p, common_items, welch, welch_df,
-        category_thresholds, category_alpha,
+        self,
+        diff,
+        se,
+        p,
+        common_items,
+        welch,
+        welch_df,
+        category_thresholds,
+        category_alpha,
     ):
         """
         ETS-style DIF Category column (Zwick, Thayer & Lewis, 1999),
@@ -2475,7 +2555,9 @@ class Rasch:
             )
         return pd.Series(category_col, index=common_items)
 
-    def _dif_lr_table(self, lr_rows, common_items, correction, alpha, diff, logit_threshold):
+    def _dif_lr_table(
+        self, lr_rows, common_items, correction, alpha, diff, logit_threshold
+    ):
         """
         Post-processing shared by every class's per-item DIF LR test
         (test='lr'/'both'): multiple-comparison correction and the
@@ -2491,7 +2573,9 @@ class Rasch:
         """
         lr_table = pd.DataFrame(lr_rows).T.loc[common_items]
         if correction == "bonferroni":
-            lr_table["p_LR (corrected)"] = (lr_table["p_LR"] * len(lr_table)).clip(upper=1.0)
+            lr_table["p_LR (corrected)"] = (lr_table["p_LR"] * len(lr_table)).clip(
+                upper=1.0
+            )
         elif correction == "bh":
             lr_table["p_LR (corrected)"] = self._bh_correction(lr_table["p_LR"])
         else:
@@ -2502,7 +2586,12 @@ class Rasch:
         return lr_table
 
     def _dif_validate(
-        self, correction, selection_method, test, category_thresholds, reference_n,
+        self,
+        correction,
+        selection_method,
+        test,
+        category_thresholds,
+        reference_n,
         dcf_cap=None,
     ):
         """
@@ -2518,7 +2607,10 @@ class Rasch:
             raise ValueError("selection_method must be 'wald', 'robust_z', or 'none'")
         if test not in ("wald", "lr", "both"):
             raise ValueError("test must be 'wald', 'lr', or 'both'")
-        if len(category_thresholds) != 2 or category_thresholds[0] >= category_thresholds[1]:
+        if (
+            len(category_thresholds) != 2
+            or category_thresholds[0] >= category_thresholds[1]
+        ):
             raise ValueError(
                 "category_thresholds must be (b_threshold, c_threshold) with "
                 "b_threshold < c_threshold."
@@ -2529,11 +2621,27 @@ class Rasch:
             raise ValueError("dcf_cap must be greater than 0.")
 
     def _dif_item_wald_block(
-        self, ref_model, focal_model, ref_boot, focal_boot,
-        selection_method, corr_tol, sd_ratio_tol, min_anchors, wald_alpha,
-        size_adjust, reference_n, welch, correction, alpha, logit_threshold,
-        category, category_thresholds, category_alpha,
-        ref_cov=None, focal_cov=None,
+        self,
+        ref_model,
+        focal_model,
+        ref_boot,
+        focal_boot,
+        selection_method,
+        corr_tol,
+        sd_ratio_tol,
+        min_anchors,
+        wald_alpha,
+        size_adjust,
+        reference_n,
+        welch,
+        correction,
+        alpha,
+        logit_threshold,
+        category,
+        category_thresholds,
+        category_alpha,
+        ref_cov=None,
+        focal_cov=None,
     ):
         """
         Shared item-location purification + per-item Wald test block from
@@ -2565,9 +2673,19 @@ class Rasch:
         # Leave-one-out per item, with tc's own variance -- see
         # _purification_loo_tc.
         tc, ref_var, focal_var, selected, anchor_table = self._purification_loo_tc(
-            ref_items, focal_items, ref_se_item, focal_se_item,
-            selection_method, corr_tol, sd_ratio_tol, min_anchors, wald_alpha,
-            ref_boot=ref_boot, focal_boot=focal_boot, ref_cov=ref_cov, focal_cov=focal_cov,
+            ref_items,
+            focal_items,
+            ref_se_item,
+            focal_se_item,
+            selection_method,
+            corr_tol,
+            sd_ratio_tol,
+            min_anchors,
+            wald_alpha,
+            ref_boot=ref_boot,
+            focal_boot=focal_boot,
+            ref_cov=ref_cov,
+            focal_cov=focal_cov,
         )
 
         focal_shifted = focal_items + tc
@@ -2592,8 +2710,11 @@ class Rasch:
         welch_df = None
         if welch:
             z_vals, df_vals, p_vals = self._welch_satterthwaite(
-                diff.values, ref_se_eff.values, ref_n_item,
-                focal_se_eff.values, focal_n_item,
+                diff.values,
+                ref_se_eff.values,
+                ref_n_item,
+                focal_se_eff.values,
+                focal_n_item,
             )
             z = pd.Series(z_vals, index=common_items)
             welch_df = pd.Series(df_vals, index=common_items)
@@ -2614,21 +2735,49 @@ class Rasch:
         category_col = None
         if category:
             category_col = self._dif_category_column(
-                diff, se, p, common_items, welch, welch_df,
-                category_thresholds, category_alpha,
+                diff,
+                se,
+                p,
+                common_items,
+                welch,
+                welch_df,
+                category_thresholds,
+                category_alpha,
             )
 
         return {
-            "common_items": common_items, "tc": tc, "focal_shifted": focal_shifted,
-            "diff": diff, "se": se, "z": z, "p": p, "p_corrected": p_corrected,
-            "flagged": flagged, "selected": selected, "anchor_table": anchor_table,
-            "welch_df": welch_df, "category_col": category_col,
+            "common_items": common_items,
+            "tc": tc,
+            "focal_shifted": focal_shifted,
+            "diff": diff,
+            "se": se,
+            "z": z,
+            "p": p,
+            "p_corrected": p_corrected,
+            "flagged": flagged,
+            "selected": selected,
+            "anchor_table": anchor_table,
+            "welch_df": welch_df,
+            "category_col": category_col,
         }
 
     def _dif_item_table(
-        self, focal, ref_model, focal_model, common_items, focal_shifted,
-        diff, se, z, p, p_corrected, selected, flagged,
-        welch_df=None, category_col=None, lr_table=None,
+        self,
+        focal,
+        ref_model,
+        focal_model,
+        common_items,
+        focal_shifted,
+        diff,
+        se,
+        z,
+        p,
+        p_corrected,
+        selected,
+        flagged,
+        welch_df=None,
+        category_col=None,
+        lr_table=None,
     ):
         """
         Shared item_table construction from dif_test() -- zero diff across
@@ -2660,8 +2809,14 @@ class Rasch:
         return table
 
     def _parameter_recovery_table(
-        self, generating, estimated, se=None, alpha=0.05, correction="bh",
-        groups=None, divergence_tol=0.1,
+        self,
+        generating,
+        estimated,
+        se=None,
+        alpha=0.05,
+        correction="bh",
+        groups=None,
+        divergence_tol=0.1,
     ):
         """
         Build the per-parameter recovery table and summary table for one
@@ -2733,7 +2888,9 @@ class Rasch:
 
         if correction == "bh":
             valid_p = p.dropna()
-            p_corrected = self._bh_correction(valid_p).reindex(idx) if len(valid_p) else p.copy()
+            p_corrected = (
+                self._bh_correction(valid_p).reindex(idx) if len(valid_p) else p.copy()
+            )
         elif correction == "bonferroni":
             n_valid = p.notna().sum()
             p_corrected = (p * n_valid).clip(upper=1.0)
@@ -2743,18 +2900,20 @@ class Rasch:
         flagged = p < alpha
         flagged_corrected = p_corrected < alpha
 
-        table = pd.DataFrame({
-            "generating": generating,
-            "estimated": estimated,
-            "SE": se if se is not None else pd.Series(np.nan, index=idx),
-            "error": error,
-            "abs_error": abs_error,
-            "z": z,
-            "p": p,
-            "p_corrected": p_corrected,
-            "Flagged": flagged,
-            "Flagged_corrected": flagged_corrected,
-        })
+        table = pd.DataFrame(
+            {
+                "generating": generating,
+                "estimated": estimated,
+                "SE": se if se is not None else pd.Series(np.nan, index=idx),
+                "error": error,
+                "abs_error": abs_error,
+                "z": z,
+                "p": p,
+                "p_corrected": p_corrected,
+                "Flagged": flagged,
+                "Flagged_corrected": flagged_corrected,
+            }
+        )
         if groups is not None:
             table["Group"] = groups.reindex(idx)
 
@@ -2776,27 +2935,30 @@ class Rasch:
                 divergence_flag = np.nan
             else:
                 r = float(np.corrcoef(g, e)[0, 1])
-                r_squared = r ** 2
+                r_squared = r**2
                 sd_ratio = float(np.std(e) / np.std(g))
                 ols_slope, ols_intercept = (float(v) for v in np.polyfit(g, e, 1))
-                hr = HuberRegressor(epsilon=1.5, max_iter=200).fit(
-                    g.reshape(-1, 1), e
-                )
+                hr = HuberRegressor(epsilon=1.5, max_iter=200).fit(g.reshape(-1, 1), e)
                 huber_slope = float(hr.coef_[0])
                 huber_intercept = float(hr.intercept_)
-                divergence_flag = bool(
-                    abs(ols_slope - huber_slope) > divergence_tol
-                )
+                divergence_flag = bool(abs(ols_slope - huber_slope) > divergence_tol)
 
-            return pd.Series({
-                "RMSE": rmse, "MAE": mae, "bias": bias, "r": r,
-                "r_squared": r_squared,
-                "SD_ratio": sd_ratio, "OLS_slope": ols_slope,
-                "OLS_intercept": ols_intercept, "Huber_slope": huber_slope,
-                "Huber_intercept": huber_intercept,
-                "Divergence_flag": divergence_flag,
-                "Prop_flagged": prop_flagged,
-            })
+            return pd.Series(
+                {
+                    "RMSE": rmse,
+                    "MAE": mae,
+                    "bias": bias,
+                    "r": r,
+                    "r_squared": r_squared,
+                    "SD_ratio": sd_ratio,
+                    "OLS_slope": ols_slope,
+                    "OLS_intercept": ols_intercept,
+                    "Huber_slope": huber_slope,
+                    "Huber_intercept": huber_intercept,
+                    "Divergence_flag": divergence_flag,
+                    "Prop_flagged": prop_flagged,
+                }
+            )
 
         summary = {"Overall": _summary_slice(table)}
         if groups is not None:
@@ -2807,7 +2969,10 @@ class Rasch:
         return table, summary
 
     def _parameter_estimation_residual(
-        self, true_theta, exp_score_generating, exp_score_estimated,
+        self,
+        true_theta,
+        exp_score_generating,
+        exp_score_estimated,
     ):
         """
         RMS residual between expected scores under two item/threshold
@@ -2871,10 +3036,21 @@ class Rasch:
         return float(np.sqrt(np.mean((e - g) ** 2)))
 
     def _recovery_plot(
-        self, generating, estimated, label, filename=None, file_format="png",
-        dpi=300, plot_style="white", font="Times New Roman",
-        title_font_size=15, axis_font_size=12, labelsize=12, figsize=(8, 6),
-        colors=None, markers=None,
+        self,
+        generating,
+        estimated,
+        label,
+        filename=None,
+        file_format="png",
+        dpi=300,
+        plot_style="white",
+        font="Times New Roman",
+        title_font_size=15,
+        axis_font_size=12,
+        labelsize=12,
+        figsize=(8, 6),
+        colors=None,
+        markers=None,
     ):
         """
         Scatter plot of estimated vs. generating parameter values, with an
@@ -2934,8 +3110,16 @@ class Rasch:
             color = colors.get(glabel, cmap(i % 10))
             marker = markers.get(glabel, "o")
             ax.scatter(
-                g, e, alpha=0.6, s=30, color=color, marker=marker,
-                edgecolors="k", linewidths=0.3, label=str(glabel), zorder=3,
+                g,
+                e,
+                alpha=0.6,
+                s=30,
+                color=color,
+                marker=marker,
+                edgecolors="k",
+                linewidths=0.3,
+                label=str(glabel),
+                zorder=3,
             )
             all_vals.append(g)
             all_vals.append(e)
@@ -2944,13 +3128,14 @@ class Rasch:
                 xseq = np.linspace(g.min(), g.max(), 50)
                 ax.plot(xseq, m * xseq + b, color=color, linestyle="--", lw=1.2)
             if len(g) >= 3:
-                hr = HuberRegressor(epsilon=1.5, max_iter=200).fit(
-                    g.reshape(-1, 1), e
-                )
+                hr = HuberRegressor(epsilon=1.5, max_iter=200).fit(g.reshape(-1, 1), e)
                 xseq = np.linspace(g.min(), g.max(), 50)
                 ax.plot(
-                    xseq, hr.coef_[0] * xseq + hr.intercept_, color=color,
-                    linestyle=":", lw=1.2,
+                    xseq,
+                    hr.coef_[0] * xseq + hr.intercept_,
+                    color=color,
+                    linestyle=":",
+                    lw=1.2,
                 )
 
         if all_vals:
@@ -2960,15 +3145,21 @@ class Rasch:
             ax.plot(xseq, xseq, color="black", lw=1, label="Identity", zorder=2)
 
         ax.set_xlabel(
-            f"Generating {label}", fontsize=axis_font_size, fontweight="bold",
+            f"Generating {label}",
+            fontsize=axis_font_size,
+            fontweight="bold",
             fontname=font,
         )
         ax.set_ylabel(
-            f"Estimated {label}", fontsize=axis_font_size, fontweight="bold",
+            f"Estimated {label}",
+            fontsize=axis_font_size,
+            fontweight="bold",
             fontname=font,
         )
         ax.set_title(
-            f"{label} recovery", fontsize=title_font_size, fontweight="bold",
+            f"{label} recovery",
+            fontsize=title_font_size,
+            fontweight="bold",
             fontname=font,
         )
         ax.tick_params(axis="x", labelsize=labelsize)
@@ -3025,7 +3216,9 @@ class Rasch:
             probe = SLM(self.responses)
             probe.items = self.generating.items
         elif gen_model == "PCM":
-            probe = PCM(self.responses, max_score_vector=self.generating.max_score_vector)
+            probe = PCM(
+                self.responses, max_score_vector=self.generating.max_score_vector
+            )
             probe.thresholds_uncentred = self.generating.thresholds_uncentred
         elif gen_model == "RSM":
             probe = RSM(self.responses, max_score=self.generating.max_score)
@@ -3174,7 +3367,9 @@ class Rasch:
         resp = self.responses
         if split in ("score", "person_location"):
             if split == "score":
-                value = resp.mean(axis=1)   # mean observed score: comparable under missing data
+                value = resp.mean(
+                    axis=1
+                )  # mean observed score: comparable under missing data
             else:
                 if getattr(self, "persons", None) is None:
                     self.person_estimates()
@@ -3190,7 +3385,9 @@ class Rasch:
             draw = np.random.default_rng(seed).random(len(resp)) < 0.5
             return {"A": resp.index[draw], "B": resp.index[~draw]}
         if getattr(self, "exogenous", None) is None or covariate is None:
-            raise ValueError("split='exogenous' requires exogenous data and covariate=.")
+            raise ValueError(
+                "split='exogenous' requires exogenous data and covariate=."
+            )
         values = self.exogenous[covariate].reindex(resp.index)
         levels = sorted(values.dropna().unique(), key=str)
         if len(levels) != 2:
@@ -3200,9 +3397,17 @@ class Rasch:
             )
         return {str(lv): resp.index[(values == lv).values] for lv in levels}
 
-    def global_fit(self, method="wald", split="score", covariate=None, welch=True,
-                   alpha=0.05, seed=None, split_prop=0.5,
-                   se_correction="kauermann-carroll"):
+    def global_fit(
+        self,
+        method="wald",
+        split="score",
+        covariate=None,
+        welch=True,
+        alpha=0.05,
+        seed=None,
+        split_prop=0.5,
+        se_correction="kauermann-carroll",
+    ):
         """
         Global test of parameter invariance across two groups of persons.
 
@@ -3292,9 +3497,13 @@ class Rasch:
             {group name: calibrated model}.
         """
         if method not in self._GLOBAL_FIT_METHODS:
-            raise ValueError(f"method must be one of {self._GLOBAL_FIT_METHODS}, got {method!r}.")
+            raise ValueError(
+                f"method must be one of {self._GLOBAL_FIT_METHODS}, got {method!r}."
+            )
         if split not in self._GLOBAL_FIT_SPLITS:
-            raise ValueError(f"split must be one of {self._GLOBAL_FIT_SPLITS}, got {split!r}.")
+            raise ValueError(
+                f"split must be one of {self._GLOBAL_FIT_SPLITS}, got {split!r}."
+            )
         if not hasattr(self, "items"):
             self.calibrate()
 
@@ -3332,7 +3541,7 @@ class Rasch:
         keep = ok1 & ok2
         idx = np.flatnonzero(keep)
         C = np.eye(len(idx))
-        for blk in blocks:   # re-centre each location block over the kept entries
+        for blk in blocks:  # re-centre each location block over the kept entries
             pos = np.flatnonzero(np.isin(idx, blk))
             if len(pos):
                 C[np.ix_(pos, pos)] -= 1.0 / len(pos)
@@ -3350,9 +3559,15 @@ class Rasch:
         se = np.sqrt(np.clip(np.diag(S), 0, None))
         kept_labels = [lab[i] for i in idx]
         self.global_fit_table = pd.DataFrame(
-            {f"{names[0]}": (C @ e1[idx]), f"{names[1]}": (C @ e2[idx]),
-             "Difference": d, "SE": se, "z": np.divide(d, se, out=np.full_like(d, np.nan), where=se > 0)},
-            index=pd.Index(kept_labels, name="Parameter"))
+            {
+                f"{names[0]}": (C @ e1[idx]),
+                f"{names[1]}": (C @ e2[idx]),
+                "Difference": d,
+                "SE": se,
+                "z": np.divide(d, se, out=np.full_like(d, np.nan), where=se > 0),
+            },
+            index=pd.Index(kept_labels, name="Parameter"),
+        )
         self.global_fit_excluded = [lab[i] for i in np.flatnonzero(~keep)]
         self.global_fit_groups = fitted
         summary = {"method": method, "split": split, "statistic": W, "df": df}
@@ -3361,9 +3576,14 @@ class Rasch:
         if welch:
             summary["denominator df"] = ddf
         summary["se_correction"] = se_correction
-        summary.update({"p-value": p, "reject": bool(p < alpha),
-                        "group sizes": {n: len(groups[n]) for n in names},
-                        "parameters excluded": len(self.global_fit_excluded)})
+        summary.update(
+            {
+                "p-value": p,
+                "reject": bool(p < alpha),
+                "group sizes": {n: len(groups[n]) for n in names},
+                "parameters excluded": len(self.global_fit_excluded),
+            }
+        )
         self.global_fit_summary = pd.Series(summary, name="Global fit")
         if self.global_fit_excluded:
             warnings.warn(
@@ -3898,10 +4118,18 @@ class Rasch:
                 f"to select {model!r} from."
             )
         if has_facets and model not in (
-            "global", "items", "thresholds", "matrix", "bivector",
-            "centrality", "pseudo_halo", "bistretch",
+            "global",
+            "items",
+            "thresholds",
+            "matrix",
+            "bivector",
+            "centrality",
+            "pseudo_halo",
+            "bistretch",
         ):
-            raise NotImplementedError(f"wright_map does not support the {model!r} MFRM model.")
+            raise NotImplementedError(
+                f"wright_map does not support the {model!r} MFRM model."
+            )
         if not has_facets and (facet_labels or overlay_facet):
             raise ValueError(
                 f"facet_labels/overlay_facet require a many-facet "
@@ -3912,7 +4140,9 @@ class Rasch:
         # item_level='items'/item_strip=False (both defaults) never touch
         # self.thresholds, so this only bites when someone actually asks
         # for per-threshold display on a model that can't provide it.
-        if (item_level == "thresholds" or item_strip) and not hasattr(self, "thresholds"):
+        if (item_level == "thresholds" or item_strip) and not hasattr(
+            self, "thresholds"
+        ):
             raise ValueError(
                 f"item_level='thresholds' and item_strip=True require "
                 f"threshold structure, which {type(self).__name__} does not "
@@ -3983,7 +4213,11 @@ class Rasch:
             self.calibrate(model=model)
         # a many-facet model's item locations / thresholds depend on the sub-model
         own_items = self._items_for(model) if has_facets else self.items
-        own_thresholds = self._thresholds_for(model) if has_facets else getattr(self, "thresholds", None)
+        own_thresholds = (
+            self._thresholds_for(model)
+            if has_facets
+            else getattr(self, "thresholds", None)
+        )
         base_items = own_items if item_names is None else own_items.loc[item_names]
 
         if has_facets:
@@ -3995,7 +4229,11 @@ class Rasch:
             # index, which .loc[] with a plain list of rater names also
             # selects on
             def _filter_by_rater(table):
-                return table if facet_element_names is None else table.loc[facet_element_names]
+                return (
+                    table
+                    if facet_element_names is None
+                    else table.loc[facet_element_names]
+                )
 
             def _flatten_facets(table):
                 # one row per rater, one column per item/threshold/category
@@ -4043,7 +4281,9 @@ class Rasch:
                 if model == "bistretch":
                     stretch_omega = {
                         "omega_items": _filter_by_rater(fe_stretch["omega_items"]),
-                        "omega_thresholds": _filter_by_rater(fe_stretch["omega_thresholds"]),
+                        "omega_thresholds": _filter_by_rater(
+                            fe_stretch["omega_thresholds"]
+                        ),
                     }
                 else:
                     stretch_omega = {"omega": _filter_by_rater(fe_stretch["omega"])}
@@ -4141,6 +4381,7 @@ class Rasch:
                 # most-probable-category envelope needed and no
                 # disordered-thresholds warning.
                 if has_facets:
+
                     def cat_prob_fn(theta, item_location, category, thresh):
                         cats = np.arange(len(thresh) + 1, dtype=float)
                         cumsum = np.concatenate([[0.0], np.cumsum(thresh)])
@@ -4157,13 +4398,17 @@ class Rasch:
                         nums = np.exp(log_nums)
                         probs = nums / nums.sum()
                         return (cats * probs).sum()
+
                 elif isinstance(own_thresholds, pd.Series):
+
                     def cat_prob_fn(theta, item_location, category, thresh):
                         return self.cat_prob(theta, item_location, category, thresh)
 
                     def exp_score_fn(theta, item_location, thresh):
                         return self.exp_score(theta, item_location, thresh)
+
                 else:
+
                     def cat_prob_fn(theta, item_location, category, thresh):
                         return self.cat_prob_uncentred(theta, category, thresh)
 
@@ -4185,14 +4430,23 @@ class Rasch:
                     lo, hi = row.min() - 15, row.max() + 15
                     for k in row.index:
                         if threshold_type == "thurstonian":
+
                             def target(theta, k=k, m=m):
-                                return sum(
-                                    cat_prob_fn(theta, item_location, c, thresh)
-                                    for c in range(k, m + 1)
-                                ) - 0.5
+                                return (
+                                    sum(
+                                        cat_prob_fn(theta, item_location, c, thresh)
+                                        for c in range(k, m + 1)
+                                    )
+                                    - 0.5
+                                )
+
                         else:  # half-point
+
                             def target(theta, k=k):
-                                return exp_score_fn(theta, item_location, thresh) - (k - 0.5)
+                                return exp_score_fn(theta, item_location, thresh) - (
+                                    k - 0.5
+                                )
+
                         display_matrix.loc[item, k] = brentq(target, lo, hi)
                 matrix_for_points = display_matrix
             else:
@@ -4202,9 +4456,7 @@ class Rasch:
             # 2.1+ implementation, so drop the short items' padding NaNs
             # explicitly rather than relying on stack()'s own default
             stacked = matrix_for_points.stack().dropna()
-            items = stacked.set_axis(
-                [f"{item} (τ{k})" for item, k in stacked.index]
-            )
+            items = stacked.set_axis([f"{item} (τ{k})" for item, k in stacked.index])
 
             if item_strip:
                 # kept grouped by item (not flattened) for the strip
@@ -4250,14 +4502,12 @@ class Rasch:
                         seg_lo = (
                             None
                             if i == 0
-                            else (intercept - hull[i - 1][1])
-                            / (hull[i - 1][0] - slope)
+                            else (intercept - hull[i - 1][1]) / (hull[i - 1][0] - slope)
                         )
                         seg_hi = (
                             None
                             if i == len(hull) - 1
-                            else (hull[i + 1][1] - intercept)
-                            / (slope - hull[i + 1][0])
+                            else (hull[i + 1][1] - intercept) / (slope - hull[i + 1][0])
                         )
                         segs.append((seg_lo, seg_hi, slope))
                     return segs
@@ -4419,7 +4669,18 @@ class Rasch:
         # for instance) -- without it, the tallest bar/curve would land
         # flush against the axis's own edge, with no headroom at all.
         _nice_fractions = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10]
-        _nice_divisors = {1: 4, 1.5: 3, 2: 4, 2.5: 5, 3: 3, 4: 4, 5: 5, 6: 3, 8: 4, 10: 5}
+        _nice_divisors = {
+            1: 4,
+            1.5: 3,
+            2: 4,
+            2.5: 5,
+            3: 3,
+            4: 4,
+            5: 5,
+            6: 3,
+            8: 4,
+            10: 5,
+        }
 
         def _nice_ceil_and_step(x, integer):
             if x <= 0:
@@ -4464,7 +4725,9 @@ class Rasch:
             item_range = item_lim
             item_step = _nice_step_for(item_lim, _integer_counts)
         else:
-            item_range, item_step = _nice_ceil_and_step(item_natural_max, _integer_counts)
+            item_range, item_step = _nice_ceil_and_step(
+                item_natural_max, _integer_counts
+            )
         if facet_lim is not None:
             facet_range = facet_lim
             facet_step = _nice_step_for(facet_lim, _integer_counts)
@@ -4539,7 +4802,12 @@ class Rasch:
         # regardless of which bin(s) the marks themselves land in.
         item_mark_rows = {}
         mark_row_depth = 0
-        if distribution_markers and item_labels and not item_distribution and not item_strip:
+        if (
+            distribution_markers
+            and item_labels
+            and not item_distribution
+            and not item_strip
+        ):
             item_mean = items.mean()
             item_sd = items.std()
             for mark_label, mark_loc in (
@@ -4588,7 +4856,9 @@ class Rasch:
                 }
 
                 if sort == "location":
-                    ordered_names = sorted(item_spans, key=lambda name: item_spans[name][0])
+                    ordered_names = sorted(
+                        item_spans, key=lambda name: item_spans[name][0]
+                    )
                 else:
                     ordered_names = list(item_thresholds_natural.keys())
 
@@ -4662,7 +4932,9 @@ class Rasch:
                         bbox.height if orientation == "vertical" else bbox.width
                     ) / probe_fig.dpi
                     plt.close(probe_fig)
-                    person_panel_in = (base_h if orientation == "vertical" else base_w) / 2
+                    person_panel_in = (
+                        base_h if orientation == "vertical" else base_w
+                    ) / 2
                     mark_depth_in = (
                         0.015 * person_panel_in
                         + mark_gap_in
@@ -4711,7 +4983,11 @@ class Rasch:
                     probe_fig = plt.figure()
                     probe_ax = probe_fig.add_subplot(111)
                     probe_text = probe_ax.text(
-                        0, 0, "μ+2σ", rotation=90, fontsize=labelsize,
+                        0,
+                        0,
+                        "μ+2σ",
+                        rotation=90,
+                        fontsize=labelsize,
                         rotation_mode="anchor",
                     )
                     probe_fig.canvas.draw()
@@ -4845,7 +5121,11 @@ class Rasch:
                     facet_panel_in = 0
                 elif (item_labels or item_dist_panel) and person_range > 0:
                     facet_panel_in = (
-                        (person_panel_h if orientation == "vertical" else person_panel_w)
+                        (
+                            person_panel_h
+                            if orientation == "vertical"
+                            else person_panel_w
+                        )
                         * (facet_range / person_range)
                         * person_scaling
                         / facet_scaling
@@ -4862,7 +5142,11 @@ class Rasch:
                     # to the plain facet_range/(person_range+item_range) at
                     # mirror_item_scale=1; facet_scaling still overrides.)
                     facet_panel_in = (
-                        (person_panel_h if orientation == "vertical" else person_panel_w)
+                        (
+                            person_panel_h
+                            if orientation == "vertical"
+                            else person_panel_w
+                        )
                         * mirror_item_scale
                         * facet_range
                         / (person_range + item_range * mirror_item_scale)
@@ -4870,9 +5154,8 @@ class Rasch:
                     )
                 else:
                     facet_panel_in = (
-                        (base_h / 3 if orientation == "vertical" else base_w / 3)
-                        / facet_scaling
-                    )
+                        base_h / 3 if orientation == "vertical" else base_w / 3
+                    ) / facet_scaling
 
             # nothing needs its own panel only when there's no item panel
             # of any kind (neither a name-label panel nor a separate,
@@ -4883,7 +5166,11 @@ class Rasch:
             # share that axis with in the first place -- the two cases
             # that still collapse to a single simple axes, as in the
             # original two-family (persons/items) layout
-            if not item_labels and not item_dist_panel and (overlay_facet or not has_facets):
+            if (
+                not item_labels
+                and not item_dist_panel
+                and (overlay_facet or not has_facets)
+            ):
                 fig, ax = plt.subplots(figsize=(base_w, base_h))
                 ax_items = None
                 ax_item_dist = None
@@ -5024,7 +5311,8 @@ class Rasch:
                 # item_labels=True, so this branch can't actually be
                 # reached that way), or plain ax as the final fallback
                 facet_dist_ax = (
-                    ax_item_dist if item_dist_panel
+                    ax_item_dist
+                    if item_dist_panel
                     else (ax_items if ax_items is not None else ax)
                 )
             elif not facet_labels:
@@ -5163,8 +5451,10 @@ class Rasch:
 
                 else:
                     kde_items = gaussian_kde(items, bw_method=bw_method)(x_grid)
-                    item_curve = item_sign * mirror_item_scale * (
-                        kde_items if prop else kde_items * no_of_items
+                    item_curve = (
+                        item_sign
+                        * mirror_item_scale
+                        * (kde_items if prop else kde_items * no_of_items)
                     )
 
                     if orientation == "vertical":
@@ -5216,7 +5506,9 @@ class Rasch:
             facet_mirror_scale = mirror_item_scale if facet_dist_ax is ax else 1
             if facet_dist_ax is not None:
                 if map_type == "hist":
-                    facet_weights = facet_sign * facet_mirror_scale * np.ones_like(facets)
+                    facet_weights = (
+                        facet_sign * facet_mirror_scale * np.ones_like(facets)
+                    )
                     if prop:
                         facet_weights = facet_weights / no_of_facets
 
@@ -5235,20 +5527,28 @@ class Rasch:
 
                 else:
                     kde_facets = gaussian_kde(facets, bw_method=bw_method)(x_grid)
-                    facet_curve = facet_sign * facet_mirror_scale * (
-                        kde_facets if prop else kde_facets * no_of_facets
+                    facet_curve = (
+                        facet_sign
+                        * facet_mirror_scale
+                        * (kde_facets if prop else kde_facets * no_of_facets)
                     )
 
                     if overlay_facet:
                         if orientation == "vertical":
                             facet_dist_ax.plot(
-                                x_grid, facet_curve, color=facet_color,
-                                linewidth=line_width * 2, label=facet_label,
+                                x_grid,
+                                facet_curve,
+                                color=facet_color,
+                                linewidth=line_width * 2,
+                                label=facet_label,
                             )
                         else:
                             facet_dist_ax.plot(
-                                facet_curve, x_grid, color=facet_color,
-                                linewidth=line_width * 2, label=facet_label,
+                                facet_curve,
+                                x_grid,
+                                color=facet_color,
+                                linewidth=line_width * 2,
+                                label=facet_label,
                             )
                     elif orientation == "vertical":
                         facet_dist_ax.plot(
@@ -5317,15 +5617,26 @@ class Rasch:
                         # The 8th (black) entry is swapped for white on dark
                         # backgrounds, where it would otherwise be invisible.
                         color_map = [
-                            "#E69F00", "#56B4E9", "#009E73", "#F0E442",
-                            "#0072B2", "#D55E00", "#CC79A7",
-                            "#FFFFFF" if plot_style in self._DARK_BACKGROUND_STYLES else "#000000",
+                            "#E69F00",
+                            "#56B4E9",
+                            "#009E73",
+                            "#F0E442",
+                            "#0072B2",
+                            "#D55E00",
+                            "#CC79A7",
+                            (
+                                "#FFFFFF"
+                                if plot_style in self._DARK_BACKGROUND_STYLES
+                                else "#000000"
+                            ),
                         ]
                     elif shade == "dark":
                         color_map = (
                             sns.color_palette("dark", as_cmap=True)
                             if palette == "dark multi"
-                            else sns.dark_palette(base_color, reverse=True, as_cmap=True)
+                            else sns.dark_palette(
+                                base_color, reverse=True, as_cmap=True
+                            )
                         )
                     else:
                         color_map = (
@@ -5758,9 +6069,7 @@ class Rasch:
                         )
                     else:
                         x0i, x1i = ax_items.get_xlim()
-                        items_in_per_row = (items_bbox.width / fig.dpi) / abs(
-                            x1i - x0i
-                        )
+                        items_in_per_row = (items_bbox.width / fig.dpi) / abs(x1i - x0i)
                     person_mark_len = (
                         mark_tick_rows * items_in_per_row
                     ) / _in_per_unit(ax)
@@ -5842,7 +6151,9 @@ class Rasch:
             # supersedes pinning just one side of each to 0 here.
 
             padding = (hi - lo) * 0.05 if pad else 0
-            loc_axis = outer_ax if (has_extra_panels and orientation == "vertical") else ax
+            loc_axis = (
+                outer_ax if (has_extra_panels and orientation == "vertical") else ax
+            )
             loc_axis_h = (
                 outer_ax if (has_extra_panels and orientation == "horizontal") else ax
             )
@@ -5877,7 +6188,11 @@ class Rasch:
                 if orientation == "vertical":
                     ax.spines["bottom"].set_visible(False)
                     ax.tick_params(
-                        axis="x", bottom=False, top=True, labelbottom=False, labeltop=True
+                        axis="x",
+                        bottom=False,
+                        top=True,
+                        labelbottom=False,
+                        labeltop=True,
                     )
                 else:
                     ax.spines["right"].set_visible(False)
@@ -5951,7 +6266,9 @@ class Rasch:
                 # *labels* at the true counts, only spaced further apart
                 # (pos_scale / neg_scale = 1 everywhere else).
                 pairs = {(t * pos_scale, t) for t in _side_ticks(pos_reach, pos_step)}
-                pairs |= {(-t * neg_scale, -t) for t in _side_ticks(neg_reach, neg_step)}
+                pairs |= {
+                    (-t * neg_scale, -t) for t in _side_ticks(neg_reach, neg_step)
+                }
                 pairs = sorted(pairs)
                 # item_dist's/facet's own zero always sits exactly at the
                 # boundary shared with its neighbour -- in horizontal
@@ -6052,7 +6369,11 @@ class Rasch:
                     "Location", fontsize=axis_font_size, fontweight="bold"
                 )
                 ax.set_ylabel(
-                    ("Density" if map_type == "kde" else "Proportion") if prop else "Count",
+                    (
+                        ("Density" if map_type == "kde" else "Proportion")
+                        if prop
+                        else "Count"
+                    ),
                     fontsize=axis_font_size,
                     fontweight="bold",
                 )
@@ -6101,7 +6422,11 @@ class Rasch:
                     "Location", fontsize=axis_font_size, fontweight="bold"
                 )
                 ax.set_xlabel(
-                    ("Density" if map_type == "kde" else "Proportion") if prop else "Count",
+                    (
+                        ("Density" if map_type == "kde" else "Proportion")
+                        if prop
+                        else "Count"
+                    ),
                     fontsize=axis_font_size,
                     fontweight="bold",
                 )
@@ -6126,7 +6451,9 @@ class Rasch:
                             if t.get_text()
                         )
 
-                    bottom_px = min(_bottommost_tick_y(ax), _bottommost_tick_y(ax_item_dist))
+                    bottom_px = min(
+                        _bottommost_tick_y(ax), _bottommost_tick_y(ax_item_dist)
+                    )
                     label_y = ax.transAxes.inverted().transform((0, bottom_px))[1]
                     label_y -= 0.05 * 0.6
                     mid_x = 0.5 * (1 + item_dist_panel_w / person_panel_w)
@@ -6154,7 +6481,9 @@ class Rasch:
                 renderer = fig.canvas.get_renderer()
                 item_boxes = [
                     a.get_window_extent(renderer)
-                    for a in list(ax_items.patches) + list(ax_items.texts) + list(ax_items.lines)
+                    for a in list(ax_items.patches)
+                    + list(ax_items.texts)
+                    + list(ax_items.lines)
                     if a.get_visible()
                 ]
                 facet_boxes = [
@@ -6169,35 +6498,56 @@ class Rasch:
                     ax_items.spines["right"].set_visible(False)
                 if item_boxes and facet_boxes:
                     if is_vertical:
-                        gap_px = min(b.y0 for b in item_boxes) - max(b.y1 for b in facet_boxes)
+                        gap_px = min(b.y0 for b in item_boxes) - max(
+                            b.y1 for b in facet_boxes
+                        )
                     else:
-                        gap_px = min(b.x0 for b in facet_boxes) - max(b.x1 for b in item_boxes)
+                        gap_px = min(b.x0 for b in facet_boxes) - max(
+                            b.x1 for b in item_boxes
+                        )
                     excess_in = gap_px / fig.dpi - facet_gap_in
                     if excess_in > 0:
                         facet_pos = ax_facet.get_position()
                         after_seam = [
-                            a for a in fig.axes
-                            if (a.get_position().y1 <= facet_pos.y1 + 1e-9 if is_vertical
-                                else a.get_position().x0 >= facet_pos.x0 - 1e-9)
+                            a
+                            for a in fig.axes
+                            if (
+                                a.get_position().y1 <= facet_pos.y1 + 1e-9
+                                if is_vertical
+                                else a.get_position().x0 >= facet_pos.x0 - 1e-9
+                            )
                         ]
                         new_size = (
-                            (fig_w_in, fig_h_in - excess_in) if is_vertical
+                            (fig_w_in, fig_h_in - excess_in)
+                            if is_vertical
                             else (fig_w_in - excess_in, fig_h_in)
                         )
                         for a in fig.axes:
                             p = a.get_position()
                             if is_vertical:
-                                y0_in = p.y0 * fig_h_in - (0 if a in after_seam else excess_in)
-                                a.set_position([
-                                    p.x0, y0_in / new_size[1],
-                                    p.width, p.height * fig_h_in / new_size[1],
-                                ])
+                                y0_in = p.y0 * fig_h_in - (
+                                    0 if a in after_seam else excess_in
+                                )
+                                a.set_position(
+                                    [
+                                        p.x0,
+                                        y0_in / new_size[1],
+                                        p.width,
+                                        p.height * fig_h_in / new_size[1],
+                                    ]
+                                )
                             else:
-                                x0_in = p.x0 * fig_w_in - (excess_in if a in after_seam else 0)
-                                a.set_position([
-                                    x0_in / new_size[0], p.y0,
-                                    p.width * fig_w_in / new_size[0], p.height,
-                                ])
+                                x0_in = p.x0 * fig_w_in - (
+                                    excess_in if a in after_seam else 0
+                                )
+                                a.set_position(
+                                    [
+                                        x0_in / new_size[0],
+                                        p.y0,
+                                        p.width * fig_w_in / new_size[0],
+                                        p.height,
+                                    ]
+                                )
                         fig.set_size_inches(*new_size)
                         fig_w, fig_h = new_size
 
@@ -6242,14 +6592,21 @@ class Rasch:
                 n_raters = len(raters_order)
                 stretch_col_w_in = max(1.8, 0.35 * n_raters)
 
-                stretch_extra_w_in = stretch_gap_in + stretch_col_w_in + stretch_margin_in
+                stretch_extra_w_in = (
+                    stretch_gap_in + stretch_col_w_in + stretch_margin_in
+                )
                 stretch_new_w = stretch_orig_w + stretch_extra_w_in
                 fig.set_size_inches(stretch_new_w, stretch_orig_h)
                 stretch_shrink = stretch_orig_w / stretch_new_w
                 for a in stretch_main_axes:
                     pos = a.get_position()
                     a.set_position(
-                        [pos.x0 * stretch_shrink, pos.y0, pos.width * stretch_shrink, pos.height]
+                        [
+                            pos.x0 * stretch_shrink,
+                            pos.y0,
+                            pos.width * stretch_shrink,
+                            pos.height,
+                        ]
                     )
 
                 stretch_tops = [a.get_position().y1 for a in stretch_main_axes]
@@ -6267,7 +6624,9 @@ class Rasch:
                 }
 
                 row_gap_frac = 0.06 * (stretch_y1 - stretch_y0)
-                row_h = (stretch_y1 - stretch_y0 - row_gap_frac * (n_stretch - 1)) / n_stretch
+                row_h = (
+                    stretch_y1 - stretch_y0 - row_gap_frac * (n_stretch - 1)
+                ) / n_stretch
 
                 # Shared y-limits across every stretch panel (e.g.
                 # bistretch's omega_items/omega_thresholds), so a bar's
@@ -6289,8 +6648,11 @@ class Rasch:
                     bar_xs = list(range(n_raters))
                     bar_vals = [omega_series.get(r, np.nan) for r in raters_order]
                     bar_colors = [
-                        (compress_color if v < 1 else expand_color)
-                        if v == v else "lightgray"
+                        (
+                            (compress_color if v < 1 else expand_color)
+                            if v == v
+                            else "lightgray"
+                        )
                         for v in bar_vals
                     ]
                     ax_stretch.bar(
@@ -6365,8 +6727,12 @@ class Rasch:
                     # would sit too close to zero to be legible
                     k = 1
                     while k <= len(ticks):
-                        chosen = [0.0] + [ticks[i][0] for i in range(k - 1, len(ticks), k)]
-                        gaps = [abs(_px(a) - _px(b)) for a, b in zip(chosen, chosen[1:])]
+                        chosen = [0.0] + [
+                            ticks[i][0] for i in range(k - 1, len(ticks), k)
+                        ]
+                        gaps = [
+                            abs(_px(a) - _px(b)) for a, b in zip(chosen, chosen[1:])
+                        ]
                         if min(gaps) >= min_gap:
                             break
                         k += 1

@@ -3,15 +3,13 @@ import warnings
 
 import numpy as np
 import pandas as pd
-from scipy.stats import chi2, gaussian_kde, norm
+from scipy.stats import chi2, norm
 from scipy.stats import t as t_dist
-from scipy.optimize import brentq
 from sklearn.decomposition import PCA
 from sklearn.linear_model import HuberRegressor
 from matplotlib import pyplot as plt
 from matplotlib import colors as colors
 from matplotlib import cm as cmx
-from matplotlib.patches import Rectangle
 import seaborn as sns
 import matplotlib.patheffects as path_effects
 
@@ -47,8 +45,14 @@ class MFRM(Rasch):
     # Model registry — maps model name to facet_effect attribute names
     # ------------------------------------------------------------------
     _MODELS = (
-        "global", "items", "thresholds", "bivector", "matrix",
-        "centrality", "pseudo_halo", "bistretch",
+        "global",
+        "items",
+        "thresholds",
+        "bivector",
+        "matrix",
+        "centrality",
+        "pseudo_halo",
+        "bistretch",
     )
 
     # Alternate, axis-based spellings for the two single-stretch models —
@@ -130,7 +134,7 @@ class MFRM(Rasch):
         for alias, canon in self._PARAM_ALIASES.items():
             prefix = f"{alias}_"
             if name.startswith(prefix):
-                canon_name = f"{canon}_" + name[len(prefix):]
+                canon_name = f"{canon}_" + name[len(prefix) :]
                 if canon_name != name and hasattr(self, canon_name):
                     return getattr(self, canon_name)
             infix = f"_{alias}_"
@@ -160,7 +164,11 @@ class MFRM(Rasch):
         is not usable directly for category probability computation.
         """
         prefix = "anchor_" if anchor else ""
-        suffix = "_full_vector" if model in ("centrality", "pseudo_halo", "bistretch") else ""
+        suffix = (
+            "_full_vector"
+            if model in ("centrality", "pseudo_halo", "bistretch")
+            else ""
+        )
         return f"{prefix}facet_effects_{model}{suffix}"
 
     def _get_params(self, model, anchor=False):
@@ -204,7 +212,11 @@ class MFRM(Rasch):
                 getattr(self, thr_attr),
                 getattr(self, sev_attr),
             )
-        return self._items_for(model), self._thresholds_for(model), getattr(self, sev_attr)
+        return (
+            self._items_for(model),
+            self._thresholds_for(model),
+            getattr(self, sev_attr),
+        )
 
     def _items_for(self, model, anchor=False):
         """Item locations from the given sub-model's calibration. With
@@ -230,7 +242,11 @@ class MFRM(Rasch):
         attribute. None if absent."""
         prefix = "anchor_" if anchor else ""
         key = "matrix" if model == "mixed" else model
-        return getattr(self, f"{prefix}item_{kind}_{key}", getattr(self, f"{prefix}item_{kind}", None))
+        return getattr(
+            self,
+            f"{prefix}item_{kind}_{key}",
+            getattr(self, f"{prefix}item_{kind}", None),
+        )
 
     def _facet_n(self, n, count=True):
         """'{n} facet element(s) (e.g. rater(s))' for messages, at first mention."""
@@ -259,10 +275,14 @@ class MFRM(Rasch):
             vals = facet_effects.reindex(self.facet_names).to_numpy()
             return np.broadcast_to(vals[:, None, None], (R, I, m))
         if model in ("items", "pseudo_halo"):
-            vals = facet_effects.reindex(index=self.facet_names, columns=self.item_names).to_numpy()
+            vals = facet_effects.reindex(
+                index=self.facet_names, columns=self.item_names
+            ).to_numpy()
             return np.broadcast_to(vals[:, :, None], (R, I, m))
         if model in ("thresholds", "centrality"):
-            vals = facet_effects.reindex(index=self.facet_names, columns=range(1, m + 1)).to_numpy()
+            vals = facet_effects.reindex(
+                index=self.facet_names, columns=range(1, m + 1)
+            ).to_numpy()
             return np.broadcast_to(vals[:, None, :], (R, I, m))
         # bivector, matrix, bistretch: MultiIndex (rater, item) x category
         mi = pd.MultiIndex.from_product([self.facet_names, self.item_names])
@@ -290,17 +310,23 @@ class MFRM(Rasch):
             vals = facet_effects.reindex(self.facet_names).to_numpy()
             return np.broadcast_to(vals[:, None, None], (R, I, m))
         if gen_model in ("items", "pseudo_halo"):
-            vals = facet_effects.reindex(index=self.facet_names, columns=self.item_names).to_numpy()
+            vals = facet_effects.reindex(
+                index=self.facet_names, columns=self.item_names
+            ).to_numpy()
             return np.broadcast_to(vals[:, :, None], (R, I, m))
         if gen_model in ("thresholds", "centrality"):
-            vals = facet_effects.reindex(index=self.facet_names, columns=range(1, m + 1)).to_numpy()
+            vals = facet_effects.reindex(
+                index=self.facet_names, columns=range(1, m + 1)
+            ).to_numpy()
             return np.broadcast_to(vals[:, None, :], (R, I, m))
         mi = pd.MultiIndex.from_product([self.facet_names, self.item_names])
         return facet_effects.reindex(mi).to_numpy().reshape(R, I, m)
 
     def _model_effect(self, simple, complex_):
         """max|location grid difference| between two nested models -- see _severity_grid."""
-        return float(np.max(np.abs(self._severity_grid(complex_) - self._severity_grid(simple))))
+        return float(
+            np.max(np.abs(self._severity_grid(complex_) - self._severity_grid(simple)))
+        )
 
     def _drop_equivalent_models(self, active_models, where):
         """
@@ -314,8 +340,13 @@ class MFRM(Rasch):
         I, m = self.no_of_items, self.max_score
         same = {}
         if m == 1:
-            same.update(thresholds="global", centrality="global", bivector="items", matrix="items",
-                        bistretch="pseudo_halo")
+            same.update(
+                thresholds="global",
+                centrality="global",
+                bivector="items",
+                matrix="items",
+                bistretch="pseudo_halo",
+            )
         if m == 2:
             same["centrality"] = "thresholds"
         if I == 2:
@@ -327,6 +358,7 @@ class MFRM(Rasch):
             while mod in same:
                 mod = same[mod]
             return mod
+
         groups = {}
         for mod in self._MODELS:
             if mod in active_models:
@@ -334,13 +366,24 @@ class MFRM(Rasch):
         groups = [g for g in groups.values() if len(g) > 1]
         if not groups:
             return active_models
-        design = " and ".join(([f"max_score={m}"] if m <= 2 else []) + ([f"{I} items"] if I == 2 else []))
-        msg = "; ".join(" and ".join(f"'{d}'" for d in g[1:])
-                        + (" is the same model as '{}' and has" if len(g) == 2
-                           else " are the same model as '{}' and have").format(g[0])
-                        + " been left out" for g in groups)
-        warnings.warn(f"{where}: with {design}, {msg}. All other comparisons still run.",
-                      UserWarning, stacklevel=3)
+        design = " and ".join(
+            ([f"max_score={m}"] if m <= 2 else []) + ([f"{I} items"] if I == 2 else [])
+        )
+        msg = "; ".join(
+            " and ".join(f"'{d}'" for d in g[1:])
+            + (
+                " is the same model as '{}' and has"
+                if len(g) == 2
+                else " are the same model as '{}' and have"
+            ).format(g[0])
+            + " been left out"
+            for g in groups
+        )
+        warnings.warn(
+            f"{where}: with {design}, {msg}. All other comparisons still run.",
+            UserWarning,
+            stacklevel=3,
+        )
         gone = {d for g in groups for d in g[1:]}
         if isinstance(active_models, set):
             return active_models - gone
@@ -356,12 +399,21 @@ class MFRM(Rasch):
         side). centrality/pseudo_halo/bistretch selections are left
         untouched, matching per_rater_model_selection's documented scope.
         """
-        if min_effect <= 0 or selected not in ("matrix", "bivector", "items", "thresholds"):
+        if min_effect <= 0 or selected not in (
+            "matrix",
+            "bivector",
+            "items",
+            "thresholds",
+        ):
             return selected
         if selected == "matrix" and "bivector" in active_set:
             if self._model_effect("bivector", "matrix") < min_effect:
                 selected = "bivector"
-        if selected == "bivector" and "items" in active_set and "thresholds" in active_set:
+        if (
+            selected == "bivector"
+            and "items" in active_set
+            and "thresholds" in active_set
+        ):
             thresh_shape_ok = self._model_effect("items", "bivector") >= min_effect
             item_dev_ok = self._model_effect("thresholds", "bivector") >= min_effect
             if not thresh_shape_ok and not item_dev_ok:
@@ -525,9 +577,13 @@ class MFRM(Rasch):
 
         # Constructor settings, reused by drop_facet_elements() to rebuild.
         self._init_kwargs = dict(
-            extreme_persons=extreme_persons, no_of_classes=no_of_classes,
-            facet=facet, facet_plural=facet_plural, validate=validate,
-            exogenous=exogenous, min_persons=min_persons,
+            extreme_persons=extreme_persons,
+            no_of_classes=no_of_classes,
+            facet=facet,
+            facet_plural=facet_plural,
+            validate=validate,
+            exogenous=exogenous,
+            min_persons=min_persons,
         )
 
         # Sim-aware instantiation: store sim attributes in self.generating namespace
@@ -576,8 +632,13 @@ class MFRM(Rasch):
             self.facets_label_eg = "facet elements (e.g. raters)"
         else:
             self.facet_label = facet
-            self.facets_label = facet_plural if facet_plural is not None else facet + "s"
-            self.facet_label_eg, self.facets_label_eg = self.facet_label, self.facets_label
+            self.facets_label = (
+                facet_plural if facet_plural is not None else facet + "s"
+            )
+            self.facet_label_eg, self.facets_label_eg = (
+                self.facet_label,
+                self.facets_label,
+            )
 
         # Facet elements with no responses, or responses for very few persons:
         # their parameters are not (or barely) identified, and in the extended
@@ -591,21 +652,28 @@ class MFRM(Rasch):
         # identified by the data.
         _lo = responses.min(axis=1).groupby(level=0, sort=False).min()
         _hi = responses.max(axis=1).groupby(level=0, sort=False).max()
-        extreme = [fe for fe in _n_persons.index
-                   if _n_persons[fe] > 0 and (_hi[fe] == 0 or _lo[fe] == self.max_score)]
+        extreme = [
+            fe
+            for fe in _n_persons.index
+            if _n_persons[fe] > 0 and (_hi[fe] == 0 or _lo[fe] == self.max_score)
+        ]
         # Facet elements with no responses are always removed: nothing can be
         # estimated for them and they distort the other estimates.
         if drop_facet_elements is None:
             requested = []
         elif isinstance(drop_facet_elements, str):
             if drop_facet_elements not in ("thin", "extreme"):
-                raise ValueError("drop_facet_elements must be None, 'thin', 'extreme' or a list of names.")
+                raise ValueError(
+                    "drop_facet_elements must be None, 'thin', 'extreme' or a list of names."
+                )
             requested = list(thin if drop_facet_elements == "thin" else extreme)
         else:
             requested = list(drop_facet_elements)
             unknown = [fe for fe in requested if fe not in _n_persons.index]
             if unknown:
-                raise ValueError(f"drop_facet_elements contains names not in the data: {unknown}.")
+                raise ValueError(
+                    f"drop_facet_elements contains names not in the data: {unknown}."
+                )
         self._resample = bool(_keep_empty)
         if _keep_empty:
             # internal (bootstrap resamples): keep the facet element set fixed
@@ -625,7 +693,9 @@ class MFRM(Rasch):
             )
         if requested:
             warnings.warn(
-                f"{self._facet_n(len(requested))} removed: {requested}.", UserWarning, stacklevel=2
+                f"{self._facet_n(len(requested))} removed: {requested}.",
+                UserWarning,
+                stacklevel=2,
             )
         kept_thin = [fe for fe in thin if fe not in dropped]
         if kept_thin:
@@ -642,7 +712,9 @@ class MFRM(Rasch):
             )
         kept_extreme = [fe for fe in extreme if fe not in dropped]
         if kept_extreme:
-            which_end = {fe: "lowest" if _hi[fe] == 0 else "highest" for fe in kept_extreme}
+            which_end = {
+                fe: "lowest" if _hi[fe] == 0 else "highest" for fe in kept_extreme
+            }
             warnings.warn(
                 f"{self._facet_n(len(kept_extreme))} used only the lowest or only the highest score "
                 f"category ({', '.join(f'{fe}: {e}' for fe, e in which_end.items())}). Like a person "
@@ -692,7 +764,9 @@ class MFRM(Rasch):
         self.no_of_items = self.responses.shape[1]
         self.facet = facet
         self.facets = facet_plural if facet_plural is not None else facet + "s"
-        self.no_of_facet_elements = len(self.responses.index.get_level_values(0).unique())
+        self.no_of_facet_elements = len(
+            self.responses.index.get_level_values(0).unique()
+        )
         self.no_of_raters = self.no_of_facet_elements  # alias; see facet naming
         setattr(self, f"no_of_{self.facets}", self.no_of_facet_elements)
         self.no_of_classes = no_of_classes
@@ -715,7 +789,10 @@ class MFRM(Rasch):
         # former needs cross-facet_element alignment for the same person.
         _index_names = self.responses.index.names
         self.responses = pd.concat(
-            {fe: self.responses.xs(fe).reindex(self.person_names) for fe in self.facet_names}
+            {
+                fe: self.responses.xs(fe).reindex(self.person_names)
+                for fe in self.facet_names
+            }
         )
         self.responses.index.names = _index_names
 
@@ -942,7 +1019,11 @@ class MFRM(Rasch):
                 stacklevel=2,
             )
         elif not isinstance(new, str):
-            warnings.warn(f"{self.facet_label_eg.capitalize()} names must be strings.", UserWarning, stacklevel=2)
+            warnings.warn(
+                f"{self.facet_label_eg.capitalize()} names must be strings.",
+                UserWarning,
+                stacklevel=2,
+            )
         else:
             new_names = [new if r == old else r for r in self.facet_names]
             self.rename_facet_elements_all(new_names)
@@ -974,7 +1055,11 @@ class MFRM(Rasch):
                 stacklevel=2,
             )
         elif not all(isinstance(n, str) for n in new_names):
-            warnings.warn(f"{self.facet_label_eg.capitalize()} names must be strings.", UserWarning, stacklevel=2)
+            warnings.warn(
+                f"{self.facet_label_eg.capitalize()} names must be strings.",
+                UserWarning,
+                stacklevel=2,
+            )
         else:
             df_dict = {
                 new: self.responses.xs(old)
@@ -1302,23 +1387,97 @@ class MFRM(Rasch):
         return ((cats - exp) ** 4 * probs).sum()
 
     # Backwards-compatible aliases for the four parameterisations
-    def cat_prob_global(self, person_location, item, item_locations, facet_element, facet_effects, category, thresholds):
+    def cat_prob_global(
+        self,
+        person_location,
+        item,
+        item_locations,
+        facet_element,
+        facet_effects,
+        category,
+        thresholds,
+    ):
         """Alias for cat_prob(..., model='global'). See cat_prob for full documentation."""
-        return self.cat_prob(person_location, item, item_locations, facet_element, facet_effects, category, thresholds, "global")
+        return self.cat_prob(
+            person_location,
+            item,
+            item_locations,
+            facet_element,
+            facet_effects,
+            category,
+            thresholds,
+            "global",
+        )
 
-    def cat_prob_items(self, person_location, item, item_locations, facet_element, facet_effects, category, thresholds):
+    def cat_prob_items(
+        self,
+        person_location,
+        item,
+        item_locations,
+        facet_element,
+        facet_effects,
+        category,
+        thresholds,
+    ):
         """Alias for cat_prob(..., model='items'). See cat_prob for full documentation."""
-        return self.cat_prob(person_location, item, item_locations, facet_element, facet_effects, category, thresholds, "items")
+        return self.cat_prob(
+            person_location,
+            item,
+            item_locations,
+            facet_element,
+            facet_effects,
+            category,
+            thresholds,
+            "items",
+        )
 
-    def cat_prob_thresholds(self, person_location, item, item_locations, facet_element, facet_effects, category, thresholds):
+    def cat_prob_thresholds(
+        self,
+        person_location,
+        item,
+        item_locations,
+        facet_element,
+        facet_effects,
+        category,
+        thresholds,
+    ):
         """Alias for cat_prob(..., model='thresholds'). See cat_prob for full documentation."""
-        return self.cat_prob(person_location, item, item_locations, facet_element, facet_effects, category, thresholds, "thresholds")
+        return self.cat_prob(
+            person_location,
+            item,
+            item_locations,
+            facet_element,
+            facet_effects,
+            category,
+            thresholds,
+            "thresholds",
+        )
 
-    def cat_prob_matrix(self, person_location, item, item_locations, facet_element, facet_effects, category, thresholds):
+    def cat_prob_matrix(
+        self,
+        person_location,
+        item,
+        item_locations,
+        facet_element,
+        facet_effects,
+        category,
+        thresholds,
+    ):
         """Alias for cat_prob(..., model='matrix'). See cat_prob for full documentation."""
-        return self.cat_prob(person_location, item, item_locations, facet_element, facet_effects, category, thresholds, "matrix")
+        return self.cat_prob(
+            person_location,
+            item,
+            item_locations,
+            facet_element,
+            facet_effects,
+            category,
+            thresholds,
+            "matrix",
+        )
 
-    def _resolve_bivector_effects(self, facet_item_effects, facet_threshold_effects, kw):
+    def _resolve_bivector_effects(
+        self, facet_item_effects, facet_threshold_effects, kw
+    ):
         """
         Resolve facet_item_effects/facet_threshold_effects, also accepting via
         **kw: the dynamic {self.facet}_item_effects/{self.facet}_threshold_effects
@@ -1346,7 +1505,9 @@ class MFRM(Rasch):
             )
         return facet_item_effects, facet_threshold_effects
 
-    def _bivector_severity(self, facet_item_effects, facet_threshold_effects, facet_element, item):
+    def _bivector_severity(
+        self, facet_item_effects, facet_threshold_effects, facet_element, item
+    ):
         """
         Combine decomposed (facet_item_effects, facet_threshold_effects) into the
         per-threshold location array for one (facet_element, item) pair:
@@ -1364,7 +1525,18 @@ class MFRM(Rasch):
         )
         return np.asarray(te, dtype=float) + ie
 
-    def cat_prob_bivector(self, person_location, item, item_locations, facet_element, facet_item_effects=None, facet_threshold_effects=None, category=None, thresholds=None, **kw):
+    def cat_prob_bivector(
+        self,
+        person_location,
+        item,
+        item_locations,
+        facet_element,
+        facet_item_effects=None,
+        facet_threshold_effects=None,
+        category=None,
+        thresholds=None,
+        **kw,
+    ):
         """
         Bivector-native category probability, taking the decomposed
         facet_item_effects/facet_threshold_effects representation directly (e.g.
@@ -1378,7 +1550,9 @@ class MFRM(Rasch):
         facet_item_effects, facet_threshold_effects = self._resolve_bivector_effects(
             facet_item_effects, facet_threshold_effects, kw
         )
-        severities = self._bivector_severity(facet_item_effects, facet_threshold_effects, facet_element, item)
+        severities = self._bivector_severity(
+            facet_item_effects, facet_threshold_effects, facet_element, item
+        )
         cats = np.arange(len(thresholds) + 1, dtype=float)
         cumtau = np.concatenate([[0.0], np.cumsum(thresholds)])
         log_nums = cats * (person_location - item_locations.loc[item]) - cumtau
@@ -1386,6 +1560,7 @@ class MFRM(Rasch):
         log_nums -= log_nums.max()
         nums = np.exp(log_nums)
         return nums[category] / nums.sum()
+
     @staticmethod
     def _stretch_value(lambda_r, scale_r, reference_value):
         """
@@ -1401,23 +1576,50 @@ class MFRM(Rasch):
 
     def _centrality_severity(self, facet_element, lambda_r, omega_r, thresholds):
         """centrality's thresholds-shaped location vector, reconstructed from its own (lambda_r, omega_r), ready for cat_prob(model='centrality')."""
-        lam_rt = self._stretch_value(lambda_r, omega_r, np.asarray(thresholds, dtype=float))
+        lam_rt = self._stretch_value(
+            lambda_r, omega_r, np.asarray(thresholds, dtype=float)
+        )
         return pd.DataFrame([lam_rt], index=[facet_element])
 
-    def _pseudo_halo_severity(self, facet_element, item, lambda_r, omega_r, item_locations):
+    def _pseudo_halo_severity(
+        self, facet_element, item, lambda_r, omega_r, item_locations
+    ):
         """pseudo_halo's items-shaped location value, reconstructed from its own (lambda_r, omega_r), ready for cat_prob(model='pseudo_halo')."""
         mu_ri = self._stretch_value(lambda_r, omega_r, item_locations.loc[item])
         return pd.DataFrame({item: [mu_ri]}, index=[facet_element])
 
-    def _bistretch_severity(self, facet_element, item, lambda_r, omega_items_r, omega_thresholds_r, item_locations, thresholds):
+    def _bistretch_severity(
+        self,
+        facet_element,
+        item,
+        lambda_r,
+        omega_items_r,
+        omega_thresholds_r,
+        item_locations,
+        thresholds,
+    ):
         """bistretch's matrix-shaped location vector for one (facet element (e.g. rater), item), reconstructed from its own (lambda_r, omega_items_r, omega_thresholds_r), ready for cat_prob(model='bistretch')."""
-        item_component = self._stretch_value(lambda_r, omega_items_r, item_locations.loc[item])
-        threshold_component = self._stretch_value(0.0, omega_thresholds_r, np.asarray(thresholds, dtype=float))
+        item_component = self._stretch_value(
+            lambda_r, omega_items_r, item_locations.loc[item]
+        )
+        threshold_component = self._stretch_value(
+            0.0, omega_thresholds_r, np.asarray(thresholds, dtype=float)
+        )
         lam_rit = item_component + threshold_component
         mi = pd.MultiIndex.from_tuples([(facet_element, item)])
         return pd.DataFrame([lam_rit], index=mi)
 
-    def cat_prob_centrality(self, person_location, item, item_locations, facet_element, lambda_r, omega_r, category, thresholds):
+    def cat_prob_centrality(
+        self,
+        person_location,
+        item,
+        item_locations,
+        facet_element,
+        lambda_r,
+        omega_r,
+        category,
+        thresholds,
+    ):
         """
         Category probability for the closed-form 'centrality' restriction,
         taking the facet element's (e.g. rater's) own raw parameters (location shift lambda_r,
@@ -1425,9 +1627,31 @@ class MFRM(Rasch):
         'thresholds'-shaped vector cat_prob(model='centrality') itself
         expects. See cat_prob for the underlying formula.
         """
-        facet_effects = self._centrality_severity(facet_element, lambda_r, omega_r, thresholds)
-        return self.cat_prob(person_location, item, item_locations, facet_element, facet_effects, category, thresholds, "centrality")
-    def cat_prob_pseudo_halo(self, person_location, item, item_locations, facet_element, lambda_r, omega_r, category, thresholds):
+        facet_effects = self._centrality_severity(
+            facet_element, lambda_r, omega_r, thresholds
+        )
+        return self.cat_prob(
+            person_location,
+            item,
+            item_locations,
+            facet_element,
+            facet_effects,
+            category,
+            thresholds,
+            "centrality",
+        )
+
+    def cat_prob_pseudo_halo(
+        self,
+        person_location,
+        item,
+        item_locations,
+        facet_element,
+        lambda_r,
+        omega_r,
+        category,
+        thresholds,
+    ):
         """
         Category probability for the closed-form 'pseudo_halo' restriction,
         taking the facet element's (e.g. rater's) own raw parameters (location shift lambda_r,
@@ -1435,9 +1659,32 @@ class MFRM(Rasch):
         reconstructed 'items'-shaped vector cat_prob(model='pseudo_halo')
         itself expects. See cat_prob for the underlying formula.
         """
-        facet_effects = self._pseudo_halo_severity(facet_element, item, lambda_r, omega_r, item_locations)
-        return self.cat_prob(person_location, item, item_locations, facet_element, facet_effects, category, thresholds, "pseudo_halo")
-    def cat_prob_bistretch(self, person_location, item, item_locations, facet_element, lambda_r, omega_items_r, omega_thresholds_r, category, thresholds):
+        facet_effects = self._pseudo_halo_severity(
+            facet_element, item, lambda_r, omega_r, item_locations
+        )
+        return self.cat_prob(
+            person_location,
+            item,
+            item_locations,
+            facet_element,
+            facet_effects,
+            category,
+            thresholds,
+            "pseudo_halo",
+        )
+
+    def cat_prob_bistretch(
+        self,
+        person_location,
+        item,
+        item_locations,
+        facet_element,
+        lambda_r,
+        omega_items_r,
+        omega_thresholds_r,
+        category,
+        thresholds,
+    ):
         """
         Category probability for the closed-form 'bistretch' restriction,
         taking the facet element's (e.g. rater's) own raw parameters (location shift lambda_r,
@@ -1446,26 +1693,117 @@ class MFRM(Rasch):
         'matrix'/'bivector'-shaped vector cat_prob(model='bistretch') itself
         expects. See cat_prob for the underlying formula.
         """
-        facet_effects = self._bistretch_severity(facet_element, item, lambda_r, omega_items_r, omega_thresholds_r, item_locations, thresholds)
-        return self.cat_prob(person_location, item, item_locations, facet_element, facet_effects, category, thresholds, "bistretch")
+        facet_effects = self._bistretch_severity(
+            facet_element,
+            item,
+            lambda_r,
+            omega_items_r,
+            omega_thresholds_r,
+            item_locations,
+            thresholds,
+        )
+        return self.cat_prob(
+            person_location,
+            item,
+            item_locations,
+            facet_element,
+            facet_effects,
+            category,
+            thresholds,
+            "bistretch",
+        )
 
-    def exp_score_global(self, person_location, item, item_locations, facet_element, facet_effects, thresholds):
+    def exp_score_global(
+        self,
+        person_location,
+        item,
+        item_locations,
+        facet_element,
+        facet_effects,
+        thresholds,
+    ):
         """Alias for exp_score(..., model='global'). See exp_score for full documentation."""
-        return self.exp_score(person_location, item, item_locations, facet_element, facet_effects, thresholds, "global")
+        return self.exp_score(
+            person_location,
+            item,
+            item_locations,
+            facet_element,
+            facet_effects,
+            thresholds,
+            "global",
+        )
 
-    def exp_score_items(self, person_location, item, item_locations, facet_element, facet_effects, thresholds):
+    def exp_score_items(
+        self,
+        person_location,
+        item,
+        item_locations,
+        facet_element,
+        facet_effects,
+        thresholds,
+    ):
         """Alias for exp_score(..., model='items'). See exp_score for full documentation."""
-        return self.exp_score(person_location, item, item_locations, facet_element, facet_effects, thresholds, "items")
+        return self.exp_score(
+            person_location,
+            item,
+            item_locations,
+            facet_element,
+            facet_effects,
+            thresholds,
+            "items",
+        )
 
-    def exp_score_thresholds(self, person_location, item, item_locations, facet_element, facet_effects, thresholds):
+    def exp_score_thresholds(
+        self,
+        person_location,
+        item,
+        item_locations,
+        facet_element,
+        facet_effects,
+        thresholds,
+    ):
         """Alias for exp_score(..., model='thresholds'). See exp_score for full documentation."""
-        return self.exp_score(person_location, item, item_locations, facet_element, facet_effects, thresholds, "thresholds")
+        return self.exp_score(
+            person_location,
+            item,
+            item_locations,
+            facet_element,
+            facet_effects,
+            thresholds,
+            "thresholds",
+        )
 
-    def exp_score_matrix(self, person_location, item, item_locations, facet_element, facet_effects, thresholds):
+    def exp_score_matrix(
+        self,
+        person_location,
+        item,
+        item_locations,
+        facet_element,
+        facet_effects,
+        thresholds,
+    ):
         """Alias for exp_score(..., model='matrix'). See exp_score for full documentation."""
-        return self.exp_score(person_location, item, item_locations, facet_element, facet_effects, thresholds, "matrix")
+        return self.exp_score(
+            person_location,
+            item,
+            item_locations,
+            facet_element,
+            facet_effects,
+            thresholds,
+            "matrix",
+        )
 
-    def exp_score_bivector(self, person_location, item, item_locations, facet_element, facet_item_effects=None, facet_threshold_effects=None, thresholds=None, **kw):
+    def exp_score_bivector(
+        self,
+        person_location,
+        item,
+        item_locations,
+        facet_element,
+        facet_item_effects=None,
+        facet_threshold_effects=None,
+        thresholds=None,
+        **kw,
+    ):
         """
         Bivector-native expected score, decomposed facet_item_effects/facet_threshold_effects
         form (also accepts the rater_item_effects/rater_threshold_effects aliases).
@@ -1478,43 +1816,190 @@ class MFRM(Rasch):
         probs = np.array(
             [
                 self.cat_prob_bivector(
-                    person_location, item, item_locations, facet_element,
-                    facet_item_effects, facet_threshold_effects, cat, thresholds,
+                    person_location,
+                    item,
+                    item_locations,
+                    facet_element,
+                    facet_item_effects,
+                    facet_threshold_effects,
+                    cat,
+                    thresholds,
                 )
                 for cat in range(len(thresholds) + 1)
             ]
         )
         return (cats * probs).sum()
-    def exp_score_centrality(self, person_location, item, item_locations, facet_element, lambda_r, omega_r, thresholds):
+
+    def exp_score_centrality(
+        self,
+        person_location,
+        item,
+        item_locations,
+        facet_element,
+        lambda_r,
+        omega_r,
+        thresholds,
+    ):
         """Expected score for 'centrality', taking the facet element's (e.g. rater's) own raw (lambda_r, omega_r) directly. See cat_prob_centrality/exp_score for details."""
-        facet_effects = self._centrality_severity(facet_element, lambda_r, omega_r, thresholds)
-        return self.exp_score(person_location, item, item_locations, facet_element, facet_effects, thresholds, "centrality")
-    def exp_score_pseudo_halo(self, person_location, item, item_locations, facet_element, lambda_r, omega_r, thresholds):
+        facet_effects = self._centrality_severity(
+            facet_element, lambda_r, omega_r, thresholds
+        )
+        return self.exp_score(
+            person_location,
+            item,
+            item_locations,
+            facet_element,
+            facet_effects,
+            thresholds,
+            "centrality",
+        )
+
+    def exp_score_pseudo_halo(
+        self,
+        person_location,
+        item,
+        item_locations,
+        facet_element,
+        lambda_r,
+        omega_r,
+        thresholds,
+    ):
         """Expected score for 'pseudo_halo', taking the facet element's (e.g. rater's) own raw (lambda_r, omega_r) directly. See cat_prob_pseudo_halo/exp_score for details."""
-        facet_effects = self._pseudo_halo_severity(facet_element, item, lambda_r, omega_r, item_locations)
-        return self.exp_score(person_location, item, item_locations, facet_element, facet_effects, thresholds, "pseudo_halo")
-    def exp_score_bistretch(self, person_location, item, item_locations, facet_element, lambda_r, omega_items_r, omega_thresholds_r, thresholds):
+        facet_effects = self._pseudo_halo_severity(
+            facet_element, item, lambda_r, omega_r, item_locations
+        )
+        return self.exp_score(
+            person_location,
+            item,
+            item_locations,
+            facet_element,
+            facet_effects,
+            thresholds,
+            "pseudo_halo",
+        )
+
+    def exp_score_bistretch(
+        self,
+        person_location,
+        item,
+        item_locations,
+        facet_element,
+        lambda_r,
+        omega_items_r,
+        omega_thresholds_r,
+        thresholds,
+    ):
         """Expected score for 'bistretch', taking the facet element's (e.g. rater's) own raw (lambda_r, omega_items_r, omega_thresholds_r) directly. See cat_prob_bistretch/exp_score for details."""
-        facet_effects = self._bistretch_severity(facet_element, item, lambda_r, omega_items_r, omega_thresholds_r, item_locations, thresholds)
-        return self.exp_score(person_location, item, item_locations, facet_element, facet_effects, thresholds, "bistretch")
+        facet_effects = self._bistretch_severity(
+            facet_element,
+            item,
+            lambda_r,
+            omega_items_r,
+            omega_thresholds_r,
+            item_locations,
+            thresholds,
+        )
+        return self.exp_score(
+            person_location,
+            item,
+            item_locations,
+            facet_element,
+            facet_effects,
+            thresholds,
+            "bistretch",
+        )
 
-    def variance_global(self, person_location, item, item_locations, facet_element, facet_effects, thresholds):
+    def variance_global(
+        self,
+        person_location,
+        item,
+        item_locations,
+        facet_element,
+        facet_effects,
+        thresholds,
+    ):
         """Alias for variance(..., model='global'). See variance for full documentation."""
-        return self.variance(person_location, item, item_locations, facet_element, facet_effects, thresholds, "global")
+        return self.variance(
+            person_location,
+            item,
+            item_locations,
+            facet_element,
+            facet_effects,
+            thresholds,
+            "global",
+        )
 
-    def variance_items(self, person_location, item, item_locations, facet_element, facet_effects, thresholds):
+    def variance_items(
+        self,
+        person_location,
+        item,
+        item_locations,
+        facet_element,
+        facet_effects,
+        thresholds,
+    ):
         """Alias for variance(..., model='items'). See variance for full documentation."""
-        return self.variance(person_location, item, item_locations, facet_element, facet_effects, thresholds, "items")
+        return self.variance(
+            person_location,
+            item,
+            item_locations,
+            facet_element,
+            facet_effects,
+            thresholds,
+            "items",
+        )
 
-    def variance_thresholds(self, person_location, item, item_locations, facet_element, facet_effects, thresholds):
+    def variance_thresholds(
+        self,
+        person_location,
+        item,
+        item_locations,
+        facet_element,
+        facet_effects,
+        thresholds,
+    ):
         """Alias for variance(..., model='thresholds'). See variance for full documentation."""
-        return self.variance(person_location, item, item_locations, facet_element, facet_effects, thresholds, "thresholds")
+        return self.variance(
+            person_location,
+            item,
+            item_locations,
+            facet_element,
+            facet_effects,
+            thresholds,
+            "thresholds",
+        )
 
-    def variance_matrix(self, person_location, item, item_locations, facet_element, facet_effects, thresholds):
+    def variance_matrix(
+        self,
+        person_location,
+        item,
+        item_locations,
+        facet_element,
+        facet_effects,
+        thresholds,
+    ):
         """Alias for variance(..., model='matrix'). See variance for full documentation."""
-        return self.variance(person_location, item, item_locations, facet_element, facet_effects, thresholds, "matrix")
+        return self.variance(
+            person_location,
+            item,
+            item_locations,
+            facet_element,
+            facet_effects,
+            thresholds,
+            "matrix",
+        )
 
-    def variance_bivector(self, person_location, item, item_locations, facet_element, facet_item_effects=None, facet_threshold_effects=None, thresholds=None, **kw):
+    def variance_bivector(
+        self,
+        person_location,
+        item,
+        item_locations,
+        facet_element,
+        facet_item_effects=None,
+        facet_threshold_effects=None,
+        thresholds=None,
+        **kw,
+    ):
         """
         Bivector-native variance, decomposed facet_item_effects/facet_threshold_effects
         form (also accepts the rater_item_effects/rater_threshold_effects aliases).
@@ -1527,44 +2012,191 @@ class MFRM(Rasch):
         probs = np.array(
             [
                 self.cat_prob_bivector(
-                    person_location, item, item_locations, facet_element,
-                    facet_item_effects, facet_threshold_effects, cat, thresholds,
+                    person_location,
+                    item,
+                    item_locations,
+                    facet_element,
+                    facet_item_effects,
+                    facet_threshold_effects,
+                    cat,
+                    thresholds,
                 )
                 for cat in range(len(thresholds) + 1)
             ]
         )
         exp = (cats * probs).sum()
         return ((cats - exp) ** 2 * probs).sum()
-    def variance_centrality(self, person_location, item, item_locations, facet_element, lambda_r, omega_r, thresholds):
+
+    def variance_centrality(
+        self,
+        person_location,
+        item,
+        item_locations,
+        facet_element,
+        lambda_r,
+        omega_r,
+        thresholds,
+    ):
         """Variance for 'centrality', taking the facet element's (e.g. rater's) own raw (lambda_r, omega_r) directly. See cat_prob_centrality/variance for details."""
-        facet_effects = self._centrality_severity(facet_element, lambda_r, omega_r, thresholds)
-        return self.variance(person_location, item, item_locations, facet_element, facet_effects, thresholds, "centrality")
-    def variance_pseudo_halo(self, person_location, item, item_locations, facet_element, lambda_r, omega_r, thresholds):
+        facet_effects = self._centrality_severity(
+            facet_element, lambda_r, omega_r, thresholds
+        )
+        return self.variance(
+            person_location,
+            item,
+            item_locations,
+            facet_element,
+            facet_effects,
+            thresholds,
+            "centrality",
+        )
+
+    def variance_pseudo_halo(
+        self,
+        person_location,
+        item,
+        item_locations,
+        facet_element,
+        lambda_r,
+        omega_r,
+        thresholds,
+    ):
         """Variance for 'pseudo_halo', taking the facet element's (e.g. rater's) own raw (lambda_r, omega_r) directly. See cat_prob_pseudo_halo/variance for details."""
-        facet_effects = self._pseudo_halo_severity(facet_element, item, lambda_r, omega_r, item_locations)
-        return self.variance(person_location, item, item_locations, facet_element, facet_effects, thresholds, "pseudo_halo")
-    def variance_bistretch(self, person_location, item, item_locations, facet_element, lambda_r, omega_items_r, omega_thresholds_r, thresholds):
+        facet_effects = self._pseudo_halo_severity(
+            facet_element, item, lambda_r, omega_r, item_locations
+        )
+        return self.variance(
+            person_location,
+            item,
+            item_locations,
+            facet_element,
+            facet_effects,
+            thresholds,
+            "pseudo_halo",
+        )
+
+    def variance_bistretch(
+        self,
+        person_location,
+        item,
+        item_locations,
+        facet_element,
+        lambda_r,
+        omega_items_r,
+        omega_thresholds_r,
+        thresholds,
+    ):
         """Variance for 'bistretch', taking the facet element's (e.g. rater's) own raw (lambda_r, omega_items_r, omega_thresholds_r) directly. See cat_prob_bistretch/variance for details."""
-        facet_effects = self._bistretch_severity(facet_element, item, lambda_r, omega_items_r, omega_thresholds_r, item_locations, thresholds)
-        return self.variance(person_location, item, item_locations, facet_element, facet_effects, thresholds, "bistretch")
+        facet_effects = self._bistretch_severity(
+            facet_element,
+            item,
+            lambda_r,
+            omega_items_r,
+            omega_thresholds_r,
+            item_locations,
+            thresholds,
+        )
+        return self.variance(
+            person_location,
+            item,
+            item_locations,
+            facet_element,
+            facet_effects,
+            thresholds,
+            "bistretch",
+        )
 
-    def kurtosis_global(self, person_location, item, item_locations, facet_element, facet_effects, thresholds):
+    def kurtosis_global(
+        self,
+        person_location,
+        item,
+        item_locations,
+        facet_element,
+        facet_effects,
+        thresholds,
+    ):
         """Alias for kurtosis(..., model='global'). See kurtosis for full documentation."""
-        return self.kurtosis(person_location, item, item_locations, facet_element, facet_effects, thresholds, "global")
+        return self.kurtosis(
+            person_location,
+            item,
+            item_locations,
+            facet_element,
+            facet_effects,
+            thresholds,
+            "global",
+        )
 
-    def kurtosis_items(self, person_location, item, item_locations, facet_element, facet_effects, thresholds):
+    def kurtosis_items(
+        self,
+        person_location,
+        item,
+        item_locations,
+        facet_element,
+        facet_effects,
+        thresholds,
+    ):
         """Alias for kurtosis(..., model='items'). See kurtosis for full documentation."""
-        return self.kurtosis(person_location, item, item_locations, facet_element, facet_effects, thresholds, "items")
+        return self.kurtosis(
+            person_location,
+            item,
+            item_locations,
+            facet_element,
+            facet_effects,
+            thresholds,
+            "items",
+        )
 
-    def kurtosis_thresholds(self, person_location, item, item_locations, facet_element, facet_effects, thresholds):
+    def kurtosis_thresholds(
+        self,
+        person_location,
+        item,
+        item_locations,
+        facet_element,
+        facet_effects,
+        thresholds,
+    ):
         """Alias for kurtosis(..., model='thresholds'). See kurtosis for full documentation."""
-        return self.kurtosis(person_location, item, item_locations, facet_element, facet_effects, thresholds, "thresholds")
+        return self.kurtosis(
+            person_location,
+            item,
+            item_locations,
+            facet_element,
+            facet_effects,
+            thresholds,
+            "thresholds",
+        )
 
-    def kurtosis_matrix(self, person_location, item, item_locations, facet_element, facet_effects, thresholds):
+    def kurtosis_matrix(
+        self,
+        person_location,
+        item,
+        item_locations,
+        facet_element,
+        facet_effects,
+        thresholds,
+    ):
         """Alias for kurtosis(..., model='matrix'). See kurtosis for full documentation."""
-        return self.kurtosis(person_location, item, item_locations, facet_element, facet_effects, thresholds, "matrix")
+        return self.kurtosis(
+            person_location,
+            item,
+            item_locations,
+            facet_element,
+            facet_effects,
+            thresholds,
+            "matrix",
+        )
 
-    def kurtosis_bivector(self, person_location, item, item_locations, facet_element, facet_item_effects=None, facet_threshold_effects=None, thresholds=None, **kw):
+    def kurtosis_bivector(
+        self,
+        person_location,
+        item,
+        item_locations,
+        facet_element,
+        facet_item_effects=None,
+        facet_threshold_effects=None,
+        thresholds=None,
+        **kw,
+    ):
         """
         Bivector-native kurtosis, decomposed facet_item_effects/facet_threshold_effects
         form (also accepts the rater_item_effects/rater_threshold_effects aliases).
@@ -1577,8 +2209,14 @@ class MFRM(Rasch):
         probs = np.array(
             [
                 self.cat_prob_bivector(
-                    person_location, item, item_locations, facet_element,
-                    facet_item_effects, facet_threshold_effects, cat, thresholds,
+                    person_location,
+                    item,
+                    item_locations,
+                    facet_element,
+                    facet_item_effects,
+                    facet_threshold_effects,
+                    cat,
+                    thresholds,
                 )
                 for cat in range(len(thresholds) + 1)
             ]
@@ -1589,21 +2227,93 @@ class MFRM(Rasch):
     # ------------------------------------------------------------------
     # Vectorised probability engine
     # ------------------------------------------------------------------
-    def kurtosis_centrality(self, person_location, item, item_locations, facet_element, lambda_r, omega_r, thresholds):
+    def kurtosis_centrality(
+        self,
+        person_location,
+        item,
+        item_locations,
+        facet_element,
+        lambda_r,
+        omega_r,
+        thresholds,
+    ):
         """Kurtosis for 'centrality', taking the facet element's (e.g. rater's) own raw (lambda_r, omega_r) directly. See cat_prob_centrality/kurtosis for details."""
-        facet_effects = self._centrality_severity(facet_element, lambda_r, omega_r, thresholds)
-        return self.kurtosis(person_location, item, item_locations, facet_element, facet_effects, thresholds, "centrality")
-    def kurtosis_pseudo_halo(self, person_location, item, item_locations, facet_element, lambda_r, omega_r, thresholds):
+        facet_effects = self._centrality_severity(
+            facet_element, lambda_r, omega_r, thresholds
+        )
+        return self.kurtosis(
+            person_location,
+            item,
+            item_locations,
+            facet_element,
+            facet_effects,
+            thresholds,
+            "centrality",
+        )
+
+    def kurtosis_pseudo_halo(
+        self,
+        person_location,
+        item,
+        item_locations,
+        facet_element,
+        lambda_r,
+        omega_r,
+        thresholds,
+    ):
         """Kurtosis for 'pseudo_halo', taking the facet element's (e.g. rater's) own raw (lambda_r, omega_r) directly. See cat_prob_pseudo_halo/kurtosis for details."""
-        facet_effects = self._pseudo_halo_severity(facet_element, item, lambda_r, omega_r, item_locations)
-        return self.kurtosis(person_location, item, item_locations, facet_element, facet_effects, thresholds, "pseudo_halo")
-    def kurtosis_bistretch(self, person_location, item, item_locations, facet_element, lambda_r, omega_items_r, omega_thresholds_r, thresholds):
+        facet_effects = self._pseudo_halo_severity(
+            facet_element, item, lambda_r, omega_r, item_locations
+        )
+        return self.kurtosis(
+            person_location,
+            item,
+            item_locations,
+            facet_element,
+            facet_effects,
+            thresholds,
+            "pseudo_halo",
+        )
+
+    def kurtosis_bistretch(
+        self,
+        person_location,
+        item,
+        item_locations,
+        facet_element,
+        lambda_r,
+        omega_items_r,
+        omega_thresholds_r,
+        thresholds,
+    ):
         """Kurtosis for 'bistretch', taking the facet element's (e.g. rater's) own raw (lambda_r, omega_items_r, omega_thresholds_r) directly. See cat_prob_bistretch/kurtosis for details."""
-        facet_effects = self._bistretch_severity(facet_element, item, lambda_r, omega_items_r, omega_thresholds_r, item_locations, thresholds)
-        return self.kurtosis(person_location, item, item_locations, facet_element, facet_effects, thresholds, "bistretch")
+        facet_effects = self._bistretch_severity(
+            facet_element,
+            item,
+            lambda_r,
+            omega_items_r,
+            omega_thresholds_r,
+            item_locations,
+            thresholds,
+        )
+        return self.kurtosis(
+            person_location,
+            item,
+            item_locations,
+            facet_element,
+            facet_effects,
+            thresholds,
+            "bistretch",
+        )
 
     def _cat_probs_mfrm(
-        self, person_locations, items, facet_elements, thresholds, model, facet_effects,
+        self,
+        person_locations,
+        items,
+        facet_elements,
+        thresholds,
+        model,
+        facet_effects,
         item_locations=None,
     ):
         """
@@ -1631,7 +2341,11 @@ class MFRM(Rasch):
         cats = np.arange(len(thresholds) + 1, dtype=float)  # (K+1,)
         cumtau = np.concatenate([[0.0], np.cumsum(thresholds)])  # (K+1,)
         ab = np.asarray(person_locations, dtype=float)  # (N,)
-        diff_arr = (self._items_for(model) if item_locations is None else item_locations).loc[items].values  # (I,)
+        diff_arr = (
+            (self._items_for(model) if item_locations is None else item_locations)
+            .loc[items]
+            .values
+        )  # (I,)
         n_items = len(items)
 
         result = {}
@@ -1793,11 +2507,11 @@ class MFRM(Rasch):
         returning a silent NaN.
         """
         R, I = self.no_of_facet_elements, self.no_of_items
-        X = self.responses.to_numpy(dtype=np.float64).reshape(R, -1, I)   # (R, P, I)
+        X = self.responses.to_numpy(dtype=np.float64).reshape(R, -1, I)  # (R, P, I)
         at_k = np.nan_to_num(X == threshold).astype(np.float64)
         at_km1 = np.nan_to_num(X == threshold - 1).astype(np.float64)
         at_kp1 = np.nan_to_num(X == threshold + 1).astype(np.float64)
-        num = np.matmul(at_k.transpose(0, 2, 1), at_k)        # (R, I, I); BLAS, not einsum
+        num = np.matmul(at_k.transpose(0, 2, 1), at_k)  # (R, I, I); BLAS, not einsum
         den = np.matmul(at_km1.transpose(0, 2, 1), at_kp1)
         # CPAT compares two DIFFERENT items (i != j); same-item cells are not
         # comparisons and must not enter the sums.
@@ -1810,14 +2524,22 @@ class MFRM(Rasch):
         seen = (num + den) > 0
         usable = seen & (num + constant > 0) & (den + constant > 0)
         with np.errstate(divide="ignore", invalid="ignore"):
-            cell_lr = np.where(usable, np.log(np.where(usable, num + constant, 1.0))
-                               - np.log(np.where(usable, den + constant, 1.0)), 0.0)
+            cell_lr = np.where(
+                usable,
+                np.log(np.where(usable, num + constant, 1.0))
+                - np.log(np.where(usable, den + constant, 1.0)),
+                0.0,
+            )
         n_used = usable.sum(axis=0)
         pair_lr = np.where(n_used > 0, cell_lr.sum(axis=0) / np.maximum(n_used, 1), 0.0)
 
         # pairs weighted by their information, from the summed counts
         N, D = num.sum(axis=0), den.sum(axis=0)
-        weight = np.where(n_used > 0, 2.0 * (N + constant) * (D + constant) / (N + D + 2 * constant), 0.0)
+        weight = np.where(
+            n_used > 0,
+            2.0 * (N + constant) * (D + constant) / (N + D + 2 * constant),
+            0.0,
+        )
         np.fill_diagonal(weight, 0.0)
 
         total_weight = weight.sum()
@@ -1982,7 +2704,9 @@ class MFRM(Rasch):
         if not log:
             return
         overall = sorted(n for n, w in log.items() if None in w)
-        partial = {n: [x for x in w if x is not None] for n, w in log.items() if None not in w}
+        partial = {
+            n: [x for x in w if x is not None] for n, w in log.items() if None not in w
+        }
         parts = []
         if overall:
             parts.append(
@@ -1990,7 +2714,9 @@ class MFRM(Rasch):
                 f"comparisons with any other {self.facet_label}: {overall}."
             )
         if partial:
-            detail = "; ".join(f"{n} ({', '.join(map(str, w))})" for n, w in sorted(partial.items()))
+            detail = "; ".join(
+                f"{n} ({', '.join(map(str, w))})" for n, w in sorted(partial.items())
+            )
             lead = self._facet_n(len(partial)) if not overall else str(len(partial))
             parts.append(
                 f"{lead} {'has' if len(partial) == 1 else 'have'} zero PAIR comparisons with any other "
@@ -2099,10 +2825,18 @@ class MFRM(Rasch):
         )
 
     def _item_rater_element(
-        self, item, data, constant=0.1, method="log-lik", matrix_power=None, log_lik_tol=0.000001
+        self,
+        item,
+        data,
+        constant=0.1,
+        method="log-lik",
+        matrix_power=None,
+        log_lik_tol=0.000001,
     ):
         """PAIR facet_element effect for a single item (items parameterisation)."""
-        matrix = self._pair_matrix(data[item, :, :], constant, where=self.item_names[item])
+        matrix = self._pair_matrix(
+            data[item, :, :], constant, where=self.item_names[item]
+        )
         mat = self._raise_matrix_power(matrix, matrix_power, constant, method)
         return self.priority_vector(
             mat, method=method, log_lik_tol=log_lik_tol, raters=True
@@ -2134,7 +2868,13 @@ class MFRM(Rasch):
         )
 
     def _threshold_rater_element(
-        self, category, data, constant=0.1, method="log-lik", matrix_power=None, log_lik_tol=0.000001
+        self,
+        category,
+        data,
+        constant=0.1,
+        method="log-lik",
+        matrix_power=None,
+        log_lik_tol=0.000001,
     ):
         """PAIR facet_element effect for a single threshold (thresholds parameterisation)."""
         # Sum across items: count(X_{i,r1}==k+1 AND X_{i,r2}==k)
@@ -2298,23 +3038,26 @@ class MFRM(Rasch):
             scale[facet_element] = 1.0 + slope_r
 
         reconstructed = pd.DataFrame(
-            {
-                col: lam + (scale - 1.0) * ref.loc[col]
-                for col in deviation_df.columns
-            },
+            {col: lam + (scale - 1.0) * ref.loc[col] for col in deviation_df.columns},
             index=deviation_df.index,
         )[deviation_df.columns]
 
         return lam, scale, reconstructed
 
-    def _derive_stretch_single(self, deviation_1d, reference_values, regression="huber"):
+    def _derive_stretch_single(
+        self, deviation_1d, reference_values, regression="huber"
+    ):
         """Single-facet-element convenience wrapper around _derive_stretch_model, for
         callers (e.g. per_rater_model_selection) working with one facet element's (e.g. rater's)
         plain numpy deviation vector rather than the usual (facet elements x
         elements) DataFrame. deviation_1d must already be ordered to match
         reference_values.index."""
-        df = pd.DataFrame([deviation_1d], index=["_single"], columns=reference_values.index)
-        lam, scale, recon = self._derive_stretch_model(df, reference_values, regression=regression)
+        df = pd.DataFrame(
+            [deviation_1d], index=["_single"], columns=reference_values.index
+        )
+        lam, scale, recon = self._derive_stretch_model(
+            df, reference_values, regression=regression
+        )
         return float(lam.iloc[0]), float(scale.iloc[0]), recon.iloc[0].values
 
     def _warn_nonpositive_stretch(self, scale, param_name, model_name):
@@ -2478,7 +3221,8 @@ class MFRM(Rasch):
         if test == "t":
             p = pd.DataFrame(
                 2 * (1 - t_dist.cdf(np.abs(z.values), no_of_samples - 1)),
-                index=z.index, columns=z.columns,
+                index=z.index,
+                columns=z.columns,
             )
         else:
             p = pd.DataFrame(
@@ -2513,6 +3257,7 @@ class MFRM(Rasch):
         repeated.
         """
         import copy
+
         kw = self._refit_kw(parent)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -2567,9 +3312,19 @@ class MFRM(Rasch):
         prefix = "anchor_" if anc else ""
         n_rows = self.no_of_facet_elements
         samples = getattr(self, f"_bootstrap_samples_{model}")
-        parent = {"centrality": "thresholds", "pseudo_halo": "items", "bistretch": "bivector"}[model]
-        free_attrs = ([f"{prefix}facet_effects_bivector_items", f"{prefix}facet_effects_bivector_thresholds"]
-                      if model == "bistretch" else [f"{prefix}facet_effects_{parent}"])
+        parent = {
+            "centrality": "thresholds",
+            "pseudo_halo": "items",
+            "bistretch": "bivector",
+        }[model]
+        free_attrs = (
+            [
+                f"{prefix}facet_effects_bivector_items",
+                f"{prefix}facet_effects_bivector_thresholds",
+            ]
+            if model == "bistretch"
+            else [f"{prefix}facet_effects_{parent}"]
+        )
         ref = self
         if any(not hasattr(s, a) for s in samples for a in free_attrs):
             ref = self._fit_divergence_parent(model, parent, anc, samples)
@@ -2578,7 +3333,8 @@ class MFRM(Rasch):
             free_est = getattr(ref, free_attr)
             stretch_est = getattr(self, stretch_attr)
             valid = [
-                s for s in samples
+                s
+                for s in samples
                 if getattr(s, free_attr).shape[0] == n_rows
                 and getattr(s, stretch_attr).shape[0] == n_rows
             ]
@@ -2681,13 +3437,21 @@ class MFRM(Rasch):
 
         not_flagged = ~flagged_vals
         ax.scatter(
-            free_vals[not_flagged], stretch_vals[not_flagged],
-            s=40, alpha=0.7, edgecolors="k", label="Not flagged",
+            free_vals[not_flagged],
+            stretch_vals[not_flagged],
+            s=40,
+            alpha=0.7,
+            edgecolors="k",
+            label="Not flagged",
         )
         if flagged_vals.any():
             ax.scatter(
-                free_vals[flagged_vals], stretch_vals[flagged_vals],
-                s=40, alpha=0.7, edgecolors="k", label="Flagged",
+                free_vals[flagged_vals],
+                stretch_vals[flagged_vals],
+                s=40,
+                alpha=0.7,
+                edgecolors="k",
+                label="Flagged",
             )
 
         xseq = np.linspace(xmin, xmax, 100)
@@ -2696,7 +3460,10 @@ class MFRM(Rasch):
         ax.set_xlim(xmin, xmax)
         ax.set_ylim(ymin, ymax)
         ax.set_xlabel(
-            "Free vector model", fontsize=axis_font_size, fontweight="bold", fontname=font
+            "Free vector model",
+            fontsize=axis_font_size,
+            fontweight="bold",
+            fontname=font,
         )
         ax.set_ylabel(
             "Stretch model (reconstructed)",
@@ -2719,7 +3486,11 @@ class MFRM(Rasch):
         return fig
 
     def _estimate_raters_centrality(
-        self, constant=0.1, method="log-lik", matrix_power=None, log_lik_tol=0.000001,
+        self,
+        constant=0.1,
+        method="log-lik",
+        matrix_power=None,
+        log_lik_tol=0.000001,
         regression="huber",
     ):
         """
@@ -2753,7 +3524,11 @@ class MFRM(Rasch):
         self._warn_nonpositive_stretch(omega, "omega", "centrality")
 
     def _estimate_raters_pseudo_halo(
-        self, constant=0.1, method="log-lik", matrix_power=None, log_lik_tol=0.000001,
+        self,
+        constant=0.1,
+        method="log-lik",
+        matrix_power=None,
+        log_lik_tol=0.000001,
         regression="huber",
     ):
         """
@@ -2849,7 +3624,9 @@ class MFRM(Rasch):
             [self.facet_names, self.responses.columns], names=[self.facet, "item"]
         )
         self.facet_effects_matrix = pd.DataFrame(
-            facet_elements.reshape(-1, self.max_score), index=mi, columns=range(1, self.max_score + 1)
+            facet_elements.reshape(-1, self.max_score),
+            index=mi,
+            columns=range(1, self.max_score + 1),
         )
 
         # Marginal facet_effects
@@ -2916,7 +3693,9 @@ class MFRM(Rasch):
             # Marginal-means estimator: full matrix PAIR → marginal means per vector
             self._estimate_raters_matrix(**kw)
             self.facet_effects_bivector_items = self.marginal_facet_effects_items
-            self.facet_effects_bivector_thresholds = self.marginal_facet_effects_thresholds
+            self.facet_effects_bivector_thresholds = (
+                self.marginal_facet_effects_thresholds
+            )
         else:
             # Direct pooled-PAIR estimator: each vector estimated from its own
             # pooled comparison matrix (items PAIR summed over thresholds;
@@ -2941,7 +3720,9 @@ class MFRM(Rasch):
         ).to_numpy()  # (R, K)
         full = items_arr[:, :, None] + thresh_arr[:, None, :]  # (R, I, K)
         self.facet_effects_bivector = pd.DataFrame(
-            full.reshape(-1, self.max_score), index=mi, columns=range(1, self.max_score + 1)
+            full.reshape(-1, self.max_score),
+            index=mi,
+            columns=range(1, self.max_score + 1),
         )
 
     def _estimate_raters_bistretch(self, regression="huber", **kw):
@@ -2982,7 +3763,9 @@ class MFRM(Rasch):
             self.facet_effects_bivector_items, self.items, regression=regression
         )
         _, omega_thresholds, thresh_recon = self._derive_stretch_model(
-            self.facet_effects_bivector_thresholds, self.thresholds, regression=regression
+            self.facet_effects_bivector_thresholds,
+            self.thresholds,
+            regression=regression,
         )
         self.lambda_bistretch = lam
         self.omega_items_bistretch = omega_items
@@ -3001,14 +3784,22 @@ class MFRM(Rasch):
         ).to_numpy()  # (R, K)
         full = items_arr[:, :, None] + thresh_arr[:, None, :]  # (R, I, K)
         self.facet_effects_bistretch_full_vector = pd.DataFrame(
-            full.reshape(-1, self.max_score), index=mi, columns=range(1, self.max_score + 1)
+            full.reshape(-1, self.max_score),
+            index=mi,
+            columns=range(1, self.max_score + 1),
         )
         self.facet_effects_bistretch = pd.DataFrame(
-            {"lambda": lam, "omega_items": omega_items, "omega_thresholds": omega_thresholds}
+            {
+                "lambda": lam,
+                "omega_items": omega_items,
+                "omega_thresholds": omega_thresholds,
+            }
         )
 
         self._warn_nonpositive_stretch(omega_items, "omega_items", "bistretch")
-        self._warn_nonpositive_stretch(omega_thresholds, "omega_thresholds", "bistretch")
+        self._warn_nonpositive_stretch(
+            omega_thresholds, "omega_thresholds", "bistretch"
+        )
 
     # ------------------------------------------------------------------
     # Calibration — top-level methods
@@ -3023,7 +3814,8 @@ class MFRM(Rasch):
                     "matrix_marginals=False for model='bistretch': direct "
                     "marginals bias the stretch parameters toward omega=1; "
                     "matrix marginals are recommended.",
-                    UserWarning, stacklevel=3,
+                    UserWarning,
+                    stacklevel=3,
                 )
                 return False
             return True
@@ -3035,7 +3827,8 @@ class MFRM(Rasch):
                 "robust=True with an explicit matrix_marginals=True for "
                 "model='bivector': the explicit matrix_marginals wins and the "
                 "direct-estimation robust route is not used.",
-                UserWarning, stacklevel=3,
+                UserWarning,
+                stacklevel=3,
             )
         return bool(matrix_marginals)
 
@@ -3057,7 +3850,7 @@ class MFRM(Rasch):
         if model == "matrix":
             m = float(self.responses.isna().to_numpy().mean())
             R = self.no_of_facet_elements
-            c = (0.65 if robust else (0.68 - 0.22 * m)) / (R ** 0.5)
+            c = (0.65 if robust else (0.68 - 0.22 * m)) / (R**0.5)
             return float(min(0.5, max(0.15, c)))
         return 0.1  # 'global'
 
@@ -3232,22 +4025,33 @@ class MFRM(Rasch):
             "interaction_ridge": ("matrix",),
             "stretch_ridge": ("centrality", "pseudo_halo", "bistretch"),
         }
-        _reg = dict(ridge=ridge, interaction_ridge=interaction_ridge, stretch_ridge=stretch_ridge)
+        _reg = dict(
+            ridge=ridge,
+            interaction_ridge=interaction_ridge,
+            stretch_ridge=stretch_ridge,
+        )
         ignored = [
-            f"{name}={value!r}" for name, value in _reg.items()
-            if value is not None and (estimation == "pair-cpat" or model not in _applies[name])
+            f"{name}={value!r}"
+            for name, value in _reg.items()
+            if value is not None
+            and (estimation == "pair-cpat" or model not in _applies[name])
         ]
         if estimation in ("cp-full-rcl", "cpat-rcl"):
             ignored += [
-                f"{name}={value!r}" for name, value, default in (
-                    ("method", method, None), ("matrix_power", matrix_power, None),
-                    ("log_lik_tol", log_lik_tol, 0.000001), ("matrix_marginals", matrix_marginals, None),
+                f"{name}={value!r}"
+                for name, value, default in (
+                    ("method", method, None),
+                    ("matrix_power", matrix_power, None),
+                    ("log_lik_tol", log_lik_tol, 0.000001),
+                    ("matrix_marginals", matrix_marginals, None),
                     ("robust", robust, False),
-                ) if value is not None and value != default
+                )
+                if value is not None and value != default
             ]
         if ignored:
             where = (
-                "with estimation='pair-cpat'" if estimation == "pair-cpat"
+                "with estimation='pair-cpat'"
+                if estimation == "pair-cpat"
                 else f"with estimation='{estimation}' and model='{model}'"
             )
             warnings.warn(
@@ -3282,17 +4086,24 @@ class MFRM(Rasch):
         # determined for that facet element. Not raised for bootstrap
         # resamples: resampling persons often thins a category the data itself
         # uses enough, and any real shortfall is reported for the full data.
-        if model in ("thresholds", "bivector", "matrix", "centrality", "bistretch") and not self._resample:
+        if (
+            model in ("thresholds", "bivector", "matrix", "centrality", "bistretch")
+            and not self._resample
+        ):
             sparse = {}
             for fe in self.facet_names:
                 v = self.responses.loc[fe].to_numpy(dtype=float)
-                cnt = np.bincount(v[np.isfinite(v)].astype(int), minlength=self.max_score + 1)
+                cnt = np.bincount(
+                    v[np.isfinite(v)].astype(int), minlength=self.max_score + 1
+                )
                 low = {k: int(c) for k, c in enumerate(cnt) if c <= 2}
                 if low:
                     sparse[fe] = low
             if sparse:
                 detail = "; ".join(
-                    f"{fe} (" + ", ".join(f"category {k}: {c}" for k, c in low.items()) + ")"
+                    f"{fe} ("
+                    + ", ".join(f"category {k}: {c}" for k, c in low.items())
+                    + ")"
                     for fe, low in sparse.items()
                 )
                 warnings.warn(
@@ -3377,7 +4188,14 @@ class MFRM(Rasch):
         self._remove_null_persons()
         self._warn_facet_groups(stacklevel=3)
         if estimation in ("cp-full-rcl", "cpat-rcl"):
-            self._calibrate_rcl(model, constant, threshold_constant, regression, full_patterns=estimation == "cp-full-rcl", **_reg)
+            self._calibrate_rcl(
+                model,
+                constant,
+                threshold_constant,
+                regression,
+                full_patterns=estimation == "cp-full-rcl",
+                **_reg,
+            )
             self._set_facet_aliases(model)
             return
 
@@ -3392,8 +4210,12 @@ class MFRM(Rasch):
             self.ra_thresholds(self.items, constant=thr_constant),
             index=range(1, self.max_score + 1),
         )
-        kw = dict(constant=facet_constant, method=method,
-                  matrix_power=matrix_power, log_lik_tol=log_lik_tol)
+        kw = dict(
+            constant=facet_constant,
+            method=method,
+            matrix_power=matrix_power,
+            log_lik_tol=log_lik_tol,
+        )
         if model in ("bivector", "bistretch"):
             kw["matrix_marginals"] = mm
         if model in _STRETCH:
@@ -3417,10 +4239,15 @@ class MFRM(Rasch):
     def _facet_cell_factor(self, model):
         I, K = self.no_of_items, self.max_score
         return {
-            "global": 1 / (I * K), "items": 1 / K, "thresholds": 1 / I,
-            "bivector": (I + K) / (I * K), "matrix": 1.0,
+            "global": 1 / (I * K),
+            "items": 1 / K,
+            "thresholds": 1 / I,
+            "bivector": (I + K) / (I * K),
+            "matrix": 1.0,
             # stretch models: their parent cell model's factor
-            "centrality": 1 / I, "pseudo_halo": 1 / K, "bistretch": (I + K) / (I * K),
+            "centrality": 1 / I,
+            "pseudo_halo": 1 / K,
+            "bistretch": (I + K) / (I * K),
         }[model]
 
     def _refit_kw(self, model):
@@ -3428,9 +4255,11 @@ class MFRM(Rasch):
         calibration, for refits on new objects (bootstrap resamples, group
         calibrations), keeping only those that apply to model."""
         kw = dict(estimation=getattr(self, "estimation", None))
-        applies = dict(ridge=("global", "items", "thresholds", "bivector", "matrix"),
-                       interaction_ridge=("matrix",),
-                       stretch_ridge=("centrality", "pseudo_halo", "bistretch"))
+        applies = dict(
+            ridge=("global", "items", "thresholds", "bivector", "matrix"),
+            interaction_ridge=("matrix",),
+            stretch_ridge=("centrality", "pseudo_halo", "bistretch"),
+        )
         if kw["estimation"] in ("cp-full-rcl", "cpat-rcl"):
             for name, models in applies.items():
                 value = getattr(self, name, None)
@@ -3444,6 +4273,7 @@ class MFRM(Rasch):
         facet elements from different groups): how the groups' locations
         differ is then not identified by the data."""
         from raschpy import _rcl
+
         R, I, K = self.no_of_facet_elements, self.no_of_items, self.max_score
         if R < 2:
             return
@@ -3473,17 +4303,28 @@ class MFRM(Rasch):
         empty-category handling), pooling every facet element's responses,
         given item_locations."""
         from raschpy.rsm import RSM
+
         stacked = self.responses.copy()
         stacked.index = [f"{r}|{p}" for r, p in stacked.index]
         pooled = RSM(stacked, max_score=self.max_score, validate=False)
         thr = pooled.threshold_set(
-            item_locations.reindex(stacked.columns), constant=threshold_constant,
+            item_locations.reindex(stacked.columns),
+            constant=threshold_constant,
             threshold_method="cpat-cml",
         )
         return np.diff(np.asarray(thr, dtype=float))
 
-    def _calibrate_rcl(self, model, constant, threshold_constant, regression,
-                       ridge=None, interaction_ridge=None, stretch_ridge=None, full_patterns=True):
+    def _calibrate_rcl(
+        self,
+        model,
+        constant,
+        threshold_constant,
+        regression,
+        ridge=None,
+        interaction_ridge=None,
+        stretch_ridge=None,
+        full_patterns=True,
+    ):
         """RCL calibration of one sub-model -- full pattern set (estimation='cp-full-rcl') or CPAT's patterns
         ('cpat-rcl'); see calibrate()."""
         import copy
@@ -3491,7 +4332,9 @@ class MFRM(Rasch):
 
         R, I, K = self.no_of_facet_elements, self.no_of_items, self.max_score
         ridge = 0.3 if ridge is None else float(ridge)
-        interaction_ridge = 3.0 if interaction_ridge is None else float(interaction_ridge)
+        interaction_ridge = (
+            3.0 if interaction_ridge is None else float(interaction_ridge)
+        )
         stretch_ridge = 1.0 if stretch_ridge is None else float(stretch_ridge)
         if constant is None:
             rows = int(self.responses.notna().any(axis=1).sum())
@@ -3511,11 +4354,17 @@ class MFRM(Rasch):
         counts = _rcl.pattern_counts(X, K)
         cat_counts = _rcl.category_counts(X, K)
         split = _rcl.empty_widths(cat_counts, K)
-        full_arg = dict(X=X, empty=_rcl.empty_categories(cat_counts)) if full_patterns else None
+        full_arg = (
+            dict(X=X, empty=_rcl.empty_categories(cat_counts))
+            if full_patterns
+            else None
+        )
         rho = _rcl.width_ridges(counts[1], counts[2], K, exclude=split)
         totals = (counts[1] + counts[2]).sum(axis=(0, 2, 3))
         self._warn_no_information(
-            [k + 1 for k in range(K - 1) if totals[k] == 0 and k not in split], stacklevel=5)
+            [k + 1 for k in range(K - 1) if totals[k] == 0 and k not in split],
+            stacklevel=5,
+        )
         items_idx = self.responses.columns
         facets = self.facet_names
 
@@ -3525,10 +4374,14 @@ class MFRM(Rasch):
             start = copy.copy(self)
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                start.calibrate(model=model, estimation="pair-cpat", regression=regression)
+                start.calibrate(
+                    model=model, estimation="pair-cpat", regression=regression
+                )
             d0 = start.items.reindex(items_idx).to_numpy(dtype=float)
             t0 = np.asarray(start.thresholds, dtype=float)
-            lam0 = getattr(start, f"lambda_{model}").reindex(facets).to_numpy(dtype=float)
+            lam0 = (
+                getattr(start, f"lambda_{model}").reindex(facets).to_numpy(dtype=float)
+            )
             if model == "centrality":
                 wI0 = np.ones(R)
                 wT0 = start.omega_centrality.reindex(facets).to_numpy(dtype=float)
@@ -3537,16 +4390,32 @@ class MFRM(Rasch):
                 wT0 = np.ones(R)
             else:
                 wI0 = start.omega_items_bistretch.reindex(facets).to_numpy(dtype=float)
-                wT0 = start.omega_thresholds_bistretch.reindex(facets).to_numpy(dtype=float)
+                wT0 = start.omega_thresholds_bistretch.reindex(facets).to_numpy(
+                    dtype=float
+                )
             wI0, wT0 = np.nan_to_num(wI0, nan=1.0), np.nan_to_num(wT0, nan=1.0)
-            sm = _rcl.StretchModel(model, counts, R, I, K, c_item, c_thr, c_facet, stretch_ridge,
-                                   width_rho=rho, drop_widths=split, full=full_arg)
+            sm = _rcl.StretchModel(
+                model,
+                counts,
+                R,
+                I,
+                K,
+                c_item,
+                c_thr,
+                c_facet,
+                stretch_ridge,
+                width_rho=rho,
+                drop_widths=split,
+                full=full_arg,
+            )
 
             def fit(fixed_widths):
                 fixed = {sm.tau_cols.start + k: v for k, v in fixed_widths.items()}
                 best = None
-                for st in (sm.theta_from(d0, t0, lam0, wI0, wT0),
-                           sm.theta_from(d0, t0, lam0, np.ones(R), np.ones(R))):
+                for st in (
+                    sm.theta_from(d0, t0, lam0, wI0, wT0),
+                    sm.theta_from(d0, t0, lam0, np.ones(R), np.ones(R)),
+                ):
                     th, info = sm.fit(st, fixed=fixed)
                     if best is None or info["objective"] > best[1]["objective"]:
                         best = (th, info)
@@ -3565,72 +4434,124 @@ class MFRM(Rasch):
                 theta, info = fit(fixed_widths)
             self._rcl_fits = getattr(self, "_rcl_fits", {})
             self._rcl_fits[model] = dict(
-                kind="stretch", sm=sm, theta=theta, split=split,
-                fixed=[sm.tau_cols.start + k for k in fixed_widths])
+                kind="stretch",
+                sm=sm,
+                theta=theta,
+                split=split,
+                fixed=[sm.tau_cols.start + k for k in fixed_widths],
+            )
             d, tau, lam, wI, wT = sm.unpack(theta)
             lam_s = pd.Series(lam, index=facets)
-            item_dev = pd.DataFrame(lam[:, None] + (wI[:, None] - 1) * d[None, :], index=facets, columns=items_idx)
-            thr_dev = pd.DataFrame((wT[:, None] - 1) * tau[None, :], index=facets, columns=range(1, K + 1))
+            item_dev = pd.DataFrame(
+                lam[:, None] + (wI[:, None] - 1) * d[None, :],
+                index=facets,
+                columns=items_idx,
+            )
+            thr_dev = pd.DataFrame(
+                (wT[:, None] - 1) * tau[None, :], index=facets, columns=range(1, K + 1)
+            )
             if model == "centrality":
                 omega = pd.Series(wT, index=facets)
                 self.lambda_centrality, self.omega_centrality = lam_s, omega
                 self.facet_effects_centrality_full_vector = thr_dev.add(lam_s, axis=0)
-                self.facet_effects_centrality = pd.DataFrame({"lambda": lam_s, "omega": omega})
+                self.facet_effects_centrality = pd.DataFrame(
+                    {"lambda": lam_s, "omega": omega}
+                )
                 self._warn_nonpositive_stretch(omega, "omega", "centrality")
             elif model == "pseudo_halo":
                 omega = pd.Series(wI, index=facets)
                 self.lambda_pseudo_halo, self.omega_pseudo_halo = lam_s, omega
                 self.facet_effects_pseudo_halo_full_vector = item_dev
-                self.facet_effects_pseudo_halo = pd.DataFrame({"lambda": lam_s, "omega": omega})
+                self.facet_effects_pseudo_halo = pd.DataFrame(
+                    {"lambda": lam_s, "omega": omega}
+                )
                 self._warn_nonpositive_stretch(omega, "omega", "pseudo_halo")
             else:
                 om_i, om_t = pd.Series(wI, index=facets), pd.Series(wT, index=facets)
                 self.lambda_bistretch = lam_s
                 self.omega_items_bistretch, self.omega_thresholds_bistretch = om_i, om_t
-                self.facet_effects_bistretch_items, self.facet_effects_bistretch_thresholds = item_dev, thr_dev
+                (
+                    self.facet_effects_bistretch_items,
+                    self.facet_effects_bistretch_thresholds,
+                ) = (item_dev, thr_dev)
                 full = item_dev.to_numpy()[:, :, None] + thr_dev.to_numpy()[:, None, :]
-                mi = pd.MultiIndex.from_product([facets, self.item_names], names=[self.facet, "item"])
+                mi = pd.MultiIndex.from_product(
+                    [facets, self.item_names], names=[self.facet, "item"]
+                )
                 self.facet_effects_bistretch_full_vector = pd.DataFrame(
-                    full.reshape(-1, K), index=mi, columns=range(1, K + 1))
+                    full.reshape(-1, K), index=mi, columns=range(1, K + 1)
+                )
                 self.facet_effects_bistretch = pd.DataFrame(
-                    {"lambda": lam_s, "omega_items": om_i, "omega_thresholds": om_t})
+                    {"lambda": lam_s, "omega_items": om_i, "omega_thresholds": om_t}
+                )
                 self._warn_nonpositive_stretch(om_i, "omega_items", "bistretch")
                 self._warn_nonpositive_stretch(om_t, "omega_thresholds", "bistretch")
             widths = np.diff(tau)
         else:
             cm, theta, info = _rcl.fit_cell(
-                model, counts, R, I, K, c_item, c_thr, c_facet, ridge=ridge,
-                interaction_ridge=interaction_ridge, width_rho=rho,
-                fixed_widths={k: 0.0 for k in split}, full=full_arg,
+                model,
+                counts,
+                R,
+                I,
+                K,
+                c_item,
+                c_thr,
+                c_facet,
+                ridge=ridge,
+                interaction_ridge=interaction_ridge,
+                width_rho=rho,
+                fixed_widths={k: 0.0 for k in split},
+                full=full_arg,
             )
             self._rcl_fits = getattr(self, "_rcl_fits", {})
-            self._rcl_fits[model] = dict(kind="cell", cm=cm, theta=theta, info=info, split=split)
+            self._rcl_fits[model] = dict(
+                kind="cell", cm=cm, theta=theta, info=info, split=split
+            )
             parts = cm.parts(theta)
             d, s = parts["delta"], parts["s"]
             widths = np.diff(parts["tau"])
             if split:
                 w = self._shipped_widths(pd.Series(d, index=items_idx), thr_constant)
                 widths[split] = w[split]
-            mi = pd.MultiIndex.from_product([facets, self.item_names], names=[self.facet, "item"])
+            mi = pd.MultiIndex.from_product(
+                [facets, self.item_names], names=[self.facet, "item"]
+            )
             if model == "global":
                 self.facet_effects_global = pd.Series(s[:, 0, 0], index=facets)
             elif model == "items":
-                self.facet_effects_items = pd.DataFrame(s[:, :, 0], index=facets, columns=items_idx)
+                self.facet_effects_items = pd.DataFrame(
+                    s[:, :, 0], index=facets, columns=items_idx
+                )
             elif model == "thresholds":
-                self.facet_effects_thresholds = pd.DataFrame(s[:, 0, :], index=facets, columns=range(1, K + 1))
+                self.facet_effects_thresholds = pd.DataFrame(
+                    s[:, 0, :], index=facets, columns=range(1, K + 1)
+                )
             elif model == "matrix":
-                self.facet_effects_matrix = pd.DataFrame(s.reshape(-1, K), index=mi, columns=range(1, K + 1))
+                self.facet_effects_matrix = pd.DataFrame(
+                    s.reshape(-1, K), index=mi, columns=range(1, K + 1)
+                )
                 thr_marg = s.mean(axis=1)
-                self.marginal_facet_effects_items = pd.DataFrame(s.mean(axis=2), index=facets, columns=items_idx)
+                self.marginal_facet_effects_items = pd.DataFrame(
+                    s.mean(axis=2), index=facets, columns=items_idx
+                )
                 self.marginal_facet_effects_thresholds = pd.DataFrame(
-                    thr_marg - thr_marg.mean(axis=1, keepdims=True), index=facets, columns=range(1, K + 1))
+                    thr_marg - thr_marg.mean(axis=1, keepdims=True),
+                    index=facets,
+                    columns=range(1, K + 1),
+                )
             else:  # bivector
                 # (no facet element parameters when there is a single facet element)
                 a = parts["a"][:, :, 0] if "a" in parts else np.zeros((R, I))
                 t2 = parts["t2"][:, 0, :] if "t2" in parts else np.zeros((R, K))
-                self.facet_effects_bivector_items = pd.DataFrame(a, index=facets, columns=items_idx)
-                self.facet_effects_bivector_thresholds = pd.DataFrame(t2, index=facets, columns=range(1, K + 1))
-                self.facet_effects_bivector = pd.DataFrame(s.reshape(-1, K), index=mi, columns=range(1, K + 1))
+                self.facet_effects_bivector_items = pd.DataFrame(
+                    a, index=facets, columns=items_idx
+                )
+                self.facet_effects_bivector_thresholds = pd.DataFrame(
+                    t2, index=facets, columns=range(1, K + 1)
+                )
+                self.facet_effects_bivector = pd.DataFrame(
+                    s.reshape(-1, K), index=mi, columns=range(1, K + 1)
+                )
 
         tau = np.concatenate([[0.0], np.cumsum(widths)])
         self.items = pd.Series(d - d.mean(), index=items_idx)
@@ -3640,12 +4561,24 @@ class MFRM(Rasch):
         self.constant = item_constant
         self.threshold_constant = thr_constant
         self.facet_constant = facet_constant
-        self.ridge = ridge if model in ("global", "items", "thresholds", "bivector", "matrix") else None
+        self.ridge = (
+            ridge
+            if model in ("global", "items", "thresholds", "bivector", "matrix")
+            else None
+        )
         self.interaction_ridge = interaction_ridge if model == "matrix" else None
-        self.stretch_ridge = stretch_ridge if model in ("centrality", "pseudo_halo", "bistretch") else None
-        self.convergence = dict(iterations=info["iterations"], converged=info["converged"])
+        self.stretch_ridge = (
+            stretch_ridge
+            if model in ("centrality", "pseudo_halo", "bistretch")
+            else None
+        )
+        self.convergence = dict(
+            iterations=info["iterations"], converged=info["converged"]
+        )
         setattr(self, f"convergence_{model}", self.convergence)
-        setattr(self, f"estimation_{model}", "cp-full-rcl" if full_patterns else "cpat-rcl")
+        setattr(
+            self, f"estimation_{model}", "cp-full-rcl" if full_patterns else "cpat-rcl"
+        )
         if not info["converged"]:
             warnings.warn(
                 f"RCL-CPAT calibration of model='{model}' did not converge in "
@@ -3742,7 +4675,11 @@ class MFRM(Rasch):
                 ridge=ridge,
                 interaction_ridge=interaction_ridge,
                 stretch_ridge=stretch_ridge,
-                **({"regression": regression} if model in ("centrality", "pseudo_halo", "bistretch") else {}),
+                **(
+                    {"regression": regression}
+                    if model in ("centrality", "pseudo_halo", "bistretch")
+                    else {}
+                ),
             )
 
         if model == "global":
@@ -3938,7 +4875,11 @@ class MFRM(Rasch):
             if model == "global":
                 return sev.loc[rater]
             if model in ("items", "thresholds", "centrality", "pseudo_halo"):
-                return sev.loc[rater].mean() if component is None else sev.loc[rater, component]
+                return (
+                    sev.loc[rater].mean()
+                    if component is None
+                    else sev.loc[rater, component]
+                )
             # matrix / bivector / bistretch: MultiIndex (facet_element, item) rows, columns=thresholds
             if component is None:
                 return sev.loc[rater].values.mean()
@@ -3980,10 +4921,15 @@ class MFRM(Rasch):
             )
             if not cochran:
                 return facet_effects, None
-            ests = np.array([
-                [_get_component(getattr(s, sev_attr), r, component) for r in anchors]
-                for s in samples
-            ])
+            ests = np.array(
+                [
+                    [
+                        _get_component(getattr(s, sev_attr), r, component)
+                        for r in anchors
+                    ]
+                    for s in samples
+                ]
+            )
             se = pd.Series(np.nanstd(ests, axis=0), index=anchors)
             return facet_effects, se
 
@@ -4067,7 +5013,9 @@ class MFRM(Rasch):
             median_val = scalar_facet_effects.median()
             mad = (scalar_facet_effects - median_val).abs().median()
             robust_z = 0.6745 * (scalar_facet_effects - median_val) / mad
-            table = pd.DataFrame({"Facet effect": scalar_facet_effects, "Robust z": robust_z})
+            table = pd.DataFrame(
+                {"Facet effect": scalar_facet_effects, "Robust z": robust_z}
+            )
             table["Flagged"] = table["Robust z"].abs() > robust_z_threshold
             self.anchor_homogeneity_test = None
 
@@ -4131,8 +5079,9 @@ class MFRM(Rasch):
             item_adj = self.facet_effects_bivector_items.loc[anchors].mean(axis=0)
             thr_adj = self.facet_effects_bivector_thresholds.loc[anchors].mean(axis=0)
             return (item_adj, thr_adj)
-        elif model in ("centrality", "pseudo_halo", "bistretch") and \
-                getattr(self, f"estimation_{model}", "pair-cpat") in ("cp-full-rcl", "cpat-rcl"):
+        elif model in ("centrality", "pseudo_halo", "bistretch") and getattr(
+            self, f"estimation_{model}", "pair-cpat"
+        ) in ("cp-full-rcl", "cpat-rcl"):
             return self._stretch_anchor_adj(model, anchors)
         elif model == "centrality":
             return self.facet_effects_thresholds.loc[anchors].mean(axis=0)
@@ -4196,8 +5145,11 @@ class MFRM(Rasch):
         """Anchor adjustment of an RCL-CPAT stretch model: the anchors' mean
         shift and mean stretches (see _calibrate_anchor_stretch_rcl)."""
         lam, om_i, om_t = self._stretch_params(model)
-        return (float(lam.loc[anchors].mean()), float(om_i.loc[anchors].mean()),
-                float(om_t.loc[anchors].mean()))
+        return (
+            float(lam.loc[anchors].mean()),
+            float(om_i.loc[anchors].mean()),
+            float(om_t.loc[anchors].mean()),
+        )
 
     def _calibrate_anchor_stretch_rcl(self, model, anchors, adj=None):
         """
@@ -4215,36 +5167,57 @@ class MFRM(Rasch):
         Item locations and thresholds stay centred.
         """
         lam, om_i, om_t = self._stretch_params(model)
-        lam_a, wi_a, wt_a = self._stretch_anchor_adj(model, anchors) if adj is None else adj
+        lam_a, wi_a, wt_a = (
+            self._stretch_anchor_adj(model, anchors) if adj is None else adj
+        )
         d = self._items_for(model) * wi_a
         tau = self._thresholds_for(model) * wt_a
         lam2, om_i2, om_t2 = lam - lam_a, om_i / wi_a, om_t / wt_a
         items_idx, K = self.responses.columns, self.max_score
-        item_dev = pd.DataFrame(lam2.to_numpy()[:, None] + (om_i2.to_numpy()[:, None] - 1) * d.reindex(items_idx).to_numpy()[None, :],
-                                index=lam.index, columns=items_idx)
-        thr_dev = pd.DataFrame((om_t2.to_numpy()[:, None] - 1) * tau.to_numpy()[None, :],
-                               index=lam.index, columns=range(1, K + 1))
+        item_dev = pd.DataFrame(
+            lam2.to_numpy()[:, None]
+            + (om_i2.to_numpy()[:, None] - 1)
+            * d.reindex(items_idx).to_numpy()[None, :],
+            index=lam.index,
+            columns=items_idx,
+        )
+        thr_dev = pd.DataFrame(
+            (om_t2.to_numpy()[:, None] - 1) * tau.to_numpy()[None, :],
+            index=lam.index,
+            columns=range(1, K + 1),
+        )
         setattr(self, f"anchor_items_{model}", d)
         setattr(self, f"anchor_thresholds_{model}", tau)
         setattr(self, f"anchor_lambda_{model}", lam2)
         if model == "centrality":
             self.anchor_omega_centrality = om_t2
             self.anchor_facet_effects_centrality_full_vector = thr_dev.add(lam2, axis=0)
-            self.anchor_facet_effects_centrality = pd.DataFrame({"lambda": lam2, "omega": om_t2})
+            self.anchor_facet_effects_centrality = pd.DataFrame(
+                {"lambda": lam2, "omega": om_t2}
+            )
         elif model == "pseudo_halo":
             self.anchor_omega_pseudo_halo = om_i2
             self.anchor_facet_effects_pseudo_halo_full_vector = item_dev
-            self.anchor_facet_effects_pseudo_halo = pd.DataFrame({"lambda": lam2, "omega": om_i2})
+            self.anchor_facet_effects_pseudo_halo = pd.DataFrame(
+                {"lambda": lam2, "omega": om_i2}
+            )
         else:
-            self.anchor_omega_items_bistretch, self.anchor_omega_thresholds_bistretch = om_i2, om_t2
+            (
+                self.anchor_omega_items_bistretch,
+                self.anchor_omega_thresholds_bistretch,
+            ) = (om_i2, om_t2)
             self.anchor_facet_effects_bistretch_items = item_dev
             self.anchor_facet_effects_bistretch_thresholds = thr_dev
             full = item_dev.to_numpy()[:, :, None] + thr_dev.to_numpy()[:, None, :]
-            mi = pd.MultiIndex.from_product([self.facet_names, self.item_names], names=[self.facet, "item"])
+            mi = pd.MultiIndex.from_product(
+                [self.facet_names, self.item_names], names=[self.facet, "item"]
+            )
             self.anchor_facet_effects_bistretch_full_vector = pd.DataFrame(
-                full.reshape(-1, K), index=mi, columns=range(1, K + 1))
+                full.reshape(-1, K), index=mi, columns=range(1, K + 1)
+            )
             self.anchor_facet_effects_bistretch = pd.DataFrame(
-                {"lambda": lam2, "omega_items": om_i2, "omega_thresholds": om_t2})
+                {"lambda": lam2, "omega_items": om_i2, "omega_thresholds": om_t2}
+            )
 
     def _calibrate_anchor_centrality(self, anchors, adj=None, regression="huber"):
         """
@@ -4255,13 +5228,14 @@ class MFRM(Rasch):
         from the anchored facet effects and anchored reference thresholds.
         See _derive_stretch_model for the regression= argument.
         """
-        if getattr(self, "estimation_centrality", "pair-cpat") in ("cp-full-rcl", "cpat-rcl"):
+        if getattr(self, "estimation_centrality", "pair-cpat") in (
+            "cp-full-rcl",
+            "cpat-rcl",
+        ):
             return self._calibrate_anchor_stretch_rcl("centrality", anchors, adj=adj)
         self._calibrate_anchor_thresholds(anchors, adj=adj)
         self.anchor_items_centrality = self.anchor_items_thresholds.copy()
-        self.anchor_thresholds_centrality = (
-            self.anchor_thresholds_thresholds.copy()
-        )
+        self.anchor_thresholds_centrality = self.anchor_thresholds_thresholds.copy()
         lam, omega, facet_effects = self._derive_stretch_model(
             self.anchor_facet_effects_thresholds,
             self.anchor_thresholds_thresholds,
@@ -4270,7 +5244,9 @@ class MFRM(Rasch):
         self.anchor_lambda_centrality = lam
         self.anchor_omega_centrality = omega
         self.anchor_facet_effects_centrality_full_vector = facet_effects
-        self.anchor_facet_effects_centrality = pd.DataFrame({"lambda": lam, "omega": omega})
+        self.anchor_facet_effects_centrality = pd.DataFrame(
+            {"lambda": lam, "omega": omega}
+        )
         self._warn_nonpositive_stretch(omega, "omega", "centrality")
 
     def _calibrate_anchor_pseudo_halo(self, anchors, adj=None, regression="huber"):
@@ -4282,7 +5258,10 @@ class MFRM(Rasch):
         anchored reference item locations. See _derive_stretch_model for
         the regression= argument.
         """
-        if getattr(self, "estimation_pseudo_halo", "pair-cpat") in ("cp-full-rcl", "cpat-rcl"):
+        if getattr(self, "estimation_pseudo_halo", "pair-cpat") in (
+            "cp-full-rcl",
+            "cpat-rcl",
+        ):
             return self._calibrate_anchor_stretch_rcl("pseudo_halo", anchors, adj=adj)
         self._calibrate_anchor_items(anchors, adj=adj)
         self.anchor_items_pseudo_halo = self.anchor_items_items.copy()
@@ -4295,7 +5274,9 @@ class MFRM(Rasch):
         self.anchor_lambda_pseudo_halo = lam
         self.anchor_omega_pseudo_halo = omega
         self.anchor_facet_effects_pseudo_halo_full_vector = facet_effects
-        self.anchor_facet_effects_pseudo_halo = pd.DataFrame({"lambda": lam, "omega": omega})
+        self.anchor_facet_effects_pseudo_halo = pd.DataFrame(
+            {"lambda": lam, "omega": omega}
+        )
         self._warn_nonpositive_stretch(omega, "omega", "pseudo_halo")
 
     def _calibrate_anchor_matrix(self, anchors, adj=None):
@@ -4336,7 +5317,9 @@ class MFRM(Rasch):
             [self.facet_names, self.responses.columns], names=[self.facet, "item"]
         )
         self.anchor_facet_effects_matrix = pd.DataFrame(
-            sev_adj.reshape(-1, self.max_score), index=mi, columns=range(1, self.max_score + 1)
+            sev_adj.reshape(-1, self.max_score),
+            index=mi,
+            columns=range(1, self.max_score + 1),
         )
 
         # Marginal facet_effects (no sentinel to skip)
@@ -4344,7 +5327,9 @@ class MFRM(Rasch):
             sev_adj.mean(axis=2), index=self.facet_names, columns=self.responses.columns
         )
         self.anchor_marginal_facet_effects_thresholds = pd.DataFrame(
-            sev_adj.mean(axis=1), index=self.facet_names, columns=range(1, self.max_score + 1)
+            sev_adj.mean(axis=1),
+            index=self.facet_names,
+            columns=range(1, self.max_score + 1),
         )
         # Zero-sum per facet_element
         adj_thr = self.anchor_marginal_facet_effects_thresholds.mean(axis=1)
@@ -4403,7 +5388,9 @@ class MFRM(Rasch):
                     ]
                 )
                 rows.append(row)
-        self.anchor_facet_effects_bivector = pd.DataFrame(rows, index=mi, columns=range(1, self.max_score + 1))
+        self.anchor_facet_effects_bivector = pd.DataFrame(
+            rows, index=mi, columns=range(1, self.max_score + 1)
+        )
 
     def _calibrate_anchor_bistretch(self, anchors, adj=None, regression="huber"):
         """
@@ -4415,7 +5402,10 @@ class MFRM(Rasch):
         reference items/thresholds. See _derive_stretch_model for the
         regression= argument, applied to both axes.
         """
-        if getattr(self, "estimation_bistretch", "pair-cpat") in ("cp-full-rcl", "cpat-rcl"):
+        if getattr(self, "estimation_bistretch", "pair-cpat") in (
+            "cp-full-rcl",
+            "cpat-rcl",
+        ):
             return self._calibrate_anchor_stretch_rcl("bistretch", anchors, adj=adj)
         self._calibrate_anchor_bivector(anchors, adj=adj)
         self.anchor_items_bistretch = self.anchor_items_bivector.copy()
@@ -4455,11 +5445,17 @@ class MFRM(Rasch):
             rows, index=mi, columns=range(1, self.max_score + 1)
         )
         self.anchor_facet_effects_bistretch = pd.DataFrame(
-            {"lambda": lam, "omega_items": omega_items, "omega_thresholds": omega_thresholds}
+            {
+                "lambda": lam,
+                "omega_items": omega_items,
+                "omega_thresholds": omega_thresholds,
+            }
         )
 
         self._warn_nonpositive_stretch(omega_items, "omega_items", "bistretch")
-        self._warn_nonpositive_stretch(omega_thresholds, "omega_thresholds", "bistretch")
+        self._warn_nonpositive_stretch(
+            omega_thresholds, "omega_thresholds", "bistretch"
+        )
 
     # Backwards-compatible aliases
     def calibrate_global_anchor(self, anchors, **kw):
@@ -4523,10 +5519,16 @@ class MFRM(Rasch):
                 # resamples keep every facet element (an element can be missed by
                 # chance), so their estimates line up with the original's
                 warnings.simplefilter("ignore", UserWarning)
-                yield MFRM(sample, self.max_score, validate=False,
-                           facet=self.facet if self.facet_label != "facet element" else None,
-                           facet_plural=self.facets if self.facet_label != "facet element" else None,
-                           _keep_empty=True)
+                yield MFRM(
+                    sample,
+                    self.max_score,
+                    validate=False,
+                    facet=self.facet if self.facet_label != "facet element" else None,
+                    facet_plural=(
+                        self.facets if self.facet_label != "facet element" else None
+                    ),
+                    _keep_empty=True,
+                )
 
     def _resamples(self, no_of_samples, seed=None, keep=False):
         """
@@ -4539,7 +5541,12 @@ class MFRM(Rasch):
         for s in self._bootstrap_samples(no_of_samples, seed=seed):
             yield s
             if not keep:
-                for name in ("responses", "_rcl_fits", "extreme_persons", "invalid_responses"):
+                for name in (
+                    "responses",
+                    "_rcl_fits",
+                    "extreme_persons",
+                    "invalid_responses",
+                ):
                     s.__dict__.pop(name, None)
 
     def _se_from_bootstrap(self, ests_arr, labels, interval):
@@ -4616,7 +5623,10 @@ class MFRM(Rasch):
             )
         if model != "mixed" and not hasattr(self, f"facet_effects_{model}"):
             self.calibrate(model=model)
-        rcl = model != "mixed" and getattr(self, f"estimation_{model}", None) in ("cp-full-rcl", "cpat-rcl")
+        rcl = model != "mixed" and getattr(self, f"estimation_{model}", None) in (
+            "cp-full-rcl",
+            "cpat-rcl",
+        )
         if se_method == "sandwich" and (not rcl or store_bootstrap):
             raise ValueError(
                 "se_method='sandwich' needs a sub-model calibrated with estimation='cp-full-rcl' (or 'cpat-rcl') "
@@ -4676,7 +5686,11 @@ class MFRM(Rasch):
         # bootstrap sample uses a fixed scale shift rather than re-estimating
         # adj from the resample (which would inflate SEs with anchor rater
         # sampling variance).
-        adj_fixed = self._extract_anchor_adj(cal_model, anchors) if anchors is not None else None
+        adj_fixed = (
+            self._extract_anchor_adj(cal_model, anchors)
+            if anchors is not None
+            else None
+        )
 
         samples = []
         collector = _BootstrapWarnings()
@@ -4707,7 +5721,9 @@ class MFRM(Rasch):
                             adj=adj_fixed,
                         )
                         s.anchor_facet_effects_mixed = s._apply_rater_models(
-                            s.anchor_facet_effects_matrix, rater_models_for_bootstrap, anchor=True
+                            s.anchor_facet_effects_matrix,
+                            rater_models_for_bootstrap,
+                            anchor=True,
                         )
                     else:
                         s.facet_effects_mixed = s._apply_rater_models(
@@ -4768,10 +5784,22 @@ class MFRM(Rasch):
         # so their SEs are stored per sub-model; the unsuffixed attributes
         # hold the latest.
         for suffix in ("", f"_{model}"):
-            setattr(self, f"{prefix}item_se{suffix}", pd.Series(item_se, index=self.responses.columns))
+            setattr(
+                self,
+                f"{prefix}item_se{suffix}",
+                pd.Series(item_se, index=self.responses.columns),
+            )
             if item_lo is not None:
-                setattr(self, f"{prefix}item_low{suffix}", pd.Series(item_lo, index=self.responses.columns))
-                setattr(self, f"{prefix}item_high{suffix}", pd.Series(item_hi, index=self.responses.columns))
+                setattr(
+                    self,
+                    f"{prefix}item_low{suffix}",
+                    pd.Series(item_lo, index=self.responses.columns),
+                )
+                setattr(
+                    self,
+                    f"{prefix}item_high{suffix}",
+                    pd.Series(item_hi, index=self.responses.columns),
+                )
 
         thr_se, thr_lo, thr_hi = self._se_from_bootstrap(thresh_ests, None, interval)
         setattr(self, f"{prefix}threshold_se_{model}", thr_se)
@@ -4814,8 +5842,12 @@ class MFRM(Rasch):
         self._store_rater_se_impl(model, samples, anchor, interval, prefix)
         self._nan_extreme_facet_se(model, prefix)
 
-    def _store_stretch_param_se(self, model, samples, anchor, interval, prefix, param_names):
-        self._store_stretch_param_se_impl(model, samples, anchor, interval, prefix, param_names)
+    def _store_stretch_param_se(
+        self, model, samples, anchor, interval, prefix, param_names
+    ):
+        self._store_stretch_param_se_impl(
+            model, samples, anchor, interval, prefix, param_names
+        )
         self._nan_extreme_facet_se(model, prefix)
 
     def _rcl_sandwich_std_errors(self, model, anchors, interval):
@@ -4829,14 +5861,22 @@ class MFRM(Rasch):
         if not ext:
             return
         names = [f"{prefix}rater_{k}_{model}" for k in ("se", "low", "high")]
-        names += [f"{prefix}rater_se_marginal_items", f"{prefix}rater_se_marginal_thresholds"]
-        names += [f"{prefix}{p}_{k}_{model}" for p in ("lambda", "omega", "omega_items", "omega_thresholds")
-                  for k in ("se", "low", "high")]
+        names += [
+            f"{prefix}rater_se_marginal_items",
+            f"{prefix}rater_se_marginal_thresholds",
+        ]
+        names += [
+            f"{prefix}{p}_{k}_{model}"
+            for p in ("lambda", "omega", "omega_items", "omega_thresholds")
+            for k in ("se", "low", "high")
+        ]
         for name in names:
             v = getattr(self, name, None)
             if isinstance(v, (pd.Series, pd.DataFrame)):
                 idx = v.index
-                mask = (idx.get_level_values(0) if isinstance(idx, pd.MultiIndex) else idx).isin(ext)
+                mask = (
+                    idx.get_level_values(0) if isinstance(idx, pd.MultiIndex) else idx
+                ).isin(ext)
                 if mask.any():
                     v = v.copy()
                     v.loc[mask] = np.nan
@@ -4845,7 +5885,11 @@ class MFRM(Rasch):
                 v = dict(v)
                 for e in ext:
                     if e in v:
-                        v[e] = np.nan * np.asarray(v[e], dtype=float) if np.ndim(v[e]) else np.nan
+                        v[e] = (
+                            np.nan * np.asarray(v[e], dtype=float)
+                            if np.ndim(v[e])
+                            else np.nan
+                        )
                 setattr(self, name, v)
 
     def _rcl_sandwich_obstacle(self, model):
@@ -4854,6 +5898,7 @@ class MFRM(Rasch):
         (the widths next to it are set by the cpat-cml rule), a calibration
         that did not converge, or estimates the data do not identify."""
         from raschpy import _rcl
+
         fit = self._rcl_fits[model]
         x = self.responses.to_numpy(dtype=float)
         empty = [c for c in range(self.max_score + 1) if (x == c).sum() == 0]
@@ -4866,14 +5911,14 @@ class MFRM(Rasch):
             )
         if not getattr(self, f"convergence_{model}")["converged"]:
             return "the calibration did not converge, and the sandwich assumes it did"
-        R, I, K = self.no_of_facet_elements, self.no_of_items, self.max_score
-        X = self.responses.to_numpy(dtype=np.float64).reshape(R, -1, I)
         if fit["kind"] == "cell":
             try:
                 null = _rcl.cell_null(fit["cm"], fit["theta"], fit["info"])
             except _rcl.SandwichTooLarge as ex:
-                return (f"the design is too large to form the analytic standard errors' "
-                        f"information matrix ({ex})")
+                return (
+                    f"the design is too large to form the analytic standard errors' "
+                    f"information matrix ({ex})"
+                )
         else:
             null = _rcl.stretch_null(fit["sm"], fit["theta"], fixed=fit["fixed"])
         if null.shape[1]:
@@ -4909,11 +5954,11 @@ class MFRM(Rasch):
             J = info["_state"]["J"]
             Z = np.zeros((I + K + n_s, cm.p))
             Z[:I, cm.slices["delta"]] = cm._NI
-            Z[I:I + K, cm.slices["tau"]] = cm._T
+            Z[I : I + K, cm.slices["tau"]] = cm._T
             Zs = J.copy()
             Zs[:, cm.slices["delta"]] = 0.0
             Zs[:, cm.slices["tau"]] = 0.0
-            Z[I + K:] = Zs
+            Z[I + K :] = Zs
             Z = Z[:, free]
             del J, Zs
             _rcl.release_state(info)
@@ -4922,25 +5967,41 @@ class MFRM(Rasch):
             out_null = Z @ null
         else:
             sm, theta = fit["sm"], fit["theta"]
-            V, free, null = _rcl.stretch_sandwich(sm, theta, X, K, fixed=fit["fixed"], drop_widths=fit["split"])
+            V, free, null = _rcl.stretch_sandwich(
+                sm, theta, X, K, fixed=fit["fixed"], drop_widths=fit["split"]
+            )
             Mf = sm.M[:, free]
             C_phi = Mf @ V @ Mf.T
             adj = self._stretch_anchor_adj(model, anchors) if anc else None
 
             def outputs(phi):
                 oD, oT, oL, oI, oW = sm.off
-                d, tau, lam = phi[oD:oD + I], phi[oT:oT + K], phi[oL:oL + R]
-                wI, wT = phi[oI:oI + R], phi[oW:oW + R]
+                d, tau, lam = phi[oD : oD + I], phi[oT : oT + K], phi[oL : oL + R]
+                wI, wT = phi[oI : oI + R], phi[oW : oW + R]
                 if adj is not None:
                     lam_a, wi_a, wt_a = adj
-                    d, tau, lam, wI, wT = d * wi_a, tau * wt_a, lam - lam_a, wI / wi_a, wT / wt_a
-                s = lam[:, None, None] + (wI[:, None, None] - 1) * d[None, :, None] + (wT[:, None, None] - 1) * tau[None, None, :]
+                    d, tau, lam, wI, wT = (
+                        d * wi_a,
+                        tau * wt_a,
+                        lam - lam_a,
+                        wI / wi_a,
+                        wT / wt_a,
+                    )
+                s = (
+                    lam[:, None, None]
+                    + (wI[:, None, None] - 1) * d[None, :, None]
+                    + (wT[:, None, None] - 1) * tau[None, None, :]
+                )
                 return np.concatenate([d, tau, s.ravel(), lam, wI, wT])
 
             phi0 = sm.phi0 + sm.M @ theta
             h = 1e-6
-            F = np.column_stack([(outputs(phi0 + h * e) - outputs(phi0 - h * e)) / (2 * h)
-                                 for e in np.eye(len(phi0))])
+            F = np.column_stack(
+                [
+                    (outputs(phi0 + h * e) - outputs(phi0 - h * e)) / (2 * h)
+                    for e in np.eye(len(phi0))
+                ]
+            )
             C = F @ C_phi @ F.T
             out_null = F @ Mf @ null
             stretch_rows = I + K + n_s
@@ -4965,32 +6026,56 @@ class MFRM(Rasch):
                 setattr(self, f"{prefix}item_low{suffix}", item_est - z * item_se)
                 setattr(self, f"{prefix}item_high{suffix}", item_est + z * item_se)
         # thresholds and widths
-        thr_se = np.sqrt(var[I:I + K])
+        thr_se = np.sqrt(var[I : I + K])
         thr_est = np.asarray(self._thresholds_for(model, anchor=anc), dtype=float)
         setattr(self, f"{prefix}threshold_se_{model}", thr_se)
-        setattr(self, f"{prefix}threshold_low_{model}", thr_est - z * thr_se if z is not None else None)
-        setattr(self, f"{prefix}threshold_high_{model}", thr_est + z * thr_se if z is not None else None)
+        setattr(
+            self,
+            f"{prefix}threshold_low_{model}",
+            thr_est - z * thr_se if z is not None else None,
+        )
+        setattr(
+            self,
+            f"{prefix}threshold_high_{model}",
+            thr_est + z * thr_se if z is not None else None,
+        )
         Dm = np.diff(np.eye(K), axis=0)
-        w_se = np.sqrt(np.clip(np.diag(Dm @ C[I:I + K, I:I + K] @ Dm.T), 0, None))
+        w_se = np.sqrt(np.clip(np.diag(Dm @ C[I : I + K, I : I + K] @ Dm.T), 0, None))
         widths = np.diff(thr_est)
         for k in fit["split"]:
-            w_se[k] = np.nan                                  # set by the cpat-cml rule, not by the fit
+            w_se[k] = np.nan  # set by the cpat-cml rule, not by the fit
         setattr(self, f"{prefix}cat_width_bootstrap_{model}", None)
-        setattr(self, f"{prefix}cat_width_se_{model}", {k + 1: float(w_se[k]) for k in range(K - 1)})
+        setattr(
+            self,
+            f"{prefix}cat_width_se_{model}",
+            {k + 1: float(w_se[k]) for k in range(K - 1)},
+        )
         if z is not None:
-            setattr(self, f"{prefix}cat_width_low_{model}", {k + 1: widths[k] - z * w_se[k] for k in range(K - 1)})
-            setattr(self, f"{prefix}cat_width_high_{model}", {k + 1: widths[k] + z * w_se[k] for k in range(K - 1)})
+            setattr(
+                self,
+                f"{prefix}cat_width_low_{model}",
+                {k + 1: widths[k] - z * w_se[k] for k in range(K - 1)},
+            )
+            setattr(
+                self,
+                f"{prefix}cat_width_high_{model}",
+                {k + 1: widths[k] + z * w_se[k] for k in range(K - 1)},
+            )
 
         # facet element effects: covariance of the location-grid deviations s
-        Cs = C[I + K:I + K + n_s, I + K:I + K + n_s].reshape(R, I, K, R, I, K)
+        Cs = C[I + K : I + K + n_s, I + K : I + K + n_s].reshape(R, I, K, R, I, K)
         r_ix = np.arange(R)
 
         def se_cells():
-            return np.sqrt(np.clip(np.diag(C)[I + K:I + K + n_s], 0, None)).reshape(R, I, K)
+            return np.sqrt(np.clip(np.diag(C)[I + K : I + K + n_s], 0, None)).reshape(
+                R, I, K
+            )
 
         def se_item_part():
             # mean over thresholds of s, per (facet element, item)
-            v = np.array([[Cs[r, i, :, r, i, :].sum() / K ** 2 for i in range(I)] for r in r_ix])
+            v = np.array(
+                [[Cs[r, i, :, r, i, :].sum() / K**2 for i in range(I)] for r in r_ix]
+            )
             return np.sqrt(np.clip(v, 0, None))
 
         def se_threshold_part(centred_over_items):
@@ -5029,29 +6114,50 @@ class MFRM(Rasch):
             setattr(self, f"{prefix}rater_se_{model}", se)
             store_interval(se, sev_est.reindex(index=facets, columns=cols_k))
         elif model == "matrix":
-            mi = pd.MultiIndex.from_product([facets, items_idx], names=[self.facet, "item"])
+            mi = pd.MultiIndex.from_product(
+                [facets, items_idx], names=[self.facet, "item"]
+            )
             se = pd.DataFrame(cells.reshape(-1, K), index=mi, columns=cols_k)
             setattr(self, f"{prefix}rater_se_{model}", se)
-            setattr(self, f"{prefix}rater_se_marginal_items",
-                    pd.DataFrame(se_item_part(), index=facets, columns=items_idx))
-            setattr(self, f"{prefix}rater_se_marginal_thresholds",
-                    pd.DataFrame(se_threshold_part(True), index=facets, columns=cols_k))
+            setattr(
+                self,
+                f"{prefix}rater_se_marginal_items",
+                pd.DataFrame(se_item_part(), index=facets, columns=items_idx),
+            )
+            setattr(
+                self,
+                f"{prefix}rater_se_marginal_thresholds",
+                pd.DataFrame(se_threshold_part(True), index=facets, columns=cols_k),
+            )
             store_interval(se, sev_est.reindex(index=mi, columns=cols_k))
         else:  # bivector, bistretch: item part (mean over thresholds) and threshold part
             se_items = pd.DataFrame(se_item_part(), index=facets, columns=items_idx)
-            se_thresholds = pd.DataFrame(se_threshold_part(False), index=facets, columns=cols_k)
+            se_thresholds = pd.DataFrame(
+                se_threshold_part(False), index=facets, columns=cols_k
+            )
             setattr(self, f"{prefix}rater_se_marginal_items", se_items)
             setattr(self, f"{prefix}rater_se_marginal_thresholds", se_thresholds)
             setattr(self, f"{prefix}rater_se_{model}", se_items)
 
         if stretch_rows is not None:
-            names = {"centrality": ["lambda", "omega"], "pseudo_halo": ["lambda", "omega"],
-                     "bistretch": ["lambda", "omega_items", "omega_thresholds"]}[model]
-            rows = {"lambda": stretch_rows, "omega_items": stretch_rows + R, "omega_thresholds": stretch_rows + 2 * R}
-            rows["omega"] = rows["omega_thresholds"] if model == "centrality" else rows["omega_items"]
+            names = {
+                "centrality": ["lambda", "omega"],
+                "pseudo_halo": ["lambda", "omega"],
+                "bistretch": ["lambda", "omega_items", "omega_thresholds"],
+            }[model]
+            rows = {
+                "lambda": stretch_rows,
+                "omega_items": stretch_rows + R,
+                "omega_thresholds": stretch_rows + 2 * R,
+            }
+            rows["omega"] = (
+                rows["omega_thresholds"]
+                if model == "centrality"
+                else rows["omega_items"]
+            )
             for pname in names:
                 r0 = rows[pname]
-                se = pd.Series(np.sqrt(var[r0:r0 + R]), index=facets)
+                se = pd.Series(np.sqrt(var[r0 : r0 + R]), index=facets)
                 setattr(self, f"{prefix}{pname}_se_{model}", se)
                 if z is not None:
                     est = getattr(self, f"{prefix}{pname}_{model}").reindex(facets)
@@ -5059,13 +6165,16 @@ class MFRM(Rasch):
                     setattr(self, f"{prefix}{pname}_high_{model}", est + z * se)
             cov = {}
             for a_i, p1 in enumerate(names):
-                for p2 in names[a_i + 1:]:
+                for p2 in names[a_i + 1 :]:
                     cov[f"{p1}_{p2}"] = pd.Series(
-                        [C[rows[p1] + r, rows[p2] + r] for r in r_ix], index=facets)
+                        [C[rows[p1] + r, rows[p2] + r] for r in r_ix], index=facets
+                    )
             setattr(self, f"{prefix}stretch_param_cov_{model}", cov)
         self._set_facet_aliases(model, anchor=anc)
 
-    def _store_stretch_param_se_impl(self, model, samples, anchor, interval, prefix, param_names):
+    def _store_stretch_param_se_impl(
+        self, model, samples, anchor, interval, prefix, param_names
+    ):
         """
         Bootstrap SE/CI for a stretch-restricted model's own raw shift/
         stretch parameters (lambda, omega -- or omega_items/
@@ -5091,42 +6200,52 @@ class MFRM(Rasch):
         hi_p = 50 * (1 + interval) if interval is not None else None
         for pname in param_names:
             attr = f"anchor_{pname}_{model}" if anchor else f"{pname}_{model}"
-            ests = np.array([
-                getattr(s, attr).values for s in samples
-                if len(getattr(s, attr)) == self.no_of_facet_elements
-            ])
+            ests = np.array(
+                [
+                    getattr(s, attr).values
+                    for s in samples
+                    if len(getattr(s, attr)) == self.no_of_facet_elements
+                ]
+            )
             se = pd.Series(np.nanstd(ests, axis=0), index=self.facet_names)
             setattr(self, f"{prefix}{pname}_se_{model}", se)
             if interval is not None:
                 setattr(
                     self,
                     f"{prefix}{pname}_low_{model}",
-                    pd.Series(np.percentile(ests, lo_p, axis=0), index=self.facet_names),
+                    pd.Series(
+                        np.percentile(ests, lo_p, axis=0), index=self.facet_names
+                    ),
                 )
                 setattr(
                     self,
                     f"{prefix}{pname}_high_{model}",
-                    pd.Series(np.percentile(ests, hi_p, axis=0), index=self.facet_names),
+                    pd.Series(
+                        np.percentile(ests, hi_p, axis=0), index=self.facet_names
+                    ),
                 )
 
         if len(param_names) > 1:
             cov_dict = {}
             for i, p1 in enumerate(param_names):
-                for p2 in param_names[i + 1:]:
+                for p2 in param_names[i + 1 :]:
                     attr1 = f"anchor_{p1}_{model}" if anchor else f"{p1}_{model}"
                     attr2 = f"anchor_{p2}_{model}" if anchor else f"{p2}_{model}"
                     valid = [
-                        s for s in samples
+                        s
+                        for s in samples
                         if len(getattr(s, attr1)) == self.no_of_facet_elements
                         and len(getattr(s, attr2)) == self.no_of_facet_elements
                     ]
                     ests1 = np.array([getattr(s, attr1).values for s in valid])
                     ests2 = np.array([getattr(s, attr2).values for s in valid])
                     if len(valid) > 1:
-                        cov_vals = np.array([
-                            np.cov(ests1[:, r], ests2[:, r])[0, 1]
-                            for r in range(ests1.shape[1])
-                        ])
+                        cov_vals = np.array(
+                            [
+                                np.cov(ests1[:, r], ests2[:, r])[0, 1]
+                                for r in range(ests1.shape[1])
+                            ]
+                        )
                     else:
                         cov_vals = np.full(self.no_of_facet_elements, np.nan)
                     cov_dict[f"{p1}_{p2}"] = pd.Series(cov_vals, index=self.facet_names)
@@ -5141,10 +6260,13 @@ class MFRM(Rasch):
             sev_attr = (
                 "anchor_facet_effects_global" if anchor else "facet_effects_global"
             )
-            rater_ests = np.array([
-                getattr(s, sev_attr).values for s in samples
-                if len(getattr(s, sev_attr)) == self.no_of_facet_elements
-            ])
+            rater_ests = np.array(
+                [
+                    getattr(s, sev_attr).values
+                    for s in samples
+                    if len(getattr(s, sev_attr)) == self.no_of_facet_elements
+                ]
+            )
             se = pd.Series(np.nanstd(rater_ests, axis=0), index=self.facet_names)
             setattr(self, f"{prefix}rater_se_{model}", se)
             if interval is not None:
@@ -5167,8 +6289,11 @@ class MFRM(Rasch):
             sev_attr = self._sev_attr(model, anchor=anchor)
             # Each sample's facet_effects_items/facet_effects_pseudo_halo_full_vector is a (R, I) DataFrame
             rater_ests = np.array(
-                [getattr(s, sev_attr).values for s in samples
-                 if getattr(s, sev_attr).shape[0] == self.no_of_facet_elements]
+                [
+                    getattr(s, sev_attr).values
+                    for s in samples
+                    if getattr(s, sev_attr).shape[0] == self.no_of_facet_elements
+                ]
             )  # (B, R, I)
             se = pd.DataFrame(
                 np.nanstd(rater_ests, axis=0),
@@ -5205,24 +6330,35 @@ class MFRM(Rasch):
             # Each sample's facet_effects_thresholds/facet_effects_centrality_full_vector
             # is a (R, K) DataFrame
             rater_ests = np.array(
-                [getattr(s, sev_attr).values for s in samples
-                 if getattr(s, sev_attr).shape[0] == self.no_of_facet_elements]
+                [
+                    getattr(s, sev_attr).values
+                    for s in samples
+                    if getattr(s, sev_attr).shape[0] == self.no_of_facet_elements
+                ]
             )  # (B, R, K+1)
-            se = pd.DataFrame(np.nanstd(rater_ests, axis=0), index=self.facet_names, columns=range(1, self.max_score + 1))
+            se = pd.DataFrame(
+                np.nanstd(rater_ests, axis=0),
+                index=self.facet_names,
+                columns=range(1, self.max_score + 1),
+            )
             setattr(self, f"{prefix}rater_se_{model}", se)
             if interval is not None:
                 setattr(
                     self,
                     f"{prefix}rater_low_{model}",
                     pd.DataFrame(
-                        np.percentile(rater_ests, lo_p, axis=0), index=self.facet_names, columns=range(1, self.max_score + 1)
+                        np.percentile(rater_ests, lo_p, axis=0),
+                        index=self.facet_names,
+                        columns=range(1, self.max_score + 1),
                     ),
                 )
                 setattr(
                     self,
                     f"{prefix}rater_high_{model}",
                     pd.DataFrame(
-                        np.percentile(rater_ests, hi_p, axis=0), index=self.facet_names, columns=range(1, self.max_score + 1)
+                        np.percentile(rater_ests, hi_p, axis=0),
+                        index=self.facet_names,
+                        columns=range(1, self.max_score + 1),
                     ),
                 )
             if model == "centrality":
@@ -5242,8 +6378,11 @@ class MFRM(Rasch):
                 else "facet_effects_bivector_thresholds"
             )
             # Both are (R, I) and (R, K+1) DataFrames
-            valid = [s for s in samples
-                     if getattr(s, sev_i_attr).shape[0] == self.no_of_facet_elements]
+            valid = [
+                s
+                for s in samples
+                if getattr(s, sev_i_attr).shape[0] == self.no_of_facet_elements
+            ]
             item_ests = np.array(
                 [getattr(s, sev_i_attr).values for s in valid]
             )  # (B, R, I)
@@ -5256,7 +6395,9 @@ class MFRM(Rasch):
                 columns=self.responses.columns,
             )
             se_thresholds = pd.DataFrame(
-                np.nanstd(thr_ests, axis=0), index=self.facet_names, columns=range(1, self.max_score + 1)
+                np.nanstd(thr_ests, axis=0),
+                index=self.facet_names,
+                columns=range(1, self.max_score + 1),
             )
             setattr(self, f"{prefix}rater_se_marginal_items", se_items)
             setattr(self, f"{prefix}rater_se_marginal_thresholds", se_thresholds)
@@ -5275,8 +6416,11 @@ class MFRM(Rasch):
             )
             # Both are (R, I) and (R, K) DataFrames, same shape as bivector's
             # own split marginal vectors -- reuse the identical approach.
-            valid = [s for s in samples
-                     if getattr(s, sev_i_attr).shape[0] == self.no_of_facet_elements]
+            valid = [
+                s
+                for s in samples
+                if getattr(s, sev_i_attr).shape[0] == self.no_of_facet_elements
+            ]
             item_ests = np.array(
                 [getattr(s, sev_i_attr).values for s in valid]
             )  # (B, R, I)
@@ -5289,13 +6433,20 @@ class MFRM(Rasch):
                 columns=self.responses.columns,
             )
             se_thresholds = pd.DataFrame(
-                np.nanstd(thr_ests, axis=0), index=self.facet_names, columns=range(1, self.max_score + 1)
+                np.nanstd(thr_ests, axis=0),
+                index=self.facet_names,
+                columns=range(1, self.max_score + 1),
             )
             setattr(self, f"{prefix}rater_se_marginal_items", se_items)
             setattr(self, f"{prefix}rater_se_marginal_thresholds", se_thresholds)
             setattr(self, f"{prefix}rater_se_{model}", se_items)
             self._store_stretch_param_se(
-                model, samples, anchor, interval, prefix, ["lambda", "omega_items", "omega_thresholds"]
+                model,
+                samples,
+                anchor,
+                interval,
+                prefix,
+                ["lambda", "omega_items", "omega_thresholds"],
             )
 
         elif model == "matrix":
@@ -5315,7 +6466,11 @@ class MFRM(Rasch):
             mi = pd.MultiIndex.from_product(
                 [self.facet_names, self.responses.columns], names=[self.facet, "item"]
             )
-            se = pd.DataFrame(np.nanstd(rater_ests, axis=0), index=mi, columns=range(1, self.max_score + 1))
+            se = pd.DataFrame(
+                np.nanstd(rater_ests, axis=0),
+                index=mi,
+                columns=range(1, self.max_score + 1),
+            )
             setattr(self, f"{prefix}rater_se_{model}", se)
 
             # Marginal SEs: item = mean over K, threshold = mean over I
@@ -5332,7 +6487,9 @@ class MFRM(Rasch):
             )
             thr_means = sev_4d.mean(axis=2)  # (B, R, K) — mean over I
             se_marginal_thresholds = pd.DataFrame(
-                np.nanstd(thr_means, axis=0), index=self.facet_names, columns=range(1, self.max_score + 1)
+                np.nanstd(thr_means, axis=0),
+                index=self.facet_names,
+                columns=range(1, self.max_score + 1),
             )
             setattr(self, f"{prefix}rater_se_marginal_items", se_marginal_items)
             setattr(
@@ -5343,12 +6500,20 @@ class MFRM(Rasch):
                 setattr(
                     self,
                     f"{prefix}rater_low_{model}",
-                    pd.DataFrame(np.percentile(rater_ests, lo_p, axis=0), index=mi, columns=range(1, self.max_score + 1)),
+                    pd.DataFrame(
+                        np.percentile(rater_ests, lo_p, axis=0),
+                        index=mi,
+                        columns=range(1, self.max_score + 1),
+                    ),
                 )
                 setattr(
                     self,
                     f"{prefix}rater_high_{model}",
-                    pd.DataFrame(np.percentile(rater_ests, hi_p, axis=0), index=mi, columns=range(1, self.max_score + 1)),
+                    pd.DataFrame(
+                        np.percentile(rater_ests, hi_p, axis=0),
+                        index=mi,
+                        columns=range(1, self.max_score + 1),
+                    ),
                 )
 
         elif model == "mixed":
@@ -5368,7 +6533,11 @@ class MFRM(Rasch):
             mi = pd.MultiIndex.from_product(
                 [self.facet_names, self.responses.columns], names=[self.facet, "item"]
             )
-            se = pd.DataFrame(np.nanstd(rater_ests, axis=0), index=mi, columns=range(1, self.max_score + 1))
+            se = pd.DataFrame(
+                np.nanstd(rater_ests, axis=0),
+                index=mi,
+                columns=range(1, self.max_score + 1),
+            )
             setattr(self, f"{prefix}rater_se_{model}", se)
 
             sev_4d = rater_ests.reshape(
@@ -5384,7 +6553,9 @@ class MFRM(Rasch):
             )
             thr_means = sev_4d.mean(axis=2)
             se_marginal_thresholds = pd.DataFrame(
-                np.nanstd(thr_means, axis=0), index=self.facet_names, columns=range(1, self.max_score + 1)
+                np.nanstd(thr_means, axis=0),
+                index=self.facet_names,
+                columns=range(1, self.max_score + 1),
             )
             setattr(self, f"{prefix}rater_se_marginal_items", se_marginal_items)
             setattr(
@@ -5395,12 +6566,20 @@ class MFRM(Rasch):
                 setattr(
                     self,
                     f"{prefix}rater_low_{model}",
-                    pd.DataFrame(np.percentile(rater_ests, lo_p, axis=0), index=mi, columns=range(1, self.max_score + 1)),
+                    pd.DataFrame(
+                        np.percentile(rater_ests, lo_p, axis=0),
+                        index=mi,
+                        columns=range(1, self.max_score + 1),
+                    ),
                 )
                 setattr(
                     self,
                     f"{prefix}rater_high_{model}",
-                    pd.DataFrame(np.percentile(rater_ests, hi_p, axis=0), index=mi, columns=range(1, self.max_score + 1)),
+                    pd.DataFrame(
+                        np.percentile(rater_ests, hi_p, axis=0),
+                        index=mi,
+                        columns=range(1, self.max_score + 1),
+                    ),
                 )
 
         self._set_facet_aliases(model, anchor=(prefix == "anchor_"))
@@ -5517,7 +6696,9 @@ class MFRM(Rasch):
         if stored_flag:
             # Fast path: reuse stored calibrated samples
             samples = getattr(self, f"_bootstrap_samples_{model}")
-            anchor_raters_used = getattr(self, f"anchor_rater_names_{cal_model}", anchors)
+            anchor_raters_used = getattr(
+                self, f"anchor_rater_names_{cal_model}", anchors
+            )
             if anchor_raters_used is None:
                 raise ValueError(
                     f"anchors must be provided, or calibrate_anchor() "
@@ -5541,7 +6722,9 @@ class MFRM(Rasch):
                     )
                     if model == "mixed":
                         s.anchor_facet_effects_mixed = s._apply_rater_models(
-                            s.anchor_facet_effects_matrix, self.anchor_rater_models, anchor=True
+                            s.anchor_facet_effects_matrix,
+                            self.anchor_rater_models,
+                            anchor=True,
                         )
             collector.emit()
         else:
@@ -5583,7 +6766,9 @@ class MFRM(Rasch):
                     )
                     if model == "mixed":
                         s.anchor_facet_effects_mixed = s._apply_rater_models(
-                            s.anchor_facet_effects_matrix, self.anchor_rater_models, anchor=True
+                            s.anchor_facet_effects_matrix,
+                            self.anchor_rater_models,
+                            anchor=True,
                         )
             collector.emit()
 
@@ -5596,10 +6781,22 @@ class MFRM(Rasch):
             item_ests, self.responses.columns, interval
         )
         for suffix in ("", f"_{model}"):
-            setattr(self, f"anchor_item_se{suffix}", pd.Series(item_se, index=self.responses.columns))
+            setattr(
+                self,
+                f"anchor_item_se{suffix}",
+                pd.Series(item_se, index=self.responses.columns),
+            )
             if item_lo is not None:
-                setattr(self, f"anchor_item_low{suffix}", pd.Series(item_lo, index=self.responses.columns))
-                setattr(self, f"anchor_item_high{suffix}", pd.Series(item_hi, index=self.responses.columns))
+                setattr(
+                    self,
+                    f"anchor_item_low{suffix}",
+                    pd.Series(item_lo, index=self.responses.columns),
+                )
+                setattr(
+                    self,
+                    f"anchor_item_high{suffix}",
+                    pd.Series(item_hi, index=self.responses.columns),
+                )
 
         # Threshold SEs
         thresh_ests = np.array(
@@ -5670,9 +6867,11 @@ class MFRM(Rasch):
     def anchor_std_errors_centrality(self, anchors=None, **kw):
         """Alias for anchor_std_errors(model=\'centrality\'). See anchor_std_errors for full documentation."""
         self.anchor_std_errors(model="centrality", anchors=anchors, **kw)
+
     def anchor_std_errors_pseudo_halo(self, anchors=None, **kw):
         """Alias for anchor_std_errors(model=\'pseudo_halo\'). See anchor_std_errors for full documentation."""
         self.anchor_std_errors(model="pseudo_halo", anchors=anchors, **kw)
+
     def anchor_std_errors_bistretch(self, anchors=None, **kw):
         """Alias for anchor_std_errors(model=\'bistretch\'). See anchor_std_errors for full documentation."""
         self.anchor_std_errors(model="bistretch", anchors=anchors, **kw)
@@ -5706,7 +6905,9 @@ class MFRM(Rasch):
                 max_iters=max_iters,
                 ext_score_adjustment=ext_score_adjustment,
             )
-        person_locations = getattr(self, f'{"anchor_" if anchor else ""}persons_{model}')
+        person_locations = getattr(
+            self, f'{"anchor_" if anchor else ""}persons_{model}'
+        )
 
         person_filter = self.responses.notna().astype(float).replace(0, np.nan)
 
@@ -5718,7 +6919,9 @@ class MFRM(Rasch):
             total_scores = sum(
                 self.responses.loc[r].sum(axis=1) for r in self.facet_names
             )
-            person_locations = person_locations[(total_scores > 0) & (total_scores < scores)]
+            person_locations = person_locations[
+                (total_scores > 0) & (total_scores < scores)
+            ]
             person_filter = (
                 self.responses.loc[(slice(None), person_locations.index), :]
                 .notna()
@@ -5778,9 +6981,11 @@ class MFRM(Rasch):
     def category_probability_dict_centrality(self, **kw):
         """Alias for category_probability_dict(model=\'centrality\'). See category_probability_dict for full documentation."""
         self.category_probability_dict(model="centrality", **kw)
+
     def category_probability_dict_pseudo_halo(self, **kw):
         """Alias for category_probability_dict(model=\'pseudo_halo\'). See category_probability_dict for full documentation."""
         self.category_probability_dict(model="pseudo_halo", **kw)
+
     def category_probability_dict_bistretch(self, **kw):
         """Alias for category_probability_dict(model=\'bistretch\'). See category_probability_dict for full documentation."""
         self.category_probability_dict(model="bistretch", **kw)
@@ -5934,8 +7139,13 @@ class MFRM(Rasch):
                         raw,
                         estimates.values,
                         lambda t, rows: self._wle_moments(
-                            t, items, facet_elements, facet_effects, thresholds,
-                            {r: pf[rows] for r, pf in pf_by_facet.items()}, model,
+                            t,
+                            items,
+                            facet_elements,
+                            facet_effects,
+                            thresholds,
+                            {r: pf[rows] for r, pf in pf_by_facet.items()},
+                            model,
                         ),
                         tolerance,
                         max_iters,
@@ -6057,6 +7267,7 @@ class MFRM(Rasch):
             facet_elements=facet_elements,
             **kw,
         )
+
     def person_estimates_pseudo_halo(
         self, anchor=False, items=None, facet_elements=None, **kw
     ):
@@ -6068,6 +7279,7 @@ class MFRM(Rasch):
             facet_elements=facet_elements,
             **kw,
         )
+
     def person_estimates_bistretch(
         self, anchor=False, items=None, facet_elements=None, **kw
     ):
@@ -6081,8 +7293,14 @@ class MFRM(Rasch):
         )
 
     def _wle_moments(
-        self, person_locations, items, facet_elements, facet_effects, thresholds,
-        person_filters, model,
+        self,
+        person_locations,
+        items,
+        facet_elements,
+        facet_effects,
+        thresholds,
+        person_filters,
+        model,
     ):
         """
         Expected score, information, and third and fourth cumulants of the
@@ -6093,8 +7311,12 @@ class MFRM(Rasch):
         0 or NaN = missing.
         """
         probs_dict, cats = self._cat_probs_mfrm(
-            np.asarray(person_locations, dtype=float), items, facet_elements,
-            thresholds, model, facet_effects,
+            np.asarray(person_locations, dtype=float),
+            items,
+            facet_elements,
+            thresholds,
+            model,
+            facet_effects,
         )
         totals = [0.0, 0.0, 0.0, 0.0]
         for facet_element in facet_elements:
@@ -6147,7 +7369,12 @@ class MFRM(Rasch):
         """
         model = self._MODEL_ALIASES.get(model, model)
         probs_dict, cats = self._cat_probs_mfrm(
-            person_locations.values, items, facet_elements, thresholds, model, facet_effects
+            person_locations.values,
+            items,
+            facet_elements,
+            thresholds,
+            model,
+            facet_effects,
         )
 
         part1 = pd.Series(0.0, index=person_locations.index)
@@ -6179,51 +7406,109 @@ class MFRM(Rasch):
         return pd.Series(warm_corr.values, index=person_locations.index)
 
     # Backwards-compatible aliases
-    def warm_global(self, person_locations, items, facet_elements, facet_effects, pf, **kw):
+    def warm_global(
+        self, person_locations, items, facet_elements, facet_effects, pf, **kw
+    ):
         """Alias for warm(..., model='global'). See warm for full documentation."""
         return self.warm(
-            person_locations, items, facet_elements, facet_effects, self._thresholds_for("global"), pf, "global"
+            person_locations,
+            items,
+            facet_elements,
+            facet_effects,
+            self._thresholds_for("global"),
+            pf,
+            "global",
         )
 
-    def warm_items(self, person_locations, items, facet_elements, facet_effects, pf, **kw):
+    def warm_items(
+        self, person_locations, items, facet_elements, facet_effects, pf, **kw
+    ):
         """Alias for warm(..., model='items'). See warm for full documentation."""
         return self.warm(
-            person_locations, items, facet_elements, facet_effects, self._thresholds_for("items"), pf, "items"
+            person_locations,
+            items,
+            facet_elements,
+            facet_effects,
+            self._thresholds_for("items"),
+            pf,
+            "items",
         )
 
-    def warm_thresholds(self, person_locations, items, facet_elements, facet_effects, pf, **kw):
+    def warm_thresholds(
+        self, person_locations, items, facet_elements, facet_effects, pf, **kw
+    ):
         """Alias for warm(..., model='thresholds'). See warm for full documentation."""
         thr = kw.get("thresholds", self._thresholds_for("thresholds"))
         return self.warm(
-            person_locations, items, facet_elements, facet_effects, thr, pf, "thresholds"
+            person_locations,
+            items,
+            facet_elements,
+            facet_effects,
+            thr,
+            pf,
+            "thresholds",
         )
 
-    def warm_centrality(self, person_locations, items, facet_elements, facet_effects, pf, **kw):
+    def warm_centrality(
+        self, person_locations, items, facet_elements, facet_effects, pf, **kw
+    ):
         """Alias for warm(..., model='centrality'). See warm for full documentation."""
         thr = kw.get("thresholds", self._thresholds_for("centrality"))
         return self.warm(
-            person_locations, items, facet_elements, facet_effects, thr, pf, "centrality"
+            person_locations,
+            items,
+            facet_elements,
+            facet_effects,
+            thr,
+            pf,
+            "centrality",
         )
 
-    def warm_pseudo_halo(self, person_locations, items, facet_elements, facet_effects, pf, **kw):
+    def warm_pseudo_halo(
+        self, person_locations, items, facet_elements, facet_effects, pf, **kw
+    ):
         """Alias for warm(..., model='pseudo_halo'). See warm for full documentation."""
         return self.warm(
-            person_locations, items, facet_elements, facet_effects, self._thresholds_for("pseudo_halo"), pf, "pseudo_halo"
+            person_locations,
+            items,
+            facet_elements,
+            facet_effects,
+            self._thresholds_for("pseudo_halo"),
+            pf,
+            "pseudo_halo",
         )
 
-    def warm_bistretch(self, person_locations, items, facet_elements, facet_effects, pf, **kw):
+    def warm_bistretch(
+        self, person_locations, items, facet_elements, facet_effects, pf, **kw
+    ):
         """Alias for warm(..., model='bistretch'). See warm for full documentation."""
         return self.warm(
-            person_locations, items, facet_elements, facet_effects, self._thresholds_for("bistretch"), pf, "bistretch"
+            person_locations,
+            items,
+            facet_elements,
+            facet_effects,
+            self._thresholds_for("bistretch"),
+            pf,
+            "bistretch",
         )
 
-    def warm_matrix(self, person_locations, items, facet_elements, facet_effects, pf, **kw):
+    def warm_matrix(
+        self, person_locations, items, facet_elements, facet_effects, pf, **kw
+    ):
         """Alias for warm(..., model='matrix'). See warm for full documentation."""
         return self.warm(
-            person_locations, items, facet_elements, facet_effects, self._thresholds_for("matrix"), pf, "matrix"
+            person_locations,
+            items,
+            facet_elements,
+            facet_effects,
+            self._thresholds_for("matrix"),
+            pf,
+            "matrix",
         )
 
-    def warm_bivector(self, person_locations, items, facet_elements, facet_effects, pf, **kw):
+    def warm_bivector(
+        self, person_locations, items, facet_elements, facet_effects, pf, **kw
+    ):
         """Alias for warm(..., model='bivector'). See warm for full documentation."""
         return self.warm(
             person_locations,
@@ -6329,7 +7614,12 @@ class MFRM(Rasch):
         person_filter = person_filter.replace(0, np.nan)
 
         probs_dict, cats = self._cat_probs_mfrm(
-            person_locations.values, items, facet_elements, thresholds, model, facet_effects
+            person_locations.values,
+            items,
+            facet_elements,
+            thresholds,
+            model,
+            facet_effects,
         )
 
         info_sum = pd.Series(0.0, index=persons)
@@ -6370,9 +7660,11 @@ class MFRM(Rasch):
     def csem_centrality(self, **kw):
         """Alias for csem(model='centrality'). See csem for full documentation."""
         return self.csem(model="centrality", **kw)
+
     def csem_pseudo_halo(self, **kw):
         """Alias for csem(model='pseudo_halo'). See csem for full documentation."""
         return self.csem(model="pseudo_halo", **kw)
+
     def csem_bistretch(self, **kw):
         """Alias for csem(model='bistretch'). See csem for full documentation."""
         return self.csem(model="bistretch", **kw)
@@ -6489,8 +7781,13 @@ class MFRM(Rasch):
                     [float(score)],
                     [estimate],
                     lambda t, rows: self._wle_moments(
-                        t, items, facet_elements, facet_effects, thresholds,
-                        {r: pf[rows] for r, pf in pf_by_facet.items()}, model,
+                        t,
+                        items,
+                        facet_elements,
+                        facet_effects,
+                        thresholds,
+                        {r: pf[rows] for r, pf in pf_by_facet.items()},
+                        model,
                     ),
                     tolerance,
                     max_iters,
@@ -6538,21 +7835,30 @@ class MFRM(Rasch):
     ):
         """Alias for score_lookup(..., model='bivector'). See score_lookup for full documentation."""
         return self.score_lookup(score, "bivector", anchor, items, facet_elements, **kw)
+
     def score_lookup_centrality(
         self, score, anchor=False, items=None, facet_elements=None, **kw
     ):
         """Alias for score_lookup(..., model='centrality'). See score_lookup for full documentation."""
-        return self.score_lookup(score, "centrality", anchor, items, facet_elements, **kw)
+        return self.score_lookup(
+            score, "centrality", anchor, items, facet_elements, **kw
+        )
+
     def score_lookup_pseudo_halo(
         self, score, anchor=False, items=None, facet_elements=None, **kw
     ):
         """Alias for score_lookup(..., model='pseudo_halo'). See score_lookup for full documentation."""
-        return self.score_lookup(score, "pseudo_halo", anchor, items, facet_elements, **kw)
+        return self.score_lookup(
+            score, "pseudo_halo", anchor, items, facet_elements, **kw
+        )
+
     def score_lookup_bistretch(
         self, score, anchor=False, items=None, facet_elements=None, **kw
     ):
         """Alias for score_lookup(..., model='bistretch'). See score_lookup for full documentation."""
-        return self.score_lookup(score, "bistretch", anchor, items, facet_elements, **kw)
+        return self.score_lookup(
+            score, "bistretch", anchor, items, facet_elements, **kw
+        )
 
     def score_lookup_table(
         self,
@@ -6679,15 +7985,21 @@ class MFRM(Rasch):
     def score_lookup_table_centrality(self, **kw):
         """Alias for score_lookup_table(model='centrality'). See score_lookup_table for full documentation."""
         return self.score_lookup_table(model="centrality", **kw)
+
     def score_lookup_table_pseudo_halo(self, **kw):
         """Alias for score_lookup_table(model='pseudo_halo'). See score_lookup_table for full documentation."""
         return self.score_lookup_table(model="pseudo_halo", **kw)
+
     def score_lookup_table_bistretch(self, **kw):
         """Alias for score_lookup_table(model='bistretch'). See score_lookup_table for full documentation."""
         return self.score_lookup_table(model="bistretch", **kw)
 
     def category_counts_df(
-        self, persons=None, items=None, facet_elements=None, counts_name=None,
+        self,
+        persons=None,
+        items=None,
+        facet_elements=None,
+        counts_name=None,
         filename=None,
         file_format="csv",
     ):
@@ -6832,7 +8144,15 @@ class MFRM(Rasch):
         calib_kw = {
             k: v
             for k, v in kw.items()
-            if k in ("constant", "threshold_constant", "method", "robust", "matrix_power", "log_lik_tol")
+            if k
+            in (
+                "constant",
+                "threshold_constant",
+                "method",
+                "robust",
+                "matrix_power",
+                "log_lik_tol",
+            )
         }
         abil_kw = {
             k: v
@@ -6843,7 +8163,12 @@ class MFRM(Rasch):
             # 'mixed' has no calibrate() of its own -- guard here too rather than
             # relying on every caller having already run _sync_mixed first (they
             # currently do, but this shouldn't be load-bearing).
-            self._sync_mixed(kw.get("anchors", None), seed=kw.get("seed", None), **calib_kw, **abil_kw)
+            self._sync_mixed(
+                kw.get("anchors", None),
+                seed=kw.get("seed", None),
+                **calib_kw,
+                **abil_kw,
+            )
         elif not hasattr(self, f"facet_effects_{model}"):
             self.calibrate(model=model, **calib_kw)
         if not hasattr(self, f"persons_{model}"):
@@ -6903,9 +8228,11 @@ class MFRM(Rasch):
     def fit_matrices_centrality(self, **kw):
         """Alias for fit_matrices(model='centrality'). See fit_matrices for full documentation."""
         self._ensure_fit_matrices("centrality", **kw)
+
     def fit_matrices_pseudo_halo(self, **kw):
         """Alias for fit_matrices(model='pseudo_halo'). See fit_matrices for full documentation."""
         self._ensure_fit_matrices("pseudo_halo", **kw)
+
     def fit_matrices_bistretch(self, **kw):
         """Alias for fit_matrices(model='bistretch'). See fit_matrices for full documentation."""
         self._ensure_fit_matrices("bistretch", **kw)
@@ -6998,9 +8325,11 @@ class MFRM(Rasch):
     def item_fit_statistics_centrality(self, **kw):
         """Alias for item_fit_statistics(model='centrality'). See item_fit_statistics for full documentation."""
         self._run_item_fit("centrality", **kw)
+
     def item_fit_statistics_pseudo_halo(self, **kw):
         """Alias for item_fit_statistics(model='pseudo_halo'). See item_fit_statistics for full documentation."""
         self._run_item_fit("pseudo_halo", **kw)
+
     def item_fit_statistics_bistretch(self, **kw):
         """Alias for item_fit_statistics(model='bistretch'). See item_fit_statistics for full documentation."""
         self._run_item_fit("bistretch", **kw)
@@ -7110,7 +8439,10 @@ class MFRM(Rasch):
 
         # Point-measure correlations
         abil_dev = pd.concat(
-            [person_locations.loc[self.person_names] - person_locations.loc[self.person_names].mean()]
+            [
+                person_locations.loc[self.person_names]
+                - person_locations.loc[self.person_names].mean()
+            ]
             * self.no_of_facet_elements,
             keys=list(self.facet_names),
         ).loc[nz]
@@ -7183,11 +8515,19 @@ class MFRM(Rasch):
             rows = {}
             for facet_element in self.facet_names:
                 if model == "global":
-                    row = item_locations + thr_loc + float(facet_effects.loc[facet_element])
+                    row = (
+                        item_locations
+                        + thr_loc
+                        + float(facet_effects.loc[facet_element])
+                    )
                 elif model in ("items", "pseudo_halo"):
                     row = item_locations + thr_loc + facet_effects.loc[facet_element]
                 elif model in ("thresholds", "centrality"):
-                    row = item_locations + thr_loc + facet_effects.loc[facet_element, t + 1]
+                    row = (
+                        item_locations
+                        + thr_loc
+                        + facet_effects.loc[facet_element, t + 1]
+                    )
                 elif model in ("bivector", "matrix", "mixed", "bistretch"):
                     row = (
                         item_locations
@@ -7212,7 +8552,9 @@ class MFRM(Rasch):
         if not hasattr(self, f"persons_{model}"):
             self.person_estimates(model=model)
         # Always use unanchored params for fit statistics — anchor is origin shift only
-        item_locations, thresholds, facet_effects = self._get_params(model, anchor=False)
+        item_locations, thresholds, facet_effects = self._get_params(
+            model, anchor=False
+        )
         person_locations = getattr(self, f"persons_{model}")
         ddd = self._diff_df_dict(model, item_locations, thresholds, facet_effects)
         results = self.threshold_fit_statistics(person_locations, ddd)
@@ -7254,9 +8596,11 @@ class MFRM(Rasch):
     def threshold_fit_statistics_centrality(self, **kw):
         """Alias for threshold_fit_statistics(model='centrality'). See threshold_fit_statistics for full documentation."""
         self._run_threshold_fit("centrality", **kw)
+
     def threshold_fit_statistics_pseudo_halo(self, **kw):
         """Alias for threshold_fit_statistics(model='pseudo_halo'). See threshold_fit_statistics for full documentation."""
         self._run_threshold_fit("pseudo_halo", **kw)
+
     def threshold_fit_statistics_bistretch(self, **kw):
         """Alias for threshold_fit_statistics(model='bistretch'). See threshold_fit_statistics for full documentation."""
         self._run_threshold_fit("bistretch", **kw)
@@ -7370,9 +8714,11 @@ class MFRM(Rasch):
     def facet_fit_statistics_centrality(self, **kw):
         """Alias for facet_fit_statistics(model='centrality'). See facet_fit_statistics for full documentation."""
         self._run_facet_fit("centrality", **kw)
+
     def facet_fit_statistics_pseudo_halo(self, **kw):
         """Alias for facet_fit_statistics(model='pseudo_halo'). See facet_fit_statistics for full documentation."""
         self._run_facet_fit("pseudo_halo", **kw)
+
     def facet_fit_statistics_bistretch(self, **kw):
         """Alias for facet_fit_statistics(model='bistretch'). See facet_fit_statistics for full documentation."""
         self._run_facet_fit("bistretch", **kw)
@@ -7481,9 +8827,11 @@ class MFRM(Rasch):
     def person_fit_statistics_centrality(self, **kw):
         """Alias for person_fit_statistics(model='centrality'). See person_fit_statistics for full documentation."""
         self._run_person_fit("centrality", **kw)
+
     def person_fit_statistics_pseudo_halo(self, **kw):
         """Alias for person_fit_statistics(model='pseudo_halo'). See person_fit_statistics for full documentation."""
         self._run_person_fit("pseudo_halo", **kw)
+
     def person_fit_statistics_bistretch(self, **kw):
         """Alias for person_fit_statistics(model='bistretch'). See person_fit_statistics for full documentation."""
         self._run_person_fit("bistretch", **kw)
@@ -7566,16 +8914,24 @@ class MFRM(Rasch):
     def test_fit_statistics_centrality(self, **kw):
         """Alias for test_fit_statistics(model='centrality'). See test_fit_statistics for full documentation."""
         self._run_test_fit("centrality", **kw)
+
     def test_fit_statistics_pseudo_halo(self, **kw):
         """Alias for test_fit_statistics(model='pseudo_halo'). See test_fit_statistics for full documentation."""
         self._run_test_fit("pseudo_halo", **kw)
+
     def test_fit_statistics_bistretch(self, **kw):
         """Alias for test_fit_statistics(model='bistretch'). See test_fit_statistics for full documentation."""
         self._run_test_fit("bistretch", **kw)
 
     def _log_likelihood(
-        self, model="global", responses=None, anchor=False, persons=None,
-        items=None, thresholds=None, facet_effects=None,
+        self,
+        model="global",
+        responses=None,
+        anchor=False,
+        persons=None,
+        items=None,
+        thresholds=None,
+        facet_effects=None,
     ):
         """
         items, thresholds, facet_effects : optional overrides, default None
@@ -7604,8 +8960,12 @@ class MFRM(Rasch):
         if facet_effects is None:
             facet_effects = _facet_effects
         total_scores = responses.groupby(level=1).sum().sum(axis=1)
-        max_possible = responses.notna().groupby(level=1).sum().sum(axis=1) * self.max_score
-        non_extreme = total_scores.index[(total_scores > 0) & (total_scores < max_possible)]
+        max_possible = (
+            responses.notna().groupby(level=1).sum().sum(axis=1) * self.max_score
+        )
+        non_extreme = total_scores.index[
+            (total_scores > 0) & (total_scores < max_possible)
+        ]
         if persons is None:
             _pfx = "anchor_" if anchor else ""
             persons = getattr(self, f"{_pfx}persons_{model}")
@@ -7624,7 +8984,9 @@ class MFRM(Rasch):
         ll = 0.0
         for facet_element in facet_names:
             probs = probs_dict[facet_element]  # (K+1, N, I)
-            obs_arr = responses.loc[facet_element].reindex(persons.index).values  # (N, I)
+            obs_arr = (
+                responses.loc[facet_element].reindex(persons.index).values
+            )  # (N, I)
             valid = ~np.isnan(obs_arr)
             obs_int = np.where(valid, obs_arr, 0).astype(int)
             n_idx, i_idx = np.meshgrid(
@@ -7824,9 +9186,11 @@ class MFRM(Rasch):
     def fit_statistics_centrality(self, **kw):
         """Alias for fit_statistics(model='centrality'). See fit_statistics for full documentation."""
         self.fit_statistics(model="centrality", **kw)
+
     def fit_statistics_pseudo_halo(self, **kw):
         """Alias for fit_statistics(model='pseudo_halo'). See fit_statistics for full documentation."""
         self.fit_statistics(model="pseudo_halo", **kw)
+
     def fit_statistics_bistretch(self, **kw):
         """Alias for fit_statistics(model='bistretch'). See fit_statistics for full documentation."""
         self.fit_statistics(model="bistretch", **kw)
@@ -7938,9 +9302,11 @@ class MFRM(Rasch):
     def andersen_lr_test_centrality(self, **kw):
         """Alias for andersen_lr_test(model='centrality'). See andersen_lr_test for full documentation."""
         self.andersen_lr_test(model="centrality", **kw)
+
     def andersen_lr_test_pseudo_halo(self, **kw):
         """Alias for andersen_lr_test(model='pseudo_halo'). See andersen_lr_test for full documentation."""
         self.andersen_lr_test(model="pseudo_halo", **kw)
+
     def andersen_lr_test_bistretch(self, **kw):
         """Alias for andersen_lr_test(model='bistretch'). See andersen_lr_test for full documentation."""
         self.andersen_lr_test(model="bistretch", **kw)
@@ -8170,7 +9536,10 @@ class MFRM(Rasch):
             raise ValueError(f"model must be one of {self._MODELS}")
         # issue #17 arises from 'pair-cpat''s staged estimation; the groups are calibrated with the latest
         # estimation method (_refit_kw), 'cp-full-rcl' if none
-        if model in self._DIF_RISK and (getattr(self, "estimation", None) or "cp-full-rcl") == "pair-cpat":
+        if (
+            model in self._DIF_RISK
+            and (getattr(self, "estimation", None) or "cp-full-rcl") == "pair-cpat"
+        ):
             warnings.warn(
                 f"model='{model}' with estimation='pair-cpat': risk of compressed item "
                 f"locations and thresholds: {self._DIF_RISK[model]} "
@@ -8182,7 +9551,11 @@ class MFRM(Rasch):
                 stacklevel=2,
             )
         self._dif_validate(
-            correction, selection_method, test, category_thresholds, reference_n,
+            correction,
+            selection_method,
+            test,
+            category_thresholds,
+            reference_n,
             dcf_cap=dcf_cap,
         )
 
@@ -8192,10 +9565,12 @@ class MFRM(Rasch):
         max_possible = (
             self.responses.notna().groupby(level=1).sum().sum(axis=1) * self.max_score
         )
-        non_extreme = total_scores.index[(total_scores > 0) & (total_scores < max_possible)]
+        non_extreme = total_scores.index[
+            (total_scores > 0) & (total_scores < max_possible)
+        ]
 
-        cov_values, reference, focal_levels, group_sizes, n_missing = self._dif_group_setup(
-            non_extreme, covariate, reference
+        cov_values, reference, focal_levels, group_sizes, n_missing = (
+            self._dif_group_setup(non_extreme, covariate, reference)
         )
 
         def _group_responses(idx):
@@ -8215,19 +9590,31 @@ class MFRM(Rasch):
             return resp[resp.index.get_level_values(0).isin(active_raters)]
 
         pe_kw = dict(
-            warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
+            warm_corr=warm_corr,
+            tolerance=tolerance,
+            max_iters=max_iters,
             ext_score_adjustment=ext_score_adjustment,
         )
         cal_kw = dict(
-            constant=constant, threshold_constant=threshold_constant, method=method,
-            matrix_power=matrix_power, matrix_marginals=matrix_marginals,
-            regression=regression, robust=robust, log_lik_tol=log_lik_tol,
+            constant=constant,
+            threshold_constant=threshold_constant,
+            method=method,
+            matrix_power=matrix_power,
+            matrix_marginals=matrix_marginals,
+            regression=regression,
+            robust=robust,
+            log_lik_tol=log_lik_tol,
             **self._refit_kw(model),
         )
         se_kw = dict(
-            no_of_samples=no_of_samples, constant=constant,
-            threshold_constant=threshold_constant, method=method, robust=robust,
-            matrix_power=matrix_power, log_lik_tol=log_lik_tol, seed=seed,
+            no_of_samples=no_of_samples,
+            constant=constant,
+            threshold_constant=threshold_constant,
+            method=method,
+            robust=robust,
+            matrix_power=matrix_power,
+            log_lik_tol=log_lik_tol,
+            seed=seed,
             # store_bootstrap=True keeps the fitted bootstrap resamples
             # (self._bootstrap_samples_{model}) so item purification's
             # Var(tc) can be estimated directly from their empirical
@@ -8269,13 +9656,29 @@ class MFRM(Rasch):
             ref_samples = getattr(ref_model, f"_bootstrap_samples_{model}", [])
             focal_samples = getattr(focal_model, f"_bootstrap_samples_{model}", [])
             ref_boot = self._bootstrap_value_matrix(ref_samples, "items", common_items)
-            focal_boot = self._bootstrap_value_matrix(focal_samples, "items", common_items)
+            focal_boot = self._bootstrap_value_matrix(
+                focal_samples, "items", common_items
+            )
 
             wald_result = self._dif_item_wald_block(
-                ref_model, focal_model, ref_boot, focal_boot,
-                selection_method, corr_tol, sd_ratio_tol, min_anchors, wald_alpha,
-                size_adjust, reference_n, welch, correction, alpha, logit_threshold,
-                category, category_thresholds, category_alpha,
+                ref_model,
+                focal_model,
+                ref_boot,
+                focal_boot,
+                selection_method,
+                corr_tol,
+                sd_ratio_tol,
+                min_anchors,
+                wald_alpha,
+                size_adjust,
+                reference_n,
+                welch,
+                correction,
+                alpha,
+                logit_threshold,
+                category,
+                category_thresholds,
+                category_alpha,
             )
             common_items = wald_result["common_items"]
             tc = wald_result["tc"]
@@ -8337,7 +9740,9 @@ class MFRM(Rasch):
                 m_full = MFRM(_group_responses(combined_idx), max_score=self.max_score)
                 m_full.calibrate(model=model, **cal_kw)
                 m_full.person_estimates(model=model, **pe_kw)
-                pooled_items, pooled_thresholds, pooled_facet_effects = m_full._get_params(model)
+                pooled_items, pooled_thresholds, pooled_facet_effects = (
+                    m_full._get_params(model)
+                )
                 ll_full = m_full._log_likelihood(model=model)
                 pooled_persons = getattr(m_full, f"persons_{model}")
                 pooled_ref_persons = pooled_persons.reindex(ref_model.person_names)
@@ -8349,13 +9754,20 @@ class MFRM(Rasch):
                 # (kept for backward comparability with the earlier
                 # single-omnibus behaviour) -- prefer dif_omnibus_table
                 # below for an axis-attributed, properly-scoped answer.
-                ll_ref_df = ref_model._log_likelihood(model=model, persons=pooled_ref_persons)
-                ll_focal_df = focal_model._log_likelihood(model=model, persons=pooled_focal_persons)
+                ll_ref_df = ref_model._log_likelihood(
+                    model=model, persons=pooled_ref_persons
+                )
+                ll_focal_df = focal_model._log_likelihood(
+                    model=model, persons=pooled_focal_persons
+                )
                 lr_df = max(0.0, -2 * (ll_full - (ll_ref_df + ll_focal_df)))
                 df_df = len(common_items) - 1
                 p_df = float(chi2.sf(lr_df, df_df))
                 df_omnibus_rows[focal] = {
-                    "LR": lr_df, "df": df_df, "p": p_df, "Flagged": p_df < alpha,
+                    "LR": lr_df,
+                    "df": df_df,
+                    "p": p_df,
+                    "Flagged": p_df < alpha,
                 }
 
                 # Item-isolated DIF omnibus -- facet_effects pinned at the
@@ -8365,21 +9777,38 @@ class MFRM(Rasch):
                 # to H0's own value rather than left free, so df=items-1
                 # is correctly scoped.
                 ll_ref_dif = ref_model._log_likelihood(
-                    model=model, persons=pooled_ref_persons, facet_effects=pooled_facet_effects,
+                    model=model,
+                    persons=pooled_ref_persons,
+                    facet_effects=pooled_facet_effects,
                 )
                 ll_focal_dif = focal_model._log_likelihood(
-                    model=model, persons=pooled_focal_persons, facet_effects=pooled_facet_effects,
+                    model=model,
+                    persons=pooled_focal_persons,
+                    facet_effects=pooled_facet_effects,
                 )
                 lr_dif = max(0.0, -2 * (ll_full - (ll_ref_dif + ll_focal_dif)))
                 df_dif = len(common_items) - 1
                 p_dif = float(chi2.sf(lr_dif, df_dif))
                 omnibus_rows[focal] = {
-                    "LR": lr_dif, "df": df_dif, "p": p_dif, "Flagged": p_dif < alpha,
+                    "LR": lr_dif,
+                    "df": df_dif,
+                    "p": p_dif,
+                    "Flagged": p_dif < alpha,
                 }
 
             item_table = self._dif_item_table(
-                focal, ref_model, focal_model, common_items, focal_shifted,
-                diff, se, z, p, p_corrected, selected, flagged,
+                focal,
+                ref_model,
+                focal_model,
+                common_items,
+                focal_shifted,
+                diff,
+                se,
+                z,
+                p,
+                p_corrected,
+                selected,
+                flagged,
                 welch_df=item_welch_df if welch else None,
                 category_col=category_col if category else None,
                 lr_table=lr_table if test in ("lr", "both") else None,
@@ -8393,9 +9822,9 @@ class MFRM(Rasch):
             thr_index = ref_widths.index
             thr_diff = focal_widths - ref_widths
 
-            ref_se_thr = pd.Series(
-                getattr(ref_model, f"cat_width_se_{model}")
-            ).reindex(thr_index)
+            ref_se_thr = pd.Series(getattr(ref_model, f"cat_width_se_{model}")).reindex(
+                thr_index
+            )
             focal_se_thr = pd.Series(
                 getattr(focal_model, f"cat_width_se_{model}")
             ).reindex(thr_index)
@@ -8417,12 +9846,15 @@ class MFRM(Rasch):
                 focal_n_thr = focal_eff
 
             thr_se = pd.Series(
-                np.sqrt(ref_se_thr ** 2 + focal_se_thr ** 2).values, index=thr_index
+                np.sqrt(ref_se_thr**2 + focal_se_thr**2).values, index=thr_index
             )
             if welch:
                 thr_z_vals, thr_df_vals, thr_p_vals = self._welch_satterthwaite(
-                    thr_diff.values, ref_se_thr.values, ref_n_thr,
-                    focal_se_thr.values, focal_n_thr,
+                    thr_diff.values,
+                    ref_se_thr.values,
+                    ref_n_thr,
+                    focal_se_thr.values,
+                    focal_n_thr,
                 )
                 thr_z = pd.Series(thr_z_vals, index=thr_index)
                 thr_welch_df = pd.Series(thr_df_vals, index=thr_index)
@@ -8438,7 +9870,9 @@ class MFRM(Rasch):
             else:
                 thr_p_corrected = thr_p
 
-            thr_flagged = (thr_p_corrected < alpha) & (thr_diff.abs() >= logit_threshold)
+            thr_flagged = (thr_p_corrected < alpha) & (
+                thr_diff.abs() >= logit_threshold
+            )
 
             threshold_table = pd.DataFrame(
                 {
@@ -8485,10 +9919,26 @@ class MFRM(Rasch):
         self.dif_group_sizes = group_sizes
 
     def _drf_element_table(
-        self, focal, ref_df, focal_df, ref_se_df, focal_se_df,
-        selection_method, corr_tol, sd_ratio_tol, min_anchors, wald_alpha,
-        welch, correction, alpha, logit_threshold, ref_n, focal_n, row_label,
-        ref_boot_elements=None, focal_boot_elements=None,
+        self,
+        focal,
+        ref_df,
+        focal_df,
+        ref_se_df,
+        focal_se_df,
+        selection_method,
+        corr_tol,
+        sd_ratio_tol,
+        min_anchors,
+        wald_alpha,
+        welch,
+        correction,
+        alpha,
+        logit_threshold,
+        ref_n,
+        focal_n,
+        row_label,
+        ref_boot_elements=None,
+        focal_boot_elements=None,
     ):
         """
         Per-element DRF Wald test for a (facet element (e.g. rater) x element) facet_effect
@@ -8544,9 +9994,17 @@ class MFRM(Rasch):
             ref_boot = (ref_boot_elements or {}).get(element)
             focal_boot = (focal_boot_elements or {}).get(element)
             tc, ref_var, focal_var, selected, anchor_table = self._purification_loo_tc(
-                ref_col, focal_col, ref_se_col, focal_se_col,
-                selection_method, corr_tol, sd_ratio_tol, min_anchors, wald_alpha,
-                ref_boot=ref_boot, focal_boot=focal_boot,
+                ref_col,
+                focal_col,
+                ref_se_col,
+                focal_se_col,
+                selection_method,
+                corr_tol,
+                sd_ratio_tol,
+                min_anchors,
+                wald_alpha,
+                ref_boot=ref_boot,
+                focal_boot=focal_boot,
             )
             tc_per_element[element] = tc
             anchor_selection_per_element[element] = anchor_table
@@ -8558,7 +10016,11 @@ class MFRM(Rasch):
             se = np.sqrt(ref_var + focal_var)
             if welch:
                 z_vals, df_vals, p_vals = self._welch_satterthwaite(
-                    diff.values, ref_se_eff.values, ref_n, focal_se_eff.values, focal_n,
+                    diff.values,
+                    ref_se_eff.values,
+                    ref_n,
+                    focal_se_eff.values,
+                    focal_n,
                 )
                 z = pd.Series(z_vals, index=ref_col.index)
                 w_df = pd.Series(df_vals, index=ref_col.index)
@@ -8593,8 +10055,8 @@ class MFRM(Rasch):
             table["p (corrected)"] = self._bh_correction(table["p"])
         else:
             table["p (corrected)"] = table["p"]
-        table["Flagged"] = (
-            (table["p (corrected)"] < alpha) & (table["Difference"].abs() >= logit_threshold)
+        table["Flagged"] = (table["p (corrected)"] < alpha) & (
+            table["Difference"].abs() >= logit_threshold
         )
         table.index.name = self.facet.capitalize()
         return table, tc_per_element, anchor_selection_per_element
@@ -8606,9 +10068,20 @@ class MFRM(Rasch):
     }
 
     def _drf_stretch_test(
-        self, focal, model, ref_model, focal_model, eligible,
-        selection_method, corr_tol, sd_ratio_tol, min_anchors, wald_alpha,
-        correction, alpha, logit_threshold,
+        self,
+        focal,
+        model,
+        ref_model,
+        focal_model,
+        eligible,
+        selection_method,
+        corr_tol,
+        sd_ratio_tol,
+        min_anchors,
+        wald_alpha,
+        correction,
+        alpha,
+        logit_threshold,
     ):
         """
         Joint covariance-aware DRF test for the stretch models
@@ -8650,17 +10123,31 @@ class MFRM(Rasch):
 
         ref_samples = getattr(ref_model, f"_bootstrap_samples_{model}", [])
         focal_samples = getattr(focal_model, f"_bootstrap_samples_{model}", [])
-        ref_boot = self._bootstrap_value_matrix(ref_samples, f"lambda_{model}", eligible)
-        focal_boot = self._bootstrap_value_matrix(focal_samples, f"lambda_{model}", eligible)
+        ref_boot = self._bootstrap_value_matrix(
+            ref_samples, f"lambda_{model}", eligible
+        )
+        focal_boot = self._bootstrap_value_matrix(
+            focal_samples, f"lambda_{model}", eligible
+        )
 
         # Leave-one-out per rater, with tc's own variance estimated
         # directly from the bootstrap distribution -- fixes known issue
         # #39 (an independence-assumption closed form under-covered
         # too, ~2x nominal; see _purification_loo_tc's own docstring).
-        tc, ref_lambda_var, focal_lambda_var, selected, anchor_table = self._purification_loo_tc(
-            ref_lambda, focal_lambda, ref_lambda_se, focal_lambda_se,
-            selection_method, corr_tol, sd_ratio_tol, min_anchors, wald_alpha,
-            ref_boot=ref_boot, focal_boot=focal_boot,
+        tc, ref_lambda_var, focal_lambda_var, selected, anchor_table = (
+            self._purification_loo_tc(
+                ref_lambda,
+                focal_lambda,
+                ref_lambda_se,
+                focal_lambda_se,
+                selection_method,
+                corr_tol,
+                sd_ratio_tol,
+                min_anchors,
+                wald_alpha,
+                ref_boot=ref_boot,
+                focal_boot=focal_boot,
+            )
         )
 
         ref_vals, focal_vals, ref_se, focal_se = {}, {}, {}, {}
@@ -8688,7 +10175,7 @@ class MFRM(Rasch):
                 for i, p in enumerate(params):
                     M[i, i] = se_dict[p].loc[r] ** 2
                 for i, p1 in enumerate(params):
-                    for j, p2 in enumerate(params[i + 1:], start=i + 1):
+                    for j, p2 in enumerate(params[i + 1 :], start=i + 1):
                         key = f"{p1}_{p2}"
                         val = cov_pairs[key].loc[r] if key in cov_pairs else 0.0
                         M[i, j] = M[j, i] = val
@@ -8719,7 +10206,8 @@ class MFRM(Rasch):
         else:
             p_corrected = p_series
         flagged = (p_corrected < alpha) & (
-            pd.concat([diffs[p].abs() for p in params], axis=1).max(axis=1) >= logit_threshold
+            pd.concat([diffs[p].abs() for p in params], axis=1).max(axis=1)
+            >= logit_threshold
         )
 
         data = {"Group": focal}
@@ -8747,7 +10235,9 @@ class MFRM(Rasch):
             data[f"z_{p}"] = z_p
             data[f"p_{p}"] = pval_p
             data[f"p_{p} (corrected)"] = pval_p_corr
-            data[f"Flagged_{p}"] = (pval_p_corr < alpha) & (diffs[p].abs() >= logit_threshold)
+            data[f"Flagged_{p}"] = (pval_p_corr < alpha) & (
+                diffs[p].abs() >= logit_threshold
+            )
 
         table = pd.DataFrame(data, index=eligible)
         table.index.name = self.facet.capitalize()
@@ -8943,14 +10433,15 @@ class MFRM(Rasch):
         if covariate not in self.exogenous.columns:
             raise ValueError(f"'{covariate}' is not a column in self.exogenous.")
 
-
         # Non-extreme persons, aggregating across facet_elements (same
         # convention as dif_test).
         total_scores = self.responses.groupby(level=1).sum().sum(axis=1)
         max_possible = (
             self.responses.notna().groupby(level=1).sum().sum(axis=1) * self.max_score
         )
-        non_extreme = total_scores.index[(total_scores > 0) & (total_scores < max_possible)]
+        non_extreme = total_scores.index[
+            (total_scores > 0) & (total_scores < max_possible)
+        ]
 
         cov_values = self.exogenous.loc[non_extreme, covariate].dropna()
         n_missing = len(non_extreme) - len(cov_values)
@@ -8965,7 +10456,9 @@ class MFRM(Rasch):
         if reference is None:
             reference = levels.index[0]
         elif reference not in levels.index:
-            raise ValueError(f"reference='{reference}' is not a value of '{covariate}'.")
+            raise ValueError(
+                f"reference='{reference}' is not a value of '{covariate}'."
+            )
 
         focal_levels = [lvl for lvl in levels.index if lvl != reference]
         if len(focal_levels) > 1:
@@ -9003,18 +10496,29 @@ class MFRM(Rasch):
             return resp.notna().any(axis=1).groupby(level=0).sum()
 
         pe_kw = dict(
-            warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
+            warm_corr=warm_corr,
+            tolerance=tolerance,
+            max_iters=max_iters,
             ext_score_adjustment=ext_score_adjustment,
         )
         cal_kw = dict(
-            constant=constant, threshold_constant=threshold_constant, method=method,
-            matrix_power=matrix_power, robust=robust, log_lik_tol=log_lik_tol,
+            constant=constant,
+            threshold_constant=threshold_constant,
+            method=method,
+            matrix_power=matrix_power,
+            robust=robust,
+            log_lik_tol=log_lik_tol,
             **self._refit_kw(model),
         )
         se_kw = dict(
-            no_of_samples=no_of_samples, constant=constant,
-            threshold_constant=threshold_constant, method=method, robust=robust,
-            matrix_power=matrix_power, log_lik_tol=log_lik_tol, seed=seed,
+            no_of_samples=no_of_samples,
+            constant=constant,
+            threshold_constant=threshold_constant,
+            method=method,
+            robust=robust,
+            matrix_power=matrix_power,
+            log_lik_tol=log_lik_tol,
+            seed=seed,
             # store_bootstrap=True keeps the fitted bootstrap resamples
             # (self._bootstrap_samples_{model}) so purification's Var(tc)
             # can be estimated directly from their empirical distribution
@@ -9048,11 +10552,14 @@ class MFRM(Rasch):
             focal_counts = _rated_person_counts(focal_responses)
 
             common_raters = ref_model.facet_names.intersection(focal_model.facet_names)
-            eligible = pd.Index([
-                r for r in common_raters
-                if ref_counts.get(r, 0) >= min_persons_per_group
-                and focal_counts.get(r, 0) >= min_persons_per_group
-            ])
+            eligible = pd.Index(
+                [
+                    r
+                    for r in common_raters
+                    if ref_counts.get(r, 0) >= min_persons_per_group
+                    and focal_counts.get(r, 0) >= min_persons_per_group
+                ]
+            )
             excluded_dict[focal] = [r for r in common_raters if r not in eligible]
             if len(eligible) < 2:
                 raise ValueError(
@@ -9065,11 +10572,17 @@ class MFRM(Rasch):
                 )
 
             elem_kw = dict(
-                selection_method=selection_method, corr_tol=corr_tol,
-                sd_ratio_tol=sd_ratio_tol, min_anchors=min_anchors, wald_alpha=wald_alpha,
-                welch=welch, correction=correction, alpha=alpha,
+                selection_method=selection_method,
+                corr_tol=corr_tol,
+                sd_ratio_tol=sd_ratio_tol,
+                min_anchors=min_anchors,
+                wald_alpha=wald_alpha,
+                welch=welch,
+                correction=correction,
+                alpha=alpha,
                 logit_threshold=logit_threshold,
-                ref_n=ref_model.no_of_persons, focal_n=focal_model.no_of_persons,
+                ref_n=ref_model.no_of_persons,
+                focal_n=focal_model.no_of_persons,
             )
 
             if model in ("items", "thresholds"):
@@ -9090,9 +10603,14 @@ class MFRM(Rasch):
                 )
                 row_label = "Item" if model == "items" else "Category"
                 table, tc_e, anchor_e = self._drf_element_table(
-                    focal, ref_df, focal_df, ref_se_df, focal_se_df,
+                    focal,
+                    ref_df,
+                    focal_df,
+                    ref_se_df,
+                    focal_se_df,
                     row_label=row_label,
-                    ref_boot_elements=ref_boot_e, focal_boot_elements=focal_boot_e,
+                    ref_boot_elements=ref_boot_e,
+                    focal_boot_elements=focal_boot_e,
                     **elem_kw,
                 )
                 all_rows.append(table)
@@ -9111,11 +10629,13 @@ class MFRM(Rasch):
                 # unchanged.
                 if model == "bivector":
                     items_attr, thr_attr = (
-                        "facet_effects_bivector_items", "facet_effects_bivector_thresholds"
+                        "facet_effects_bivector_items",
+                        "facet_effects_bivector_thresholds",
                     )
                 else:
                     items_attr, thr_attr = (
-                        "marginal_facet_effects_items", "marginal_facet_effects_thresholds"
+                        "marginal_facet_effects_items",
+                        "marginal_facet_effects_thresholds",
                     )
                 ref_items_df = getattr(ref_model, items_attr).loc[eligible]
                 focal_items_df = getattr(focal_model, items_attr).loc[eligible]
@@ -9131,27 +10651,48 @@ class MFRM(Rasch):
 
                 ref_samples = getattr(ref_model, f"_bootstrap_samples_{model}", [])
                 focal_samples = getattr(focal_model, f"_bootstrap_samples_{model}", [])
-                ref_boot_items = self._bootstrap_element_matrices(ref_samples, items_attr, eligible)
-                focal_boot_items = self._bootstrap_element_matrices(focal_samples, items_attr, eligible)
-                ref_boot_thr = self._bootstrap_element_matrices(ref_samples, thr_attr, eligible)
-                focal_boot_thr = self._bootstrap_element_matrices(focal_samples, thr_attr, eligible)
+                ref_boot_items = self._bootstrap_element_matrices(
+                    ref_samples, items_attr, eligible
+                )
+                focal_boot_items = self._bootstrap_element_matrices(
+                    focal_samples, items_attr, eligible
+                )
+                ref_boot_thr = self._bootstrap_element_matrices(
+                    ref_samples, thr_attr, eligible
+                )
+                focal_boot_thr = self._bootstrap_element_matrices(
+                    focal_samples, thr_attr, eligible
+                )
 
                 table_items, tc_items, anchor_items = self._drf_element_table(
-                    focal, ref_items_df, focal_items_df, ref_se_items_df, focal_se_items_df,
+                    focal,
+                    ref_items_df,
+                    focal_items_df,
+                    ref_se_items_df,
+                    focal_se_items_df,
                     row_label="Item",
-                    ref_boot_elements=ref_boot_items, focal_boot_elements=focal_boot_items,
+                    ref_boot_elements=ref_boot_items,
+                    focal_boot_elements=focal_boot_items,
                     **elem_kw,
                 )
                 table_thr, tc_thr, anchor_thr = self._drf_element_table(
-                    focal, ref_thr_df, focal_thr_df, ref_se_thr_df, focal_se_thr_df,
+                    focal,
+                    ref_thr_df,
+                    focal_thr_df,
+                    ref_se_thr_df,
+                    focal_se_thr_df,
                     row_label="Category",
-                    ref_boot_elements=ref_boot_thr, focal_boot_elements=focal_boot_thr,
+                    ref_boot_elements=ref_boot_thr,
+                    focal_boot_elements=focal_boot_thr,
                     **elem_kw,
                 )
                 all_rows.append(table_items)
                 all_threshold_rows.append(table_thr)
                 tc_dict[focal] = {"items": tc_items, "thresholds": tc_thr}
-                anchor_selection_dict[focal] = {"items": anchor_items, "thresholds": anchor_thr}
+                anchor_selection_dict[focal] = {
+                    "items": anchor_items,
+                    "thresholds": anchor_thr,
+                }
                 plot_dict[focal] = None  # per-element plotting not supported yet
 
             elif model in ("centrality", "pseudo_halo", "bistretch"):
@@ -9160,10 +10701,18 @@ class MFRM(Rasch):
                 # (confirmed shift-invariant). See _drf_stretch_test's own
                 # docstring.
                 table, tc_lambda, anchor_lambda = self._drf_stretch_test(
-                    focal, model, ref_model, focal_model, eligible,
-                    selection_method=selection_method, corr_tol=corr_tol,
-                    sd_ratio_tol=sd_ratio_tol, min_anchors=min_anchors,
-                    wald_alpha=wald_alpha, correction=correction, alpha=alpha,
+                    focal,
+                    model,
+                    ref_model,
+                    focal_model,
+                    eligible,
+                    selection_method=selection_method,
+                    corr_tol=corr_tol,
+                    sd_ratio_tol=sd_ratio_tol,
+                    min_anchors=min_anchors,
+                    wald_alpha=wald_alpha,
+                    correction=correction,
+                    alpha=alpha,
                     logit_threshold=logit_threshold,
                 )
                 all_rows.append(table)
@@ -9179,16 +10728,30 @@ class MFRM(Rasch):
 
                 ref_samples = getattr(ref_model, "_bootstrap_samples_global", [])
                 focal_samples = getattr(focal_model, "_bootstrap_samples_global", [])
-                ref_boot = self._bootstrap_value_matrix(ref_samples, "facet_effects_global", eligible)
-                focal_boot = self._bootstrap_value_matrix(focal_samples, "facet_effects_global", eligible)
+                ref_boot = self._bootstrap_value_matrix(
+                    ref_samples, "facet_effects_global", eligible
+                )
+                focal_boot = self._bootstrap_value_matrix(
+                    focal_samples, "facet_effects_global", eligible
+                )
 
                 # Leave-one-out per rater, with tc's own variance
                 # estimated from the bootstrap distribution (see
                 # _purification_loo_tc).
-                tc, ref_var, focal_var, selected, anchor_table = self._purification_loo_tc(
-                    ref_sev, focal_sev, ref_se, focal_se_all,
-                    selection_method, corr_tol, sd_ratio_tol, min_anchors, wald_alpha,
-                    ref_boot=ref_boot, focal_boot=focal_boot,
+                tc, ref_var, focal_var, selected, anchor_table = (
+                    self._purification_loo_tc(
+                        ref_sev,
+                        focal_sev,
+                        ref_se,
+                        focal_se_all,
+                        selection_method,
+                        corr_tol,
+                        sd_ratio_tol,
+                        min_anchors,
+                        wald_alpha,
+                        ref_boot=ref_boot,
+                        focal_boot=focal_boot,
+                    )
                 )
                 anchor_selection_dict[focal] = anchor_table
 
@@ -9200,8 +10763,11 @@ class MFRM(Rasch):
                 se = np.sqrt(ref_var + focal_var)
                 if welch:
                     z_vals, df_vals, p_vals = self._welch_satterthwaite(
-                        diff.values, ref_se.values, ref_model.no_of_persons,
-                        focal_se.values, focal_model.no_of_persons,
+                        diff.values,
+                        ref_se.values,
+                        ref_model.no_of_persons,
+                        focal_se.values,
+                        focal_model.no_of_persons,
                     )
                     z = pd.Series(z_vals, index=eligible)
                     rater_welch_df = pd.Series(df_vals, index=eligible)
@@ -9237,18 +10803,24 @@ class MFRM(Rasch):
                 # own value rather than left free, so df=eligible-1 is
                 # rater-specific.
                 ll_ref_omni = ref_model._log_likelihood(
-                    model=model, persons=pooled_ref_persons,
-                    items=pooled_items, thresholds=pooled_thresholds,
+                    model=model,
+                    persons=pooled_ref_persons,
+                    items=pooled_items,
+                    thresholds=pooled_thresholds,
                 )
                 ll_focal_omni = focal_model._log_likelihood(
-                    model=model, persons=pooled_focal_persons,
-                    items=pooled_items, thresholds=pooled_thresholds,
+                    model=model,
+                    persons=pooled_focal_persons,
+                    items=pooled_items,
+                    thresholds=pooled_thresholds,
                 )
                 lr_omni = max(0.0, -2 * (ll_full - (ll_ref_omni + ll_focal_omni)))
                 df_omni = len(eligible) - 1
                 p_omni = float(chi2.sf(lr_omni, df_omni))
                 omnibus_rows[focal] = {
-                    "LR": lr_omni, "df": df_omni, "p": p_omni,
+                    "LR": lr_omni,
+                    "df": df_omni,
+                    "p": p_omni,
                     "Flagged": p_omni < alpha,
                 }
 
@@ -9425,10 +10997,16 @@ class MFRM(Rasch):
             reflect min_effect (see above); Preferred is per-pair, not an
             overall selected model.
         """
-        models = None if models is None else [self._MODEL_ALIASES.get(m, m) for m in models]
+        models = (
+            None if models is None else [self._MODEL_ALIASES.get(m, m) for m in models]
+        )
         if test not in ("LR", "AIC", "BIC"):
             raise ValueError("test must be 'LR', 'AIC', or 'BIC'")
-        if sampling is not None and sampling != "dynamic" and not isinstance(sampling, int):
+        if (
+            sampling is not None
+            and sampling != "dynamic"
+            and not isinstance(sampling, int)
+        ):
             raise ValueError("sampling must be None, 'dynamic', or an integer")
 
         if models is None:
@@ -9447,7 +11025,9 @@ class MFRM(Rasch):
                 raise ValueError("models must contain at least 2 model names.")
         active_models = self._drop_equivalent_models(active_models, "model_selection()")
         if len(active_models) < 2:
-            raise ValueError("models must contain at least 2 distinct models for this design.")
+            raise ValueError(
+                "models must contain at least 2 distinct models for this design."
+            )
 
         n_items = self.no_of_items
         m = self.max_score
@@ -9456,22 +11036,32 @@ class MFRM(Rasch):
         # Free parameter counts for each model
         shared_k = (n_items - 1) + (m - 1)
         rater_k = {
-            "global":     R - 1,
-            "items":      n_items * (R - 1),
+            "global": R - 1,
+            "items": n_items * (R - 1),
             "thresholds": m * (R - 1),
-            "bivector":   (n_items + m - 1) * (R - 1),
-            "matrix":     n_items * m * (R - 1),
+            "bivector": (n_items + m - 1) * (R - 1),
+            "matrix": n_items * m * (R - 1),
             "centrality": 2 * (R - 1),
-            "pseudo_halo":       2 * (R - 1),
-            "bistretch":  3 * (R - 1),
+            "pseudo_halo": 2 * (R - 1),
+            "bistretch": 3 * (R - 1),
         }
         k_model = {mod: shared_k + rater_k[mod] for mod in active_models}
 
         # Calibrate and person-estimate each active model
-        cal_kw = dict(constant=constant, threshold_constant=threshold_constant, method=method, robust=robust,
-                      matrix_power=matrix_power, log_lik_tol=log_lik_tol)
-        pe_kw = dict(warm_corr=warm_corr, tolerance=tolerance,
-                     max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
+        cal_kw = dict(
+            constant=constant,
+            threshold_constant=threshold_constant,
+            method=method,
+            robust=robust,
+            matrix_power=matrix_power,
+            log_lik_tol=log_lik_tol,
+        )
+        pe_kw = dict(
+            warm_corr=warm_corr,
+            tolerance=tolerance,
+            max_iters=max_iters,
+            ext_score_adjustment=ext_score_adjustment,
+        )
         for mod in active_models:
             if not hasattr(self, f"facet_effects_{mod}"):
                 self.calibrate(model=mod, **cal_kw)
@@ -9480,9 +11070,7 @@ class MFRM(Rasch):
 
         # Non-extreme persons (aggregate total score across all raters)
         total_scores = self.responses.groupby(level=1).sum().sum(axis=1)
-        max_possible = (
-            self.responses.notna().groupby(level=1).sum().sum(axis=1) * m
-        )
+        max_possible = self.responses.notna().groupby(level=1).sum().sum(axis=1) * m
         non_extreme_mask = (total_scores > 0) & (total_scores < max_possible)
         n_persons = int(non_extreme_mask.sum())
 
@@ -9505,8 +11093,10 @@ class MFRM(Rasch):
                 n_ll = T
 
         # Compute LL for each active model
-        ll = {mod: self._log_likelihood(model=mod, responses=ll_responses)
-              for mod in active_models}
+        ll = {
+            mod: self._log_likelihood(model=mod, responses=ll_responses)
+            for mod in active_models
+        }
 
         if test == "AIC":
             aic = {mod: 2 * k_model[mod] - 2 * ll[mod] for mod in active_models}
@@ -9518,9 +11108,7 @@ class MFRM(Rasch):
                 for mod in active_models
             }
             summary_df = (
-                pd.DataFrame(summary_rows).T
-                .sort_values("AIC")
-                .rename_axis("Model")
+                pd.DataFrame(summary_rows).T.sort_values("AIC").rename_axis("Model")
             )
 
             active_set = set(active_models)
@@ -9541,17 +11129,21 @@ class MFRM(Rasch):
                 self.model_comparison_mfrm_aic_summary = summary_df
 
         elif test == "BIC":
-            bic = {mod: k_model[mod] * np.log(n_ll) - 2 * ll[mod] for mod in active_models}
+            bic = {
+                mod: k_model[mod] * np.log(n_ll) - 2 * ll[mod] for mod in active_models
+            }
             best_mod = min(bic, key=bic.__getitem__)
             preferred = self._walk_back_effect(best_mod, set(active_models), min_effect)
             self.model_comparison_mfrm_bic = bic
             self.model_comparison_mfrm_bic_preferred = preferred
             self.model_comparison_mfrm_bic_summary = (
                 pd.DataFrame(
-                    {mod: {"LL": ll[mod], "k": k_model[mod], "BIC": bic[mod]}
-                     for mod in active_models}
-                ).T
-                .sort_values("BIC")
+                    {
+                        mod: {"LL": ll[mod], "k": k_model[mod], "BIC": bic[mod]}
+                        for mod in active_models
+                    }
+                )
+                .T.sort_values("BIC")
                 .rename_axis("Model")
             )
 
@@ -9574,19 +11166,19 @@ class MFRM(Rasch):
                 ("bistretch", "bivector"),
             ]
             df_map = {
-                ("global", "items"):        (n_items - 1) * (R - 1),
-                ("global", "thresholds"):   (m - 1) * (R - 1),
-                ("items", "bivector"):      (m - 1) * (R - 1),
+                ("global", "items"): (n_items - 1) * (R - 1),
+                ("global", "thresholds"): (m - 1) * (R - 1),
+                ("items", "bivector"): (m - 1) * (R - 1),
                 ("thresholds", "bivector"): (n_items - 1) * (R - 1),
-                ("bivector", "matrix"):     (n_items - 1) * (m - 1) * (R - 1),
-                ("global", "centrality"):        (R - 1),
-                ("centrality", "thresholds"):    (m - 2) * (R - 1),
-                ("global", "pseudo_halo"):                        (R - 1),
-                ("pseudo_halo", "items"):                         (n_items - 2) * (R - 1),
-                ("global", "bistretch"):          2 * (R - 1),
-                ("centrality", "bistretch"):      (R - 1),
-                ("pseudo_halo", "bistretch"):      (R - 1),
-                ("bistretch", "bivector"):        (n_items + m - 4) * (R - 1),
+                ("bivector", "matrix"): (n_items - 1) * (m - 1) * (R - 1),
+                ("global", "centrality"): (R - 1),
+                ("centrality", "thresholds"): (m - 2) * (R - 1),
+                ("global", "pseudo_halo"): (R - 1),
+                ("pseudo_halo", "items"): (n_items - 2) * (R - 1),
+                ("global", "bistretch"): 2 * (R - 1),
+                ("centrality", "bistretch"): (R - 1),
+                ("pseudo_halo", "bistretch"): (R - 1),
+                ("bistretch", "bivector"): (n_items + m - 4) * (R - 1),
             }
             active_set = set(active_models)
             nested_pairs = [
@@ -9614,17 +11206,22 @@ class MFRM(Rasch):
                 df_val = df_map[(null_mod, alt_mod)]
                 p_val = float(chi2.sf(lr_stat, df_val))
                 effect = self._model_effect(null_mod, alt_mod)
-                preferred = alt_mod if (p_val < alpha and effect >= min_effect) else null_mod
+                preferred = (
+                    alt_mod if (p_val < alpha and effect >= min_effect) else null_mod
+                )
                 label = f"{null_mod} vs {alt_mod}"
                 lr_results[label] = {
-                    "LR": lr_stat, "df": df_val, "p-value": p_val,
-                    "Effect": effect, "Preferred": preferred,
+                    "LR": lr_stat,
+                    "df": df_val,
+                    "p-value": p_val,
+                    "Effect": effect,
+                    "Preferred": preferred,
                 }
 
             self.model_comparison_mfrm_lr = lr_results
-            self.model_comparison_mfrm_lr_summary = (
-                pd.DataFrame(lr_results).T.rename_axis("Comparison")
-            )
+            self.model_comparison_mfrm_lr_summary = pd.DataFrame(
+                lr_results
+            ).T.rename_axis("Comparison")
 
     def _rater_ll_from_sev(self, sev_rik, persons, responses_r, anchor=False):
         """
@@ -9643,11 +11240,11 @@ class MFRM(Rasch):
             matrix item locations and thresholds, which absorb the anchors'
             mean effects.
         """
-        thresholds = self._thresholds_for("matrix", anchor=anchor).values          # (m,)
+        thresholds = self._thresholds_for("matrix", anchor=anchor).values  # (m,)
         cumtau = np.concatenate([[0.0], np.cumsum(thresholds)])  # (m+1,)
-        diff_arr = self._items_for("matrix", anchor=anchor).values                  # (I,)
+        diff_arr = self._items_for("matrix", anchor=anchor).values  # (I,)
         cats = np.arange(len(thresholds) + 1, dtype=float)  # (m+1,)
-        ab = persons.values                           # (N,)
+        ab = persons.values  # (N,)
         obs = responses_r.reindex(persons.index).values  # (N, I)
 
         log_num = np.zeros((len(thresholds) + 1, len(ab), len(diff_arr)))
@@ -9671,10 +11268,10 @@ class MFRM(Rasch):
     def per_rater_model_selection(
         self,
         anchors=None,
-        test='AIC',
+        test="AIC",
         models=None,
         aic_sig_test=True,
-        sampling='dynamic',
+        sampling="dynamic",
         alpha=0.05,
         min_effect=0,
         warm_corr=True,
@@ -9849,13 +11446,19 @@ class MFRM(Rasch):
             from earlier anchors= calls survive later ones with different
             anchor sets. E.g. mfrm.per_rater_model_selection_runs[tuple(my_anchors_1)].table.
         """
-        models = None if models is None else [self._MODEL_ALIASES.get(m, m) for m in models]
+        models = (
+            None if models is None else [self._MODEL_ALIASES.get(m, m) for m in models]
+        )
         n_items = self.no_of_items
         m = self.max_score
         anchored = anchors is not None
 
         # dichotomous data: only items and pseudo_halo vary by item (see _drop_equivalent_models)
-        backbone = {"global", "items"} if m == 1 else {"global", "items", "thresholds", "bivector"}
+        backbone = (
+            {"global", "items"}
+            if m == 1
+            else {"global", "items", "thresholds", "bivector"}
+        )
         if models is None:
             active_models = set(self._MODELS)
         else:
@@ -9875,16 +11478,28 @@ class MFRM(Rasch):
                     f"without them. The other models are independently optional. "
                     f"AIC/BIC don't have this restriction."
                 )
-        active_models = self._drop_equivalent_models(active_models, "per_rater_model_selection()")
+        active_models = self._drop_equivalent_models(
+            active_models, "per_rater_model_selection()"
+        )
         matrix_allowed = "matrix" in active_models
         centrality_allowed = "centrality" in active_models
         pseudo_halo_allowed = "pseudo_halo" in active_models
         bistretch_allowed = "bistretch" in active_models
 
-        cal_kw = dict(constant=constant, threshold_constant=threshold_constant, method=method, robust=robust,
-                      matrix_power=matrix_power, log_lik_tol=log_lik_tol)
-        pe_kw = dict(warm_corr=warm_corr, tolerance=tolerance,
-                     max_iters=max_iters, ext_score_adjustment=ext_score_adjustment)
+        cal_kw = dict(
+            constant=constant,
+            threshold_constant=threshold_constant,
+            method=method,
+            robust=robust,
+            matrix_power=matrix_power,
+            log_lik_tol=log_lik_tol,
+        )
+        pe_kw = dict(
+            warm_corr=warm_corr,
+            tolerance=tolerance,
+            max_iters=max_iters,
+            ext_score_adjustment=ext_score_adjustment,
+        )
 
         if anchored:
             # Calibrate matrix model then apply anchor adjustment (one pass).
@@ -9920,13 +11535,11 @@ class MFRM(Rasch):
             total_r = responses_r.sum(axis=1)
             max_r = responses_r.notna().sum(axis=1) * m
             non_extreme_r = (total_r > 0) & (total_r < max_r)
-            persons_r = persons_all.reindex(
-                total_r.index[non_extreme_r]
-            ).dropna()
+            persons_r = persons_all.reindex(total_r.index[non_extreme_r]).dropna()
             persons_r = persons_r[persons_r.abs() <= 20]
 
             # Dynamic subsampling for LL evaluation (parameters from full data)
-            if sampling == 'dynamic':
+            if sampling == "dynamic":
                 T = min(20 * (n_items - 1) * max(m - 1, 1), 1500)
             elif isinstance(sampling, int):
                 T = sampling
@@ -9936,30 +11549,34 @@ class MFRM(Rasch):
                 persons_r = persons_r.sample(T, random_state=seed)
 
             if len(persons_r) == 0:
-                records[rater] = {"selected_model": "items" if m == 1 else "matrix",
-                                  "LL_matrix": np.nan, "LL_bivector": np.nan,
-                                  "LL_items": np.nan, "LL_thresholds": np.nan,
-                                  "LL_global": np.nan}
+                records[rater] = {
+                    "selected_model": "items" if m == 1 else "matrix",
+                    "LL_matrix": np.nan,
+                    "LL_bivector": np.nan,
+                    "LL_items": np.nan,
+                    "LL_thresholds": np.nan,
+                    "LL_global": np.nan,
+                }
                 continue
 
             # Matrix params for this rater: shape (I, m)
             sev_mat = sev_source.loc[rater].values
 
             # Marginal decomposition
-            item_means = sev_mat.mean(axis=1)          # λ_ri·  (I,)
-            thresh_means = sev_mat.mean(axis=0)         # mean_i σ_{r,i,k}  (m,)
-            mu_r = sev_mat.mean()                       # overall scalar
+            item_means = sev_mat.mean(axis=1)  # λ_ri·  (I,)
+            thresh_means = sev_mat.mean(axis=0)  # mean_i σ_{r,i,k}  (m,)
+            mu_r = sev_mat.mean()  # overall scalar
 
-            lambda_rk = thresh_means - mu_r                          # zero-summed threshold shape (m,)
+            lambda_rk = thresh_means - mu_r  # zero-summed threshold shape (m,)
             sev_biv = item_means[:, None] + lambda_rk[None, :]
             sev_items = np.tile(item_means[:, None], (1, m))
             sev_thresh = np.tile(thresh_means[None, :], (n_items, 1))
             sev_global = np.full((n_items, m), mu_r)
 
             # Step-wise effect sizes: max|complex_sev - simple_sev| at each rung
-            eff_mat_biv = float(np.max(np.abs(sev_mat - sev_biv)))   # interaction
-            eff_biv_itm = float(np.max(np.abs(lambda_rk)))            # threshold shape
-            eff_biv_thr = float(np.max(np.abs(item_means - mu_r)))    # item deviations
+            eff_mat_biv = float(np.max(np.abs(sev_mat - sev_biv)))  # interaction
+            eff_biv_itm = float(np.max(np.abs(lambda_rk)))  # threshold shape
+            eff_biv_thr = float(np.max(np.abs(item_means - mu_r)))  # item deviations
             # items→global and thresholds→global reuse the same quantities
             eff_itm_glb = eff_biv_thr
             eff_thr_glb = eff_biv_itm
@@ -9998,6 +11615,7 @@ class MFRM(Rasch):
 
             def _ll(sev, mod):
                 return self._rater_ll_from_sev(sev, persons_r, responses_r, anchored)
+
             ll_mat = _ll(sev_mat, "matrix")
             ll_biv = _ll(sev_biv, "bivector")
             ll_itm = _ll(sev_items, "items")
@@ -10008,27 +11626,48 @@ class MFRM(Rasch):
             ll_bis = _ll(sev_bistretch, "bistretch")
 
             rec = {
-                "LL_matrix": ll_mat, "LL_bivector": ll_biv,
-                "LL_items": ll_itm, "LL_thresholds": ll_thr, "LL_global": ll_glb,
-                "LL_centrality": ll_cen, "LL_pseudo_halo": ll_pha, "LL_bistretch": ll_bis,
+                "LL_matrix": ll_mat,
+                "LL_bivector": ll_biv,
+                "LL_items": ll_itm,
+                "LL_thresholds": ll_thr,
+                "LL_global": ll_glb,
+                "LL_centrality": ll_cen,
+                "LL_pseudo_halo": ll_pha,
+                "LL_bistretch": ll_bis,
             }
 
             # Per-rater free parameter counts (rater side only)
-            k_map = {"global": 1, "items": n_items, "thresholds": m,
-                     "bivector": n_items + m - 1, "matrix": n_items * m,
-                     "centrality": 2, "pseudo_halo": 2, "bistretch": 3}
+            k_map = {
+                "global": 1,
+                "items": n_items,
+                "thresholds": m,
+                "bivector": n_items + m - 1,
+                "matrix": n_items * m,
+                "centrality": 2,
+                "pseudo_halo": 2,
+                "bistretch": 3,
+            }
             n_r = len(persons_r)  # subsampled n when sampling triggered
 
             if test in ("AIC", "BIC"):
-                ll_map = {"global": ll_glb, "items": ll_itm, "thresholds": ll_thr,
-                          "bivector": ll_biv, "matrix": ll_mat,
-                          "centrality": ll_cen, "pseudo_halo": ll_pha, "bistretch": ll_bis}
+                ll_map = {
+                    "global": ll_glb,
+                    "items": ll_itm,
+                    "thresholds": ll_thr,
+                    "bivector": ll_biv,
+                    "matrix": ll_mat,
+                    "centrality": ll_cen,
+                    "pseudo_halo": ll_pha,
+                    "bistretch": ll_bis,
+                }
                 ll_map = {mod: ll for mod, ll in ll_map.items() if mod in active_models}
                 if test == "AIC":
                     ic = {mod: 2 * k_map[mod] - 2 * ll for mod, ll in ll_map.items()}
                 else:
-                    ic = {mod: k_map[mod] * np.log(n_r) - 2 * ll
-                          for mod, ll in ll_map.items()}
+                    ic = {
+                        mod: k_map[mod] * np.log(n_r) - 2 * ll
+                        for mod, ll in ll_map.items()
+                    }
                 rec.update({f"{test}_{mod}": v for mod, v in ic.items()})
                 best = min(ic, key=ic.get)
                 if test == "AIC" and aic_sig_test:
@@ -10061,7 +11700,9 @@ class MFRM(Rasch):
                     if selected == "thresholds" and eff_thr_glb < min_effect:
                         selected = "global"
 
-            elif m == 1:  # LR, dichotomous: global -> items, then the pseudo_halo restriction
+            elif (
+                m == 1
+            ):  # LR, dichotomous: global -> items, then the pseudo_halo restriction
                 lr_gi = max(0.0, -2.0 * (ll_glb - ll_itm))
                 p_gi = float(chi2.sf(lr_gi, n_items - 1))
                 rec.update({"LR_glb_vs_items": lr_gi, "p_glb_vs_items": p_gi})
@@ -10083,15 +11724,24 @@ class MFRM(Rasch):
                             selected = "pseudo_halo"
 
             else:  # LR — top-down ladder
-                rec.update({"LR_biv_vs_matrix": np.nan, "p_biv_vs_matrix": np.nan,
-                            "LR_items_vs_biv": np.nan, "p_items_vs_biv": np.nan,
-                            "LR_thresh_vs_biv": np.nan, "p_thresh_vs_biv": np.nan})
+                rec.update(
+                    {
+                        "LR_biv_vs_matrix": np.nan,
+                        "p_biv_vs_matrix": np.nan,
+                        "LR_items_vs_biv": np.nan,
+                        "p_items_vs_biv": np.nan,
+                        "LR_thresh_vs_biv": np.nan,
+                        "p_thresh_vs_biv": np.nan,
+                    }
+                )
                 if matrix_allowed:
                     lr_biv = max(0.0, -2.0 * (ll_biv - ll_mat))
                     p_biv = float(chi2.sf(lr_biv, (n_items - 1) * (m - 1)))
                     rec.update({"LR_biv_vs_matrix": lr_biv, "p_biv_vs_matrix": p_biv})
                 else:
-                    p_biv = 1.0  # 'matrix' not offered -- always fall through to the fork
+                    p_biv = (
+                        1.0  # 'matrix' not offered -- always fall through to the fork
+                    )
                 if matrix_allowed and (p_biv < alpha or eff_mat_biv < min_effect):
                     selected = "matrix" if p_biv < alpha else "bivector"
                 else:
@@ -10099,8 +11749,14 @@ class MFRM(Rasch):
                     lr_thr = max(0.0, -2.0 * (ll_thr - ll_biv))
                     p_itm = float(chi2.sf(lr_itm, m - 1))
                     p_thr = float(chi2.sf(lr_thr, n_items - 1))
-                    rec.update({"LR_items_vs_biv": lr_itm, "p_items_vs_biv": p_itm,
-                                "LR_thresh_vs_biv": lr_thr, "p_thresh_vs_biv": p_thr})
+                    rec.update(
+                        {
+                            "LR_items_vs_biv": lr_itm,
+                            "p_items_vs_biv": p_itm,
+                            "LR_thresh_vs_biv": lr_thr,
+                            "p_thresh_vs_biv": p_thr,
+                        }
+                    )
                     # items_ok: threshold shape not significant OR not substantial → items model adequate
                     # thresh_ok: item deviation not significant OR not substantial → thresholds model adequate
                     items_ok = p_itm >= alpha or eff_biv_itm < min_effect
@@ -10148,7 +11804,9 @@ class MFRM(Rasch):
                     rec.update({"LR_itm_vs_pha": lr_pha, "p_itm_vs_pha": p_pha})
                     if not (p_pha < alpha and eff_itm_pha >= min_effect):
                         selected = "pseudo_halo"
-                elif selected == "global" and (centrality_allowed or pseudo_halo_allowed):
+                elif selected == "global" and (
+                    centrality_allowed or pseudo_halo_allowed
+                ):
                     cen_wins = pha_wins = False
                     p_gc = p_gh = None
                     if centrality_allowed:
@@ -10175,7 +11833,9 @@ class MFRM(Rasch):
                                 # Combined model not itself confirmed --
                                 # fall back to whichever single axis had
                                 # the stronger evidence.
-                                selected = "centrality" if p_gc <= p_gh else "pseudo_halo"
+                                selected = (
+                                    "centrality" if p_gc <= p_gh else "pseudo_halo"
+                                )
                         else:
                             # bistretch not offered -- fall back directly
                             # to whichever single axis had the stronger
@@ -10191,28 +11851,71 @@ class MFRM(Rasch):
             records[rater] = rec
 
         # Build column order: selected_model first, then LLs, then test-specific
-        ll_cols = ["LL_matrix", "LL_bivector", "LL_items", "LL_thresholds", "LL_global",
-                   "LL_centrality", "LL_pseudo_halo", "LL_bistretch"]
+        ll_cols = [
+            "LL_matrix",
+            "LL_bivector",
+            "LL_items",
+            "LL_thresholds",
+            "LL_global",
+            "LL_centrality",
+            "LL_pseudo_halo",
+            "LL_bistretch",
+        ]
         if test in ("AIC", "BIC"):
-            ic_cols = [f"{test}_{m_}" for m_ in
-                       ("matrix", "bivector", "items", "thresholds", "global",
-                        "centrality", "pseudo_halo", "bistretch")]
-            extra_cols = ic_cols + (["p_vs_baseline", "baseline_model"] if test == "AIC" and aic_sig_test else [])
+            ic_cols = [
+                f"{test}_{m_}"
+                for m_ in (
+                    "matrix",
+                    "bivector",
+                    "items",
+                    "thresholds",
+                    "global",
+                    "centrality",
+                    "pseudo_halo",
+                    "bistretch",
+                )
+            ]
+            extra_cols = ic_cols + (
+                ["p_vs_baseline", "baseline_model"]
+                if test == "AIC" and aic_sig_test
+                else []
+            )
         else:
             extra_cols = (["LR_glb_vs_items", "p_glb_vs_items"] if m == 1 else []) + [
-                          "LR_biv_vs_matrix", "p_biv_vs_matrix",
-                          "LR_items_vs_biv", "p_items_vs_biv",
-                          "LR_thresh_vs_biv", "p_thresh_vs_biv",
-                          "LR_biv_vs_bis", "p_biv_vs_bis",
-                          "LR_thr_vs_cen", "p_thr_vs_cen",
-                          "LR_itm_vs_pha", "p_itm_vs_pha",
-                          "LR_glb_vs_cen", "p_glb_vs_cen",
-                          "LR_glb_vs_pha", "p_glb_vs_pha",
-                          "LR_glb_vs_bis", "p_glb_vs_bis"]
+                "LR_biv_vs_matrix",
+                "p_biv_vs_matrix",
+                "LR_items_vs_biv",
+                "p_items_vs_biv",
+                "LR_thresh_vs_biv",
+                "p_thresh_vs_biv",
+                "LR_biv_vs_bis",
+                "p_biv_vs_bis",
+                "LR_thr_vs_cen",
+                "p_thr_vs_cen",
+                "LR_itm_vs_pha",
+                "p_itm_vs_pha",
+                "LR_glb_vs_cen",
+                "p_glb_vs_cen",
+                "LR_glb_vs_pha",
+                "p_glb_vs_pha",
+                "LR_glb_vs_bis",
+                "p_glb_vs_bis",
+            ]
         cols = ["selected_model"] + ll_cols + extra_cols
-        if m == 1:  # dichotomous: only the global/items/pseudo_halo columns are meaningful
-            keep = ("global", "items", "pseudo_halo", "glb_vs_items", "itm_vs_pha", "glb_vs_pha",
-                    "p_vs_baseline", "baseline_model", "selected_model")
+        if (
+            m == 1
+        ):  # dichotomous: only the global/items/pseudo_halo columns are meaningful
+            keep = (
+                "global",
+                "items",
+                "pseudo_halo",
+                "glb_vs_items",
+                "itm_vs_pha",
+                "glb_vs_pha",
+                "p_vs_baseline",
+                "baseline_model",
+                "selected_model",
+            )
             cols = [c for c in cols if c.endswith(keep)]
         table = pd.DataFrame(records).T.rename_axis("Rater")
         table = table.reindex(columns=cols)
@@ -10290,6 +11993,7 @@ class MFRM(Rasch):
         # results from different anchors= calls can be recovered later
         # instead of being overwritten by the next call.
         from types import SimpleNamespace
+
         if not hasattr(self, "per_rater_model_selection_runs"):
             self.per_rater_model_selection_runs = {}
         key = tuple(anchors) if anchored else None
@@ -10331,7 +12035,7 @@ class MFRM(Rasch):
             if assigned == "matrix":
                 sev_r = sev_mat
             else:
-                item_means = sev_mat.mean(axis=1)    # (I,)
+                item_means = sev_mat.mean(axis=1)  # (I,)
                 thresh_means = sev_mat.mean(axis=0)  # (m,)
                 mu_r = sev_mat.mean()
                 if assigned == "global":
@@ -10557,9 +12261,11 @@ class MFRM(Rasch):
     def item_res_corr_analysis_bivector(self, **kw):
         """Alias for item_res_corr_analysis(model='bivector'). See item_res_corr_analysis for full documentation."""
         self._run_item_res_corr("bivector", **kw)
+
     def item_res_corr_analysis_centrality(self, **kw):
         """Alias for item_res_corr_analysis(model='bivector'). See item_res_corr_analysis for full documentation."""
         self._run_item_res_corr("centrality", **kw)
+
     def item_res_corr_analysis_pseudo_halo(self, **kw):
         """Alias for item_res_corr_analysis(model='bivector'). See item_res_corr_analysis for full documentation."""
         self._run_item_res_corr("pseudo_halo", **kw)
@@ -10592,12 +12298,15 @@ class MFRM(Rasch):
     def rater_res_corr_analysis_global(self, **kw):
         """Alias for rater_res_corr_analysis(model='global'). See facet_res_corr_analysis for full documentation."""
         self._run_facet_res_corr("global", **kw)
+
     def facet_res_corr_analysis_centrality(self, **kw):
         """Alias for facet_res_corr_analysis(model='centrality'). See facet_res_corr_analysis for full documentation."""
         self._run_facet_res_corr("centrality", **kw)
+
     def facet_res_corr_analysis_pseudo_halo(self, **kw):
         """Alias for facet_res_corr_analysis(model='pseudo_halo'). See facet_res_corr_analysis for full documentation."""
         self._run_facet_res_corr("pseudo_halo", **kw)
+
     def facet_res_corr_analysis_bistretch(self, **kw):
         """Alias for facet_res_corr_analysis(model='bistretch'). See facet_res_corr_analysis for full documentation."""
         self._run_facet_res_corr("bistretch", **kw)
@@ -10655,7 +12364,11 @@ class MFRM(Rasch):
         """
         if anchors is None:
             return False
-        name_attr = "anchor_rater_names_matrix" if model == "mixed" else f"anchor_rater_names_{model}"
+        name_attr = (
+            "anchor_rater_names_matrix"
+            if model == "mixed"
+            else f"anchor_rater_names_{model}"
+        )
         stored = getattr(self, name_attr, None)
         return stored is None or set(stored) != set(anchors)
 
@@ -10699,7 +12412,15 @@ class MFRM(Rasch):
         calib_kw = {
             k: v
             for k, v in kw.items()
-            if k in ("constant", "threshold_constant", "method", "robust", "matrix_power", "log_lik_tol")
+            if k
+            in (
+                "constant",
+                "threshold_constant",
+                "method",
+                "robust",
+                "matrix_power",
+                "log_lik_tol",
+            )
         }
         abil_kw = {
             k: v
@@ -10716,7 +12437,9 @@ class MFRM(Rasch):
                 self.calibrate(model=model, **calib_kw)
             if anchors is not None:
                 stored = getattr(self, f"anchor_rater_names_{model}", None)
-                if not hasattr(self, f"anchor_rater_names_{model}") or set(stored) != set(anchors):
+                if not hasattr(self, f"anchor_rater_names_{model}") or set(
+                    stored
+                ) != set(anchors):
                     self.calibrate_anchor(model, anchors, **calib_kw)
         if not hasattr(self, f"persons_{model}"):
             self.person_estimates(model=model, **abil_kw)
@@ -10942,7 +12665,9 @@ class MFRM(Rasch):
             low = self._item_se_for(model, "low", anchor=anc)
             high = self._item_se_for(model, "high", anchor=anc)
             if anc and low is None:
-                low, high = self._item_se_for(model, "low"), self._item_se_for(model, "high")
+                low, high = self._item_se_for(model, "low"), self._item_se_for(
+                    model, "high"
+                )
             stats["SE"] = se_vals.round(dp)
             if interval is not None and low is not None:
                 lo_lbl = f"{round((1 - interval) * 50, 1)}%"
@@ -10986,12 +12711,15 @@ class MFRM(Rasch):
     def item_stats_df_bivector(self, **kw):
         """Alias for item_stats_df(model='bivector'). See item_stats_df for full documentation."""
         return self.item_stats_df(model="bivector", **kw)
+
     def item_stats_df_centrality(self, **kw):
         """Alias for item_stats_df(model='bivector'). See item_stats_df for full documentation."""
         return self.item_stats_df(model="centrality", **kw)
+
     def item_stats_df_pseudo_halo(self, **kw):
         """Alias for item_stats_df(model='bivector'). See item_stats_df for full documentation."""
         return self.item_stats_df(model="pseudo_halo", **kw)
+
     def item_stats_df_bistretch(self, **kw):
         """Alias for item_stats_df(model='bivector'). See item_stats_df for full documentation."""
         return self.item_stats_df(model="bistretch", **kw)
@@ -11133,9 +12861,7 @@ class MFRM(Rasch):
             self._run_threshold_fit(model, anchors=anchors)
 
         anc = anchors is not None
-        thresholds = (
-            self._thresholds_for(model, anchor=anc)
-        )
+        thresholds = self._thresholds_for(model, anchor=anc)
         thr_se_attr = f"anchor_threshold_se_{model}" if anc else f"threshold_se_{model}"
         thr_se = getattr(self, thr_se_attr, None)
         thr_lo = getattr(
@@ -11209,12 +12935,15 @@ class MFRM(Rasch):
     def threshold_stats_df_bivector(self, **kw):
         """Alias for threshold_stats_df(model='bivector'). See threshold_stats_df for full documentation."""
         return self.threshold_stats_df(model="bivector", **kw)
+
     def threshold_stats_df_centrality(self, **kw):
         """Alias for threshold_stats_df(model='bivector'). See threshold_stats_df for full documentation."""
         return self.threshold_stats_df(model="centrality", **kw)
+
     def threshold_stats_df_pseudo_halo(self, **kw):
         """Alias for threshold_stats_df(model='bivector'). See threshold_stats_df for full documentation."""
         return self.threshold_stats_df(model="pseudo_halo", **kw)
+
     def threshold_stats_df_bistretch(self, **kw):
         """Alias for threshold_stats_df(model='bivector'). See threshold_stats_df for full documentation."""
         return self.threshold_stats_df(model="bistretch", **kw)
@@ -11356,10 +13085,10 @@ class MFRM(Rasch):
         anc = anchors is not None
         prefix = "anchor_" if anc else ""
 
-        thresholds = (
-            self._thresholds_for(model, anchor=anc)
+        thresholds = self._thresholds_for(model, anchor=anc)
+        thresholds = pd.Series(
+            np.asarray(thresholds), index=range(1, self.max_score + 1)
         )
-        thresholds = pd.Series(np.asarray(thresholds), index=range(1, self.max_score + 1))
         cat_widths = thresholds.diff().dropna()
         cat_widths.index = range(1, self.max_score)
 
@@ -11414,12 +13143,15 @@ class MFRM(Rasch):
     def category_stats_df_bivector(self, **kw):
         """Alias for category_stats_df(model='bivector'). See category_stats_df for full documentation."""
         return self.category_stats_df(model="bivector", **kw)
+
     def category_stats_df_centrality(self, **kw):
         """Alias for category_stats_df(model='bivector'). See category_stats_df for full documentation."""
         return self.category_stats_df(model="centrality", **kw)
+
     def category_stats_df_pseudo_halo(self, **kw):
         """Alias for category_stats_df(model='bivector'). See category_stats_df for full documentation."""
         return self.category_stats_df(model="pseudo_halo", **kw)
+
     def category_stats_df_bistretch(self, **kw):
         """Alias for category_stats_df(model='bivector'). See category_stats_df for full documentation."""
         return self.category_stats_df(model="bistretch", **kw)
@@ -11579,12 +13311,15 @@ class MFRM(Rasch):
     def person_stats_df_bivector(self, **kw):
         """Alias for person_stats_df(model='bivector'). See person_stats_df for full documentation."""
         return self.person_stats_df(model="bivector", **kw)
+
     def person_stats_df_centrality(self, **kw):
         """Alias for person_stats_df(model='bivector'). See person_stats_df for full documentation."""
         return self.person_stats_df(model="centrality", **kw)
+
     def person_stats_df_pseudo_halo(self, **kw):
         """Alias for person_stats_df(model='bivector'). See person_stats_df for full documentation."""
         return self.person_stats_df(model="pseudo_halo", **kw)
+
     def person_stats_df_bistretch(self, **kw):
         """Alias for person_stats_df(model='bivector'). See person_stats_df for full documentation."""
         return self.person_stats_df(model="bistretch", **kw)
@@ -12030,7 +13765,9 @@ class MFRM(Rasch):
                 return ov.T
 
             result = {}
-            flagged_col_keys = []  # (group, 'Flagged') columns needing an explicit bool cast below
+            flagged_col_keys = (
+                []
+            )  # (group, 'Flagged') columns needing an explicit bool cast below
 
             if model == "items":
                 for item in self.item_names:
@@ -12039,8 +13776,12 @@ class MFRM(Rasch):
                     if rse is not None and not isinstance(rse, dict) and not rse.empty:
                         sub["SE"] = rse[item].values.round(dp)
                     if interval is not None and rlo is not None:
-                        sub[f"{round((1-interval)*50, 1)}%"] = rlo[item].values.round(dp)
-                        sub[f"{round((1+interval)*50, 1)}%"] = rhi[item].values.round(dp)
+                        sub[f"{round((1-interval)*50, 1)}%"] = rlo[item].values.round(
+                            dp
+                        )
+                        sub[f"{round((1+interval)*50, 1)}%"] = rhi[item].values.round(
+                            dp
+                        )
                     result[item] = sub.T
 
             elif model == "thresholds":
@@ -12071,9 +13812,17 @@ class MFRM(Rasch):
                 }[model]
                 for pname in param_names:
                     est_attr = f"anchor_{pname}_{model}" if anc else f"{pname}_{model}"
-                    se_attr = f"anchor_{pname}_se_{model}" if anc else f"{pname}_se_{model}"
-                    lo_attr = f"anchor_{pname}_low_{model}" if anc else f"{pname}_low_{model}"
-                    hi_attr = f"anchor_{pname}_high_{model}" if anc else f"{pname}_high_{model}"
+                    se_attr = (
+                        f"anchor_{pname}_se_{model}" if anc else f"{pname}_se_{model}"
+                    )
+                    lo_attr = (
+                        f"anchor_{pname}_low_{model}" if anc else f"{pname}_low_{model}"
+                    )
+                    hi_attr = (
+                        f"anchor_{pname}_high_{model}"
+                        if anc
+                        else f"{pname}_high_{model}"
+                    )
                     p_est = getattr(self, est_attr)
                     p_se = getattr(self, se_attr, None)
                     sub = pd.DataFrame(index=self.facet_names)
@@ -12086,7 +13835,9 @@ class MFRM(Rasch):
                         if p_lo is not None and p_hi is not None:
                             sub[f"{round((1-interval)*50, 1)}%"] = p_lo.round(dp)
                             sub[f"{round((1+interval)*50, 1)}%"] = p_hi.round(dp)
-                    col_key = self._RATER_PARAM_ALIAS_LABELS[model][pname] if alias else pname
+                    col_key = (
+                        self._RATER_PARAM_ALIAS_LABELS[model][pname] if alias else pname
+                    )
                     result[col_key] = sub.T
 
                 # Divergence test (opt-in): free vector model vs stretch
@@ -12097,18 +13848,23 @@ class MFRM(Rasch):
                     div_inputs = self._get_divergence_inputs(model, anc)
                     div_results = {
                         axis: self._axis_divergence_test(
-                            *div_inputs[axis], test=divergence_test, correction=correction,
-                            alpha=alpha, no_of_samples=no_of_samples,
+                            *div_inputs[axis],
+                            test=divergence_test,
+                            correction=correction,
+                            alpha=alpha,
+                            no_of_samples=no_of_samples,
                         )
                         for axis in div_inputs
                     }
                     if "items" in div_results:
                         result["Flagged items"] = pd.DataFrame(
-                            {"Count": div_results["items"][2]["Flagged"]}, index=self.facet_names
+                            {"Count": div_results["items"][2]["Flagged"]},
+                            index=self.facet_names,
                         ).T
                     if "thresholds" in div_results:
                         result["Flagged categories"] = pd.DataFrame(
-                            {"Count": div_results["thresholds"][2]["Flagged"]}, index=self.facet_names
+                            {"Count": div_results["thresholds"][2]["Flagged"]},
+                            index=self.facet_names,
                         ).T
                     # full=True: one column per item/threshold, straight
                     # after the Flagged items/categories summary above --
@@ -12122,7 +13878,8 @@ class MFRM(Rasch):
                             item_flagged = div_results["items"][1]
                             for item in item_flagged.columns:
                                 result[item] = pd.DataFrame(
-                                    {"Flagged": item_flagged[item]}, index=self.facet_names
+                                    {"Flagged": item_flagged[item]},
+                                    index=self.facet_names,
                                 ).T
                                 flagged_col_keys.append(item)
                         if "thresholds" in div_results:
@@ -12144,45 +13901,81 @@ class MFRM(Rasch):
                     for item in self.item_names:
                         sub = pd.DataFrame(index=self.facet_names)
                         sub["Estimate"] = facet_effects[item].values.round(dp)
-                        if rse is not None and not isinstance(rse, dict) and not rse.empty:
+                        if (
+                            rse is not None
+                            and not isinstance(rse, dict)
+                            and not rse.empty
+                        ):
                             sub["SE"] = rse[item].values.round(dp)
                         if interval is not None and rlo is not None:
-                            sub[f"{round((1-interval)*50, 1)}%"] = rlo[item].values.round(dp)
-                            sub[f"{round((1+interval)*50, 1)}%"] = rhi[item].values.round(dp)
+                            sub[f"{round((1-interval)*50, 1)}%"] = rlo[
+                                item
+                            ].values.round(dp)
+                            sub[f"{round((1+interval)*50, 1)}%"] = rhi[
+                                item
+                            ].values.round(dp)
                         if full and flagged_items is not None:
                             sub["Flagged"] = flagged_items[item].values
                         fv_result[item] = sub.T
                 elif model == "centrality":
-                    flagged_thresholds = div_results["thresholds"][1] if div_results else None
+                    flagged_thresholds = (
+                        div_results["thresholds"][1] if div_results else None
+                    )
                     for t in range(self.max_score):
                         key = f"Threshold {t+1}"
                         sub = pd.DataFrame(index=self.facet_names)
                         sub["Estimate"] = facet_effects.iloc[:, t].values.round(dp)
-                        if rse is not None and not isinstance(rse, dict) and not rse.empty:
+                        if (
+                            rse is not None
+                            and not isinstance(rse, dict)
+                            and not rse.empty
+                        ):
                             sub["SE"] = rse.iloc[:, t].values.round(dp)
                         if interval is not None and rlo is not None:
-                            sub[f"{round((1-interval)*50, 1)}%"] = rlo.iloc[:, t].values.round(dp)
-                            sub[f"{round((1+interval)*50, 1)}%"] = rhi.iloc[:, t].values.round(dp)
+                            sub[f"{round((1-interval)*50, 1)}%"] = rlo.iloc[
+                                :, t
+                            ].values.round(dp)
+                            sub[f"{round((1+interval)*50, 1)}%"] = rhi.iloc[
+                                :, t
+                            ].values.round(dp)
                         if full and flagged_thresholds is not None:
                             sub["Flagged"] = flagged_thresholds.iloc[:, t].values
                         fv_result[key] = sub.T
                 else:  # bistretch -- dual reconstruction, same pattern as bivector below
                     mg_i_attr = (
-                        "anchor_facet_effects_bistretch_items" if anc else "facet_effects_bistretch_items"
+                        "anchor_facet_effects_bistretch_items"
+                        if anc
+                        else "facet_effects_bistretch_items"
                     )
                     mg_t_attr = (
-                        "anchor_facet_effects_bistretch_thresholds" if anc else "facet_effects_bistretch_thresholds"
+                        "anchor_facet_effects_bistretch_thresholds"
+                        if anc
+                        else "facet_effects_bistretch_thresholds"
                     )
                     mg_items = getattr(self, mg_i_attr)
                     mg_thrs = getattr(self, mg_t_attr)
                     mg_se_i = getattr(
-                        self, "anchor_rater_se_marginal_items" if anc else "rater_se_marginal_items", None
+                        self,
+                        (
+                            "anchor_rater_se_marginal_items"
+                            if anc
+                            else "rater_se_marginal_items"
+                        ),
+                        None,
                     )
                     mg_se_t = getattr(
-                        self, "anchor_rater_se_marginal_thresholds" if anc else "rater_se_marginal_thresholds", None
+                        self,
+                        (
+                            "anchor_rater_se_marginal_thresholds"
+                            if anc
+                            else "rater_se_marginal_thresholds"
+                        ),
+                        None,
                     )
                     flagged_items = div_results["items"][1] if div_results else None
-                    flagged_thresholds = div_results["thresholds"][1] if div_results else None
+                    flagged_thresholds = (
+                        div_results["thresholds"][1] if div_results else None
+                    )
                     for item in self.item_names:
                         sub = pd.DataFrame(index=self.facet_names)
                         sub["Estimate"] = mg_items[item].values.round(dp)
@@ -12207,7 +14000,8 @@ class MFRM(Rasch):
 
                 if plot and div_results is not None:
                     setattr(
-                        self, f"fit_plot_{model}",
+                        self,
+                        f"fit_plot_{model}",
                         self._build_fit_plot(model, div_inputs, div_results),
                     )
 
@@ -12365,9 +14159,7 @@ class MFRM(Rasch):
                             and not isinstance(rse, dict)
                             and not rse.empty
                         ):
-                            sub["SE"] = rse.loc[(slice(None), item), t].values.round(
-                                dp
-                            )
+                            sub["SE"] = rse.loc[(slice(None), item), t].values.round(dp)
                         if interval is not None and rlo is not None:
                             sub[f"{round((1-interval)*50, 1)}%"] = rlo.loc[
                                 (slice(None), item), t
@@ -12439,9 +14231,11 @@ class MFRM(Rasch):
     def rater_stats_df_centrality(self, **kw):
         """Alias for rater_stats_df(model='centrality'). See rater_stats_df for full documentation."""
         return self.rater_stats_df(model="centrality", **kw)
+
     def rater_stats_df_pseudo_halo(self, **kw):
         """Alias for rater_stats_df(model='pseudo_halo'). See rater_stats_df for full documentation."""
         return self.rater_stats_df(model="pseudo_halo", **kw)
+
     def rater_stats_df_bistretch(self, **kw):
         """Alias for rater_stats_df(model='bistretch'). See rater_stats_df for full documentation."""
         return self.rater_stats_df(model="bistretch", **kw)
@@ -12571,9 +14365,13 @@ class MFRM(Rasch):
                 f"rater_stats_{model}",
                 "rater_stats_df",
                 dict(
-                    no_of_samples=no_of_samples, interval=interval, alias=alias,
-                    divergence_test=divergence_test, correction=correction,
-                    alpha=alpha, plot=plot,
+                    no_of_samples=no_of_samples,
+                    interval=interval,
+                    alias=alias,
+                    divergence_test=divergence_test,
+                    correction=correction,
+                    alpha=alpha,
+                    plot=plot,
                 ),
             ),
             (f"person_stats_{model}", "person_stats_df", {}),
@@ -12641,12 +14439,15 @@ class MFRM(Rasch):
     def save_stats_bivector(self, **kw):
         """Alias for save_stats(model='bivector'). See save_stats for full documentation."""
         self.save_stats(model="bivector", **kw)
+
     def save_stats_centrality(self, **kw):
         """Alias for save_stats(model='centrality'). See save_stats for full documentation."""
         self.save_stats(model="centrality", **kw)
+
     def save_stats_pseudo_halo(self, **kw):
         """Alias for save_stats(model='pseudo_halo'). See save_stats for full documentation."""
         self.save_stats(model="pseudo_halo", **kw)
+
     def save_stats_bistretch(self, **kw):
         """Alias for save_stats(model='bistretch'). See save_stats for full documentation."""
         self.save_stats(model="bistretch", **kw)
@@ -12789,12 +14590,15 @@ class MFRM(Rasch):
     def save_residuals_items_bivector(self, filename, **kw):
         """Alias for save_residuals_items(model='bivector'). See save_residuals_items for full documentation."""
         self._save_residuals_for("bivector", "item", filename, **kw)
+
     def save_residuals_items_centrality(self, filename, **kw):
         """Alias for save_residuals_centrality(model='centrality'). See save_residuals_items for full documentation."""
         self._save_residuals_for("centrality", "item", filename, **kw)
+
     def save_residuals_items_pseudo_halo(self, filename, **kw):
         """Alias for save_residuals_pseudo_halo(model='pseudo_halo'). See save_residuals_items for full documentation."""
         self._save_residuals_for("pseudo_halo", "item", filename, **kw)
+
     def save_residuals_items_bistretch(self, filename, **kw):
         """Alias for save_residuals_bistretch(model='bistretch'). See save_residuals_items for full documentation."""
         self._save_residuals_for("bistretch", "item", filename, **kw)
@@ -12841,12 +14645,15 @@ class MFRM(Rasch):
             },
         }
         return {cg: mask[cg][mask[cg]].index for cg in class_groups}
+
     def save_residuals_raters_centrality(self, filename, **kw):
         """Alias for save_residuals_raters(model='centrality'). See save_residuals_raters for full documentation."""
         self._save_residuals_for("centrality", "rater", filename, **kw)
+
     def save_residuals_raters_pseudo_halo(self, filename, **kw):
         """Alias for save_residuals_raters(model='pseudo_halo'). See save_residuals_raters for full documentation."""
         self._save_residuals_for("pseudo_halo", "rater", filename, **kw)
+
     def save_residuals_raters_bistretch(self, filename, **kw):
         """Alias for save_residuals_raters(model='bistretch'). See save_residuals_raters for full documentation."""
         self._save_residuals_for("bistretch", "rater", filename, **kw)
@@ -12873,9 +14680,13 @@ class MFRM(Rasch):
         if model == "global":
             return pd.Series(0.0, index=facet_effects.index)
         elif model in ("items", "thresholds", "centrality", "pseudo_halo"):
-            return pd.DataFrame(0.0, index=facet_effects.index, columns=facet_effects.columns)
+            return pd.DataFrame(
+                0.0, index=facet_effects.index, columns=facet_effects.columns
+            )
         elif model in ("bivector", "matrix", "bistretch"):
-            return pd.DataFrame(0.0, index=facet_effects.index, columns=facet_effects.columns)
+            return pd.DataFrame(
+                0.0, index=facet_effects.index, columns=facet_effects.columns
+            )
 
     def _mean_facet_effects(self, model, facet_effects, facet_element):
         """Return a facet_effects structure where `facet_element` has the mean facet_effect
@@ -12895,7 +14706,12 @@ class MFRM(Rasch):
             return result
 
     def class_intervals(
-        self, person_locations, items=None, facet_elements=None, shift=0, no_of_classes=5
+        self,
+        person_locations,
+        items=None,
+        facet_elements=None,
+        shift=0,
+        no_of_classes=5,
     ):
         """Class intervals for TCC/ICC observed data overlay."""
         if isinstance(items, str) and items in ("all", "none"):
@@ -13070,9 +14886,7 @@ class MFRM(Rasch):
         elif item is None and facet_element is not None:
             raw_for_x = (raw_abil_base * pf).unstack()
         elif item is not None and facet_element is None:
-            raw_frame = pd.DataFrame(
-                {r: raw_abil_base[item] for r in self.facet_names}
-            )
+            raw_frame = pd.DataFrame({r: raw_abil_base[item] for r in self.facet_names})
             raw_for_x = (raw_frame * pf).unstack()
         else:
             raw_for_x = raw_abil_base[item] * pf
@@ -13143,10 +14957,15 @@ class MFRM(Rasch):
 
             if item is None:
                 obs_data = pd.DataFrame(
-                    {"person_location": cond_estimates.stack(), "score": cond_df.stack()}
+                    {
+                        "person_location": cond_estimates.stack(),
+                        "score": cond_df.stack(),
+                    }
                 ).droplevel(level=1)
             else:
-                obs_data = pd.DataFrame({"person_location": cond_estimates, "score": cond_df})
+                obs_data = pd.DataFrame(
+                    {"person_location": cond_estimates, "score": cond_df}
+                )
 
             masks = self._class_masks(obs_data["person_location"], no_of_classes)
             mean_abilities_all.append(
@@ -13183,7 +15002,12 @@ class MFRM(Rasch):
     ):
         """Alias for class_intervals_cats(model='thresholds'). See class_intervals_cats for full documentation."""
         return self.class_intervals_cats(
-            person_locations, item_locations, thresholds, facet_effects, "thresholds", **kw
+            person_locations,
+            item_locations,
+            thresholds,
+            facet_effects,
+            "thresholds",
+            **kw,
         )
 
     def class_intervals_cats_matrix(
@@ -13199,73 +15023,112 @@ class MFRM(Rasch):
     ):
         """Alias for class_intervals_cats(model='bivector'). See class_intervals_cats for full documentation."""
         return self.class_intervals_cats(
-            person_locations, item_locations, thresholds, facet_effects, "bivector", **kw
+            person_locations,
+            item_locations,
+            thresholds,
+            facet_effects,
+            "bivector",
+            **kw,
         )
+
     def class_intervals_cats_centrality(
         self, person_locations, item_locations, thresholds, facet_effects, **kw
     ):
         """Alias for class_intervals_cats(model='centrality'). See class_intervals_cats for full documentation."""
         return self.class_intervals_cats(
-            person_locations, item_locations, thresholds, facet_effects, "centrality", **kw
+            person_locations,
+            item_locations,
+            thresholds,
+            facet_effects,
+            "centrality",
+            **kw,
         )
+
     def class_intervals_cats_pseudo_halo(
         self, person_locations, item_locations, thresholds, facet_effects, **kw
     ):
         """Alias for class_intervals_cats(model='pseudo_halo'). See class_intervals_cats for full documentation."""
         return self.class_intervals_cats(
-            person_locations, item_locations, thresholds, facet_effects, "pseudo_halo", **kw
+            person_locations,
+            item_locations,
+            thresholds,
+            facet_effects,
+            "pseudo_halo",
+            **kw,
         )
+
     def class_intervals_cats_bistretch(
         self, person_locations, item_locations, thresholds, facet_effects, **kw
     ):
         """Alias for class_intervals_cats(model='bistretch'). See class_intervals_cats for full documentation."""
         return self.class_intervals_cats(
-            person_locations, item_locations, thresholds, facet_effects, "bistretch", **kw
+            person_locations,
+            item_locations,
+            thresholds,
+            facet_effects,
+            "bistretch",
+            **kw,
         )
 
-    def class_intervals_thr_global(self, person_locations, item_locations, facet_effects, **kw):
+    def class_intervals_thr_global(
+        self, person_locations, item_locations, facet_effects, **kw
+    ):
         """Alias for class_intervals_thr(model='global'). See class_intervals_thr for full documentation."""
         return self.class_intervals_thr(
             person_locations, item_locations, facet_effects, "global", **kw
         )
 
-    def class_intervals_thr_items(self, person_locations, item_locations, facet_effects, **kw):
+    def class_intervals_thr_items(
+        self, person_locations, item_locations, facet_effects, **kw
+    ):
         """Alias for class_intervals_thr(model='items'). See class_intervals_thr for full documentation."""
         return self.class_intervals_thr(
             person_locations, item_locations, facet_effects, "items", **kw
         )
 
-    def class_intervals_thr_thresholds(self, person_locations, item_locations, facet_effects, **kw):
+    def class_intervals_thr_thresholds(
+        self, person_locations, item_locations, facet_effects, **kw
+    ):
         """Alias for class_intervals_thr(model='thresholds'). See class_intervals_thr for full documentation."""
         return self.class_intervals_thr(
             person_locations, item_locations, facet_effects, "thresholds", **kw
         )
 
-    def class_intervals_thr_matrix(self, person_locations, item_locations, facet_effects, **kw):
+    def class_intervals_thr_matrix(
+        self, person_locations, item_locations, facet_effects, **kw
+    ):
         """Alias for class_intervals_thr(model='matrix'). See class_intervals_thr for full documentation."""
         return self.class_intervals_thr(
             person_locations, item_locations, facet_effects, "matrix", **kw
         )
 
-    def class_intervals_thr_bivector(self, person_locations, item_locations, facet_effects, **kw):
+    def class_intervals_thr_bivector(
+        self, person_locations, item_locations, facet_effects, **kw
+    ):
         """Alias for class_intervals_thr(model='bivector'). See class_intervals_thr for full documentation."""
         return self.class_intervals_thr(
             person_locations, item_locations, facet_effects, "bivector", **kw
         )
 
-    def class_intervals_thr_centrality(self, person_locations, item_locations, facet_effects, **kw):
+    def class_intervals_thr_centrality(
+        self, person_locations, item_locations, facet_effects, **kw
+    ):
         """Alias for class_intervals_thr(model='centrality'). See class_intervals_thr for full documentation."""
         return self.class_intervals_thr(
             person_locations, item_locations, facet_effects, "centrality", **kw
         )
 
-    def class_intervals_thr_pseudo_halo(self, person_locations, item_locations, facet_effects, **kw):
+    def class_intervals_thr_pseudo_halo(
+        self, person_locations, item_locations, facet_effects, **kw
+    ):
         """Alias for class_intervals_thr(model='pseudo_halo'). See class_intervals_thr for full documentation."""
         return self.class_intervals_thr(
             person_locations, item_locations, facet_effects, "pseudo_halo", **kw
         )
 
-    def class_intervals_thr_bistretch(self, person_locations, item_locations, facet_effects, **kw):
+    def class_intervals_thr_bistretch(
+        self, person_locations, item_locations, facet_effects, **kw
+    ):
         """Alias for class_intervals_thr(model='bistretch'). See class_intervals_thr for full documentation."""
         return self.class_intervals_thr(
             person_locations, item_locations, facet_effects, "bistretch", **kw
@@ -13381,8 +15244,13 @@ class MFRM(Rasch):
             # The 8th (black) entry is swapped for white on dark
             # backgrounds, where it would otherwise be invisible.
             color_map = [
-                "#E69F00", "#56B4E9", "#009E73", "#F0E442",
-                "#0072B2", "#D55E00", "#CC79A7",
+                "#E69F00",
+                "#56B4E9",
+                "#009E73",
+                "#F0E442",
+                "#0072B2",
+                "#D55E00",
+                "#CC79A7",
                 "#FFFFFF" if plot_style in self._DARK_BACKGROUND_STYLES else "#000000",
             ]
         elif shade == "dark":
@@ -13409,10 +15277,16 @@ class MFRM(Rasch):
             # legible on a background/gridline colour close to its own --
             # white on the darker plot_style schemes, black otherwise.
             line_fx = (
-                [path_effects.withStroke(
-                    linewidth=2.5,
-                    foreground="white" if plot_style in self._DARK_BACKGROUND_STYLES else "black",
-                )]
+                [
+                    path_effects.withStroke(
+                        linewidth=2.5,
+                        foreground=(
+                            "white"
+                            if plot_style in self._DARK_BACKGROUND_STYLES
+                            else "black"
+                        ),
+                    )
+                ]
                 if line_border
                 else None
             )
@@ -13427,7 +15301,11 @@ class MFRM(Rasch):
                 )
                 label = curve_labels[i] if curve_labels is not None else i + 1
                 ax.plot(
-                    x_data, y_data[:, i], "", color=col, label=label,
+                    x_data,
+                    y_data[:, i],
+                    "",
+                    color=col,
+                    label=label,
                     path_effects=line_fx,
                 )
 
@@ -13443,8 +15321,12 @@ class MFRM(Rasch):
                             else color_map[0]
                         )
                         ax.plot(
-                            x_obs_data, y_obs_data, "o", color=col,
-                            markeredgecolor="k" if marker_border else "none", zorder=3,
+                            x_obs_data,
+                            y_obs_data,
+                            "o",
+                            color=col,
+                            markeredgecolor="k" if marker_border else "none",
+                            zorder=3,
                         )
                     elif obs_by_column:
                         # icc()'s own multi-curve convention: one column
@@ -13458,8 +15340,12 @@ class MFRM(Rasch):
                                 else color_map[j]
                             )
                             ax.plot(
-                                x_obs_data, y_obs_data[:, j], "o", color=col,
-                                markeredgecolor="k" if marker_border else "none", zorder=3,
+                                x_obs_data,
+                                y_obs_data[:, j],
+                                "o",
+                                color=col,
+                                markeredgecolor="k" if marker_border else "none",
+                                zorder=3,
                             )
                     else:
                         for j in range(y_obs_data.shape[0]):
@@ -13470,8 +15356,12 @@ class MFRM(Rasch):
                                 else color_map[k]
                             )
                             ax.plot(
-                                x_obs_data, y_obs_data[j, :], "o", color=col,
-                                markeredgecolor="k" if marker_border else "none", zorder=3,
+                                x_obs_data,
+                                y_obs_data[j, :],
+                                "o",
+                                color=col,
+                                markeredgecolor="k" if marker_border else "none",
+                                zorder=3,
                             )
                 except Exception:
                     pass
@@ -13486,8 +15376,12 @@ class MFRM(Rasch):
                             else color_map[k]
                         )
                         ax.plot(
-                            x_obs_data[j, :], y_obs_data[j, :], "o", color=col,
-                            markeredgecolor="k" if marker_border else "none", zorder=3,
+                            x_obs_data[j, :],
+                            y_obs_data[j, :],
+                            "o",
+                            color=col,
+                            markeredgecolor="k" if marker_border else "none",
+                            zorder=3,
                         )
                 except Exception:
                     pass
@@ -13516,11 +15410,15 @@ class MFRM(Rasch):
                         sev_val = float(facet_effects.loc[(r_sc, item_key), t + 1])
                     elif model in ("items", "pseudo_halo") and items is not None:
                         sev_val = float(
-                            self._facet_effect_item_offset(model, facet_effects, r_sc)[items]
+                            self._facet_effect_item_offset(model, facet_effects, r_sc)[
+                                items
+                            ]
                         )
                     else:
                         sev_val = float(
-                            self._facet_effect_item_offset(model, facet_effects, r_sc).mean()
+                            self._facet_effect_item_offset(
+                                model, facet_effects, r_sc
+                            ).mean()
                         )
                     xval = diff_val + thresholds[t + 1] + sev_val
                     ax.axvline(x=xval, color="black", linestyle="--")
@@ -13565,7 +15463,9 @@ class MFRM(Rasch):
                         else str(round(xval, 2))
                     )
                     if central_location_fit and items_multi:
-                        label_y = curve_peak + gap + label_h_data * (n_labels - idx - 0.5)
+                        label_y = (
+                            curve_peak + gap + label_h_data * (n_labels - idx - 0.5)
+                        )
                         label_x = xval - (x_max - x_min) / 100
                         ha = "right"
                     elif items_multi:
@@ -13651,7 +15551,9 @@ class MFRM(Rasch):
                                     color=colorVal,
                                 )
                                 ax.text(
-                                    x_min + (x_max - x_min) / 100, s + y_max / 50, str(s),
+                                    x_min + (x_max - x_min) / 100,
+                                    s + y_max / 50,
+                                    str(s),
                                     color=colorVal,
                                 )
                 else:
@@ -13747,20 +15649,32 @@ class MFRM(Rasch):
                             )
                         )
                         r = (
-                            fe if fe is not None and fe not in ("none", "zero")
+                            fe
+                            if fe is not None and fe not in ("none", "zero")
                             else list(self.facet_names)[0]
                         )
                         for estimate in point_info_lines_item[1]:
                             info = self.variance(
-                                estimate, it, item_locations, r, facet_effects,
-                                thresholds, model,
+                                estimate,
+                                it,
+                                item_locations,
+                                r,
+                                facet_effects,
+                                thresholds,
+                                model,
                             )
                             ax.vlines(
-                                x=estimate, ymin=-100, ymax=info, color=colorVal,
+                                x=estimate,
+                                ymin=-100,
+                                ymax=info,
+                                color=colorVal,
                                 linestyles="dashed",
                             )
                             ax.hlines(
-                                y=info, xmin=-100, xmax=estimate, color=colorVal,
+                                y=info,
+                                xmin=-100,
+                                xmax=estimate,
+                                color=colorVal,
                                 linestyles="dashed",
                             )
                             if score_labels:
@@ -13776,8 +15690,10 @@ class MFRM(Rasch):
                                         + curve_i * (x_max - x_min) * 0.03
                                     )
                                     ax.text(
-                                        label_x, info + y_max / 50,
-                                        f"{name}: {round(info, 3)}", color=colorVal,
+                                        label_x,
+                                        info + y_max / 50,
+                                        f"{name}: {round(info, 3)}",
+                                        color=colorVal,
                                     )
                                 else:
                                     ax.text(
@@ -13800,7 +15716,13 @@ class MFRM(Rasch):
                 for estimate in point_info_lines_test:
                     info = sum(
                         self.variance(
-                            estimate, it, item_locations, r, facet_effects, thresholds, model
+                            estimate,
+                            it,
+                            item_locations,
+                            r,
+                            facet_effects,
+                            thresholds,
+                            model,
                         )
                         for it in item_keys
                         for r in rater_list
@@ -13839,7 +15761,13 @@ class MFRM(Rasch):
                 for estimate in point_csem_lines:
                     info = sum(
                         self.variance(
-                            estimate, it, item_locations, r, facet_effects, thresholds, model
+                            estimate,
+                            it,
+                            item_locations,
+                            r,
+                            facet_effects,
+                            thresholds,
+                            model,
                         )
                         for it in item_keys
                         for r in rater_list
@@ -13880,7 +15808,9 @@ class MFRM(Rasch):
                         if isinstance(facet_elements, list)
                         else facet_elements
                     )
-                    sev_offset = self._facet_effect_item_offset(model, facet_effects, r_scalar)
+                    sev_offset = self._facet_effect_item_offset(
+                        model, facet_effects, r_scalar
+                    )
                     if model in ("items", "pseudo_halo") and items is not None:
                         sev_shift = float(sev_offset[items])
                     else:
@@ -14059,7 +15989,13 @@ class MFRM(Rasch):
                     np.mean(
                         [
                             self.exp_score(
-                                a, it, item_locations, r, facet_effects, thresholds, model
+                                a,
+                                it,
+                                item_locations,
+                                r,
+                                facet_effects,
+                                thresholds,
+                                model,
                             )
                             for r in all_raters
                         ]
@@ -14067,7 +16003,9 @@ class MFRM(Rasch):
                     for a in person_locations_arr
                 ]
             return [
-                self.exp_score(a, it, item_locations, fe, facet_effects, thresholds, model)
+                self.exp_score(
+                    a, it, item_locations, fe, facet_effects, thresholds, model
+                )
                 for a in person_locations_arr
             ]
 
@@ -14108,7 +16046,9 @@ class MFRM(Rasch):
                 for it in items_to_plot:
                     for fe in raters_to_plot:
                         xd, yd = self.class_intervals(
-                            person_estimates, items=it, facet_elements=fe,
+                            person_estimates,
+                            items=it,
+                            facet_elements=fe,
                             no_of_classes=no_of_classes,
                         )
                         if xobsdata is None:
@@ -14425,12 +16365,16 @@ class MFRM(Rasch):
         elif model in ("items", "pseudo_halo") and item is not None:
             sev_thresh = np.full(
                 self.max_score,
-                float(self._facet_effect_item_offset(model, facet_effects, r_use)[item]),
+                float(
+                    self._facet_effect_item_offset(model, facet_effects, r_use)[item]
+                ),
             )
         else:
             sev_thresh = np.full(
                 self.max_score,
-                float(self._facet_effect_item_offset(model, facet_effects, r_use).mean()),
+                float(
+                    self._facet_effect_item_offset(model, facet_effects, r_use).mean()
+                ),
             )
         abs_thresh = thresholds + diff_shift + sev_thresh
 
@@ -14611,7 +16555,7 @@ class MFRM(Rasch):
         items_multi = isinstance(item, list)
         raters_multi = isinstance(facet_element, list)
 
-        if (items_multi or raters_multi):
+        if items_multi or raters_multi:
             # thresh_lines/cat_highlight each only make sense for a
             # single curve's own location -- silently no-op with several
             # plotted at once rather than erroring, since they'd just be
@@ -14625,14 +16569,17 @@ class MFRM(Rasch):
 
         def _r_use(fe):
             return (
-                fe if fe is not None and fe not in ("none", "zero")
+                fe
+                if fe is not None and fe not in ("none", "zero")
                 else list(self.facet_names)[0]
             )
 
         def _curve(it, fe):
             r = _r_use(fe)
             return [
-                self.variance(a, it, item_locations, r, facet_effects, thresholds, model)
+                self.variance(
+                    a, it, item_locations, r, facet_effects, thresholds, model
+                )
                 for a in estimates
             ]
 
@@ -14980,7 +16927,9 @@ class MFRM(Rasch):
         y = np.array(
             [
                 sum(
-                    self.variance(a, it, item_locations, r, facet_effects, thresholds, model)
+                    self.variance(
+                        a, it, item_locations, r, facet_effects, thresholds, model
+                    )
                     for it in item_keys
                     for r in rater_list
                 )
@@ -15097,7 +17046,9 @@ class MFRM(Rasch):
         info = np.array(
             [
                 sum(
-                    self.variance(a, it, item_locations, r, facet_effects, thresholds, model)
+                    self.variance(
+                        a, it, item_locations, r, facet_effects, thresholds, model
+                    )
                     for it in item_keys
                     for r in rater_list
                 )
@@ -15189,7 +17140,8 @@ class MFRM(Rasch):
         if plot_density is not None:
             warnings.warn(
                 "plot_density= is deprecated and will be removed in a future version; use dpi= instead.",
-                FutureWarning, stacklevel=2,
+                FutureWarning,
+                stacklevel=2,
             )
             dpi = plot_density
         model = self._MODEL_ALIASES.get(model, model)
@@ -15259,6 +17211,7 @@ class MFRM(Rasch):
     def std_residuals_plot_bivector(self, **kw):
         """Alias for std_residuals_plot(model='bivector'). See std_residuals_plot for full documentation."""
         return self.std_residuals_plot(model="bivector", **kw)
+
     def std_residuals_plot_bistretch(self, **kw):
         """Alias for std_residuals_plot(model='bistretch'). See std_residuals_plot for full documentation."""
         return self.std_residuals_plot(model="bistretch", **kw)
@@ -15337,7 +17290,9 @@ class MFRM(Rasch):
             else:
                 gen_aligned = gen_vals.reindex(index=est.index, columns=est.columns)
                 gen_flat, est_flat, se_flat = (
-                    gen_aligned.stack(), est.stack(), se.stack(),
+                    gen_aligned.stack(),
+                    est.stack(),
+                    se.stack(),
                 )
             return [(model, gen_flat, est_flat, se_flat)]
         if model == "bivector":
@@ -15345,8 +17300,12 @@ class MFRM(Rasch):
             est_thr = getattr(self, f"{prefix}facet_effects_bivector_thresholds")
             se_items = getattr(self, f"{prefix}rater_se_marginal_items")
             se_thr = getattr(self, f"{prefix}rater_se_marginal_thresholds")
-            gen_items = gen.item_effects.reindex(index=est_items.index, columns=est_items.columns)
-            gen_thr = gen.threshold_effects.reindex(index=est_thr.index, columns=est_thr.columns)
+            gen_items = gen.item_effects.reindex(
+                index=est_items.index, columns=est_items.columns
+            )
+            gen_thr = gen.threshold_effects.reindex(
+                index=est_thr.index, columns=est_thr.columns
+            )
             return [
                 ("items", gen_items.stack(), est_items.stack(), se_items.stack()),
                 ("thresholds", gen_thr.stack(), est_thr.stack(), se_thr.stack()),
@@ -15355,36 +17314,54 @@ class MFRM(Rasch):
             compact = getattr(self, f"{prefix}facet_effects_{model}")
             return [
                 (
-                    "lambda", gen.lambda_.reindex(compact.index),
-                    compact["lambda"], getattr(self, f"{prefix}lambda_se_{model}"),
+                    "lambda",
+                    gen.lambda_.reindex(compact.index),
+                    compact["lambda"],
+                    getattr(self, f"{prefix}lambda_se_{model}"),
                 ),
                 (
-                    "omega", gen.omega.reindex(compact.index),
-                    compact["omega"], getattr(self, f"{prefix}omega_se_{model}"),
+                    "omega",
+                    gen.omega.reindex(compact.index),
+                    compact["omega"],
+                    getattr(self, f"{prefix}omega_se_{model}"),
                 ),
             ]
         if model == "bistretch":
             compact = getattr(self, f"{prefix}facet_effects_bistretch")
             return [
                 (
-                    "lambda", gen.lambda_.reindex(compact.index),
-                    compact["lambda"], getattr(self, f"{prefix}lambda_se_bistretch"),
+                    "lambda",
+                    gen.lambda_.reindex(compact.index),
+                    compact["lambda"],
+                    getattr(self, f"{prefix}lambda_se_bistretch"),
                 ),
                 (
-                    "omega_items", gen.omega_items.reindex(compact.index),
-                    compact["omega_items"], getattr(self, f"{prefix}omega_items_se_bistretch"),
+                    "omega_items",
+                    gen.omega_items.reindex(compact.index),
+                    compact["omega_items"],
+                    getattr(self, f"{prefix}omega_items_se_bistretch"),
                 ),
                 (
-                    "omega_thresholds", gen.omega_thresholds.reindex(compact.index),
-                    compact["omega_thresholds"], getattr(self, f"{prefix}omega_thresholds_se_bistretch"),
+                    "omega_thresholds",
+                    gen.omega_thresholds.reindex(compact.index),
+                    compact["omega_thresholds"],
+                    getattr(self, f"{prefix}omega_thresholds_se_bistretch"),
                 ),
             ]
         raise ValueError(f"Unrecognised model {model!r}.")
 
     def recovery_stats(
-        self, model=None, anchor=False, groups=None, rater_subset=None,
-        separate_rater_plots=False, alpha=0.05, correction="bh",
-        divergence_tol=0.1, plot=True, **plot_kwargs,
+        self,
+        model=None,
+        anchor=False,
+        groups=None,
+        rater_subset=None,
+        separate_rater_plots=False,
+        alpha=0.05,
+        correction="bh",
+        divergence_tol=0.1,
+        plot=True,
+        **plot_kwargs,
     ):
         """
         Compare recovered parameter estimates against the true generating
@@ -15527,9 +17504,12 @@ class MFRM(Rasch):
             # attribute exists anywhere in the package. Person SE below
             # uses the plain csem_vector_{model} regardless of anchor.
             required = [
-                f"anchor_items_{model}", f"anchor_thresholds_{model}",
-                "anchor_item_se", f"anchor_threshold_se_{model}",
-                f"anchor_cat_width_se_{model}", f"csem_vector_{model}",
+                f"anchor_items_{model}",
+                f"anchor_thresholds_{model}",
+                "anchor_item_se",
+                f"anchor_threshold_se_{model}",
+                f"anchor_cat_width_se_{model}",
+                f"csem_vector_{model}",
             ]
             missing = [a for a in required if not hasattr(self, a)]
             if missing:
@@ -15564,8 +17544,12 @@ class MFRM(Rasch):
         # the sub-model's own item locations / thresholds (anchored or not)
         est_items = self._items_for(model, anchor=anchor)
         items_table, items_summary = self._parameter_recovery_table(
-            self.generating.items, est_items, se=self._item_se_for(model, anchor=anchor),
-            alpha=alpha, correction=correction, divergence_tol=divergence_tol,
+            self.generating.items,
+            est_items,
+            se=self._item_se_for(model, anchor=anchor),
+            alpha=alpha,
+            correction=correction,
+            divergence_tol=divergence_tol,
         )
         self.recovery.items = _SimParams()
         self.recovery.items.table = items_table
@@ -15573,11 +17557,16 @@ class MFRM(Rasch):
 
         est_thresh = self._thresholds_for(model, anchor=anchor)
         threshold_se = pd.Series(
-            getattr(self, f"{prefix}threshold_se_{model}"), index=range(1, self.max_score + 1)
+            getattr(self, f"{prefix}threshold_se_{model}"),
+            index=range(1, self.max_score + 1),
         )
         thresholds_table, thresholds_summary = self._parameter_recovery_table(
-            self.generating.thresholds, est_thresh, se=threshold_se, alpha=alpha,
-            correction=correction, divergence_tol=divergence_tol,
+            self.generating.thresholds,
+            est_thresh,
+            se=threshold_se,
+            alpha=alpha,
+            correction=correction,
+            divergence_tol=divergence_tol,
         )
         self.recovery.thresholds = _SimParams()
         self.recovery.thresholds.table = thresholds_table
@@ -15587,8 +17576,12 @@ class MFRM(Rasch):
         est_widths = self._category_widths(est_thresh)
         cat_width_se = pd.Series(getattr(self, f"{prefix}cat_width_se_{model}"))
         widths_table, widths_summary = self._parameter_recovery_table(
-            gen_widths, est_widths, se=cat_width_se, alpha=alpha,
-            correction=correction, divergence_tol=divergence_tol,
+            gen_widths,
+            est_widths,
+            se=cat_width_se,
+            alpha=alpha,
+            correction=correction,
+            divergence_tol=divergence_tol,
         )
         self.recovery.category_widths = _SimParams()
         self.recovery.category_widths.table = widths_table
@@ -15636,10 +17629,15 @@ class MFRM(Rasch):
             pseudo_by_rater = {}
             for r in raters:
                 real_by_rater[r] = self.person(
-                    self.person_names, model=model, anchor=anchor, facet_elements=[r],
+                    self.person_names,
+                    model=model,
+                    anchor=anchor,
+                    facet_elements=[r],
                 )
                 pseudo_by_rater[r] = probe.person(
-                    probe.person_names, model=gen_model, facet_elements=[r],
+                    probe.person_names,
+                    model=gen_model,
+                    facet_elements=[r],
                 )
             person_groups = pd.concat(
                 {r: pd.Series(r, index=real_by_rater[r].index) for r in raters}
@@ -15647,18 +17645,18 @@ class MFRM(Rasch):
             # Flatten to (rater, person) rows for the table/summary, plus
             # 'Overall' via the pooled pseudo/real estimate already
             # computed above.
-            real_flat = pd.concat(
-                {r: real_by_rater[r] for r in raters}
-            )
-            pseudo_flat = pd.concat(
-                {r: pseudo_by_rater[r] for r in raters}
-            )
+            real_flat = pd.concat({r: real_by_rater[r] for r in raters})
+            pseudo_flat = pd.concat({r: pseudo_by_rater[r] for r in raters})
             group_labels = pd.Series(
                 [idx[0] for idx in real_flat.index], index=real_flat.index
             )
             persons_table, persons_summary = self._parameter_recovery_table(
-                pseudo_flat, real_flat, se=None, alpha=alpha,
-                correction=correction, divergence_tol=divergence_tol,
+                pseudo_flat,
+                real_flat,
+                se=None,
+                alpha=alpha,
+                correction=correction,
+                divergence_tol=divergence_tol,
                 groups=group_labels,
             )
             # Overall column reflects the pooled (all-rater) comparison,
@@ -15666,8 +17664,12 @@ class MFRM(Rasch):
             probe.person_estimates(model=gen_model)
             pseudo_estimate = getattr(probe, f"persons_{gen_model}")
             _, pooled_summary = self._parameter_recovery_table(
-                pseudo_estimate, est_persons, se=csem, alpha=alpha,
-                correction=correction, divergence_tol=divergence_tol,
+                pseudo_estimate,
+                est_persons,
+                se=csem,
+                alpha=alpha,
+                correction=correction,
+                divergence_tol=divergence_tol,
             )
             persons_summary["Overall"] = pooled_summary["Overall"]
         else:
@@ -15675,8 +17677,12 @@ class MFRM(Rasch):
             probe.person_estimates(model=gen_model)
             pseudo_estimate = getattr(probe, f"persons_{gen_model}")
             persons_table, persons_summary = self._parameter_recovery_table(
-                pseudo_estimate, est_persons, se=csem, alpha=alpha,
-                correction=correction, divergence_tol=divergence_tol,
+                pseudo_estimate,
+                est_persons,
+                se=csem,
+                alpha=alpha,
+                correction=correction,
+                divergence_tol=divergence_tol,
                 groups=person_groups,
             )
         self.recovery.persons = _SimParams()
@@ -15706,10 +17712,16 @@ class MFRM(Rasch):
 
         gen_items_ = self.generating.items
         gen_thresh_ = self.generating.thresholds
-        self.recovery.parameter_estimation_residual = self._parameter_estimation_residual(
-            self.generating.persons,
-            lambda theta, item: _facet_free_exp_score(theta, gen_items_[item], gen_thresh_),
-            lambda theta, item: _facet_free_exp_score(theta, est_items[item], est_thresh),
+        self.recovery.parameter_estimation_residual = (
+            self._parameter_estimation_residual(
+                self.generating.persons,
+                lambda theta, item: _facet_free_exp_score(
+                    theta, gen_items_[item], gen_thresh_
+                ),
+                lambda theta, item: _facet_free_exp_score(
+                    theta, est_items[item], est_thresh
+                ),
+            )
         )
 
         # Rater/facet effects. subvectors is a plain dict (not a _SimParams
@@ -15724,7 +17736,11 @@ class MFRM(Rasch):
             sub_tables = {}
             for label, g, e, se in subvectors:
                 sub_table, sub_summary = self._parameter_recovery_table(
-                    g, e, se=se, alpha=alpha, correction=correction,
+                    g,
+                    e,
+                    se=se,
+                    alpha=alpha,
+                    correction=correction,
                     divergence_tol=divergence_tol,
                 )
                 sub_tables[label] = _SimParams()
@@ -15744,7 +17760,11 @@ class MFRM(Rasch):
             gen_s = pd.Series(gen_grid, index=mi)
             est_s = pd.Series(est_grid, index=mi)
             raters_table, raters_summary = self._parameter_recovery_table(
-                gen_s, est_s, se=None, alpha=alpha, correction=correction,
+                gen_s,
+                est_s,
+                se=None,
+                alpha=alpha,
+                correction=correction,
                 divergence_tol=divergence_tol,
             )
             self.recovery.raters.table = raters_table
@@ -15754,7 +17774,9 @@ class MFRM(Rasch):
             raters_est = {"raters": est_s}
 
         if plot:
-            self._recovery_plot(self.generating.items, est_items, "items", **plot_kwargs)
+            self._recovery_plot(
+                self.generating.items, est_items, "items", **plot_kwargs
+            )
             self._recovery_plot(
                 self.generating.thresholds, est_thresh, "thresholds", **plot_kwargs
             )
@@ -15766,13 +17788,16 @@ class MFRM(Rasch):
                 self._recovery_plot(
                     {r: pseudo_by_rater[r] for r in plot_raters},
                     {r: real_by_rater[r] for r in plot_raters},
-                    "persons (by rater)", **plot_kwargs,
+                    "persons (by rater)",
+                    **plot_kwargs,
                 )
             if separate_rater_plots:
                 for label in raters_gen:
                     self._recovery_plot(
-                        raters_gen[label], raters_est[label],
-                        f"raters ({label})", **plot_kwargs,
+                        raters_gen[label],
+                        raters_est[label],
+                        f"raters ({label})",
+                        **plot_kwargs,
                     )
             else:
                 self._recovery_plot(raters_gen, raters_est, "raters", **plot_kwargs)
@@ -15791,9 +17816,12 @@ class MFRM(Rasch):
                 est_all = pd.concat(list(raters_est.values()))
                 rater_level = (
                     gen_all.index.get_level_values(0)
-                    if isinstance(gen_all.index, pd.MultiIndex) else gen_all.index
+                    if isinstance(gen_all.index, pd.MultiIndex)
+                    else gen_all.index
                 )
-                is_anchor = pd.Series(rater_level, index=gen_all.index).isin(anchor_names)
+                is_anchor = pd.Series(rater_level, index=gen_all.index).isin(
+                    anchor_names
+                )
                 self._recovery_plot(
                     {
                         "Anchor raters": gen_all[is_anchor.values],

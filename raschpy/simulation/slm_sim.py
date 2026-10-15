@@ -143,7 +143,8 @@ class SLM_Sim(Rasch_Sim):
             self.persons = np.array(self.persons)
 
         self.persons = {
-            person: location for person, location in zip(self.person_names, self.persons)
+            person: location
+            for person, location in zip(self.person_names, self.persons)
         }
         self.persons = pd.Series(self.persons)
 

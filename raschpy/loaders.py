@@ -75,6 +75,7 @@ def _mfrm_reindex_and_stack(responses_dict, item_ids, scores):
 # Public loaders
 # ---------------------------------------------------------------------------
 
+
 def loadup_slm(filename, item_names=True, person_names=True, long=False):
     """
     Load and validate response data for the Simple Logistic Model (SLM).
@@ -478,6 +479,7 @@ def loadup_mfrm_multiple(
         sheets[rater] = np.floor(df.apply(pd.to_numeric, errors="coerce"))
 
     return _mfrm_reindex_and_stack(sheets, None, scores)
+
 
 def loadup_exogenous(filename, person_names=True):
     """

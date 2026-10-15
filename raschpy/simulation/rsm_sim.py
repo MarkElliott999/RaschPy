@@ -166,7 +166,8 @@ class RSM_Sim(Rasch_Sim):
             self.persons = np.array(self.persons)
 
         self.persons = {
-            person: location for person, location in zip(self.person_names, self.persons)
+            person: location
+            for person, location in zip(self.person_names, self.persons)
         }
         self.persons = pd.Series(self.persons)
 
@@ -201,20 +202,28 @@ class RSM_Sim(Rasch_Sim):
             ]
             self.thresholds = np.array(self.thresholds)
             self.thresholds -= np.mean(self.thresholds)
-            self.thresholds = pd.Series(self.thresholds, index=range(1, self.max_score + 1))
+            self.thresholds = pd.Series(
+                self.thresholds, index=range(1, self.max_score + 1)
+            )
 
         else:
             assert (
                 len(self.thresholds) == self.max_score
             ), "Number of manual thresholds must be max score."
-            assert np.isclose(sum(manual_thresholds), 0), "Manual thresholds must sum to zero."
-            self.thresholds = pd.Series(np.array(self.thresholds), index=range(1, self.max_score + 1))
+            assert np.isclose(
+                sum(manual_thresholds), 0
+            ), "Manual thresholds must sum to zero."
+            self.thresholds = pd.Series(
+                np.array(self.thresholds), index=range(1, self.max_score + 1)
+            )
 
         # Calculate scores and apply missing data
 
         self._theta = self.persons.to_numpy()
         self._delta = self.items.to_numpy()
-        self._tau_sums = [sum(self.thresholds.iloc[:cat]) for cat in range(self.max_score + 1)]
+        self._tau_sums = [
+            sum(self.thresholds.iloc[:cat]) for cat in range(self.max_score + 1)
+        ]
         self._prob_labels = (self.persons.index, list(self.item_names))
         self._cat_probs = None
 
@@ -226,7 +235,9 @@ class RSM_Sim(Rasch_Sim):
     def _cat_prob_rows(self, start, stop):
         """Category probabilities [P(X=0), ..., P(X=K)] for persons start:stop."""
         c_p = self._theta[start:stop, None] - self._delta[None, :]
-        num = [np.exp(cat * c_p - self._tau_sums[cat]) for cat in range(self.max_score + 1)]
+        num = [
+            np.exp(cat * c_p - self._tau_sums[cat]) for cat in range(self.max_score + 1)
+        ]
         den = num[0].copy()
         for x in num[1:]:
             den += x
