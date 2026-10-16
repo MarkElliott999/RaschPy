@@ -1038,6 +1038,32 @@ def test_mfrm_dif_partly_overlapping_raters_anchored_on_common():
     assert m.dif_reference_model.anchor_rater_names_items == ["Rater_3", "Rater_4"]
 
 
+def test_mfrm_calibrate_anchor_preserves_likelihood():
+    """calibrate_anchor() changes only the reference: with persons re-estimated, the
+    log-likelihood is unchanged for every representation. Before the fix, 'matrix' dropped the
+    anchors' item-by-threshold remainder from every facet element (-9638.5 -> -9660.9 here)."""
+    from raschpy.simulation.mfrm_sim import MFRM_Sim
+    sim = MFRM_Sim(6, 300, 6, 3, model="matrix", seed=2)
+    anchors = ["Rater_1", "Rater_2", "Rater_3"]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        for model in ("global", "items", "thresholds", "bivector", "matrix",
+                      "centrality", "pseudo_halo", "bistretch"):
+            m = rp.MFRM(sim.responses, max_score=3, validate=False)
+            m.calibrate(model=model)
+            m.person_estimates(model=model)
+            ll = m._log_likelihood(model=model)
+            m.calibrate_anchor(model, anchors)
+            items, thresholds, fe = m._get_params(model, anchor=True)
+            a = rp.MFRM(sim.responses, max_score=3, validate=False)
+            a.items, a.thresholds = items, thresholds
+            setattr(a, f"items_{model}", items)
+            setattr(a, f"thresholds_{model}", thresholds)
+            setattr(a, m._sev_attr(model), fe)
+            a.person_estimates(model=model)
+            assert abs(a._log_likelihood(model=model) - ll) < 1e-6, model
+
+
 def test_mfrm_dif_no_common_facet_elements():
     """Disjoint facet elements: dif_test raises for representations with facet-element-specific
     item locations or thresholds, but runs under 'global'."""

@@ -5283,8 +5283,14 @@ class MFRM(Rasch):
     def _calibrate_anchor_matrix(self, anchors, adj=None):
         """
         Anchor calibration for matrix parameterisation.
-        Subtracts the mean anchor facet_element effect (per item, per threshold)
-        from all facet_elements, and absorbs it into item item_locations and thresholds.
+        Splits the anchors' mean facet_element effect per (item, threshold)
+        into an item margin, a threshold margin and an item-by-threshold
+        remainder; subtracts the two margins from all facet_elements and
+        absorbs them into the item locations and thresholds. The remainder
+        stays in the facet_element effects, since item locations and
+        thresholds cannot carry it, so every threshold location is
+        unchanged apart from a common shift (taken up by the persons), and
+        the anchors' mean effect is zero in its item and threshold margins.
         """
         self.anchor_items_matrix = self._items_for("matrix").copy()
         self.anchor_thresholds_matrix = self._thresholds_for("matrix").copy()
@@ -5307,9 +5313,14 @@ class MFRM(Rasch):
             self.anchor_items_matrix[item] += diff_adjustments[i]
         self.anchor_thresholds_matrix += threshold_adjustments
 
+        additive_adjustments = (
+            diff_adjustments[:, None]
+            + threshold_adjustments[None, :]
+            - facet_effect_adjustments.mean()
+        )  # (I, K)
         sev_adj = sev_array.copy()
         for r in range(self.no_of_facet_elements):
-            sev_adj[r, :, :] -= facet_effect_adjustments
+            sev_adj[r, :, :] -= additive_adjustments
 
         self.anchor_items_matrix -= self.anchor_items_matrix.mean()
         self.anchor_thresholds_matrix -= self.anchor_thresholds_matrix.mean()
