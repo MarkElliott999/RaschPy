@@ -1,4 +1,5 @@
 from math import log
+import types
 import warnings
 
 import numpy as np
@@ -9339,6 +9340,120 @@ class MFRM(Rasch):
         ),
     }
 
+    def _dif_anchor_on(self, model, fitted, facet_elements):
+        """
+        Anchor a fitted group model (or one of its bootstrap resamples) on
+        `facet_elements` with calibrate_anchor(), the adjustment estimated
+        from `fitted` itself. Returns the anchored (item locations,
+        thresholds), or None if a facet element in `facet_elements` is not
+        in the fit (e.g. a resample that dropped it).
+        """
+        fe = getattr(fitted, self._sev_attr(model), None)
+        if fe is None or not set(facet_elements) <= set(fe.index.get_level_values(0)):
+            return None
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            fitted.calibrate_anchor(model, list(facet_elements))
+        return (
+            fitted._items_for(model, anchor=True),
+            fitted._thresholds_for(model, anchor=True),
+        )
+
+    def _dif_common_frame(self, model, fitted, facet_elements):
+        """
+        A fitted group model's item locations and thresholds anchored on
+        `facet_elements`, the facet elements common to the groups being
+        compared (calibrate_anchor()), with bootstrap standard errors from
+        its stored resamples, each anchored the same way with its own
+        adjustment, so the sampling variance of the common facet elements'
+        mean is included. Under every sub-model except 'global', each
+        group's item locations and thresholds are averages over its own
+        facet elements of the facet-element-specific ones, so groups with
+        different facet elements are only comparable after this.
+
+        Returns a namespace with items, item_se, thresholds, item_boot
+        ((B, I) DataFrame or None), cat_width_se (dict) and no_of_persons,
+        plus slope: d(anchored item location) / d(own item location), 1
+        except for the stretch models under RCL, whose anchoring rescales
+        item locations by the anchors' mean item stretch.
+        """
+        items, thresholds = self._dif_anchor_on(model, fitted, facet_elements)
+        slope = 1.0
+        if model in ("pseudo_halo", "bistretch") and getattr(
+            fitted, f"estimation_{model}", "pair-cpat"
+        ) in ("cp-full-rcl", "cpat-rcl"):
+            slope = fitted._stretch_anchor_adj(model, list(facet_elements))[1]
+        item_rows, thr_rows = [], []
+        for s in getattr(fitted, f"_bootstrap_samples_{model}", []):
+            anchored = self._dif_anchor_on(model, s, facet_elements)
+            if anchored is None:
+                continue
+            item_rows.append(anchored[0].reindex(items.index).values)
+            thr_rows.append(np.asarray(anchored[1], dtype=float))
+        if len(item_rows) >= 2:
+            item_boot = pd.DataFrame(item_rows, columns=items.index).dropna()
+            thr_arr = np.array(thr_rows)
+            item_se = pd.Series(np.nanstd(item_boot.values, axis=0), index=items.index)
+            cat_width_se = {
+                k + 1: np.nanstd(thr_arr[:, k + 1] - thr_arr[:, k])
+                for k in range(thr_arr.shape[1] - 1)
+            }
+        else:
+            item_boot = None
+            item_se = pd.Series(np.nan, index=items.index)
+            cat_width_se = {k + 1: np.nan for k in range(len(thresholds) - 1)}
+        return types.SimpleNamespace(
+            items=items,
+            item_se=item_se,
+            thresholds=thresholds,
+            item_boot=item_boot,
+            cat_width_se=cat_width_se,
+            no_of_persons=fitted.no_of_persons,
+            slope=slope,
+        )
+
+    def _dif_mean_location(self, model, fitted, anchor=False):
+        """Mean, over facet elements, items and thresholds, of a fitted
+        model's threshold locations (item location + threshold + facet
+        element effect)."""
+        fe = getattr(fitted, self._sev_attr(model, anchor=anchor))
+        return (
+            float(fitted._items_for(model, anchor=anchor).mean())
+            + float(fitted._thresholds_for(model, anchor=anchor).mean())
+            + float(np.nanmean(np.asarray(fe, dtype=float)))
+        )
+
+    def _dif_pooled_reference(self, model, group, pooled, facet_elements):
+        """
+        A group model's item locations and thresholds for evaluation with
+        the pooled (combined-group) model's person locations, with the
+        group's facet elements `facet_elements` as the shared reference
+        (calibrate_anchor() on the pooled model).
+
+        Returns (items, thresholds, items_own):
+        items, thresholds : for the pooled model's own facet element
+            effects: the group's, less the change anchoring makes to the
+            pooled model's item locations and thresholds (the pooled
+            facet element effects are used as fitted, since anchoring
+            'matrix' drops the anchors' item-by-threshold remainder).
+        items_own : for the group's own facet element effects: the group's
+            item locations plus the shift that anchoring makes to every
+            threshold location, which the pooled person locations do not
+            take up.
+        """
+        before = self._dif_mean_location(model, pooled)
+        p_items = pooled._items_for(model)
+        p_thr = pooled._thresholds_for(model)
+        a_items, a_thr = self._dif_anchor_on(model, pooled, facet_elements)
+        after = self._dif_mean_location(model, pooled, anchor=True)
+        g_items = group._items_for(model)
+        g_thr = group._thresholds_for(model)
+        items = g_items - (a_items - p_items).reindex(g_items.index)
+        thresholds = g_thr - (
+            np.asarray(a_thr, dtype=float) - np.asarray(p_thr, dtype=float)
+        )
+        return items, thresholds, g_items + (before - after)
+
     def global_fit(self, *args, **kwargs):
         """
         Not available for MFRM: the global invariance test (Section on
@@ -9427,6 +9542,21 @@ class MFRM(Rasch):
         which can produce apparent DIF/DCF when the two
         groups' facet element panels differ; 'global', 'items' and
         'pseudo_halo' carry no warning.
+
+        Under every model except 'global', each group's item locations and
+        thresholds are averages of the facet-element-specific ones over the
+        facet elements that scored that group. When the two groups were
+        scored by different facet elements, each group is anchored on the
+        facet elements common to both (calibrate_anchor(), re-estimated in
+        each bootstrap resample) before item locations and thresholds are
+        compared, and the 'Reference' and 'Focal' columns are on that
+        anchored scale. DIF that differs between facet elements is then
+        measured as its average over the common facet elements. The
+        omnibus tests anchor the pooled model on each group's facet
+        elements in turn. With no facet elements in common, only
+        model='global' can be tested (ValueError otherwise). The group
+        models in dif_reference_model / dif_focal_models keep the anchored
+        estimates (anchor_items_{model} etc.).
 
         Parameters
         ----------
@@ -9651,18 +9781,52 @@ class MFRM(Rasch):
                 focal_model.person_estimates(model=model, **pe_kw)
                 ll_focal = focal_model._log_likelihood(model=model)
 
+            # Groups rated by different facet elements: compare item
+            # locations and thresholds anchored on the facet elements
+            # common to both (see _dif_common_frame).
+            focal_panel = set(focal_model.facet_names)
+            common_fe = [fe for fe in ref_model.facet_names if fe in focal_panel]
+            panels_differ = set(ref_model.facet_names) != focal_panel
+            if panels_differ and model != "global" and not common_fe:
+                raise ValueError(
+                    f"The reference and focal group ({focal!r}) have no "
+                    f"{self.facets_label_eg} in common, so under model='{model}' "
+                    f"their item locations and thresholds are not comparable. "
+                    f"Use model='global'."
+                )
+            reframe = panels_differ and model != "global"
+            if reframe:
+                ref_cmp = self._dif_common_frame(model, ref_model, common_fe)
+                focal_cmp = self._dif_common_frame(model, focal_model, common_fe)
+            else:
+                ref_cmp, focal_cmp = ref_model, focal_model
+
             # --- Item-location DIF ---
-            common_items = ref_model.items.index.intersection(focal_model.items.index)
-            ref_samples = getattr(ref_model, f"_bootstrap_samples_{model}", [])
-            focal_samples = getattr(focal_model, f"_bootstrap_samples_{model}", [])
-            ref_boot = self._bootstrap_value_matrix(ref_samples, "items", common_items)
-            focal_boot = self._bootstrap_value_matrix(
-                focal_samples, "items", common_items
-            )
+            common_items = ref_cmp.items.index.intersection(focal_cmp.items.index)
+            if reframe:
+                ref_boot = (
+                    None
+                    if ref_cmp.item_boot is None
+                    else ref_cmp.item_boot[common_items]
+                )
+                focal_boot = (
+                    None
+                    if focal_cmp.item_boot is None
+                    else focal_cmp.item_boot[common_items]
+                )
+            else:
+                ref_samples = getattr(ref_model, f"_bootstrap_samples_{model}", [])
+                focal_samples = getattr(focal_model, f"_bootstrap_samples_{model}", [])
+                ref_boot = self._bootstrap_value_matrix(
+                    ref_samples, "items", common_items
+                )
+                focal_boot = self._bootstrap_value_matrix(
+                    focal_samples, "items", common_items
+                )
 
             wald_result = self._dif_item_wald_block(
-                ref_model,
-                focal_model,
+                ref_cmp,
+                focal_cmp,
                 ref_boot,
                 focal_boot,
                 selection_method,
@@ -9711,15 +9875,28 @@ class MFRM(Rasch):
                 focal_scratch = _make_dif_scratch(focal_model)
                 lr_rows = {}
                 for item in common_items:
-                    w_ref = 1.0 / ref_model.item_se[item] ** 2
-                    w_focal = 1.0 / focal_model.item_se[item] ** 2
+                    w_ref = 1.0 / ref_cmp.item_se[item] ** 2
+                    w_focal = 1.0 / focal_cmp.item_se[item] ** 2
                     pooled = (
-                        w_ref * ref_model.items[item] + w_focal * focal_shifted[item]
+                        w_ref * ref_cmp.items[item] + w_focal * focal_shifted[item]
                     ) / (w_ref + w_focal)
                     pooled_focal_scale = pooled - tc[item]
+                    pooled_ref_scale = pooled
+                    if reframe:
+                        # from the common-facet-element anchoring back to
+                        # each group's own scale
+                        pooled_ref_scale = (
+                            ref_model.items[item]
+                            + (pooled - ref_cmp.items[item]) / ref_cmp.slope
+                        )
+                        pooled_focal_scale = (
+                            focal_model.items[item]
+                            + (pooled_focal_scale - focal_cmp.items[item])
+                            / focal_cmp.slope
+                        )
 
                     ref_scratch.items = ref_model.items.copy()
-                    ref_scratch.items[item] = pooled
+                    ref_scratch.items[item] = pooled_ref_scale
                     ref_scratch.person_estimates(model=model, **pe_kw)
                     ll_ref_h0 = ref_scratch._log_likelihood(model=model)
 
@@ -9754,11 +9931,28 @@ class MFRM(Rasch):
                 # (kept for backward comparability with the earlier
                 # single-omnibus behaviour) -- prefer dif_omnibus_table
                 # below for an axis-attributed, properly-scoped answer.
+                # When the groups' facet elements differ, the pooled
+                # model is anchored on each group's own facet elements in
+                # turn, to put each group's parameters on the pooled scale
+                # (_dif_pooled_reference).
+                ref_df_items = focal_df_items = None
+                ref_dif_items = ref_dif_thr = focal_dif_items = focal_dif_thr = None
+                if panels_differ:
+                    ref_dif_items, ref_dif_thr, ref_df_items = (
+                        self._dif_pooled_reference(
+                            model, ref_model, m_full, list(ref_model.facet_names)
+                        )
+                    )
+                    focal_dif_items, focal_dif_thr, focal_df_items = (
+                        self._dif_pooled_reference(
+                            model, focal_model, m_full, list(focal_model.facet_names)
+                        )
+                    )
                 ll_ref_df = ref_model._log_likelihood(
-                    model=model, persons=pooled_ref_persons
+                    model=model, persons=pooled_ref_persons, items=ref_df_items
                 )
                 ll_focal_df = focal_model._log_likelihood(
-                    model=model, persons=pooled_focal_persons
+                    model=model, persons=pooled_focal_persons, items=focal_df_items
                 )
                 lr_df = max(0.0, -2 * (ll_full - (ll_ref_df + ll_focal_df)))
                 df_df = len(common_items) - 1
@@ -9779,11 +9973,15 @@ class MFRM(Rasch):
                 ll_ref_dif = ref_model._log_likelihood(
                     model=model,
                     persons=pooled_ref_persons,
+                    items=ref_dif_items,
+                    thresholds=ref_dif_thr,
                     facet_effects=pooled_facet_effects,
                 )
                 ll_focal_dif = focal_model._log_likelihood(
                     model=model,
                     persons=pooled_focal_persons,
+                    items=focal_dif_items,
+                    thresholds=focal_dif_thr,
                     facet_effects=pooled_facet_effects,
                 )
                 lr_dif = max(0.0, -2 * (ll_full - (ll_ref_dif + ll_focal_dif)))
@@ -9798,8 +9996,8 @@ class MFRM(Rasch):
 
             item_table = self._dif_item_table(
                 focal,
-                ref_model,
-                focal_model,
+                ref_cmp,
+                focal_cmp,
                 common_items,
                 focal_shifted,
                 diff,
@@ -9816,18 +10014,20 @@ class MFRM(Rasch):
 
             # --- DCF: category widths, shared threshold vector, no
             # purification (same rationale as RSM's dif_test) ---
-            ref_widths = ref_model.thresholds.diff().dropna()
-            focal_widths = focal_model.thresholds.diff().dropna()
+            ref_widths = ref_cmp.thresholds.diff().dropna()
+            focal_widths = focal_cmp.thresholds.diff().dropna()
             ref_widths.index = focal_widths.index = range(1, len(ref_widths) + 1)
             thr_index = ref_widths.index
             thr_diff = focal_widths - ref_widths
 
-            ref_se_thr = pd.Series(getattr(ref_model, f"cat_width_se_{model}")).reindex(
-                thr_index
-            )
-            focal_se_thr = pd.Series(
-                getattr(focal_model, f"cat_width_se_{model}")
-            ).reindex(thr_index)
+            if reframe:
+                ref_width_se = ref_cmp.cat_width_se
+                focal_width_se = focal_cmp.cat_width_se
+            else:
+                ref_width_se = getattr(ref_model, f"cat_width_se_{model}")
+                focal_width_se = getattr(focal_model, f"cat_width_se_{model}")
+            ref_se_thr = pd.Series(ref_width_se).reindex(thr_index)
+            focal_se_thr = pd.Series(focal_width_se).reindex(thr_index)
             ref_n_thr = ref_model.no_of_persons
             focal_n_thr = focal_model.no_of_persons
             if size_adjust:

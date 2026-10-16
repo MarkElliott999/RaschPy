@@ -4,6 +4,9 @@ All notable changes to RaschPy are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **`MFRM.dif_test` when the groups were scored by different facet elements:** under every model except `'global'`, each group's item locations and thresholds are averages of the facet-element-specific ones over the facet elements that scored that group, so when the reference and focal groups were scored by different (partly overlapping) facet elements, `dif_test` compared averages over different facet elements, which produced apparent DIF and DCF with none present (in simulation, per-item Type I error up to 0.66 and DCF Type I error up to 0.73 at nominal 0.05, against at most 0.08 after the fix). Each group is now anchored on the facet elements common to both (`calibrate_anchor()`, re-estimated in each bootstrap resample) before comparison, and the omnibus tests anchor the pooled model on each group's facet elements in turn. Results are unchanged when both groups were scored by the same facet elements. With no facet elements in common, `dif_test` raises a `ValueError` for every model except `'global'`.
+
 ### Changed
 - **Code formatting and lint clean-up, no functional changes:** the package is formatted with `black`, unused imports and variables are removed, and the CI lint job (`flake8` + `black --check`, pinned versions) now blocks. `E741` is ignored, so `I` can denote the number of items.
 

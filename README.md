@@ -340,7 +340,7 @@ print(mfrm.rater_stats_pseudo_halo['Item_1'])  # 'Flagged' column, True/False pe
 
 Pass `correction='bh'` to apply Benjamini-Hochberg FDR correction within each rater's own family of tests (the rater's items thresholds, not pooled across raters); default `correction=None` compares raw p-values against `alpha` (default `0.05`) directly. Pass `plot=True` to also build and store `self.fit_plot_{model}` (e.g. `self.fit_plot_pseudo_halo`) – a scatter of the free vector model's estimates against the stretch model's reconstruction, flagged elements in a different colour, in the style of `self.anchor_plot`.
 
-Since, as described above, `pseudo_halo` tests compression of item locations under an otherwise locally-independent response process, rather that classic halo effect's usual mechanism (elevated local item interdependence), pair `omega_pseudo_halo` with a per-rater residual-correlation to check for full halo effect:
+Since, as described above, `pseudo_halo` tests compression of item locations under an otherwise locally-independent response process, rather than classic halo effect's usual mechanism (elevated local item interdependence), pair `omega_pseudo_halo` with a per-rater residual-correlation to check for full halo effect:
 
 ```python
 mfrm.item_res_corr_analysis_pseudo_halo()
@@ -529,7 +529,9 @@ mfrm.drf_test(covariate='Gender', model='global')
 print(mfrm.drf_table)             # per-rater DRF, raters scored in both groups
 ```
 
-`drf_test()`'s functioning depend on `model`: one Wald test per rater for `global`; a separate test of each rater's effect on each item or threshold for `items`/`thresholds`/`bivector`/`matrix`; and one joint test of each rater's shift and stretch parameters for `centrality`/`pseudo_halo`/`bistretch`. Only raters who scored at least `min_persons_per_group` persons in each group are tested.
+When the two groups were scored by different (partly overlapping) sets of raters, `dif_test()` anchors each group on the raters common to both before comparing item locations and thresholds, since under every parameterisation except `global` each group's estimates are averages over the raters who scored it. With no raters in common, only `model='global'` can be tested.
+
+What `drf_test()` tests depends on `model`: one Wald test per rater for `global`; a separate test of each rater's effect on each item or threshold for `items`/`thresholds`/`bivector`/`matrix`; and one joint test of each rater's shift and stretch parameters for `centrality`/`pseudo_halo`/`bistretch`. Only raters who scored at least `min_persons_per_group` persons in each group are tested.
 
 ---
 
@@ -629,7 +631,7 @@ Set `plot=False` to skip the accompanying recovery plots (identity line, OLS and
 
 ### Standard errors and confidence intervals
 
-Standard errors are computed analytically where possible, by a sandwich (robust, Huber–White) covariance (Huber, 1967) with persons as the independent units: for `SLM` and `PCM`, and for `RSM` and `MFRM` under the default RCL estimation (`'cp-full-rcl'` or `'cpat-rcl'`). The bootstrap (resampling persons and recalibrating) is used when the sandwich cannot be computer — for example when there is an unused score category, calibration did not converge, estimates not identified, `MFRM` with `estimation='pair-cpat'`, or when the resamples are needed later (`store_bootstrap=True`, e.g. for DIF) — with a warning giving the reason, so standard errors are always produced by one of the two methods. `model.se_method` records which method was used; pass `se_method='bootstrap'` or `'sandwich'` to choose. Standard errors are triggered automatically inside `fit_statistics()`, or can be run explicitly to request confidence intervals:
+Standard errors are computed analytically where possible, by a sandwich (robust, Huber–White) covariance (Huber, 1967) with persons as the independent units: for `SLM` and `PCM`, and for `RSM` and `MFRM` under the default RCL estimation (`'cp-full-rcl'` or `'cpat-rcl'`). The bootstrap (resampling persons and recalibrating) is used when the sandwich cannot be computed — for example when there is an unused score category, calibration did not converge, estimates are not identified, `MFRM` with `estimation='pair-cpat'`, or when the resamples are needed later (`store_bootstrap=True`, e.g. for DIF) — with a warning giving the reason, so standard errors are always produced by one of the two methods. `model.se_method` records which method was used; pass `se_method='bootstrap'` or `'sandwich'` to choose. Standard errors are triggered automatically inside `fit_statistics()`, or can be run explicitly to request confidence intervals:
 
 ```python
 model.std_errors(interval=0.95)                                        # sandwich where it applies

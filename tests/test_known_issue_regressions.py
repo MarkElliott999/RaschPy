@@ -1010,6 +1010,46 @@ def test_mfrm_dif_issue17_warning_pair_cpat_only():
         assert any("risk of compressed item" in str(x.message) for x in w) == expected
 
 
+def _mfrm_dif_two_panels(model, seed, raters_a, raters_b, no_of_persons=400):
+    """MFRM with no true DIF whose two person groups were scored by different
+    facet elements (positions into the rater list)."""
+    import numpy as np
+    from raschpy.simulation.mfrm_sim import MFRM_Sim
+    sim = MFRM_Sim(6, no_of_persons, 6, 3, model=model, seed=seed)
+    resp = sim.responses
+    persons = resp.index.get_level_values(1).unique()
+    raters = resp.index.get_level_values(0).unique()
+    g = pd.Series(np.where(np.arange(len(persons)) < no_of_persons // 2, "a", "b"), index=persons)
+    in_a = g.reindex(resp.index.get_level_values(1)).values == "a"
+    r_lvl = resp.index.get_level_values(0)
+    keep = np.where(in_a, r_lvl.isin(raters[raters_a]), r_lvl.isin(raters[raters_b]))
+    return rp.MFRM(resp[keep], max_score=3, exogenous=pd.DataFrame({"g": g}), validate=False)
+
+
+def test_mfrm_dif_partly_overlapping_raters_anchored_on_common():
+    """With groups scored by partly overlapping facet elements and no true DIF, dif_test anchors
+    both groups on the common facet elements before comparing item locations (v1.5.0 item 0).
+    Comparing each group's own averages gave max |Difference| = 0.67 logits here."""
+    m = _mfrm_dif_two_panels("items", 3, slice(0, 4), slice(2, 6))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m.dif_test("g", model="items", reference="a", no_of_samples=50, seed=1, omnibus=False)
+    assert m.dif_table["Difference"].abs().max() < 0.25
+    assert m.dif_reference_model.anchor_rater_names_items == ["Rater_3", "Rater_4"]
+
+
+def test_mfrm_dif_no_common_facet_elements():
+    """Disjoint facet elements: dif_test raises for representations with facet-element-specific
+    item locations or thresholds, but runs under 'global'."""
+    m = _mfrm_dif_two_panels("items", 3, slice(0, 3), slice(3, 6))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with pytest.raises(ValueError, match="in common"):
+            m.dif_test("g", model="items", reference="a", no_of_samples=20, seed=1, omnibus=False)
+        m.dif_test("g", model="global", reference="a", no_of_samples=20, seed=1, omnibus=False)
+    assert len(m.dif_table) == 6
+
+
 def test_std_residuals_plot_dpi_and_deprecated_plot_density(tmp_path):
     """std_residuals_plot takes dpi= like every other plot; plot_density= still works, with a FutureWarning."""
     import matplotlib
