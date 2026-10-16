@@ -2425,6 +2425,66 @@ class Rasch:
         result[order] = adjusted
         return pd.Series(result, index=pvalues.index)
 
+    def _calibration_kw(self, **passed):
+        """
+        calibrate() arguments for refits of this object's data (bootstrap
+        resamples, and the group models of dif_test() and global_fit()):
+        those of its last calibrate() call, overridden by any passed
+        explicitly (not None), so a refit uses the same method as the
+        estimates it accompanies. constant=None stays None, re-resolving
+        the data-adaptive default for each refit.
+        """
+        kw = dict(getattr(self, "_calibrate_args", {}))
+        kw.update({k: v for k, v in passed.items() if v is not None})
+        return kw
+
+    def _resolve_se_method(self, se_method):
+        """
+        SLM/PCM standard error method for the current estimates: the
+        sandwich is the covariance of the Bradley-Terry estimating
+        equations, which only method='log-lik' solves, so None resolves to
+        'sandwich' for 'log-lik' and 'bootstrap' for 'cos'/'ls'/'evm', and
+        an explicit 'sandwich' with those raises a ValueError.
+        """
+        method = getattr(self, "_calibrate_args", {}).get("method") or "log-lik"
+        if se_method is None:
+            return "sandwich" if method == "log-lik" else "bootstrap"
+        if se_method == "sandwich" and method != "log-lik":
+            raise ValueError(
+                f"se_method='sandwich' is the covariance of method='log-lik' "
+                f"(Bradley-Terry maximum likelihood); these estimates are from "
+                f"method={method!r}, so use se_method='bootstrap' (or None)."
+            )
+        return se_method
+
+    @staticmethod
+    def _answered_items(responses):
+        """Responses restricted to the items with at least one response:
+        a group of persons' own items, for the group models of dif_test(),
+        drf_test() and global_fit(). An item a group did not take has no
+        estimate in that group's calibration."""
+        return responses.loc[:, responses.notna().any(axis=0).values]
+
+    def _omnibus_h1_log_likelihood(self, group, pooled, persons, common_items):
+        """
+        A group model's log-likelihood at the pooled (combined-group)
+        model's person locations, for dif_test()'s omnibus test (H1). When
+        the groups took different items, the items only this group took are
+        held at their pooled values, as under H0, so that only the common
+        items are free (df = common items - 1), and the pooled person
+        locations are shifted by the difference between the pooled and
+        group models' mean locations over the common items
+        (_mean_location), since each model is centred over its own items.
+        """
+        own = list(group.responses.columns)
+        if set(own) == set(pooled.responses.columns):
+            return group._log_likelihood(persons=persons)
+        common = [i for i in own if i in set(common_items)]
+        shift = pooled._mean_location(common) - group._mean_location(common)
+        others = [i for i in own if i not in set(common)]
+        scratch = group._with_pooled_items(pooled, others, shift)
+        return scratch._log_likelihood(persons=persons - shift)
+
     def _dif_group_setup(self, non_extreme, covariate, reference):
         """
         Shared covariate/reference-focal group setup for dif_test(),
@@ -2509,6 +2569,88 @@ class Rasch:
             )
 
         return cov_values, reference, focal_levels, group_sizes, n_missing
+
+    def _dif_linked_focal_levels(
+        self,
+        cov_values,
+        reference,
+        focal_levels,
+        test,
+        need_items=True,
+        need_facets=0,
+        min_persons=1,
+    ):
+        """
+        The focal groups that can be compared with the reference group in
+        dif_test() / drf_test(): those with at least one item in common with
+        it (need_items) and, for MFRM, at least `need_facets` facet elements
+        that scored at least `min_persons` persons in each. With more than
+        two groups the data can be connected through other groups while a
+        focal group has none of these in common with the reference; such
+        groups are left out, with one warning, and a ValueError is raised
+        if no focal group is left.
+
+        Returns (focal levels kept, {left-out focal level: reason}).
+        """
+        resp = self.responses
+        mfrm = isinstance(resp.index, pd.MultiIndex)
+        persons = resp.index.get_level_values(1) if mfrm else resp.index
+
+        def _items(idx):
+            sub = resp[persons.isin(idx)]
+            return set(resp.columns[sub.notna().any(axis=0).values])
+
+        def _facets(idx):
+            sub = resp[persons.isin(idx)]
+            counts = sub.notna().any(axis=1).groupby(level=0).sum()
+            return set(counts.index[counts >= min_persons])
+
+        ref_idx = cov_values.index[cov_values == reference]
+        ref_items = _items(ref_idx) if need_items else None
+        ref_facets = _facets(ref_idx) if need_facets else None
+        reasons = {}
+        for focal in focal_levels:
+            idx = cov_values.index[cov_values == focal]
+            why = []
+            if need_items and not ref_items & _items(idx):
+                why.append("no items in common")
+            if need_facets and len(ref_facets & _facets(idx)) < need_facets:
+                why.append(
+                    f"fewer than {need_facets} {self.facets_label} in common"
+                    + (
+                        f" (each scoring at least {min_persons} persons in both)"
+                        if min_persons > 1
+                        else ""
+                    )
+                )
+            if why:
+                reasons[focal] = " and ".join(why)
+        if not reasons:
+            return focal_levels, {}
+        kept = [f for f in focal_levels if f not in reasons]
+        detail = "; ".join(f"{f!r}: {r}" for f, r in reasons.items())
+        if not kept:
+            raise ValueError(
+                f"No focal group can be compared with the reference group "
+                f"{reference!r} in {test}() ({detail})."
+            )
+        warnings.warn(
+            f"{len(reasons)} focal group(s) left out of {test}(), as they cannot "
+            f"be compared with the reference group {reference!r} ({detail}); the "
+            f"data link them only through other groups. Choose a different "
+            f"reference= to compare them.",
+            UserWarning,
+            stacklevel=3,
+        )
+        return kept, reasons
+
+    @staticmethod
+    def _nan_omnibus_rows(rows, excluded):
+        """Add a row of NaN, Flagged=False, to an omnibus table's rows for
+        each focal group left out (_dif_linked_focal_levels)."""
+        for focal in excluded:
+            rows[focal] = {"LR": np.nan, "df": np.nan, "p": np.nan, "Flagged": False}
+        return rows
 
     def _dif_category_column(
         self,
@@ -2665,6 +2807,13 @@ class Rasch:
         (pandas.Series or None), category_col (pandas.Series or None).
         """
         common_items = ref_model.items.index.intersection(focal_model.items.index)
+        if len(common_items) == 0:
+            # possible with more than two groups: the data can be connected
+            # through another group
+            raise ValueError(
+                "The reference and focal group took no items in common, so there "
+                "is nothing to compare."
+            )
         ref_items = ref_model.items.loc[common_items]
         focal_items = focal_model.items.loc[common_items]
         ref_se_item = ref_model.item_se.loc[common_items]
@@ -3397,6 +3546,56 @@ class Rasch:
             )
         return {str(lv): resp.index[(values == lv).values] for lv in levels}
 
+    def _global_fit_needs_bootstrap(self):
+        """True if this object's calibration settings have no sandwich
+        covariance (method='cos', 'ls' or 'evm', for SLM, PCM, and RSM with
+        estimation='pair-cpat'), so global_fit() uses bootstrap covariances."""
+        if getattr(self, "estimation", "pair-cpat") != "pair-cpat":
+            return False
+        return (self._calibration_kw().get("method") or "log-lik") != "log-lik"
+
+    def _global_fit_bootstrap_cov(self, idx, labels, no_of_samples, rng):
+        """Bootstrap covariance of a global_fit() group's estimates (as
+        returned by _global_fit_params) over no_of_samples resamples of its
+        persons; resamples whose parameters differ (an item lost) are
+        skipped."""
+        rows = []
+        for _ in range(no_of_samples):
+            draw = idx[rng.integers(0, len(idx), len(idx))]
+            m = self._global_fit_subset(draw)
+            lab, est, _, _, _ = self._global_fit_params(m, covariance=False)
+            if list(lab) == list(labels):
+                rows.append(est)
+        return np.cov(np.array(rows), rowvar=False)
+
+    @staticmethod
+    def _global_fit_align(parts):
+        """
+        global_fit()'s two groups' (labels, estimates, covariance, comparable
+        mask, location blocks) re-indexed onto the union of their labels,
+        for groups that took different items: a parameter missing from a
+        group is marked not comparable. Returns (parts, blocks), blocks as
+        positions in the union.
+        """
+        labels = list(parts[0][0]) + [x for x in parts[1][0] if x not in parts[0][0]]
+        pos = {x: i for i, x in enumerate(labels)}
+        n = len(labels)
+        out = []
+        for lab, est, V, ok, _ in parts:
+            ix = np.array([pos[x] for x in lab])
+            e2 = np.zeros(n)
+            V2 = np.zeros((n, n))
+            ok2 = np.zeros(n, bool)
+            e2[ix] = est
+            V2[np.ix_(ix, ix)] = V
+            ok2[ix] = ok
+            out.append((labels, e2, V2, ok2, None))
+        blocks = [
+            np.array(sorted({pos[parts[g][0][j]] for g in (0, 1) for j in blk[g]}))
+            for blk in zip(parts[0][4], parts[1][4])
+        ]
+        return out, blocks
+
     def global_fit(
         self,
         method="wald",
@@ -3407,6 +3606,7 @@ class Rasch:
         seed=None,
         split_prop=0.5,
         se_correction="kauermann-carroll",
+        no_of_samples=500,
     ):
         """
         Global test of parameter invariance across two groups of persons.
@@ -3484,11 +3684,26 @@ class Rasch:
             (I - H_n)^(-1/2) u_n, H_n being the person's leverage (Kauermann &
             Carroll, 2001; Bell & McCaffrey, 2002). Negligible with many
             persons per parameter. None uses the uncorrected sandwich.
+        no_of_samples : int, default 500
+            Bootstrap resamples per group, used instead of the sandwich when
+            the object was calibrated with method='cos', 'ls' or 'evm'
+            (SLM, PCM; RSM with estimation='pair-cpat'): the sandwich is the
+            covariance of method='log-lik' only. se_correction does not
+            apply then.
+
+        Each group is calibrated with this object's last calibrate()
+        settings. In null simulations with bootstrap covariances, PCM's test
+        was liberal (0.08-0.10 at alpha = 0.05, 300 persons per group; SLM
+        and RSM 0.03-0.065). For a test with a nominal false-positive rate,
+        re-run with method='log-lik': pcm.calibrate(method='log-lik'), then
+        pcm.global_fit(...) (0.05-0.07), or use the per-item tests of
+        pcm.dif_test() (0.045-0.062 with bootstrap standard errors).
 
         Attributes set
         --------------
         global_fit_summary : pandas.Series
-            Method, split, statistic, df, (denominator df), p-value, decision.
+            Method, split, statistic, df, (denominator df), covariance
+            ('sandwich' or 'bootstrap'), se_correction, p-value, decision.
         global_fit_table : pandas.DataFrame or None
             Wald only: each compared parameter's difference, SE and z.
         global_fit_excluded : list
@@ -3533,12 +3748,31 @@ class Rasch:
         groups = self._global_fit_groups(split, covariate, seed, split_prop)
         names = list(groups)
         fitted, parts = {}, []
+        rng = np.random.default_rng(seed)
+        boot = self._global_fit_needs_bootstrap()
         for name in names:
             m = self._global_fit_subset(groups[name])
             fitted[name] = m
-            parts.append(self._global_fit_params(m, se_correction is not None))
-        (lab, e1, V1, ok1, blocks), (_, e2, V2, ok2, _) = parts
+            if boot:
+                lab, est, _, ok, blk = self._global_fit_params(m, covariance=False)
+                V = self._global_fit_bootstrap_cov(
+                    groups[name], lab, no_of_samples, rng
+                )
+                parts.append((lab, est, V, ok, blk))
+            else:
+                parts.append(self._global_fit_params(m, se_correction is not None))
+        if parts[0][0] != parts[1][0]:
+            # the groups took different items: match parameters by name
+            parts, blocks = self._global_fit_align(parts)
+        else:
+            blocks = parts[0][4]
+        (lab, e1, V1, ok1, _), (_, e2, V2, ok2, _) = parts
         keep = ok1 & ok2
+        if not keep.any():
+            raise ValueError(
+                "The two groups have no parameters estimable in both (e.g. they "
+                "took no items in common), so there is nothing to compare."
+            )
         idx = np.flatnonzero(keep)
         C = np.eye(len(idx))
         for blk in blocks:  # re-centre each location block over the kept entries
@@ -3575,7 +3809,8 @@ class Rasch:
             summary["split_prop"] = split_prop
         if welch:
             summary["denominator df"] = ddf
-        summary["se_correction"] = se_correction
+        summary["covariance"] = "bootstrap" if boot else "sandwich"
+        summary["se_correction"] = None if boot else se_correction
         summary.update(
             {
                 "p-value": p,
@@ -3588,8 +3823,9 @@ class Rasch:
         if self.global_fit_excluded:
             warnings.warn(
                 f"{len(self.global_fit_excluded)} parameter(s) not compared because "
-                f"they are not estimable in both groups (e.g. next to a score "
-                f"category unused in one group): {self.global_fit_excluded[:10]}"
+                f"they are not estimable in both groups (e.g. an item one group did "
+                f"not take, or next to a score category unused in one group): "
+                f"{self.global_fit_excluded[:10]}"
                 f"{' ...' if len(self.global_fit_excluded) > 10 else ''}. See "
                 f"global_fit_excluded.",
                 UserWarning,

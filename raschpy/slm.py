@@ -384,6 +384,13 @@ class SLM(Rasch):
             Persons dropped prior to calibration due to entirely missing
             response patterns.
         """
+        # arguments as passed, for refits (see _calibration_kw)
+        self._calibrate_args = dict(
+            constant=constant,
+            method=method,
+            matrix_power=matrix_power,
+            log_lik_tol=log_lik_tol,
+        )
 
         if len(self.responses.columns) == 1:
             warnings.warn(
@@ -707,27 +714,33 @@ class SLM(Rasch):
         no_of_samples=500,
         constant=None,
         robust=False,
-        method="log-lik",
+        method=None,
         matrix_power=None,
-        log_lik_tol=0.000001,
+        log_lik_tol=None,
         seed=None,
-        se_method="sandwich",
+        se_method=None,
     ):
         """
         Estimate standard errors for item location estimates.
 
-        se_method='sandwich' (default) computes analytic standard errors: a
-        sandwich (robust) covariance for the Bradley-Terry estimating
-        equations of PAIR on the pairwise matrix, with persons as the
-        independent units (each person contributes to many item pairs, so
-        the naive likelihood standard error is too small). It costs about
-        one calibration.
+        se_method='sandwich' computes analytic standard errors: a sandwich
+        (robust) covariance for the Bradley-Terry estimating equations of
+        PAIR on the pairwise matrix, with persons as the independent units
+        (each person contributes to many item pairs, so the naive
+        likelihood standard error is too small). It costs about one
+        calibration, and applies only to estimates from method='log-lik',
+        which solves those equations; for 'cos', 'ls' and 'evm' it raises
+        a ValueError.
 
         se_method='bootstrap' draws no_of_samples bootstrap resamples (with
         replacement) of the person-level response data, calibrates each
         resample, and computes the standard deviation of item location
         estimates across samples as the standard error. Optionally computes
         bootstrap confidence intervals.
+
+        se_method=None (default) uses the sandwich for estimates from
+        method='log-lik' and the bootstrap otherwise. self.se_method records
+        the method used.
 
         Parameters
         ----------
@@ -738,21 +751,16 @@ class SLM(Rasch):
         no_of_samples : int, default 500
             Number of bootstrap resamples. More samples give more stable
             SE estimates at the cost of computation time.
-        constant : float or None, default None
-            Additive smoothing constant passed to calibrate() for each
-            bootstrap resample; None resolves to the data-adaptive default (see calibrate()).
+        constant, method, matrix_power, log_lik_tol : default None
+            Passed to calibrate() for each bootstrap resample (and for the
+            point estimates if not yet calibrated). None uses the value of
+            the object's last calibrate() call, or calibrate()'s default.
         robust : bool, default False
             Passed to calibrate(); deprecated, no effect (see calibrate()).
-        method : str, default 'log-lik'
-            Priority vector extraction method passed to calibrate().
-        matrix_power : int or None, default None
-            Matrix power passed to calibrate().
-        log_lik_tol : float, default 0.000001
-            Convergence tolerance passed to calibrate().
         seed : int or None, default None
             Seed for the bootstrap resampling RNG. Pass an int for fully
             reproducible standard errors; None (default) draws fresh entropy.
-        se_method : {'sandwich', 'bootstrap'}, default 'sandwich'
+        se_method : {None, 'sandwich', 'bootstrap'}, default None
             Standard error method; see above. With 'sandwich', confidence
             intervals are estimate +/- z * SE, and the bootstrap attributes
             are None.
@@ -779,18 +787,19 @@ class SLM(Rasch):
             Dictionary of item location Series from each bootstrap resample,
             keyed by 'Sample_1', 'Sample_2', etc. (None with the sandwich).
         """
-        if se_method not in ("sandwich", "bootstrap"):
+        if se_method not in (None, "sandwich", "bootstrap"):
             raise ValueError(
-                f"se_method must be 'sandwich' or 'bootstrap', got {se_method!r}."
+                f"se_method must be None, 'sandwich' or 'bootstrap', got {se_method!r}."
             )
+        cal_kw = self._calibration_kw(
+            constant=constant,
+            method=method,
+            matrix_power=matrix_power,
+            log_lik_tol=log_lik_tol,
+        )
         if not hasattr(self, "items"):
-            self.calibrate(
-                constant=constant,
-                robust=robust,
-                method=method,
-                matrix_power=matrix_power,
-                log_lik_tol=log_lik_tol,
-            )
+            self.calibrate(robust=robust, **cal_kw)
+        se_method = self._resolve_se_method(se_method)
         self.se_method = se_method
         if se_method == "sandwich":
             V = self._sandwich_covariance()
@@ -820,13 +829,7 @@ class SLM(Rasch):
                     self.responses.sample(frac=1, replace=True, random_state=rng),
                     validate=False,
                 )
-                sample.calibrate(
-                    constant=constant,
-                    robust=robust,
-                    method=method,
-                    matrix_power=matrix_power,
-                    log_lik_tol=log_lik_tol,
-                )
+                sample.calibrate(robust=robust, **cal_kw)
             samples.append(sample)
         collector.emit()
 
@@ -1541,6 +1544,18 @@ class SLM(Rasch):
         _save_table(category_counts_df, filename, file_format)
         return category_counts_df
 
+    def _with_pooled_items(self, pooled, items, shift):
+        """Copy of this model with the locations of `items` set to the
+        pooled model's, less `shift` (dif_test()'s omnibus test)."""
+        m = SLM(self.responses, validate=False)
+        m.items = self.items.copy()
+        m.items[items] = pooled.items[items] - shift
+        return m
+
+    def _mean_location(self, items):
+        """Mean item location over `items` (see _omnibus_h1_log_likelihood)."""
+        return float(self.items.loc[items].mean())
+
     def _log_likelihood(self, responses=None, persons=None):
         if responses is None:
             responses = self.responses
@@ -1895,12 +1910,12 @@ class SLM(Rasch):
         """Calibrated SLM on a subset of persons (global_fit())."""
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            m = SLM(self.responses.loc[idx], validate=False)
-            m.calibrate()
+            m = SLM(self._answered_items(self.responses.loc[idx]), validate=False)
+            m.calibrate(**self._calibration_kw())
         return m
 
     @staticmethod
-    def _global_fit_params(m, small_sample=False):
+    def _global_fit_params(m, small_sample=False, covariance=True):
         """(labels, estimates, covariance, comparable mask, location blocks) for global_fit()."""
         names = list(m.item_names)
         est = m.items.reindex(names).values.astype(float)
@@ -1914,7 +1929,7 @@ class SLM(Rasch):
                 for i in range(len(names))
             ]
         )
-        V = m._sandwich_covariance(small_sample=small_sample)
+        V = m._sandwich_covariance(small_sample=small_sample) if covariance else None
         return names, est - est.mean(), V, ok, [np.arange(len(names))]
 
     def andersen_lr_test(
@@ -2149,9 +2164,9 @@ class SLM(Rasch):
         ext_score_adjustment=0.5,
         constant=None,
         robust=False,
-        method="log-lik",
+        method=None,
         matrix_power=None,
-        log_lik_tol=0.000001,
+        log_lik_tol=None,
         seed=None,
     ):
         """
@@ -2162,6 +2177,14 @@ class SLM(Rasch):
         self.exogenous, designates one group as the reference (by default
         the largest), and compares each other ("focal") group against it
         individually — a reference-group design, not all-pairwise.
+
+        Each group is calibrated on the items it took, and only items both
+        groups took are compared (ValueError if there are none, possible
+        with more than two groups). In the omnibus test, items only one
+        group took are held at their pooled values, and the pooled person
+        locations are shifted by the difference between the pooled and
+        group models' mean locations over the common items, since each
+        model is centred over its own items.
 
         For each focal group: both groups are calibrated independently
         (each self-centred), then purified onto a common scale before
@@ -2362,8 +2385,10 @@ class SLM(Rasch):
             at all and these are unused, but kept for signature
             consistency with other group-fitting methods such as
             andersen_lr_test.
-        constant, method, matrix_power, log_lik_tol : floats
-            Calibration kwargs passed to group models.
+        constant, method, matrix_power, log_lik_tol : default None
+            Calibration arguments for the group models. None uses the value
+            of this object's last calibrate() call (or calibrate()'s
+            default), so the groups are calibrated as the full data were.
 
         Attributes set
         --------------
@@ -2400,6 +2425,11 @@ class SLM(Rasch):
             otherwise.
         dif_group_sizes : dict {group_value: int}
             Non-extreme, non-missing-covariate N used for each group.
+        dif_excluded_groups : dict {focal_value: str}
+            Focal groups left out because they cannot be compared with the
+            reference group (no items, or for MFRM no facet elements, in
+            common; possible with more than two groups), with the reason.
+            Their omnibus-table rows are NaN.
         """
         from raschpy.slm import SLM
 
@@ -2415,6 +2445,12 @@ class SLM(Rasch):
         cov_values, reference, focal_levels, group_sizes, n_missing = (
             self._dif_group_setup(non_extreme, covariate, reference)
         )
+        focal_levels, excluded_groups = self._dif_linked_focal_levels(
+            cov_values,
+            reference,
+            focal_levels,
+            "dif_test",
+        )
 
         needs_ll = test in ("lr", "both") or omnibus
         pe_kw = dict(
@@ -2424,22 +2460,20 @@ class SLM(Rasch):
             ext_score_adjustment=ext_score_adjustment,
         )
 
-        ref_idx = cov_values.index[cov_values == reference]
-        ref_model = SLM(self.responses.loc[ref_idx], validate=False)
-        ref_model.calibrate(
+        # the object's own calibration settings, unless passed explicitly
+        cal_kw = self._calibration_kw(
             constant=constant,
-            robust=robust,
             method=method,
             matrix_power=matrix_power,
             log_lik_tol=log_lik_tol,
         )
+        ref_idx = cov_values.index[cov_values == reference]
+        ref_model = SLM(
+            self._answered_items(self.responses.loc[ref_idx]), validate=False
+        )
+        ref_model.calibrate(**cal_kw)
         ref_model.std_errors(
             no_of_samples=no_of_samples,
-            constant=constant,
-            robust=robust,
-            method=method,
-            matrix_power=matrix_power,
-            log_lik_tol=log_lik_tol,
             seed=seed,
         )
         if needs_ll:
@@ -2455,21 +2489,12 @@ class SLM(Rasch):
 
         for focal in focal_levels:
             focal_idx = cov_values.index[cov_values == focal]
-            focal_model = SLM(self.responses.loc[focal_idx], validate=False)
-            focal_model.calibrate(
-                constant=constant,
-                robust=robust,
-                method=method,
-                matrix_power=matrix_power,
-                log_lik_tol=log_lik_tol,
+            focal_model = SLM(
+                self._answered_items(self.responses.loc[focal_idx]), validate=False
             )
+            focal_model.calibrate(**cal_kw)
             focal_model.std_errors(
                 no_of_samples=no_of_samples,
-                constant=constant,
-                robust=robust,
-                method=method,
-                matrix_power=matrix_power,
-                log_lik_tol=log_lik_tol,
                 seed=seed,
             )
             if needs_ll:
@@ -2522,23 +2547,22 @@ class SLM(Rasch):
 
             if omnibus:
                 combined_idx = ref_idx.append(focal_idx)
-                m_full = SLM(self.responses.loc[combined_idx], validate=False)
-                m_full.calibrate(
-                    constant=constant,
-                    robust=robust,
-                    method=method,
-                    matrix_power=matrix_power,
-                    log_lik_tol=log_lik_tol,
+                m_full = SLM(
+                    self._answered_items(self.responses.loc[combined_idx]),
+                    validate=False,
                 )
+                m_full.calibrate(**cal_kw)
                 m_full.person_estimates(**pe_kw)
                 ll_full = m_full._log_likelihood()
                 pooled_ref_persons = m_full.persons.reindex(ref_model.responses.index)
                 pooled_focal_persons = m_full.persons.reindex(
                     focal_model.responses.index
                 )
-                ll_ref_omni = ref_model._log_likelihood(persons=pooled_ref_persons)
-                ll_focal_omni = focal_model._log_likelihood(
-                    persons=pooled_focal_persons
+                ll_ref_omni = self._omnibus_h1_log_likelihood(
+                    ref_model, m_full, pooled_ref_persons, common_items
+                )
+                ll_focal_omni = self._omnibus_h1_log_likelihood(
+                    focal_model, m_full, pooled_focal_persons, common_items
                 )
                 lr_omni = max(0.0, -2 * (ll_full - (ll_ref_omni + ll_focal_omni)))
                 df_omni = len(common_items) - 1
@@ -2610,7 +2634,12 @@ class SLM(Rasch):
                 plot_dict[focal] = None
 
         self.dif_table = pd.concat(all_rows)
-        self.dif_omnibus_table = pd.DataFrame(omnibus_rows).T if omnibus else None
+        self.dif_omnibus_table = (
+            pd.DataFrame(self._nan_omnibus_rows(omnibus_rows, excluded_groups)).T
+            if omnibus
+            else None
+        )
+        self.dif_excluded_groups = excluded_groups
         self.dif_reference = reference
         self.dif_covariate = covariate
         self.dif_reference_model = ref_model

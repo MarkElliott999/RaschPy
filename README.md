@@ -61,7 +61,7 @@ Dichotomous data (0/1). Each row is a person, each column an item.
 from raschpy import SLM
 from raschpy.simulation import SLM_Sim
 
-# Pass a simulation object directly — generating parameters are attached to m.generating
+# Pass a simulation object directly — generating parameters are attached to slm.generating
 sim = SLM_Sim(no_of_items=10, no_of_persons=300)
 slm = SLM(sim)
 
@@ -92,12 +92,12 @@ slm.save_stats('slm_results', format='xlsx')
 
 ```python
 # Convert raw scores to person location estimates
-model.score_lookup_table()
-print(model.score_lookup)   # pandas Series indexed by raw score
+slm.score_lookup_table()
+print(slm.score_lookup)   # pandas Series indexed by raw score
 
 # By default, missing responses are excluded from person estimates.
 # To include them, treated as incorrect rather than missing:
-model.person_estimates(missing_as_incorrect=True)
+slm.person_estimates(missing_as_incorrect=True)
 ```
 
 ---
@@ -110,7 +110,7 @@ Polytomous data where items may have different maximum scores.
 from raschpy import PCM
 from raschpy.simulation import PCM_Sim
 
-# Pass a simulation object directly — generating parameters are attached to m.generating
+# Pass a simulation object directly — generating parameters are attached to pcm.generating
 sim = PCM_Sim(no_of_items=5, no_of_persons=300, max_score_vector=[3, 3, 4, 4, 3])
 pcm = PCM(sim)
 
@@ -148,7 +148,7 @@ Polytomous data where all items share the same rating scale structure.
 from raschpy import RSM
 from raschpy.simulation import RSM_Sim
 
-# Pass a simulation object directly — generating parameters are attached to m.generating
+# Pass a simulation object directly — generating parameters are attached to rsm.generating
 sim = RSM_Sim(no_of_items=8, no_of_persons=300, max_score=4)
 rsm = RSM(sim)
 
@@ -232,11 +232,11 @@ print(mfrm.rater_stats_items)  # Per-item severity table
 
 **Extreme and invalid persons**
 
-Persons with entirely missing data are always removed at instantiation and stored in `m.invalid_responses`. Persons with extreme scores (all-zero or perfect) are removed only when `extreme_persons=False` is passed to the constructor, and are stored in `m.extreme_persons`.
+Persons with entirely missing data are always removed at instantiation and stored in `mfrm.invalid_responses`. Persons with extreme scores (all-zero or perfect) are removed only when `extreme_persons=False` is passed to the constructor, and are stored in `mfrm.extreme_persons`.
 
 **Empty, thin and extreme raters**
 
-On creation, `MFRM` removes raters with no responses (with a warning), and warns about raters that scored fewer than `min_persons` persons (default 3; listed in `m.thin_raters`) and raters who used only the lowest or highest score category (`m.extreme_raters`; as with an extreme-scoring person, location is not identifiable from the data). Remove them on creation with `drop_facet_elements='thin'` or `'extreme'` (or a list of names), or afterwards:
+On creation, `MFRM` removes raters with no responses (with a warning), and warns about raters that scored fewer than `min_persons` persons (default 3; listed in `mfrm.thin_raters`) and raters who used only the lowest or highest score category (`mfrm.extreme_raters`; as with an extreme-scoring person, location is not identifiable from the data). Remove them on creation with `drop_facet_elements='thin'` or `'extreme'` (or a list of names), or afterwards:
 
 ```python
 mfrm = MFRM(responses)
@@ -338,7 +338,7 @@ mfrm.rater_stats_df(model='pseudo_halo', full=True, divergence_test='wald')
 print(mfrm.rater_stats_pseudo_halo['Item_1'])  # 'Flagged' column, True/False per rater
 ```
 
-Pass `correction='bh'` to apply Benjamini-Hochberg FDR correction within each rater's own family of tests (the rater's items thresholds, not pooled across raters); default `correction=None` compares raw p-values against `alpha` (default `0.05`) directly. Pass `plot=True` to also build and store `self.fit_plot_{model}` (e.g. `self.fit_plot_pseudo_halo`) – a scatter of the free vector model's estimates against the stretch model's reconstruction, flagged elements in a different colour, in the style of `self.anchor_plot`.
+Pass `correction='bh'` to apply Benjamini-Hochberg FDR correction within each rater's own family of tests (the rater's items or thresholds, not pooled across raters); default `correction=None` compares raw p-values against `alpha` (default `0.05`) directly. Pass `plot=True` to also build and store `mfrm.fit_plot_{model}` (e.g. `mfrm.fit_plot_pseudo_halo`) – a scatter of the free vector model's estimates against the stretch model's reconstruction, flagged elements in a different colour, in the style of `mfrm.anchor_plot`.
 
 Since, as described above, `pseudo_halo` tests compression of item locations under an otherwise locally-independent response process, rather than classic halo effect's usual mechanism (elevated local item interdependence), pair `omega_pseudo_halo` with a per-rater residual-correlation to check for full halo effect:
 
@@ -513,7 +513,7 @@ print(slm.global_fit_summary)   # statistic, df, p-value, decision
 print(slm.global_fit_table)     # per-parameter differences, SEs and z
 ```
 
-`dif_test()` is available on all four model classes, including `MFRM`. (`andersen_lr_test()` is deprecated: with PAIR/CPAT estimates, Andersen's likelihood-ratio test was not calibrated in simulation; it is reserved for conditional maximum likelihood estimates in a later version.)
+`dif_test()` is available on all four model classes, including `MFRM`. `dif_test()`, `drf_test()` and `global_fit()` calibrate each group with the object's own `calibrate()` settings, and each group on the items it took; only items (and, for `MFRM`, raters) both groups have in common are compared. (`andersen_lr_test()` is deprecated: with PAIR/CPAT estimates, Andersen's likelihood-ratio test was not calibrated in simulation; it is reserved for conditional maximum likelihood estimates in a later version.)
 
 On `PCM`, `RSM`, and `MFRM`, `dif_test()` also tests **differential category functioning (DCF)**: whether the category widths differ by group, via `threshold_dif_table`, alongside the item-location `dif_table`. `size_adjust=True` inflates standard errors at very large N so that trivially small differences are not flagged: item-location SEs are scaled to `reference_n`, and category-width SEs are capped by `dcf_cap` (in information-weight units on `PCM`/`RSM`, in persons on `MFRM`).
 
@@ -593,7 +593,7 @@ print(mfrm.raters_global)             # Estimated rater locations
 
 ### Parameter recovery diagnostics (`recovery_stats()`)
 
-When a model object is constructed directly from a simulation (see above, `m.generating` present), `recovery_stats()` compares every recovered parameter against its true generating value, storing the results (a per-parameter table and a summary) under `m.recovery`:
+When a model object is constructed directly from a simulation (see above, `rsm.generating` present), `recovery_stats()` compares every recovered parameter against its true generating value, storing the results (a per-parameter table and a summary) under `rsm.recovery`:
 
 ```python
 sim = RSM_Sim(no_of_items=8, no_of_persons=300, max_score=4)
@@ -610,7 +610,7 @@ print(rsm.recovery.persons.summary)
 
 Person estimates are compared against *pseudo-estimates* (Elliott & Buttery, 2022b): the person estimate from the same responses using the true generating item/threshold/(rater) parameters. The error (recovered estimate − pseudo-estimate) combines parameter estimation error and model misspecification, and `rsm.recovery.persons.table['generating']` holds the pseudo-estimate.
 
-`recovery_stats()` is a no-op (with a warning, returning `None`) unless `m.generating` exists, but otherwise does not require an exact model match — person recovery works across any appropriate model pairing (e.g. an `RSM` object built from `PCM_Sim`-generated data), and `SLM`/`PCM`/`RSM` items are always comparable regardless of threshold structure. The `RSM`↔`PCM` (and `SLM`↔either) pairing has a stricter gate for thresholds/category widths specifically: no-op unless every max score matches. Pass `anchor=True` to compare against anchored estimates (`calibrate_anchor()` must have been run) — note SLM/PCM/RSM only have anchored item locations, so `anchor=True` leaves thresholds/persons unaffected on those three classes; MFRM has the full set (items/thresholds/persons/rater effects).
+`recovery_stats()` is a no-op (with a warning, returning `None`) unless `rsm.generating` exists, but otherwise does not require an exact model match — person recovery works across any appropriate model pairing (e.g. an `RSM` object built from `PCM_Sim`-generated data), and `SLM`/`PCM`/`RSM` items are always comparable regardless of threshold structure. The `RSM`↔`PCM` (and `SLM`↔either) pairing has a stricter gate for thresholds/category widths specifically: no-op unless every max score matches. Pass `anchor=True` to compare against anchored estimates (`calibrate_anchor()` must have been run) — note SLM/PCM/RSM only have anchored item locations, so `anchor=True` leaves thresholds/persons unaffected on those three classes; MFRM has the full set (items/thresholds/persons/rater effects).
 
 On `MFRM`, `recovery_stats()` also accepts `model=` (which of the 8 rater sub-models to recover; defaults to the simulation model, but a simpler one may be passed to measure the effect of misspecification, as in Elliott & Buttery, 2022a) and `groups=` for person-level breakdowns, including `groups='rater'`, which re-estimates persons from each rater's responses separately:
 
@@ -631,12 +631,12 @@ Set `plot=False` to skip the accompanying recovery plots (identity line, OLS and
 
 ### Standard errors and confidence intervals
 
-Standard errors are computed analytically where possible, by a sandwich (robust, Huber–White) covariance (Huber, 1967) with persons as the independent units: for `SLM` and `PCM`, and for `RSM` and `MFRM` under the default RCL estimation (`'cp-full-rcl'` or `'cpat-rcl'`). The bootstrap (resampling persons and recalibrating) is used when the sandwich cannot be computed — for example when there is an unused score category, calibration did not converge, estimates are not identified, `MFRM` with `estimation='pair-cpat'`, or when the resamples are needed later (`store_bootstrap=True`, e.g. for DIF) — with a warning giving the reason, so standard errors are always produced by one of the two methods. `model.se_method` records which method was used; pass `se_method='bootstrap'` or `'sandwich'` to choose. Standard errors are triggered automatically inside `fit_statistics()`, or can be run explicitly to request confidence intervals:
+Standard errors are computed analytically where possible, by a sandwich (robust, Huber–White) covariance (Huber, 1967) with persons as the independent units: for `SLM` and `PCM` with the default `method='log-lik'`, and for `RSM` and `MFRM` under the default RCL estimation (`'cp-full-rcl'` or `'cpat-rcl'`). The sandwich is the covariance of the estimator that produced the estimates, so with `method='cos'`, `'ls'` or `'evm'` (`SLM`, `PCM`, and `RSM` with `estimation='pair-cpat'`) standard errors come from the bootstrap. The bootstrap (resampling persons and recalibrating) is used when the sandwich cannot be computed — for example when there is an unused score category, calibration did not converge, estimates are not identified, `MFRM` with `estimation='pair-cpat'`, or when the resamples are needed later (`store_bootstrap=True`, e.g. for DIF) — with a warning giving the reason, so standard errors are always produced by one of the two methods. `rsm.se_method` records which method was used; pass `se_method='bootstrap'` or `'sandwich'` to choose. Standard errors are triggered automatically inside `fit_statistics()`, or can be run explicitly to request confidence intervals:
 
 ```python
-model.std_errors(interval=0.95)                                        # sandwich where it applies
-model.std_errors(se_method='bootstrap', no_of_samples=200, interval=0.95)
-model.item_stats_df(interval=0.95)  # adds 2.5% and 97.5% columns
+rsm.std_errors(interval=0.95)                                        # sandwich where it applies
+rsm.std_errors(se_method='bootstrap', no_of_samples=200, interval=0.95)
+rsm.item_stats_df(interval=0.95)  # adds 2.5% and 97.5% columns
 ```
 
 ---

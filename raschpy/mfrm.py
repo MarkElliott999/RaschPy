@@ -9370,7 +9370,7 @@ class MFRM(Rasch):
             fitted._thresholds_for(model, anchor=True),
         )
 
-    def _dif_common_frame(self, model, fitted, facet_elements):
+    def _dif_common_frame(self, model, fitted, facet_elements, common_items):
         """
         A fitted group model's item locations and thresholds anchored on
         `facet_elements`, the facet elements common to the groups being
@@ -9387,8 +9387,24 @@ class MFRM(Rasch):
         plus slope: d(anchored item location) / d(own item location), 1
         except for the stretch models under RCL, whose anchoring rescales
         item locations by the anchors' mean item stretch.
+
+        For 'matrix', the anchored thresholds absorb the anchors' threshold
+        margin averaged over the group's own items; when the groups took
+        different items it is averaged over `common_items` instead.
         """
+        own_items = list(fitted.responses.columns)
+        matrix_items = model == "matrix" and set(common_items) != set(own_items)
+
+        def _thr_correction(m):
+            _, v_common = self._dif_fe_margins(
+                model, m, facet_elements, list(common_items)
+            )
+            _, v_own = self._dif_fe_margins(model, m, facet_elements, own_items)
+            return (v_common - v_own).values
+
         items, thresholds = self._dif_anchor_on(model, fitted, facet_elements)
+        if matrix_items:
+            thresholds = thresholds + _thr_correction(fitted)
         slope = 1.0
         if model in ("pseudo_halo", "bistretch") and getattr(
             fitted, f"estimation_{model}", "pair-cpat"
@@ -9400,7 +9416,10 @@ class MFRM(Rasch):
             if anchored is None:
                 continue
             item_rows.append(anchored[0].reindex(items.index).values)
-            thr_rows.append(np.asarray(anchored[1], dtype=float))
+            s_thr = np.asarray(anchored[1], dtype=float)
+            if matrix_items:
+                s_thr = s_thr + _thr_correction(s)
+            thr_rows.append(s_thr)
         if len(item_rows) >= 2:
             item_boot = pd.DataFrame(item_rows, columns=items.index).dropna()
             thr_arr = np.array(thr_rows)
@@ -9423,47 +9442,108 @@ class MFRM(Rasch):
             slope=slope,
         )
 
-    def _dif_mean_location(self, model, fitted, anchor=False):
-        """Mean, over facet elements, items and thresholds, of a fitted
-        model's threshold locations (item location + threshold + facet
-        element effect)."""
-        fe = getattr(fitted, self._sev_attr(model, anchor=anchor))
+    def _dif_fe_margins(self, model, fitted, facet_elements, items):
+        """
+        Mean of a fitted sub-model's facet element effects over
+        `facet_elements`, as an item part u (indexed by `items`) and a
+        threshold part v (averaged over `items`, centred), for an additive
+        item location + threshold reading of the (item, threshold) cell
+        means; for 'matrix', 'bivector', 'bistretch' and 'mixed' the
+        item-by-threshold remainder is left out. u is not centred, so
+        mean(u) is the overall mean effect.
+        """
+        fe = getattr(fitted, self._sev_attr(model))
+        thr = fitted._thresholds_for(model).index
+        u = pd.Series(0.0, index=items)
+        v = pd.Series(0.0, index=thr)
+        if model == "global":
+            u[:] = float(fe.loc[facet_elements].mean())
+        elif model in ("items", "pseudo_halo"):
+            u = fe.loc[facet_elements, items].mean()
+        elif model in ("thresholds", "centrality"):
+            vk = fe.loc[facet_elements].mean().values
+            u[:] = vk.mean()
+            v = pd.Series(vk - vk.mean(), index=thr)
+        else:
+            sub = fe.loc[facet_elements]
+            sub = sub[sub.index.get_level_values(1).isin(items)]
+            cell = sub.groupby(level=1).mean().reindex(items)
+            u = cell.mean(axis=1)
+            v = pd.Series(cell.mean(axis=0).values - cell.values.mean(), index=thr)
+        return u, v
+
+    def _dif_mean_location(
+        self,
+        model,
+        fitted,
+        facet_elements,
+        items,
+        item_locations=None,
+        thresholds=None,
+        fe_model=None,
+    ):
+        """Mean threshold location (item location + threshold + facet
+        element effect) of a fitted model over `facet_elements` and `items`,
+        with optional item_locations / thresholds overrides and the facet
+        element effects of `fe_model` (default: `fitted`'s own)."""
+        item_locations = (
+            fitted._items_for(model) if item_locations is None else item_locations
+        )
+        thresholds = fitted._thresholds_for(model) if thresholds is None else thresholds
+        u, _ = self._dif_fe_margins(
+            model, fitted if fe_model is None else fe_model, facet_elements, items
+        )
         return (
-            float(fitted._items_for(model, anchor=anchor).mean())
-            + float(fitted._thresholds_for(model, anchor=anchor).mean())
-            + float(np.nanmean(np.asarray(fe, dtype=float)))
+            float(item_locations.loc[items].mean())
+            + float(np.mean(np.asarray(thresholds, dtype=float)))
+            + float(u.mean())
         )
 
-    def _dif_pooled_reference(self, model, group, pooled, facet_elements):
+    def _dif_pooled_reference(self, model, group, pooled, common_items):
         """
-        A group model's item locations and thresholds for evaluation with
-        the pooled (combined-group) model's person locations, with the
-        group's facet elements `facet_elements` as the shared reference
-        (calibrate_anchor() on the pooled model).
+        A group model's parameters and person-location shift for evaluation
+        with the pooled (combined-group) model's person locations, over the
+        group's own facet elements (dif_test()'s omnibus tests).
 
-        Returns (items, thresholds, items_own):
-        items, thresholds : for the pooled model's own facet element
-            effects: the group's, less the change anchoring makes to the
-            pooled model's item locations and thresholds (the pooled
-            facet element effects are used as fitted, since anchoring
-            'matrix' drops the anchors' item-by-threshold remainder).
-        items_own : for the group's own facet element effects: the group's
-            item locations plus the shift that anchoring makes to every
-            threshold location, which the pooled person locations do not
-            take up.
+        Returns (items, thresholds, shift):
+        items, thresholds : for the pooled model's facet element effects
+            (item-only test): the group's, less the item and threshold
+            margins of the pooled effects over the group's facet elements
+            and items, which the group's own estimates have absorbed
+            (_dif_fe_margins); items only this group took are held at their
+            pooled locations, as under H0, so only the common items are
+            free.
+        shift : to subtract from the pooled person locations with those:
+            the mean pooled-model threshold location over the group's facet
+            elements and the common items, less the group's.
         """
-        before = self._dif_mean_location(model, pooled)
-        p_items = pooled._items_for(model)
-        p_thr = pooled._thresholds_for(model)
-        a_items, a_thr = self._dif_anchor_on(model, pooled, facet_elements)
-        after = self._dif_mean_location(model, pooled, anchor=True)
+        fes = list(group.facet_names)
+        items = list(group.responses.columns)
+        common = [i for i in items if i in set(common_items)]
+        others = [i for i in items if i not in set(common)]
         g_items = group._items_for(model)
         g_thr = group._thresholds_for(model)
-        items = g_items - (a_items - p_items).reindex(g_items.index)
-        thresholds = g_thr - (
-            np.asarray(a_thr, dtype=float) - np.asarray(p_thr, dtype=float)
+        u, v = self._dif_fe_margins(model, pooled, fes, items)
+        h_items = g_items - (u - u.mean()).reindex(g_items.index)
+        h_thr = g_thr - v.values
+        shift = self._dif_mean_location(
+            model, pooled, fes, common
+        ) - self._dif_mean_location(
+            model, group, fes, common, h_items, h_thr, fe_model=pooled
         )
-        return items, thresholds, g_items + (before - after)
+        if others:
+            p_thr = pooled._thresholds_for(model)
+            h_items = h_items.copy()
+            h_items[others] = (
+                pooled._items_for(model)[others]
+                - shift
+                + float(
+                    np.mean(
+                        np.asarray(p_thr, dtype=float) - np.asarray(h_thr, dtype=float)
+                    )
+                )
+            )
+        return h_items, h_thr, shift
 
     def global_fit(self, *args, **kwargs):
         """
@@ -9537,12 +9617,24 @@ class MFRM(Rasch):
         effects at their fitted values; df = 1. It is mildly liberal;
         test='wald' (the default) is preferred.
 
-        There are two omnibus likelihood-ratio tests, both evaluated at the
-        pooled (combined-group) model's person locations:
-        dif_omnibus_table tests items only (facet effects held at their
-        pooled values in both groups, items and thresholds free per group);
-        df_omnibus_table tests items and facet effects together (all free
-        per group). Both have df = common items - 1.
+        The omnibus likelihood-ratio test (dif_omnibus_table) is evaluated
+        at the pooled (combined-group) model's person locations and tests
+        items only: facet effects are held at their pooled values in both
+        groups, items and thresholds are free per group, df = common items
+        - 1. In null simulations (estimation='cp-full-rcl') it was at or below
+        nominal when both groups
+        took every item (0.00-0.08 at alpha = 0.05; 0.00 for 'matrix', whose
+        likelihood ratio is often 0), but liberal when they took partly
+        overlapping item sets (up to 0.23 with 2 of 8 items in common) and,
+        with estimation='pair-cpat', when they were scored by partly
+        overlapping facet elements (0.23-0.87). For
+        a test with a nominal false-positive rate, use the per-item Wald
+        tests in dif_table (BH-corrected; computed by the same call), which
+        stayed near nominal in the same designs.
+        The joint test of items and facet effects together (df_omnibus_table)
+        is withheld: its df did not count the facet effect parameters, and
+        it rejected in most null datasets. It is to be revisited with
+        conditional maximum likelihood.
 
         If method=None, calibrate() resolves it by model, so dif_test()
         under two different models can use different item-estimation
@@ -9568,6 +9660,23 @@ class MFRM(Rasch):
         model='global' can be tested (ValueError otherwise). The group
         models in dif_reference_model / dif_focal_models keep the anchored
         estimates (anchor_items_{model} etc.).
+        Under 'matrix', which constrains the average facet element's
+        item-by-threshold structure to be additive over the facet elements
+        in the fit, groups scored by different facet elements remain
+        comparable only approximately: in null simulations (4 of 8 facet
+        elements shared) the per-item DIF test's false-positive rate rose
+        with sample size, from 0.05 with 150-300 persons per group to 0.16
+        with 600, and a UserWarning says so. For a test with a nominal
+        false-positive rate, use model='bivector' (0.06 in the same design)
+        if it fits the data.
+
+        Each group is calibrated on the items it took, and only items both
+        groups took are compared (ValueError if there are none, possible
+        with more than two groups); for 'matrix', the anchored thresholds
+        are then averaged over the common items. The omnibus tests shift
+        the pooled person locations by the difference between the pooled
+        and group models' mean locations over the group's facet elements
+        and items.
 
         Parameters
         ----------
@@ -9648,9 +9757,9 @@ class MFRM(Rasch):
         dif_omnibus_table : pandas.DataFrame or None
             One row per focal group: 'LR', 'df', 'p', 'Flagged', for the
             test of items only. None if omnibus=False.
-        df_omnibus_table : pandas.DataFrame or None
-            As dif_omnibus_table, for the joint test of items and facet
-            effects. None if omnibus=False.
+        df_omnibus_table : None
+            Withheld (see above); kept so that existing code reading it does
+            not fail.
         threshold_dif_table : pandas.DataFrame
             DCF on category widths (thresholds[k+1] - thresholds[k]). One
             row per (category, focal group) pair: 'Group', 'Category',
@@ -9669,6 +9778,11 @@ class MFRM(Rasch):
         dif_plots : dict {focal_value: matplotlib.figure.Figure or None}
         dif_group_sizes : dict {group_value: int}
             Non-extreme, non-missing-variable N used for each group.
+        dif_excluded_groups : dict {focal_value: str}
+            Focal groups left out because they cannot be compared with the
+            reference group (no items, or for MFRM no facet elements, in
+            common; possible with more than two groups), with the reason.
+            Their omnibus-table rows are NaN.
         """
         from raschpy.mfrm import MFRM
 
@@ -9713,6 +9827,13 @@ class MFRM(Rasch):
         cov_values, reference, focal_levels, group_sizes, n_missing = (
             self._dif_group_setup(non_extreme, covariate, reference)
         )
+        focal_levels, excluded_groups = self._dif_linked_focal_levels(
+            cov_values,
+            reference,
+            focal_levels,
+            "dif_test",
+            need_facets=0 if model == "global" else 1,
+        )
 
         def _group_responses(idx):
             # Splitting by person can leave a facet_element (rater) with
@@ -9728,7 +9849,10 @@ class MFRM(Rasch):
             resp = self.responses[mask]
             nonnull_by_rater = resp.notna().groupby(level=0).sum().sum(axis=1)
             active_raters = nonnull_by_rater[nonnull_by_rater > 0].index
-            return resp[resp.index.get_level_values(0).isin(active_raters)]
+            # likewise the items this group did not take
+            return self._answered_items(
+                resp[resp.index.get_level_values(0).isin(active_raters)]
+            )
 
         pe_kw = dict(
             warm_corr=warm_corr,
@@ -9775,13 +9899,13 @@ class MFRM(Rasch):
             ll_ref = ref_model._log_likelihood(model=model)
 
         all_item_rows = []
+        frame_flags = {"matrix": [], "omnibus": []}
         all_threshold_rows = []
         focal_models = {}
         tc_dict = {}
         anchor_selection_dict = {}
         plot_dict = {}
         omnibus_rows = {}
-        df_omnibus_rows = {}
 
         for focal in focal_levels:
             focal_idx = cov_values.index[cov_values == focal]
@@ -9805,10 +9929,29 @@ class MFRM(Rasch):
                     f"their item locations and thresholds are not comparable. "
                     f"Use model='global'."
                 )
+            items_differ = set(ref_model.responses.columns) != set(
+                focal_model.responses.columns
+            )
+            if not set(ref_model.responses.columns) & set(
+                focal_model.responses.columns
+            ):
+                # possible with more than two groups: the data can be
+                # connected through another group
+                raise ValueError(
+                    f"The reference and focal group ({focal!r}) took no items in "
+                    f"common, so there is nothing to compare."
+                )
             reframe = panels_differ and model != "global"
             if reframe:
-                ref_cmp = self._dif_common_frame(model, ref_model, common_fe)
-                focal_cmp = self._dif_common_frame(model, focal_model, common_fe)
+                shared_items = ref_model.responses.columns.intersection(
+                    focal_model.responses.columns
+                )
+                ref_cmp = self._dif_common_frame(
+                    model, ref_model, common_fe, shared_items
+                )
+                focal_cmp = self._dif_common_frame(
+                    model, focal_model, common_fe, shared_items
+                )
             else:
                 ref_cmp, focal_cmp = ref_model, focal_model
 
@@ -9936,44 +10079,21 @@ class MFRM(Rasch):
                 pooled_ref_persons = pooled_persons.reindex(ref_model.person_names)
                 pooled_focal_persons = pooled_persons.reindex(focal_model.person_names)
 
-                # Joint DF -- both axes (items/thresholds AND facet_effects)
-                # free per group.
-                # df undercounts the facet_effects axis on purpose here
-                # (kept for backward comparability with the earlier
-                # single-omnibus behaviour) -- prefer dif_omnibus_table
-                # below for an axis-attributed, properly-scoped answer.
-                # When the groups' facet elements differ, the pooled
-                # model is anchored on each group's own facet elements in
-                # turn, to put each group's parameters on the pooled scale
+                # When the groups were scored by different facet elements
+                # or took different items, each group's parameters are put
+                # on the pooled person scale over its own facet elements
                 # (_dif_pooled_reference).
-                ref_df_items = focal_df_items = None
                 ref_dif_items = ref_dif_thr = focal_dif_items = focal_dif_thr = None
-                if panels_differ:
-                    ref_dif_items, ref_dif_thr, ref_df_items = (
+                ref_shift = focal_shift = 0.0
+                if panels_differ or items_differ:
+                    ref_dif_items, ref_dif_thr, ref_shift = self._dif_pooled_reference(
+                        model, ref_model, m_full, common_items
+                    )
+                    focal_dif_items, focal_dif_thr, focal_shift = (
                         self._dif_pooled_reference(
-                            model, ref_model, m_full, list(ref_model.facet_names)
+                            model, focal_model, m_full, common_items
                         )
                     )
-                    focal_dif_items, focal_dif_thr, focal_df_items = (
-                        self._dif_pooled_reference(
-                            model, focal_model, m_full, list(focal_model.facet_names)
-                        )
-                    )
-                ll_ref_df = ref_model._log_likelihood(
-                    model=model, persons=pooled_ref_persons, items=ref_df_items
-                )
-                ll_focal_df = focal_model._log_likelihood(
-                    model=model, persons=pooled_focal_persons, items=focal_df_items
-                )
-                lr_df = max(0.0, -2 * (ll_full - (ll_ref_df + ll_focal_df)))
-                df_df = len(common_items) - 1
-                p_df = float(chi2.sf(lr_df, df_df))
-                df_omnibus_rows[focal] = {
-                    "LR": lr_df,
-                    "df": df_df,
-                    "p": p_df,
-                    "Flagged": p_df < alpha,
-                }
 
                 # Item-isolated DIF omnibus -- facet_effects pinned at the
                 # pooled (m_full) value on both sides, items/thresholds
@@ -9983,14 +10103,14 @@ class MFRM(Rasch):
                 # is correctly scoped.
                 ll_ref_dif = ref_model._log_likelihood(
                     model=model,
-                    persons=pooled_ref_persons,
+                    persons=pooled_ref_persons - ref_shift,
                     items=ref_dif_items,
                     thresholds=ref_dif_thr,
                     facet_effects=pooled_facet_effects,
                 )
                 ll_focal_dif = focal_model._log_likelihood(
                     model=model,
-                    persons=pooled_focal_persons,
+                    persons=pooled_focal_persons - focal_shift,
                     items=focal_dif_items,
                     thresholds=focal_dif_thr,
                     facet_effects=pooled_facet_effects,
@@ -10106,6 +10226,17 @@ class MFRM(Rasch):
             all_item_rows.append(item_table)
             all_threshold_rows.append(threshold_table)
             focal_models[focal] = focal_model
+            if model == "matrix" and panels_differ:
+                frame_flags["matrix"].append(focal)
+            if omnibus and (
+                items_differ
+                or (
+                    panels_differ
+                    and (getattr(self, "estimation", None) or "cp-full-rcl")
+                    == "pair-cpat"
+                )
+            ):
+                frame_flags["omnibus"].append(focal)
             tc_dict[focal] = tc
 
             if plot and anchor_selection_dict[focal] is not None:
@@ -10115,10 +10246,41 @@ class MFRM(Rasch):
             else:
                 plot_dict[focal] = None
 
+        if frame_flags["matrix"]:
+            warnings.warn(
+                f"model='matrix' with groups scored by different {self.facets_label} "
+                f"(focal group(s) {frame_flags['matrix']}): in null simulations the "
+                f"per-item DIF test's false-positive rate rose with sample size (0.05 "
+                f"with 150-300 persons per group, 0.16 with 600, 4 of 8 "
+                f"{self.facets_label} shared), as 'matrix' constrains the average "
+                f"{self.facet_label}'s item-by-threshold structure to be additive, and "
+                f"that depends on which {self.facets_label} are averaged. For a test "
+                f"with a nominal false-positive rate, re-run with model='bivector' "
+                f"(0.06 in the same design), if it fits the data (see "
+                f"mfrm.model_selection()): mfrm.dif_test({covariate!r}, model='bivector').",
+                UserWarning,
+                stacklevel=2,
+            )
+        if frame_flags["omnibus"]:
+            warnings.warn(
+                f"dif_omnibus_table (focal group(s) {frame_flags['omnibus']}) is liberal "
+                f"when the groups took different items (up to 0.23 at alpha = 0.05 in "
+                f"null simulations) or, with estimation='pair-cpat', were scored by "
+                f"different {self.facets_label} (up to 0.87). For a test with a nominal "
+                f"false-positive rate, use the per-item Wald tests in mfrm.dif_table "
+                f"(computed by the same call).",
+                UserWarning,
+                stacklevel=2,
+            )
         self.dif_model = model
         self.dif_table = pd.concat(all_item_rows)
-        self.dif_omnibus_table = pd.DataFrame(omnibus_rows).T if omnibus else None
-        self.df_omnibus_table = pd.DataFrame(df_omnibus_rows).T if omnibus else None
+        self.dif_omnibus_table = (
+            pd.DataFrame(self._nan_omnibus_rows(omnibus_rows, excluded_groups)).T
+            if omnibus
+            else None
+        )
+        self.dif_excluded_groups = excluded_groups
+        self.df_omnibus_table = None  # withheld; see the docstring
         self.threshold_dif_table = pd.concat(all_threshold_rows, ignore_index=True)
         self.dif_reference = reference
         self.dif_covariate = covariate
@@ -10278,6 +10440,110 @@ class MFRM(Rasch):
         "bistretch": ["lambda", "omega_items", "omega_thresholds"],
     }
 
+    @staticmethod
+    def _matrix_threshold_marginal(m, items):
+        """(facet element x threshold) marginal of a 'matrix' fit's facet
+        element effects over `items`, centred per facet element, as
+        marginal_facet_effects_thresholds is over all items."""
+        fe = m.facet_effects_matrix
+        sub = fe[fe.index.get_level_values(1).isin(items)]
+        marg = sub.groupby(level=0, sort=False).mean()
+        return marg.sub(marg.mean(axis=1), axis=0)
+
+    def _drf_matrix_threshold_marginal(self, m, samples, eligible, items):
+        """
+        drf_test()'s 'matrix' threshold track over `items` (the items both
+        groups took): the group's marginal, its bootstrap standard errors,
+        and the per-threshold bootstrap matrices, as for the stored
+        all-item marginal.
+        """
+        est = self._matrix_threshold_marginal(m, items).loc[eligible]
+        draws = []
+        for s in samples:
+            fe = getattr(s, "facet_effects_matrix", None)
+            if fe is None or not set(eligible) <= set(fe.index.get_level_values(0)):
+                continue
+            draws.append(self._matrix_threshold_marginal(s, items).loc[eligible])
+        se = pd.DataFrame(
+            np.nanstd(np.array([d.values for d in draws]), axis=0),
+            index=eligible,
+            columns=est.columns,
+        )
+        boot = {
+            k: (
+                pd.DataFrame([d[k].values for d in draws], columns=eligible)
+                if len(draws) >= 2
+                else None
+            )
+            for k in est.columns
+        }
+        return est, se, boot
+
+    def _drf_stretch_values(self, model, m, eligible, common_items):
+        """
+        A fitted stretch model's parameters re-referenced for DRF: the
+        tested facet elements `eligible` as the reference (mean shift 0,
+        mean stretches 1, as in calibrate_anchor()) and item locations
+        centred over `common_items`. Each group's stretches are otherwise
+        relative to its own facet elements, and its shift lambda_r to item
+        locations centred over its own items: centring them over items
+        with mean c instead turns lambda_r into lambda_r +
+        (omega_items_r - 1) * c. Returns {parameter: Series over
+        `eligible`}, or None if a facet element in `eligible` is missing
+        (a bootstrap resample that dropped it).
+        """
+        lam, om_i, om_t = m._stretch_params(model)
+        if not set(eligible) <= set(lam.index):
+            return None
+        wi = float(om_i.loc[eligible].mean())
+        wt = float(om_t.loc[eligible].mean())
+        om_i, om_t = om_i / wi, om_t / wt
+        c = float((m._items_for(model) * wi).loc[list(common_items)].mean())
+        vals = {"lambda": lam - lam.loc[eligible].mean() + (om_i - 1) * c}
+        if model == "bistretch":
+            vals["omega_items"], vals["omega_thresholds"] = om_i, om_t
+        else:
+            vals["omega"] = om_i if model == "pseudo_halo" else om_t
+        return {p: v.loc[eligible] for p, v in vals.items()}
+
+    def _drf_stretch_bootstrap(self, model, m, samples, eligible, common_items):
+        """
+        _drf_stretch_values() for a group model and each of its bootstrap
+        resamples: (estimates, SEs, covariance pairs, lambda bootstrap
+        matrix), the SEs and covariances computed as in
+        _store_stretch_param_se.
+        """
+        params = self._STRETCH_PARAMS[model]
+        est = self._drf_stretch_values(model, m, eligible, common_items)
+        draws = [
+            d
+            for d in (
+                self._drf_stretch_values(model, s, eligible, common_items)
+                for s in samples
+            )
+            if d is not None
+        ]
+        arr = {p: np.array([d[p].values for d in draws]) for p in params}
+        se = {p: pd.Series(np.nanstd(arr[p], axis=0), index=eligible) for p in params}
+        cov = {}
+        for i, p1 in enumerate(params):
+            for p2 in params[i + 1 :]:
+                cov[f"{p1}_{p2}"] = pd.Series(
+                    (
+                        [
+                            np.cov(arr[p1][:, r], arr[p2][:, r])[0, 1]
+                            for r in range(len(eligible))
+                        ]
+                        if len(draws) > 1
+                        else np.nan
+                    ),
+                    index=eligible,
+                )
+        boot = (
+            pd.DataFrame(arr["lambda"], columns=eligible) if len(draws) >= 2 else None
+        )
+        return est, se, cov, boot
+
     def _drf_stretch_test(
         self,
         focal,
@@ -10293,10 +10559,18 @@ class MFRM(Rasch):
         correction,
         alpha,
         logit_threshold,
+        common_items=None,
     ):
         """
         Joint covariance-aware DRF test for the stretch models
         ('centrality', 'pseudo_halo', 'bistretch').
+
+        common_items : list or None
+            If given (the groups' facet elements or items differ), each
+            group's parameters are first re-referenced on the tested facet
+            elements and these items (_drf_stretch_values), with standard
+            errors and covariances from its bootstrap resamples treated the
+            same way.
 
         lambda purifies exactly like 'global' DRF (common-facet-element
         translation constant via _wald_anchor_selection/
@@ -10326,20 +10600,41 @@ class MFRM(Rasch):
         anchor_table : pandas.DataFrame or None.
         """
         params = self._STRETCH_PARAMS[model]
-
-        ref_lambda = getattr(ref_model, f"lambda_{model}").loc[eligible]
-        focal_lambda = getattr(focal_model, f"lambda_{model}").loc[eligible]
-        ref_lambda_se = getattr(ref_model, f"lambda_se_{model}").loc[eligible]
-        focal_lambda_se = getattr(focal_model, f"lambda_se_{model}").loc[eligible]
-
         ref_samples = getattr(ref_model, f"_bootstrap_samples_{model}", [])
         focal_samples = getattr(focal_model, f"_bootstrap_samples_{model}", [])
-        ref_boot = self._bootstrap_value_matrix(
-            ref_samples, f"lambda_{model}", eligible
-        )
-        focal_boot = self._bootstrap_value_matrix(
-            focal_samples, f"lambda_{model}", eligible
-        )
+
+        if common_items is None:
+            ref_est = {
+                p: getattr(ref_model, f"{p}_{model}").loc[eligible] for p in params
+            }
+            focal_est = {
+                p: getattr(focal_model, f"{p}_{model}").loc[eligible] for p in params
+            }
+            ref_se_all = {
+                p: getattr(ref_model, f"{p}_se_{model}").loc[eligible] for p in params
+            }
+            focal_se_all = {
+                p: getattr(focal_model, f"{p}_se_{model}").loc[eligible] for p in params
+            }
+            ref_cov = getattr(ref_model, f"stretch_param_cov_{model}", {})
+            focal_cov = getattr(focal_model, f"stretch_param_cov_{model}", {})
+            ref_boot = self._bootstrap_value_matrix(
+                ref_samples, f"lambda_{model}", eligible
+            )
+            focal_boot = self._bootstrap_value_matrix(
+                focal_samples, f"lambda_{model}", eligible
+            )
+        else:
+            ref_est, ref_se_all, ref_cov, ref_boot = self._drf_stretch_bootstrap(
+                model, ref_model, ref_samples, eligible, common_items
+            )
+            focal_est, focal_se_all, focal_cov, focal_boot = (
+                self._drf_stretch_bootstrap(
+                    model, focal_model, focal_samples, eligible, common_items
+                )
+            )
+        ref_lambda, focal_lambda = ref_est["lambda"], focal_est["lambda"]
+        ref_lambda_se, focal_lambda_se = ref_se_all["lambda"], focal_se_all["lambda"]
 
         # Leave-one-out per rater, with tc's own variance estimated
         # directly from the bootstrap distribution -- fixes known issue
@@ -10371,15 +10666,12 @@ class MFRM(Rasch):
         ref_se["lambda"] = np.sqrt(ref_lambda_var)
         focal_se["lambda"] = np.sqrt(focal_lambda_var)
         for p in params[1:]:
-            ref_vals[p] = getattr(ref_model, f"{p}_{model}").loc[eligible]
-            focal_vals[p] = getattr(focal_model, f"{p}_{model}").loc[eligible]
-            ref_se[p] = getattr(ref_model, f"{p}_se_{model}").loc[eligible]
-            focal_se[p] = getattr(focal_model, f"{p}_se_{model}").loc[eligible]
+            ref_vals[p], focal_vals[p] = ref_est[p], focal_est[p]
+            ref_se[p], focal_se[p] = ref_se_all[p], focal_se_all[p]
 
         diffs = {p: focal_vals[p] - ref_vals[p] for p in params}
 
-        def _cov_matrices(model_obj, se_dict):
-            cov_pairs = getattr(model_obj, f"stretch_param_cov_{model}", {})
+        def _cov_matrices(cov_pairs, se_dict):
             mats = {}
             for r in eligible:
                 M = np.zeros((len(params), len(params)))
@@ -10393,8 +10685,8 @@ class MFRM(Rasch):
                 mats[r] = M
             return mats
 
-        sigma_ref = _cov_matrices(ref_model, ref_se)
-        sigma_focal = _cov_matrices(focal_model, focal_se)
+        sigma_ref = _cov_matrices(ref_cov, ref_se)
+        sigma_focal = _cov_matrices(focal_cov, focal_se)
 
         n_params = len(params)
         T_vals, p_vals = {}, {}
@@ -10512,6 +10804,27 @@ class MFRM(Rasch):
         constant per focal group; for 'items'/'thresholds'/'bivector'/
         'matrix' there is one per item or threshold.
 
+        Each group is calibrated on the items it took, and only items both
+        groups took are tested. Where a parameter depends on which facet
+        elements or items it is relative to, both groups are first put on
+        the same reference: 'matrix''s threshold marginal is averaged over
+        the common items; for 'centrality'/'pseudo_halo'/'bistretch', the
+        tested facet elements are the reference (mean shift 0, mean
+        stretches 1, as in calibrate_anchor()) and item locations are
+        centred over the common items, which changes lambda_r by
+        (omega_items_r - 1) times the change in centre. Standard errors and
+        covariances come from the bootstrap resamples treated the same
+        way. With no items in common (possible with more than two groups),
+        'items', 'bivector', 'matrix', 'pseudo_halo' and 'bistretch' raise
+        a ValueError.
+
+        In null simulations (all three estimation methods), the tests were at
+        or near nominal (mostly 0.03-0.08 at alpha = 0.05); 'matrix''s
+        threshold marginal was the exception, at 0.09-0.10 with 150 persons
+        per group and 4 of 8 facet elements shared, falling to nominal by
+        600 (the facet element parameters' sampling variability in small
+        groups).
+
         The omnibus test is available for 'global' only, and is run by
         default. It holds items and thresholds at their pooled
         (combined-group) values and lets only the facet effects vary per
@@ -10605,6 +10918,12 @@ class MFRM(Rasch):
         drf_anchor_selection : dict {focal_value: pandas.DataFrame or None}
         drf_plots : dict {focal_value: matplotlib.figure.Figure or None}
         drf_group_sizes : dict {group_value: int}
+        drf_excluded_groups : dict {focal_value: str}
+            Focal groups left out because they cannot be compared with the
+            reference group (fewer than two facet elements, or no items
+            where the model needs them, in common; possible with more than
+            two groups), with the reason. Their drf_omnibus_table rows are
+            NaN.
         """
         from raschpy.mfrm import MFRM
 
@@ -10686,6 +11005,16 @@ class MFRM(Rasch):
         group_sizes = {reference: int(levels.loc[reference])}
         for focal in focal_levels:
             group_sizes[focal] = int(levels.loc[focal])
+        focal_levels, excluded_groups = self._dif_linked_focal_levels(
+            cov_values,
+            reference,
+            focal_levels,
+            "drf_test",
+            need_items=model
+            in ("items", "bivector", "matrix", "pseudo_halo", "bistretch"),
+            need_facets=2,
+            min_persons=min_persons_per_group,
+        )
 
         if n_missing > 0:
             warnings.warn(
@@ -10701,7 +11030,10 @@ class MFRM(Rasch):
             resp = self.responses[mask]
             nonnull_by_rater = resp.notna().groupby(level=0).sum().sum(axis=1)
             active_raters = nonnull_by_rater[nonnull_by_rater > 0].index
-            return resp[resp.index.get_level_values(0).isin(active_raters)]
+            # likewise the items this group did not take
+            return self._answered_items(
+                resp[resp.index.get_level_values(0).isin(active_raters)]
+            )
 
         def _rated_person_counts(resp):
             return resp.notna().any(axis=1).groupby(level=0).sum()
@@ -10782,6 +11114,31 @@ class MFRM(Rasch):
                     f"{self.facet_label} panel overlap between groups."
                 )
 
+            # items both groups took: only these are compared, and for
+            # 'matrix' thresholds and the stretch models' lambda, averaged or
+            # centred over
+            shared_items = ref_model.responses.columns.intersection(
+                focal_model.responses.columns
+            )
+            items_differ = len(shared_items) < max(
+                len(ref_model.responses.columns), len(focal_model.responses.columns)
+            )
+            if len(shared_items) == 0 and model in (
+                "items",
+                "bivector",
+                "matrix",
+                "pseudo_halo",
+                "bistretch",
+            ):
+                # possible with more than two groups: the data can be
+                # connected through another group
+                raise ValueError(
+                    f"The reference and focal group ({focal!r}) took no items in "
+                    f"common, so under model='{model}' their {self.facet_label} "
+                    f"effects are not comparable. Use model='global', 'thresholds' "
+                    f"or 'centrality'."
+                )
+
             elem_kw = dict(
                 selection_method=selection_method,
                 corr_tol=corr_tol,
@@ -10800,10 +11157,21 @@ class MFRM(Rasch):
                 # Per-axis-slice purification: each item's/threshold's own
                 # column is independently zero-mean across raters, so _drf_element_table
                 # purifies per element, not once for the whole table.
-                ref_df = getattr(ref_model, f"facet_effects_{model}").loc[eligible]
-                focal_df = getattr(focal_model, f"facet_effects_{model}").loc[eligible]
-                ref_se_df = getattr(ref_model, f"rater_se_{model}").loc[eligible]
-                focal_se_df = getattr(focal_model, f"rater_se_{model}").loc[eligible]
+                cols = (
+                    shared_items
+                    if model == "items"
+                    else getattr(ref_model, f"facet_effects_{model}").columns
+                )
+                ref_df = getattr(ref_model, f"facet_effects_{model}").loc[
+                    eligible, cols
+                ]
+                focal_df = getattr(focal_model, f"facet_effects_{model}").loc[
+                    eligible, cols
+                ]
+                ref_se_df = getattr(ref_model, f"rater_se_{model}").loc[eligible, cols]
+                focal_se_df = getattr(focal_model, f"rater_se_{model}").loc[
+                    eligible, cols
+                ]
                 ref_samples = getattr(ref_model, f"_bootstrap_samples_{model}", [])
                 focal_samples = getattr(focal_model, f"_bootstrap_samples_{model}", [])
                 ref_boot_e = self._bootstrap_element_matrices(
@@ -10848,15 +11216,23 @@ class MFRM(Rasch):
                         "marginal_facet_effects_items",
                         "marginal_facet_effects_thresholds",
                     )
-                ref_items_df = getattr(ref_model, items_attr).loc[eligible]
-                focal_items_df = getattr(focal_model, items_attr).loc[eligible]
+                ref_items_df = getattr(ref_model, items_attr).loc[
+                    eligible, shared_items
+                ]
+                focal_items_df = getattr(focal_model, items_attr).loc[
+                    eligible, shared_items
+                ]
                 ref_thr_df = getattr(ref_model, thr_attr).loc[eligible]
                 focal_thr_df = getattr(focal_model, thr_attr).loc[eligible]
                 # rater_se_marginal_items/_thresholds are shared (non-model-
                 # suffixed) attribute names, freshly set by the std_errors()
                 # call just above for THIS model -- safe to read here.
-                ref_se_items_df = ref_model.rater_se_marginal_items.loc[eligible]
-                focal_se_items_df = focal_model.rater_se_marginal_items.loc[eligible]
+                ref_se_items_df = ref_model.rater_se_marginal_items.loc[
+                    eligible, shared_items
+                ]
+                focal_se_items_df = focal_model.rater_se_marginal_items.loc[
+                    eligible, shared_items
+                ]
                 ref_se_thr_df = ref_model.rater_se_marginal_thresholds.loc[eligible]
                 focal_se_thr_df = focal_model.rater_se_marginal_thresholds.loc[eligible]
 
@@ -10874,6 +11250,18 @@ class MFRM(Rasch):
                 focal_boot_thr = self._bootstrap_element_matrices(
                     focal_samples, thr_attr, eligible
                 )
+                if model == "matrix" and items_differ:
+                    # threshold marginal over the items both groups took
+                    ref_thr_df, ref_se_thr_df, ref_boot_thr = (
+                        self._drf_matrix_threshold_marginal(
+                            ref_model, ref_samples, eligible, shared_items
+                        )
+                    )
+                    focal_thr_df, focal_se_thr_df, focal_boot_thr = (
+                        self._drf_matrix_threshold_marginal(
+                            focal_model, focal_samples, eligible, shared_items
+                        )
+                    )
 
                 table_items, tc_items, anchor_items = self._drf_element_table(
                     focal,
@@ -10925,6 +11313,13 @@ class MFRM(Rasch):
                     correction=correction,
                     alpha=alpha,
                     logit_threshold=logit_threshold,
+                    common_items=(
+                        shared_items
+                        if items_differ
+                        or set(eligible) != set(ref_model.facet_names)
+                        or set(eligible) != set(focal_model.facet_names)
+                        else None
+                    ),
                 )
                 all_rows.append(table)
                 tc_dict[focal] = tc_lambda
@@ -11013,15 +11408,35 @@ class MFRM(Rasch):
                 # (m_full's own fit): the item axis is held EQUAL to H0's
                 # own value rather than left free, so df=eligible-1 is
                 # rater-specific.
+                # Each group's facet effects are centred over its own
+                # facet elements: when those differ from the pooled
+                # model's, shift the pooled person locations to match, over
+                # the group's facet elements and items.
+                shifts = []
+                for g_model in (ref_model, focal_model):
+                    fes, its = list(g_model.facet_names), list(
+                        g_model.responses.columns
+                    )
+                    same = set(fes) == set(m_full.facet_names) and set(its) == set(
+                        m_full.responses.columns
+                    )
+                    shifts.append(
+                        0.0
+                        if same
+                        else self._dif_mean_location(model, m_full, fes, its)
+                        - self._dif_mean_location(
+                            model, g_model, fes, its, pooled_items, pooled_thresholds
+                        )
+                    )
                 ll_ref_omni = ref_model._log_likelihood(
                     model=model,
-                    persons=pooled_ref_persons,
+                    persons=pooled_ref_persons - shifts[0],
                     items=pooled_items,
                     thresholds=pooled_thresholds,
                 )
                 ll_focal_omni = focal_model._log_likelihood(
                     model=model,
-                    persons=pooled_focal_persons,
+                    persons=pooled_focal_persons - shifts[1],
                     items=pooled_items,
                     thresholds=pooled_thresholds,
                 )
@@ -11071,7 +11486,12 @@ class MFRM(Rasch):
         self.drf_threshold_table = (
             pd.concat(all_threshold_rows) if all_threshold_rows else None
         )
-        self.drf_omnibus_table = pd.DataFrame(omnibus_rows).T if omnibus else None
+        self.drf_omnibus_table = (
+            pd.DataFrame(self._nan_omnibus_rows(omnibus_rows, excluded_groups)).T
+            if omnibus
+            else None
+        )
+        self.drf_excluded_groups = excluded_groups
         self.drf_excluded_raters = excluded_dict
         self.drf_reference = reference
         self.drf_covariate = covariate

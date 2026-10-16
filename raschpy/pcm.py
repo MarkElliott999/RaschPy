@@ -790,6 +790,13 @@ class PCM(Rasch):
         null_persons : pandas.Index
             Persons dropped prior to calibration due to entirely missing data.
         """
+        # arguments as passed, for refits (see _calibration_kw)
+        self._calibrate_args = dict(
+            constant=constant,
+            method=method,
+            matrix_power=matrix_power,
+            log_lik_tol=log_lik_tol,
+        )
 
         if len(self.responses.columns) == 1:
             warnings.warn(
@@ -1482,10 +1489,10 @@ class PCM(Rasch):
         self,
         interval=None,
         constant=None,
-        method="log-lik",
+        method=None,
         robust=False,
         matrix_power=None,
-        log_lik_tol=0.000001,
+        log_lik_tol=None,
         no_of_samples=500,
         seed=None,
         se_method=None,
@@ -1506,25 +1513,23 @@ class PCM(Rasch):
         person-level response data, calibrates each resample, and computes
         the standard deviation of the estimates across samples.
 
-        se_method=None (default) uses the sandwich unless some item has a
-        score category that nobody used (its adjacent thresholds are then
-        set by the smoothing constant, which the sandwich does not model),
-        in which case it uses the bootstrap. self.se_method records the
-        method used.
+        se_method=None (default) uses the sandwich unless the estimates are
+        from method='cos', 'ls' or 'evm' (the sandwich is the covariance of
+        the Bradley-Terry estimating equations, which only 'log-lik' solves;
+        an explicit se_method='sandwich' with those raises a ValueError) or
+        some item has a score category that nobody used (its adjacent
+        thresholds are then set by the smoothing constant, which the
+        sandwich does not model, and a UserWarning says so), in which case
+        it uses the bootstrap. self.se_method records the method used.
 
         Parameters
         ----------
         interval : float or None, default None
             Confidence interval width (e.g. 0.95). If None, only SEs computed.
-        constant : float, default 0.1
-            Additive smoothing constant for bootstrap calibrations.
-        method : str, default 'log-lik'
-            Priority vector extraction method.
-        matrix_power : int or None, default None
-            Matrix power for bootstrap calibrations. None resolves to 0 for
-            method='log-lik' (no powering), else 5.
-        log_lik_tol : float, default 0.000001
-            Convergence tolerance for bootstrap calibrations.
+        constant, method, matrix_power, log_lik_tol : default None
+            Passed to calibrate() for each bootstrap resample (and for the
+            point estimates if not yet calibrated). None uses the value of
+            the object's last calibrate() call, or calibrate()'s default.
         no_of_samples : int, default 500
             Number of bootstrap resamples.
         seed : int or None, default None
@@ -1559,14 +1564,19 @@ class PCM(Rasch):
             raise ValueError(
                 f"se_method must be None, 'sandwich' or 'bootstrap', got {se_method!r}."
             )
+        cal_kw = self._calibration_kw(
+            constant=constant,
+            method=method,
+            matrix_power=matrix_power,
+            log_lik_tol=log_lik_tol,
+        )
         if not hasattr(self, "thresholds_uncentred"):
-            self.calibrate(
-                constant=constant,
-                method=method,
-                robust=robust,
-                matrix_power=matrix_power,
-                log_lik_tol=log_lik_tol,
-            )
+            self.calibrate(robust=robust, **cal_kw)
+        if (
+            se_method is not None
+            or (self._calibrate_args.get("method") or "log-lik") != "log-lik"
+        ):
+            se_method = self._resolve_se_method(se_method)
         if se_method is None:
             x = self.responses.to_numpy(dtype=float)
             unobserved = [
@@ -1606,13 +1616,7 @@ class PCM(Rasch):
                     self.responses.sample(frac=1, replace=True, random_state=rng),
                     self.max_score_vector,
                 )
-                sample.calibrate(
-                    constant=constant,
-                    robust=robust,
-                    method=method,
-                    matrix_power=matrix_power,
-                    log_lik_tol=log_lik_tol,
-                )
+                sample.calibrate(robust=robust, **cal_kw)
             samples.append(sample)
         collector.emit()
 
@@ -2399,6 +2403,20 @@ class PCM(Rasch):
     # Fit statistics
     # ------------------------------------------------------------------
 
+    def _with_pooled_items(self, pooled, items, shift):
+        """Copy of this model with the uncentred thresholds of `items` set
+        to the pooled model's, less `shift` (dif_test()'s omnibus test)."""
+        m = PCM(self.responses, self.max_score_vector.tolist(), validate=False)
+        m.thresholds_uncentred = self.thresholds_uncentred.copy()
+        m.thresholds_uncentred.loc[items] = (
+            pooled.thresholds_uncentred.loc[items] - shift
+        )
+        return m
+
+    def _mean_location(self, items):
+        """Mean uncentred threshold over `items` (see _omnibus_h1_log_likelihood)."""
+        return float(np.nanmean(self.thresholds_uncentred.loc[items].values))
+
     def _log_likelihood(self, responses=None, persons=None):
         if responses is None:
             responses = self.responses
@@ -2430,6 +2448,7 @@ class PCM(Rasch):
         item_names,
         tolerance=0.00001,
         max_iters=100,
+        fixed_items=None,
     ):
         """
         Log-likelihood maximised over a per-item location shift only, holding
@@ -2470,7 +2489,11 @@ class PCM(Rasch):
             thresholds_uncentred minus its own item locations), indexed
             by item, zero-centred per item.
         item_names : list of str
-            Items to include (the common item set between groups).
+            Items to include.
+        fixed_items : pandas.Series or None, default None
+            Items in item_names held at the given location instead of
+            optimised (dif_test(): the items only this group took, at their
+            pooled locations).
 
         Returns
         -------
@@ -2488,6 +2511,9 @@ class PCM(Rasch):
 
         delta = pd.Series(0.0, index=item_names)
         active = pd.Series(True, index=item_names)
+        if fixed_items is not None and len(fixed_items):
+            delta.loc[fixed_items.index] = fixed_items.values
+            active.loc[fixed_items.index] = False
         iters = 0
         while active.any() and iters <= max_iters:
             active_items = active[active].index.tolist()
@@ -3139,16 +3165,17 @@ class PCM(Rasch):
         """Calibrated PCM on a subset of persons (global_fit())."""
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
+            resp = self._answered_items(self.responses.loc[idx])
             m = PCM(
-                self.responses.loc[idx],
-                max_score_vector=self.max_score_vector,
+                resp,
+                max_score_vector=self.max_score_vector.loc[resp.columns].tolist(),
                 validate=False,
             )
-            m.calibrate()
+            m.calibrate(**self._calibration_kw())
         return m
 
     @staticmethod
-    def _global_fit_params(m, small_sample=False):
+    def _global_fit_params(m, small_sample=False, covariance=True):
         """(labels, estimates, covariance, comparable mask, location blocks) for
         global_fit(): all uncentred thresholds; those next to a category
         unused in this group are marked not comparable."""
@@ -3161,7 +3188,7 @@ class PCM(Rasch):
                 est.append(thr[k - 1])
                 ok.append((x[:, i] == k).sum() > 0 and (x[:, i] == k - 1).sum() > 0)
         est = np.array(est)
-        V, _ = m._sandwich_covariance(small_sample=small_sample)
+        V = m._sandwich_covariance(small_sample=small_sample)[0] if covariance else None
         return labels, est - est.mean(), V, np.array(ok), [np.arange(len(est))]
 
     def andersen_lr_test(
@@ -3388,10 +3415,10 @@ class PCM(Rasch):
         max_iters=100,
         ext_score_adjustment=0.5,
         constant=None,
-        method="log-lik",
+        method=None,
         robust=False,
         matrix_power=None,
-        log_lik_tol=0.000001,
+        log_lik_tol=None,
         seed=None,
     ):
         """
@@ -3402,6 +3429,14 @@ class PCM(Rasch):
         self.exogenous, designates one group as the reference (by default
         the largest), and compares each other ("focal") group against it
         individually — a reference-group design, not all-pairwise.
+
+        Each group is calibrated on the items it took, and only items both
+        groups took are compared (ValueError if there are none, possible
+        with more than two groups). In the omnibus test, items only one
+        group took are held at their pooled values, and the pooled person
+        locations are shifted by the difference between the pooled and
+        group models' mean locations over the common items, since each
+        model is centred over its own items.
 
         Two independent components are tested:
 
@@ -3679,10 +3714,10 @@ class PCM(Rasch):
         warm_corr, tolerance, max_iters, ext_score_adjustment : floats
             Person estimation kwargs, passed through to group models. Only
             actually used when test in ('lr', 'both') or omnibus=True.
-        constant, method, matrix_power, log_lik_tol : floats
-            Calibration kwargs passed to group models. matrix_power is
-            accepted for signature consistency with SLM/RSM but unused —
-            PCM's calibrate() does not take a matrix_power argument.
+        constant, method, matrix_power, log_lik_tol : default None
+            Calibration arguments for the group models. None uses the value
+            of this object's last calibrate() call (or calibrate()'s
+            default), so the groups are calibrated as the full data were.
 
         Attributes set
         --------------
@@ -3742,6 +3777,11 @@ class PCM(Rasch):
             None otherwise.
         dif_group_sizes : dict {group_value: int}
             Non-extreme, non-missing-covariate N used for each group.
+        dif_excluded_groups : dict {focal_value: str}
+            Focal groups left out because they cannot be compared with the
+            reference group (no items, or for MFRM no facet elements, in
+            common; possible with more than two groups), with the reason.
+            Their omnibus-table rows are NaN.
         """
         from raschpy.pcm import PCM
 
@@ -3764,6 +3804,12 @@ class PCM(Rasch):
         cov_values, reference, focal_levels, group_sizes, n_missing = (
             self._dif_group_setup(non_extreme, covariate, reference)
         )
+        focal_levels, excluded_groups = self._dif_linked_focal_levels(
+            cov_values,
+            reference,
+            focal_levels,
+            "dif_test",
+        )
 
         needs_ll = test in ("lr", "both") or omnibus
         pe_kw = dict(
@@ -3773,16 +3819,19 @@ class PCM(Rasch):
             ext_score_adjustment=ext_score_adjustment,
         )
 
-        ref_idx = cov_values.index[cov_values == reference]
-        ref_model = PCM(self.responses.loc[ref_idx], self.max_score_vector)
-        ref_model.calibrate(
-            constant=constant, method=method, robust=robust, log_lik_tol=log_lik_tol
-        )
-        ref_model.std_errors(
-            no_of_samples=no_of_samples,
+        # the object's own calibration settings, unless passed explicitly
+        cal_kw = self._calibration_kw(
             constant=constant,
             method=method,
+            matrix_power=matrix_power,
             log_lik_tol=log_lik_tol,
+        )
+        ref_idx = cov_values.index[cov_values == reference]
+        ref_resp = self._answered_items(self.responses.loc[ref_idx])
+        ref_model = PCM(ref_resp, self.max_score_vector.loc[ref_resp.columns].tolist())
+        ref_model.calibrate(**cal_kw)
+        ref_model.std_errors(
+            no_of_samples=no_of_samples,
             seed=seed,
         )
         if needs_ll:
@@ -3800,15 +3849,13 @@ class PCM(Rasch):
 
         for focal in focal_levels:
             focal_idx = cov_values.index[cov_values == focal]
-            focal_model = PCM(self.responses.loc[focal_idx], self.max_score_vector)
-            focal_model.calibrate(
-                constant=constant, method=method, robust=robust, log_lik_tol=log_lik_tol
+            focal_resp = self._answered_items(self.responses.loc[focal_idx])
+            focal_model = PCM(
+                focal_resp, self.max_score_vector.loc[focal_resp.columns].tolist()
             )
+            focal_model.calibrate(**cal_kw)
             focal_model.std_errors(
                 no_of_samples=no_of_samples,
-                constant=constant,
-                method=method,
-                log_lik_tol=log_lik_tol,
                 seed=seed,
             )
             if needs_ll:
@@ -3862,13 +3909,11 @@ class PCM(Rasch):
 
             if omnibus:
                 combined_idx = ref_idx.append(focal_idx)
-                m_full = PCM(self.responses.loc[combined_idx], self.max_score_vector)
-                m_full.calibrate(
-                    constant=constant,
-                    method=method,
-                    robust=robust,
-                    log_lik_tol=log_lik_tol,
+                full_resp = self._answered_items(self.responses.loc[combined_idx])
+                m_full = PCM(
+                    full_resp, self.max_score_vector.loc[full_resp.columns].tolist()
                 )
+                m_full.calibrate(**cal_kw)
                 m_full.person_estimates(**pe_kw)
                 ll_full = m_full._log_likelihood()
                 pooled_ref_persons = m_full.persons.reindex(ref_model.responses.index)
@@ -3879,11 +3924,16 @@ class PCM(Rasch):
                     pooled_step_shape = m_full.thresholds_uncentred.sub(
                         m_full.items, axis=0
                     )
+                    # every item each group took; those only this group
+                    # took are held at their pooled locations, as under H0
                     ll_ref_omni = self._item_location_log_likelihood(
                         ref_model.responses,
                         pooled_ref_persons,
                         pooled_step_shape,
-                        list(common_items),
+                        list(ref_model.responses.columns),
+                        fixed_items=m_full.items.reindex(
+                            ref_model.responses.columns.difference(common_items)
+                        ),
                         tolerance=tolerance,
                         max_iters=max_iters,
                     )
@@ -3891,15 +3941,20 @@ class PCM(Rasch):
                         focal_model.responses,
                         pooled_focal_persons,
                         pooled_step_shape,
-                        list(common_items),
+                        list(focal_model.responses.columns),
+                        fixed_items=m_full.items.reindex(
+                            focal_model.responses.columns.difference(common_items)
+                        ),
                         tolerance=tolerance,
                         max_iters=max_iters,
                     )
                     df_omni = len(common_items) - 1
                 else:
-                    ll_ref_omni = ref_model._log_likelihood(persons=pooled_ref_persons)
-                    ll_focal_omni = focal_model._log_likelihood(
-                        persons=pooled_focal_persons
+                    ll_ref_omni = self._omnibus_h1_log_likelihood(
+                        ref_model, m_full, pooled_ref_persons, common_items
+                    )
+                    ll_focal_omni = self._omnibus_h1_log_likelihood(
+                        focal_model, m_full, pooled_focal_persons, common_items
                     )
                     df_omni = (
                         len(common_items)
@@ -3920,8 +3975,12 @@ class PCM(Rasch):
 
             if test in ("lr", "both"):
                 ll_h1 = ll_ref + ll_focal
-                ref_scratch = PCM(ref_model.responses, self.max_score_vector)
-                focal_scratch = PCM(focal_model.responses, self.max_score_vector)
+                ref_scratch = PCM(
+                    ref_model.responses, ref_model.max_score_vector.tolist()
+                )
+                focal_scratch = PCM(
+                    focal_model.responses, focal_model.max_score_vector.tolist()
+                )
                 lr_rows = {}
                 for item in common_items:
                     w_ref = 1.0 / ref_model.item_se[item] ** 2
@@ -4114,7 +4173,12 @@ class PCM(Rasch):
                 plot_dict[focal] = None
 
         self.dif_table = pd.concat(all_item_rows)
-        self.dif_omnibus_table = pd.DataFrame(omnibus_rows).T if omnibus else None
+        self.dif_omnibus_table = (
+            pd.DataFrame(self._nan_omnibus_rows(omnibus_rows, excluded_groups)).T
+            if omnibus
+            else None
+        )
+        self.dif_excluded_groups = excluded_groups
         self.threshold_dif_table = pd.concat(all_threshold_rows)
         self.dif_reference = reference
         self.dif_covariate = covariate

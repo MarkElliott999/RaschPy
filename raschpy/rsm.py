@@ -982,6 +982,21 @@ class RSM(Rasch):
                 f"estimation must be 'cp-full-rcl', 'cpat-rcl', 'pair-cpat' or None, got {estimation!r}."
             )
         self.estimation = estimation
+        # arguments as passed (estimation resolved), for refits (see
+        # _calibration_kw); the 'pair-cpat'-only ones only with 'pair-cpat'
+        self._calibrate_args = dict(
+            constant=constant,
+            threshold_constant=threshold_constant,
+            no_info=no_info,
+            estimation=estimation,
+        )
+        if estimation == "pair-cpat":
+            self._calibrate_args.update(
+                method=method,
+                matrix_power=matrix_power,
+                log_lik_tol=log_lik_tol,
+                threshold_method=threshold_method,
+            )
         if estimation in ("cp-full-rcl", "cpat-rcl"):
             ignored = [
                 f"{name}={value!r}"
@@ -1850,9 +1865,9 @@ class RSM(Rasch):
         no_of_samples=500,
         constant=None,
         threshold_constant=None,
-        method="log-lik",
+        method=None,
         matrix_power=None,
-        log_lik_tol=0.000001,
+        log_lik_tol=None,
         seed=None,
         se_method=None,
     ):
@@ -1882,6 +1897,10 @@ class RSM(Rasch):
         calibration did not converge or the data do not identify some
         estimates; in which case it uses the bootstrap, with a UserWarning
         giving the reason. So standard errors are always produced.
+        With estimation='pair-cpat' and method='cos', 'ls' or 'evm', None
+        resolves to the bootstrap (the item locations' sandwich is that of
+        method='log-lik'), and an explicit se_method='sandwich' raises a
+        ValueError.
         self.se_method records the method used.
 
         Parameters
@@ -1890,19 +1909,11 @@ class RSM(Rasch):
             CI width (e.g. 0.95). If None, only SEs computed.
         no_of_samples : int, default 500
             Number of bootstrap resamples.
-        constant : float or None, default None
-            Smoothing constant for bootstrap calibrations, passed to
-            calibrate(); None resolves to the data-adaptive default (see calibrate()).
-        threshold_constant : float or None, default None
-            Passed to calibrate() as the Stage 2 CPAT constant; None
-            follows `constant` (0.03 when constant is None). See calibrate().
-        method : str, default 'log-lik'
-            Priority vector extraction method.
-        matrix_power : int or None, default None
-            Matrix power for bootstrap calibrations. None resolves to 0 for
-            method='log-lik' (no powering), else 5.
-        log_lik_tol : float, default 0.000001
-            Convergence tolerance.
+        constant, threshold_constant, method, matrix_power, log_lik_tol :
+        default None
+            Passed to calibrate() for each bootstrap resample (and for the
+            point estimates if not yet calibrated). None uses the value of
+            the object's last calibrate() call, or calibrate()'s default.
         seed : int or None, default None
             Seed for the bootstrap resampling RNG. Pass an int for fully
             reproducible standard errors; None (default) draws fresh entropy.
@@ -1936,14 +1947,22 @@ class RSM(Rasch):
             raise ValueError(
                 f"se_method must be None, 'sandwich' or 'bootstrap', got {se_method!r}."
             )
+        cal_kw = self._calibration_kw(
+            constant=constant,
+            threshold_constant=threshold_constant,
+            method=method,
+            matrix_power=matrix_power,
+            log_lik_tol=log_lik_tol,
+        )
         if not hasattr(self, "thresholds"):
-            self.calibrate(
-                constant=constant,
-                threshold_constant=threshold_constant,
-                method=method,
-                matrix_power=matrix_power,
-                log_lik_tol=log_lik_tol,
-            )
+            self.calibrate(**cal_kw)
+        if getattr(self, "estimation", None) == "pair-cpat" and (
+            se_method is not None
+            or (getattr(self, "_calibrate_args", {}).get("method") or "log-lik")
+            != "log-lik"
+        ):
+            # the item locations' sandwich is that of method='log-lik'
+            se_method = self._resolve_se_method(se_method)
         if se_method is None:
             obstacle = self._sandwich_obstacle()
             se_method = "sandwich" if obstacle is None else "bootstrap"
@@ -1978,15 +1997,7 @@ class RSM(Rasch):
                     self.responses.sample(frac=1, replace=True, random_state=rng),
                     max_score=self.max_score,
                 )
-                sample.calibrate(
-                    estimation=getattr(self, "estimation", None),
-                    constant=constant,
-                    threshold_constant=threshold_constant,
-                    threshold_method=getattr(self, "threshold_method", "cpat-cml"),
-                    method=method,
-                    matrix_power=matrix_power,
-                    log_lik_tol=log_lik_tol,
-                )
+                sample.calibrate(**cal_kw)
             samples.append(sample)
         collector.emit()
 
@@ -2688,6 +2699,20 @@ class RSM(Rasch):
     # Fit statistics
     # ------------------------------------------------------------------
 
+    def _with_pooled_items(self, pooled, items, shift):
+        """Copy of this model with the locations of `items` set to the
+        pooled model's, less `shift` (dif_test()'s omnibus test)."""
+        m = RSM(self.responses, max_score=self.max_score, validate=False)
+        m.items = self.items.copy()
+        m.items[items] = pooled.items[items] - shift
+        m.thresholds = self.thresholds
+        return m
+
+    def _mean_location(self, items):
+        """Mean threshold location (item location + threshold) over `items`
+        (see _omnibus_h1_log_likelihood)."""
+        return float(self.items.loc[items].mean() + self.thresholds.mean())
+
     def _log_likelihood(self, responses=None, persons=None):
         if responses is None:
             responses = self.responses
@@ -3215,15 +3240,16 @@ class RSM(Rasch):
         """Calibrated RSM on a subset of persons (global_fit())."""
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            m = RSM(self.responses.loc[idx], max_score=self.max_score, validate=False)
-            m.calibrate(
-                estimation=getattr(self, "estimation", None),
-                threshold_method=getattr(self, "threshold_method", "cpat-cml"),
+            m = RSM(
+                self._answered_items(self.responses.loc[idx]),
+                max_score=self.max_score,
+                validate=False,
             )
+            m.calibrate(**self._calibration_kw())
         return m
 
     @staticmethod
-    def _global_fit_params(m, small_sample=False):
+    def _global_fit_params(m, small_sample=False, covariance=True):
         """(labels, estimates, covariance, comparable mask, location blocks) for
         global_fit(): item locations (centred) and category widths, with the
         full stacked sandwich covariance. Widths needing a fallback in this
@@ -3235,7 +3261,11 @@ class RSM(Rasch):
         est = np.concatenate(
             [items - items.mean(), np.diff(m.thresholds.values.astype(float))]
         )
-        V = m._sandwich_covariance(full=True, small_sample=small_sample)
+        V = (
+            m._sandwich_covariance(full=True, small_sample=small_sample)
+            if covariance
+            else None
+        )
         x = np.array(m.responses, dtype=np.float64)
         ok = np.ones(I + K - 1, bool)
         # an item scored the same by everyone in this group is not estimable here
@@ -3486,9 +3516,9 @@ class RSM(Rasch):
         ext_score_adjustment=0.5,
         constant=None,
         threshold_constant=None,
-        method="log-lik",
+        method=None,
         matrix_power=None,
-        log_lik_tol=0.000001,
+        log_lik_tol=None,
         seed=None,
     ):
         """
@@ -3499,6 +3529,21 @@ class RSM(Rasch):
         self.exogenous, designates one group as the reference (by default
         the largest), and compares each other ("focal") group against it
         individually — a reference-group design, not all-pairwise.
+
+        Each group is calibrated on the items it took, and only items both
+        groups took are compared (ValueError if there are none, possible
+        with more than two groups). In the omnibus test, items only one
+        group took are held at their pooled values, and the pooled person
+        locations are shifted by the difference between the pooled and
+        group models' mean locations over the common items, since each
+        model is centred over its own items.
+        In null simulations it was mildly liberal when the groups shared
+        few items (0.09-0.13 at alpha = 0.05 with 2 of 10 items in common,
+        across the three estimation methods) and at or below nominal
+        otherwise (0.015-0.05 with 6 or 10). For a test with a nominal
+        false-positive rate when few items are shared, use the per-item
+        Wald tests in dif_table (computed by the same call), which stayed
+        near nominal throughout.
 
         Two independent components are tested:
 
@@ -3726,8 +3771,11 @@ class RSM(Rasch):
         warm_corr, tolerance, max_iters, ext_score_adjustment : floats
             Person estimation kwargs, passed through to group models. Only
             actually used when test in ('lr', 'both') or omnibus=True.
-        constant, method, matrix_power, log_lik_tol : floats
-            Calibration kwargs passed to group models.
+        constant, threshold_constant, method, matrix_power, log_lik_tol :
+        default None
+            Calibration arguments for the group models. None uses the value
+            of this object's last calibrate() call (or calibrate()'s
+            default), so the groups are calibrated as the full data were.
 
         Attributes set
         --------------
@@ -3776,6 +3824,11 @@ class RSM(Rasch):
             None otherwise.
         dif_group_sizes : dict {group_value: int}
             Non-extreme, non-missing-covariate N used for each group.
+        dif_excluded_groups : dict {focal_value: str}
+            Focal groups left out because they cannot be compared with the
+            reference group (no items, or for MFRM no facet elements, in
+            common; possible with more than two groups), with the reason.
+            Their omnibus-table rows are NaN.
         """
         from raschpy.rsm import RSM
 
@@ -3796,6 +3849,12 @@ class RSM(Rasch):
         cov_values, reference, focal_levels, group_sizes, n_missing = (
             self._dif_group_setup(non_extreme, covariate, reference)
         )
+        focal_levels, excluded_groups = self._dif_linked_focal_levels(
+            cov_values,
+            reference,
+            focal_levels,
+            "dif_test",
+        )
 
         needs_ll = test in ("lr", "both") or omnibus
         pe_kw = dict(
@@ -3805,24 +3864,21 @@ class RSM(Rasch):
             ext_score_adjustment=ext_score_adjustment,
         )
 
-        ref_idx = cov_values.index[cov_values == reference]
-        ref_model = RSM(self.responses.loc[ref_idx], max_score=self.max_score)
-        ref_model.calibrate(
-            estimation=getattr(self, "estimation", None),
+        # the object's own calibration settings, unless passed explicitly
+        cal_kw = self._calibration_kw(
             constant=constant,
             threshold_constant=threshold_constant,
-            threshold_method=getattr(self, "threshold_method", "cpat-cml"),
             method=method,
             matrix_power=matrix_power,
             log_lik_tol=log_lik_tol,
         )
+        ref_idx = cov_values.index[cov_values == reference]
+        ref_model = RSM(
+            self._answered_items(self.responses.loc[ref_idx]), max_score=self.max_score
+        )
+        ref_model.calibrate(**cal_kw)
         ref_model.std_errors(
             no_of_samples=no_of_samples,
-            constant=constant,
-            threshold_constant=threshold_constant,
-            method=method,
-            matrix_power=matrix_power,
-            log_lik_tol=log_lik_tol,
             seed=seed,
         )
         if needs_ll:
@@ -3844,23 +3900,13 @@ class RSM(Rasch):
 
         for focal in focal_levels:
             focal_idx = cov_values.index[cov_values == focal]
-            focal_model = RSM(self.responses.loc[focal_idx], max_score=self.max_score)
-            focal_model.calibrate(
-                estimation=getattr(self, "estimation", None),
-                constant=constant,
-                threshold_constant=threshold_constant,
-                threshold_method=getattr(self, "threshold_method", "cpat-cml"),
-                method=method,
-                matrix_power=matrix_power,
-                log_lik_tol=log_lik_tol,
+            focal_model = RSM(
+                self._answered_items(self.responses.loc[focal_idx]),
+                max_score=self.max_score,
             )
+            focal_model.calibrate(**cal_kw)
             focal_model.std_errors(
                 no_of_samples=no_of_samples,
-                constant=constant,
-                threshold_constant=threshold_constant,
-                method=method,
-                matrix_power=matrix_power,
-                log_lik_tol=log_lik_tol,
                 seed=seed,
             )
             if needs_ll:
@@ -3914,25 +3960,22 @@ class RSM(Rasch):
 
             if omnibus:
                 combined_idx = ref_idx.append(focal_idx)
-                m_full = RSM(self.responses.loc[combined_idx], max_score=self.max_score)
-                m_full.calibrate(
-                    estimation=getattr(self, "estimation", None),
-                    constant=constant,
-                    threshold_constant=threshold_constant,
-                    threshold_method=getattr(self, "threshold_method", "cpat-cml"),
-                    method=method,
-                    matrix_power=matrix_power,
-                    log_lik_tol=log_lik_tol,
+                m_full = RSM(
+                    self._answered_items(self.responses.loc[combined_idx]),
+                    max_score=self.max_score,
                 )
+                m_full.calibrate(**cal_kw)
                 m_full.person_estimates(**pe_kw)
                 ll_full = m_full._log_likelihood()
                 pooled_ref_persons = m_full.persons.reindex(ref_model.responses.index)
                 pooled_focal_persons = m_full.persons.reindex(
                     focal_model.responses.index
                 )
-                ll_ref_omni = ref_model._log_likelihood(persons=pooled_ref_persons)
-                ll_focal_omni = focal_model._log_likelihood(
-                    persons=pooled_focal_persons
+                ll_ref_omni = self._omnibus_h1_log_likelihood(
+                    ref_model, m_full, pooled_ref_persons, common_items
+                )
+                ll_focal_omni = self._omnibus_h1_log_likelihood(
+                    focal_model, m_full, pooled_focal_persons, common_items
                 )
                 lr_omni = max(0.0, -2 * (ll_full - (ll_ref_omni + ll_focal_omni)))
                 df_omni = len(common_items) - 1
@@ -4099,7 +4142,12 @@ class RSM(Rasch):
                 plot_dict[focal] = None
 
         self.dif_table = pd.concat(all_item_rows)
-        self.dif_omnibus_table = pd.DataFrame(omnibus_rows).T if omnibus else None
+        self.dif_omnibus_table = (
+            pd.DataFrame(self._nan_omnibus_rows(omnibus_rows, excluded_groups)).T
+            if omnibus
+            else None
+        )
+        self.dif_excluded_groups = excluded_groups
         self.threshold_dif_table = pd.concat(all_threshold_rows, ignore_index=True)
         self.dif_reference = reference
         self.dif_covariate = covariate

@@ -1064,6 +1064,174 @@ def test_mfrm_calibrate_anchor_preserves_likelihood():
             assert abs(a._log_likelihood(model=model) - ll) < 1e-6, model
 
 
+def _split_items(r, g, items_a, items_b):
+    """Blank out the items each group did not take."""
+    r = r.copy()
+    for j, it in enumerate(r.columns):
+        if j not in items_a:
+            r.loc[g == "a", it] = float("nan")
+        if j not in items_b:
+            r.loc[g == "b", it] = float("nan")
+    return r
+
+
+def test_dif_and_global_fit_groups_took_different_items():
+    """When the groups took partly overlapping item sets, each group model uses only its own
+    items: dif_test compares the common items, and global_fit leaves the others out. Before the
+    fix, SLM raised, RSM gave differences of ~1e14, and PCM reported items one group never took."""
+    import numpy as np
+    from raschpy.simulation import SLM_Sim, PCM_Sim
+    common = ["Item_3", "Item_4", "Item_5", "Item_6"]
+    sims = [
+        (rp.SLM, SLM_Sim(no_of_items=8, no_of_persons=400, seed=1), {}),
+        (rp.PCM, PCM_Sim(no_of_items=8, no_of_persons=400, max_score_vector=[2] * 8, seed=1),
+         {"max_score_vector": [2] * 8}),
+        (rp.RSM, _rsm_sim(no_of_items=8, no_of_persons=400, max_score=2, seed=1), {"max_score": 2}),
+    ]
+    for cls, sim, kw in sims:
+        g = pd.Series(np.where(np.arange(400) < 200, "a", "b"), index=sim.responses.index)
+        r = _split_items(sim.responses, g, range(0, 6), range(2, 8))
+        m = cls(r, exogenous=pd.DataFrame({"g": g}), **kw)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            m.dif_test("g", reference="a", no_of_samples=50, seed=1)
+            m.global_fit(split="exogenous", covariate="g")
+        assert list(m.dif_table.index) == common, cls.__name__
+        assert m.dif_table["Difference"].abs().max() < 1, cls.__name__
+        assert all(x.split(",")[0] not in common for x in m.global_fit_excluded), cls.__name__
+
+
+def test_mfrm_dif_drf_groups_took_different_items():
+    """MFRM dif_test and drf_test with groups taking partly overlapping item sets compare the
+    common items only, and raise when a pair of groups took none in common."""
+    import numpy as np
+    from raschpy.simulation.mfrm_sim import MFRM_Sim
+    sim = MFRM_Sim(8, 300, 4, 3, model="items", seed=4)
+    persons = sim.responses.index.get_level_values(1).unique()
+    g = pd.Series(np.where(np.arange(300) < 150, "a", "b"), index=persons)
+    gl = pd.Series(g.reindex(sim.responses.index.get_level_values(1)).values, index=sim.responses.index)
+    r = _split_items(sim.responses, gl, range(0, 6), range(2, 8))
+    m = rp.MFRM(r, max_score=3, exogenous=pd.DataFrame({"g": g}), validate=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m.dif_test("g", model="items", reference="a", no_of_samples=30, seed=1, omnibus=False)
+        m.drf_test("g", model="items", reference="a", no_of_samples=30, seed=1)
+    assert sorted(m.dif_table.index.unique()) == ["Item_3", "Item_4", "Item_5", "Item_6"]
+    assert sorted(m.drf_table["Item"].unique()) == ["Item_3", "Item_4", "Item_5", "Item_6"]
+    r = _split_items(sim.responses, gl, range(0, 4), range(4, 8))
+    m = rp.MFRM(r, max_score=3, exogenous=pd.DataFrame({"g": g}), validate=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with pytest.raises(ValueError, match="no items in common"):
+            m.dif_test("g", model="items", reference="a", no_of_samples=20, seed=1, omnibus=False)
+        with pytest.raises(ValueError, match="no items in common"):
+            m.drf_test("g", model="items", reference="a", no_of_samples=20, seed=1)
+
+
+def test_dif_focal_group_linked_only_through_another_group():
+    """Three groups: 'b' shares no items with the reference 'a', but the data are connected
+    through 'c', which took every item. dif_test leaves 'b' out with one warning and compares
+    'c'; with 'b' the only focal group it raises."""
+    import numpy as np
+    from raschpy.simulation import SLM_Sim
+    sim = SLM_Sim(no_of_items=8, no_of_persons=600, seed=3)
+    g = pd.Series(np.repeat(["a", "b", "c"], 200), index=sim.responses.index)
+    r = sim.responses.copy()
+    r.loc[g == "a", r.columns[4:]] = np.nan
+    r.loc[g == "b", r.columns[:4]] = np.nan
+    m = rp.SLM(r, exogenous=pd.DataFrame({"g": g}))
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        m.dif_test("g", reference="a", no_of_samples=30, seed=1)
+    assert any("left out of dif_test()" in str(x.message) and "'b'" in str(x.message) for x in w)
+    assert set(m.dif_table["Group"]) == {"c"}
+    assert list(m.dif_excluded_groups) == ["b"]
+    assert np.isnan(m.dif_omnibus_table.loc["b", "p"])
+    m2 = rp.SLM(r[g != "c"], exogenous=pd.DataFrame({"g": g[g != "c"]}))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with pytest.raises(ValueError, match="No focal group can be compared"):
+            m2.dif_test("g", reference="a", no_of_samples=30, seed=1)
+
+
+def test_se_method_and_refits_follow_calibration_method():
+    """Standard errors match the estimator: the sandwich for method='log-lik', the bootstrap for
+    'cos'/'ls'/'evm' (an explicit sandwich raises), and dif_test()/global_fit() calibrate their
+    group models with the object's own settings."""
+    import numpy as np
+    from raschpy.simulation import SLM_Sim, PCM_Sim
+    cases = [
+        (rp.SLM, SLM_Sim(no_of_items=6, no_of_persons=300, seed=1), {}, {"method": "cos"}),
+        (rp.PCM, PCM_Sim(no_of_items=5, no_of_persons=300, max_score_vector=[2] * 5, seed=1),
+         {"max_score_vector": [2] * 5}, {"method": "ls"}),
+        (rp.RSM, _rsm_sim(no_of_items=5, no_of_persons=300, max_score=2, seed=1), {"max_score": 2},
+         {"estimation": "pair-cpat", "method": "evm"}),
+    ]
+    for cls, sim, kw, ckw in cases:
+        g = pd.Series(np.where(np.arange(300) < 150, "a", "b"), index=sim.responses.index)
+        m = cls(sim.responses, exogenous=pd.DataFrame({"g": g}), **kw)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            m.calibrate(**ckw)
+            m.std_errors(no_of_samples=20, seed=1)
+            assert m.se_method == "bootstrap", cls.__name__
+            with pytest.raises(ValueError, match="se_method='sandwich'"):
+                m.std_errors(se_method="sandwich")
+            m.dif_test("g", reference="a", no_of_samples=20, seed=1, omnibus=False)
+            assert m.dif_reference_model._calibrate_args["method"] == ckw["method"]
+            assert m.dif_reference_model.se_method == "bootstrap"
+            m.global_fit(split="exogenous", covariate="g", no_of_samples=20, seed=1)
+            assert m.global_fit_summary["covariance"] == "bootstrap"
+            m.calibrate()
+            m.std_errors()
+            assert m.se_method == "sandwich", cls.__name__
+
+
+def test_drf_stretch_values_rereferenced():
+    """drf_test's re-referenced stretch parameters: mean shift 0 and mean stretch 1 over the
+    tested facet elements, with item locations centred over the common items."""
+    import numpy as np
+    from raschpy.simulation.mfrm_sim import MFRM_Sim_Bistretch
+    sim = MFRM_Sim_Bistretch(8, 300, 3, 6, seed=2)
+    m = rp.MFRM(sim.responses, max_score=3, validate=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m.calibrate(model="bistretch")
+    eligible = pd.Index(list(m.facet_names[:4]))
+    v = m._drf_stretch_values("bistretch", m, eligible, ["Item_1", "Item_2", "Item_3"])
+    assert abs(v["omega_items"].mean() - 1) < 1e-12
+    assert abs(v["omega_thresholds"].mean() - 1) < 1e-12
+    lam, om_i, _ = m._stretch_params("bistretch")
+    wi = om_i.loc[eligible].mean()
+    c = (m._items_for("bistretch") * wi).loc[["Item_1", "Item_2", "Item_3"]].mean()
+    expected = lam.loc[eligible] - lam.loc[eligible].mean() + (om_i.loc[eligible] / wi - 1) * c
+    assert np.allclose(v["lambda"].values, expected.values)
+
+
+def test_mfrm_dif_liberal_design_warnings():
+    """dif_test warns where a test was liberal in null simulations, naming the alternative:
+    'matrix' with groups scored by different facet elements, and the omnibus test when the
+    groups took different items."""
+    m = _mfrm_dif_two_panels("matrix", 3, slice(0, 4), slice(2, 6))
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        m.dif_test("g", model="matrix", reference="a", no_of_samples=20, seed=1, omnibus=False)
+    assert any("model='bivector'" in str(x.message) for x in w)
+    import numpy as np
+    from raschpy.simulation.mfrm_sim import MFRM_Sim
+    sim = MFRM_Sim(8, 300, 4, 3, model="items", seed=4)
+    persons = sim.responses.index.get_level_values(1).unique()
+    g = pd.Series(np.where(np.arange(300) < 150, "a", "b"), index=persons)
+    gl = pd.Series(g.reindex(sim.responses.index.get_level_values(1)).values, index=sim.responses.index)
+    m = rp.MFRM(_split_items(sim.responses, gl, range(0, 6), range(2, 8)), max_score=3,
+                exogenous=pd.DataFrame({"g": g}), validate=False)
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        m.dif_test("g", model="items", reference="a", no_of_samples=20, seed=1)
+    assert any("dif_omnibus_table" in str(x.message) and "dif_table" in str(x.message) for x in w)
+    assert m.df_omnibus_table is None
+
+
 def test_mfrm_dif_no_common_facet_elements():
     """Disjoint facet elements: dif_test raises for representations with facet-element-specific
     item locations or thresholds, but runs under 'global'."""
