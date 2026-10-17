@@ -3692,9 +3692,10 @@ class Rasch:
             apply then.
 
         Each group is calibrated with this object's last calibrate()
-        settings. In null simulations with bootstrap covariances, PCM's test
-        was liberal (0.08-0.10 at alpha = 0.05, 300 persons per group; SLM
-        and RSM 0.03-0.065). For a test with a nominal false-positive rate,
+        settings. In null simulations under method='cos', 'ls' or 'evm'
+        (bootstrap covariances), PCM's test was liberal (0.08-0.10 at
+        alpha = 0.05, 300 persons per group; SLM and RSM 0.03-0.065). For a
+        test with a nominal false-positive rate,
         re-run with method='log-lik': pcm.calibrate(method='log-lik'), then
         pcm.global_fit(...) (0.05-0.07), or use the per-item tests of
         pcm.dif_test() (0.045-0.062 with bootstrap standard errors).
