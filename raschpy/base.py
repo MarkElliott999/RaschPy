@@ -1889,6 +1889,35 @@ class Rasch:
             for el, rows in collected.items()
         }
 
+    @staticmethod
+    def _emit_loo_warnings(loo_caught, full_caught, n_units):
+        """
+        Re-emit the warnings of _purification_loo_tc's anchor selections: the
+        whole-set selection's as raised, and each distinct per-unit
+        (leave-one-out) warning once, with the number of units it occurred
+        for, unless the whole-set selection gave the same warning.
+        """
+
+        def key(w):
+            return (w.category, re.sub(r"\d+", "#", str(w.message)))
+
+        full_keys = {key(w) for w in full_caught}
+        for w in full_caught:
+            warnings.warn(w.message, w.category, stacklevel=4)
+        seen = {}
+        for w in loo_caught:
+            k = key(w)
+            if k in full_keys:
+                continue
+            if k not in seen:
+                seen[k] = [w, 0]
+            seen[k][1] += 1
+        for w, count in seen.values():
+            msg = str(w.message)
+            if count > 1 or n_units > 1:
+                msg = f"{msg} (in {count} of {n_units} leave-one-out purifications)"
+            warnings.warn(msg, w.category, stacklevel=4)
+
     def _purification_loo_tc(
         self,
         ref_col,
@@ -1942,109 +1971,117 @@ class Rasch:
         tc_per_unit = pd.Series(index=idx, dtype=float)
         ref_var_per_unit = pd.Series(index=idx, dtype=float)
         focal_var_per_unit = pd.Series(index=idx, dtype=float)
-        for r in idx:
-            others = idx.drop(r)
-            ref_o, focal_o = ref_col.loc[others], focal_col.loc[others]
-            ref_se_o, focal_se_o = ref_se_col.loc[others], focal_se_col.loc[others]
-            w = None
+        # The anchor selection is run once per tested unit; its warnings are
+        # collected and reported once each (see _emit_loo_warnings).
+        with warnings.catch_warnings(record=True) as loo_caught:
+            warnings.simplefilter("always")
+            for r in idx:
+                others = idx.drop(r)
+                ref_o, focal_o = ref_col.loc[others], focal_col.loc[others]
+                ref_se_o, focal_se_o = ref_se_col.loc[others], focal_se_col.loc[others]
+                w = None
+                if selection_method == "wald":
+                    ar = self._wald_anchor_selection(
+                        ref_o,
+                        focal_o,
+                        focal_se_o,
+                        alpha=wald_alpha,
+                        min_anchors=min_anchors,
+                    )
+                    sel = ar["selected_anchors"]
+                    tc_per_unit[r] = ar["tc"]
+                    w = 1.0 / focal_se_o.loc[sel] ** 2
+                elif selection_method == "robust_z":
+                    ar = self._robust_anchor_selection(
+                        ref_o,
+                        focal_o,
+                        corr_tol=corr_tol,
+                        sd_ratio_tol=sd_ratio_tol,
+                        min_anchors=min_anchors,
+                    )
+                    sel = ar["selected_anchors"]
+                    tc_per_unit[r] = ar["tc"]
+                else:
+                    sel = others
+                    tc_per_unit[r] = ref_o.mean() - focal_o.mean()
+                n_sel = len(sel)
+
+                have_boot = (
+                    ref_boot is not None
+                    and focal_boot is not None
+                    and n_sel > 0
+                    and set(sel).issubset(ref_boot.columns)
+                    and set(sel).issubset(focal_boot.columns)
+                    and r in ref_boot.columns
+                    and r in focal_boot.columns
+                )
+                if have_boot:
+                    if w is not None:
+                        wn = (w / w.sum()).reindex(sel).values
+                        ref_anchor_mean_b = ref_boot[sel].values @ wn
+                        focal_anchor_mean_b = focal_boot[sel].values @ wn
+                    else:
+                        ref_anchor_mean_b = ref_boot[sel].values.mean(axis=1)
+                        focal_anchor_mean_b = focal_boot[sel].values.mean(axis=1)
+                    d_ref_b = ref_boot[r].values - ref_anchor_mean_b
+                    d_focal_b = focal_boot[r].values - focal_anchor_mean_b
+                    ref_var_per_unit[r] = float(np.var(d_ref_b, ddof=1))
+                    focal_var_per_unit[r] = float(np.var(d_focal_b, ddof=1))
+                elif (
+                    ref_cov is not None
+                    and focal_cov is not None
+                    and n_sel > 0
+                    and set(sel).issubset(ref_cov.index)
+                    and set(sel).issubset(focal_cov.index)
+                    and r in ref_cov.index
+                    and r in focal_cov.index
+                ):
+                    a = (
+                        (w / w.sum()).reindex(sel).values
+                        if w is not None
+                        else np.full(n_sel, 1.0 / n_sel)
+                    )
+                    for cov, store in (
+                        (ref_cov, ref_var_per_unit),
+                        (focal_cov, focal_var_per_unit),
+                    ):
+                        Vss = cov.loc[sel, sel].values
+                        Vsr = cov.loc[sel, r].values
+                        store[r] = float(cov.loc[r, r] - 2.0 * a @ Vsr + a @ Vss @ a)
+                elif n_sel > 0:
+                    tc_var = float(
+                        (ref_se_o.loc[sel] ** 2 + focal_se_o.loc[sel] ** 2).sum()
+                    ) / (n_sel**2)
+                    ref_var_per_unit[r] = ref_se_col.loc[r] ** 2
+                    focal_var_per_unit[r] = focal_se_col.loc[r] ** 2 + tc_var
+                else:
+                    ref_var_per_unit[r] = np.nan
+                    focal_var_per_unit[r] = np.nan
+
+        with warnings.catch_warnings(record=True) as full_caught:
+            warnings.simplefilter("always")
             if selection_method == "wald":
-                ar = self._wald_anchor_selection(
-                    ref_o,
-                    focal_o,
-                    focal_se_o,
+                ar_full = self._wald_anchor_selection(
+                    ref_col,
+                    focal_col,
+                    focal_se_col,
                     alpha=wald_alpha,
                     min_anchors=min_anchors,
                 )
-                sel = ar["selected_anchors"]
-                tc_per_unit[r] = ar["tc"]
-                w = 1.0 / focal_se_o.loc[sel] ** 2
+                selected, anchor_table = ar_full["selected_anchors"], ar_full["table"]
             elif selection_method == "robust_z":
-                ar = self._robust_anchor_selection(
-                    ref_o,
-                    focal_o,
+                ar_full = self._robust_anchor_selection(
+                    ref_col,
+                    focal_col,
                     corr_tol=corr_tol,
                     sd_ratio_tol=sd_ratio_tol,
                     min_anchors=min_anchors,
                 )
-                sel = ar["selected_anchors"]
-                tc_per_unit[r] = ar["tc"]
+                selected, anchor_table = ar_full["selected_anchors"], ar_full["table"]
             else:
-                sel = others
-                tc_per_unit[r] = ref_o.mean() - focal_o.mean()
-            n_sel = len(sel)
+                selected, anchor_table = idx, None
 
-            have_boot = (
-                ref_boot is not None
-                and focal_boot is not None
-                and n_sel > 0
-                and set(sel).issubset(ref_boot.columns)
-                and set(sel).issubset(focal_boot.columns)
-                and r in ref_boot.columns
-                and r in focal_boot.columns
-            )
-            if have_boot:
-                if w is not None:
-                    wn = (w / w.sum()).reindex(sel).values
-                    ref_anchor_mean_b = ref_boot[sel].values @ wn
-                    focal_anchor_mean_b = focal_boot[sel].values @ wn
-                else:
-                    ref_anchor_mean_b = ref_boot[sel].values.mean(axis=1)
-                    focal_anchor_mean_b = focal_boot[sel].values.mean(axis=1)
-                d_ref_b = ref_boot[r].values - ref_anchor_mean_b
-                d_focal_b = focal_boot[r].values - focal_anchor_mean_b
-                ref_var_per_unit[r] = float(np.var(d_ref_b, ddof=1))
-                focal_var_per_unit[r] = float(np.var(d_focal_b, ddof=1))
-            elif (
-                ref_cov is not None
-                and focal_cov is not None
-                and n_sel > 0
-                and set(sel).issubset(ref_cov.index)
-                and set(sel).issubset(focal_cov.index)
-                and r in ref_cov.index
-                and r in focal_cov.index
-            ):
-                a = (
-                    (w / w.sum()).reindex(sel).values
-                    if w is not None
-                    else np.full(n_sel, 1.0 / n_sel)
-                )
-                for cov, store in (
-                    (ref_cov, ref_var_per_unit),
-                    (focal_cov, focal_var_per_unit),
-                ):
-                    Vss = cov.loc[sel, sel].values
-                    Vsr = cov.loc[sel, r].values
-                    store[r] = float(cov.loc[r, r] - 2.0 * a @ Vsr + a @ Vss @ a)
-            elif n_sel > 0:
-                tc_var = float(
-                    (ref_se_o.loc[sel] ** 2 + focal_se_o.loc[sel] ** 2).sum()
-                ) / (n_sel**2)
-                ref_var_per_unit[r] = ref_se_col.loc[r] ** 2
-                focal_var_per_unit[r] = focal_se_col.loc[r] ** 2 + tc_var
-            else:
-                ref_var_per_unit[r] = np.nan
-                focal_var_per_unit[r] = np.nan
-
-        if selection_method == "wald":
-            ar_full = self._wald_anchor_selection(
-                ref_col,
-                focal_col,
-                focal_se_col,
-                alpha=wald_alpha,
-                min_anchors=min_anchors,
-            )
-            selected, anchor_table = ar_full["selected_anchors"], ar_full["table"]
-        elif selection_method == "robust_z":
-            ar_full = self._robust_anchor_selection(
-                ref_col,
-                focal_col,
-                corr_tol=corr_tol,
-                sd_ratio_tol=sd_ratio_tol,
-                min_anchors=min_anchors,
-            )
-            selected, anchor_table = ar_full["selected_anchors"], ar_full["table"]
-        else:
-            selected, anchor_table = idx, None
+        self._emit_loo_warnings(loo_caught, full_caught, len(idx))
 
         return tc_per_unit, ref_var_per_unit, focal_var_per_unit, selected, anchor_table
 
