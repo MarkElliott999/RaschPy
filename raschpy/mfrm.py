@@ -9662,9 +9662,10 @@ class MFRM(Rasch):
         each bootstrap resample) before item locations and thresholds are
         compared, and the 'Reference' and 'Focal' columns are on that
         anchored scale. DIF that differs between facet elements is then
-        measured as its average over the common facet elements. The
-        omnibus test anchors the pooled model on each group's facet
-        elements in turn. With no facet elements in common, only
+        measured as its average over the common facet elements. In the
+        omnibus test, each group's item locations and thresholds are
+        adjusted by the pooled model's mean facet element effects over the
+        group's own facet elements. With no facet elements in common, only
         model='global' can be tested (ValueError otherwise). The group
         models in dif_reference_model / dif_focal_models keep the anchored
         estimates (anchor_items_{model} etc.).
