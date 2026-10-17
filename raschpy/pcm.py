@@ -2492,7 +2492,7 @@ class PCM(Rasch):
             Items to include.
         fixed_items : pandas.Series or None, default None
             Items in item_names held at the given location instead of
-            optimised (dif_test(): the items only this group took, at their
+            optimised (dif_test(): the items only this group responded to, at their
             pooled locations).
 
         Returns
@@ -3430,10 +3430,10 @@ class PCM(Rasch):
         the largest), and compares each other ("focal") group against it
         individually — a reference-group design, not all-pairwise.
 
-        Each group is calibrated on the items it took, and only items both
+        Each group is calibrated on the items it responded to, and only items both
         groups share are compared (ValueError if there are none, possible
         with more than two groups). In the omnibus test, items only one
-        group took are held at their pooled values, and the pooled person
+        group responded to are held at their pooled values, and the pooled person
         locations are shifted by the difference between the pooled and
         group models' mean locations over the shared items, since each
         model is centred over the items it was fitted to.
@@ -3924,8 +3924,8 @@ class PCM(Rasch):
                     pooled_step_shape = m_full.thresholds_uncentred.sub(
                         m_full.items, axis=0
                     )
-                    # every item each group took; those only this group
-                    # took are held at their pooled locations, as under H0
+                    # every item each group responded to; those only this group
+                    # responded to are held at their pooled locations, as under H0
                     ll_ref_omni = self._item_location_log_likelihood(
                         ref_model.responses,
                         pooled_ref_persons,

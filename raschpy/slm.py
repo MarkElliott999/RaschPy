@@ -2178,10 +2178,10 @@ class SLM(Rasch):
         the largest), and compares each other ("focal") group against it
         individually — a reference-group design, not all-pairwise.
 
-        Each group is calibrated on the items it took, and only items both
+        Each group is calibrated on the items it responded to, and only items both
         groups share are compared (ValueError if there are none, possible
         with more than two groups). In the omnibus test, items only one
-        group took are held at their pooled values, and the pooled person
+        group responded to are held at their pooled values, and the pooled person
         locations are shifted by the difference between the pooled and
         group models' mean locations over the shared items, since each
         model is centred over the items it was fitted to.

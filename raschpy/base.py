@@ -2461,7 +2461,7 @@ class Rasch:
     def _answered_items(responses):
         """Responses restricted to the items with at least one response:
         a group of persons' own items, for the group models of dif_test(),
-        drf_test() and global_fit(). An item a group did not take has no
+        drf_test() and global_fit(). An item a group did not respond to has no
         estimate in that group's calibration."""
         return responses.loc[:, responses.notna().any(axis=0).values]
 
@@ -2469,7 +2469,7 @@ class Rasch:
         """
         A group model's log-likelihood at the pooled (combined-group)
         model's person locations, for dif_test()'s omnibus test (H1). When
-        the groups took different items, the items only this group took are
+        the groups responded to different items, the items only this group responded to are
         held at their pooled values, as under H0, so that only the shared
         items are free (df = shared items - 1), and the pooled person
         locations are shifted by the difference between the pooled and
@@ -3577,7 +3577,7 @@ class Rasch:
         """
         global_fit()'s two groups' (labels, estimates, covariance, comparable
         mask, location blocks) re-indexed onto the union of their labels,
-        for groups that took different items: a parameter missing from a
+        for groups that responded to different items: a parameter missing from a
         group is marked not comparable. Returns (parts, blocks), blocks as
         positions in the union.
         """
@@ -3767,7 +3767,7 @@ class Rasch:
             else:
                 parts.append(self._global_fit_params(m, se_correction is not None))
         if parts[0][0] != parts[1][0]:
-            # the groups took different items: match parameters by name
+            # the groups responded to different items: match parameters by name
             parts, blocks = self._global_fit_align(parts)
         else:
             blocks = parts[0][4]
@@ -3828,8 +3828,8 @@ class Rasch:
         if self.global_fit_excluded:
             warnings.warn(
                 f"{len(self.global_fit_excluded)} parameter(s) not compared because "
-                f"they are not estimable in both groups (e.g. an item one group did "
-                f"not take, or next to a score category unused in one group): "
+                f"they are not estimable in both groups (e.g. an item one group did not "
+                f"respond to, or next to a score category unused in one group): "
                 f"{self.global_fit_excluded[:10]}"
                 f"{' ...' if len(self.global_fit_excluded) > 10 else ''}. See "
                 f"global_fit_excluded.",

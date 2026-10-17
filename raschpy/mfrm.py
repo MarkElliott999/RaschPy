@@ -9389,8 +9389,8 @@ class MFRM(Rasch):
         item locations by the anchors' mean item stretch.
 
         For 'matrix', the anchored thresholds absorb the anchors' threshold
-        margin averaged over the group's own items; when the groups took
-        different items it is averaged over `common_items` instead.
+        margin averaged over the group's own items; when the groups responded
+        to different items it is averaged over `common_items` instead.
         """
         own_items = list(fitted.responses.columns)
         matrix_items = model == "matrix" and set(common_items) != set(own_items)
@@ -9510,7 +9510,7 @@ class MFRM(Rasch):
             (item-only test): the group's, less the item and threshold
             margins of the pooled effects over the group's facet elements
             and items, which the group's own estimates have absorbed
-            (_dif_fe_margins); items only this group took are held at their
+            (_dif_fe_margins); items only this group responded to are held at their
             pooled locations, as under H0, so only the shared items are
             free.
         shift : to subtract from the pooled person locations with those:
@@ -9623,9 +9623,9 @@ class MFRM(Rasch):
         groups, items and thresholds are free per group, df = shared items
         - 1. In null simulations (estimation='cp-full-rcl') it was at or below
         nominal when both groups
-        took every item (0.00-0.08 at alpha = 0.05; 0.00 for 'matrix', whose
-        likelihood ratio is often 0), but liberal when they took partly
-        overlapping item sets (up to 0.23 with 2 of 8 items shared) and,
+        responded to every item (0.00-0.08 at alpha = 0.05; 0.00 for 'matrix', whose
+        likelihood ratio is often 0), but liberal when they responded to
+        partly overlapping item sets (up to 0.23 with 2 of 8 items shared) and,
         with estimation='pair-cpat', when they were scored by partly
         overlapping facet elements (0.23-0.87). For
         a test with a nominal false-positive rate, use the per-item Wald
@@ -9680,7 +9680,7 @@ class MFRM(Rasch):
         false-positive rate, use model='bivector' (0.06 in the same design)
         if it fits the data.
 
-        Each group is calibrated on the items it took, and only items both
+        Each group is calibrated on the items it responded to, and only items both
         groups share are compared (ValueError if there are none, possible
         with more than two groups); for 'matrix', the anchored thresholds
         are then averaged over the shared items. The omnibus tests shift
@@ -9843,7 +9843,7 @@ class MFRM(Rasch):
             resp = self.responses[mask]
             nonnull_by_rater = resp.notna().groupby(level=0).sum().sum(axis=1)
             active_raters = nonnull_by_rater[nonnull_by_rater > 0].index
-            # likewise the items this group did not take
+            # likewise the items this group did not respond to
             return self._answered_items(
                 resp[resp.index.get_level_values(0).isin(active_raters)]
             )
@@ -9933,8 +9933,8 @@ class MFRM(Rasch):
                 # possible with more than two groups: the data can be
                 # connected through another group
                 raise ValueError(
-                    f"The reference and focal group ({focal!r}) took no items in "
-                    f"common, so there is nothing to compare."
+                    f"The reference and focal group ({focal!r}) share no items, so "
+                    f"there is nothing to compare."
                 )
             reframe = panels_differ and model != "global"
             if reframe:
@@ -10075,7 +10075,7 @@ class MFRM(Rasch):
                 pooled_focal_persons = pooled_persons.reindex(focal_model.person_names)
 
                 # When the groups were scored by different facet elements
-                # or took different items, each group's parameters are put
+                # or responded to different items, each group's parameters are put
                 # on the pooled person scale over its own facet elements
                 # (_dif_pooled_reference).
                 ref_dif_items = ref_dif_thr = focal_dif_items = focal_dif_thr = None
@@ -10282,7 +10282,7 @@ class MFRM(Rasch):
         if frame_flags["omnibus"]:
             warnings.warn(
                 f"dif_omnibus_table (focal group(s) {frame_flags['omnibus']}) is liberal "
-                f"when the groups took different items (up to 0.23 at alpha = 0.05 in "
+                f"when the groups responded to different items (up to 0.23 at alpha = 0.05 in "
                 f"null simulations) or, with estimation='pair-cpat', were scored by "
                 f"different {self.facets_label} (up to 0.87). For a test with a nominal "
                 f"false-positive rate, use the per-item Wald tests in mfrm.dif_table "
@@ -10822,7 +10822,7 @@ class MFRM(Rasch):
         constant per focal group; for 'items'/'thresholds'/'bivector'/
         'matrix' there is one per item or threshold.
 
-        Each group is calibrated on the items it took, and only items both
+        Each group is calibrated on the items it responded to, and only items both
         groups share are tested. Where a parameter depends on which facet
         elements or items it is relative to, both groups are first anchored
         on the facet elements and items both groups share: 'matrix''s
@@ -11049,7 +11049,7 @@ class MFRM(Rasch):
             resp = self.responses[mask]
             nonnull_by_rater = resp.notna().groupby(level=0).sum().sum(axis=1)
             active_raters = nonnull_by_rater[nonnull_by_rater > 0].index
-            # likewise the items this group did not take
+            # likewise the items this group did not respond to
             return self._answered_items(
                 resp[resp.index.get_level_values(0).isin(active_raters)]
             )
@@ -11152,8 +11152,8 @@ class MFRM(Rasch):
                 # possible with more than two groups: the data can be
                 # connected through another group
                 raise ValueError(
-                    f"The reference and focal group ({focal!r}) took no items in "
-                    f"common, so under model='{model}' their {self.facet_label} "
+                    f"The reference and focal group ({focal!r}) share no items, so "
+                    f"under model='{model}' their {self.facet_label} "
                     f"effects are not comparable. Use model='global', 'thresholds' "
                     f"or 'centrality'."
                 )
