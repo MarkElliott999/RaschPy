@@ -529,7 +529,7 @@ mfrm.drf_test(covariate='Gender', model='global')
 print(mfrm.drf_table)             # per-rater DRF, raters scored in both groups
 ```
 
-When the two groups were scored by different (partly overlapping) sets of raters, `dif_test()` anchors each group on the raters both groups share before comparing item locations and thresholds, since under every parameterisation except `global` each group's estimates are averages over the raters who scored it. With no raters in common, only `model='global'` can be tested.
+When the two groups were scored by different (partly overlapping) sets of raters, `dif_test()` anchors each group on the raters shared by both groups before comparing item locations and thresholds, since under every parameterisation except `global` each group's estimates are averages over the raters who scored it. With no raters in common, only `model='global'` can be tested.
 
 What `drf_test()` tests depends on `model`: one Wald test per rater for `global`; a separate test of each rater's effect on each item or threshold for `items`/`thresholds`/`bivector`/`matrix`; and one joint test of each rater's shift and stretch parameters for `centrality`/`pseudo_halo`/`bistretch`. Only raters who scored at least `min_persons_per_group` persons in each group are tested.
 

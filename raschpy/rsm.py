@@ -3530,8 +3530,8 @@ class RSM(Rasch):
         the largest), and compares each other ("focal") group against it
         individually — a reference-group design, not all-pairwise.
 
-        Each group is calibrated on the items it responded to, and only items both
-        groups share are compared (ValueError if there are none, possible
+        Each group is calibrated on the items it responded to, and only items shared
+        by both groups are compared (ValueError if there are none, possible
         with more than two groups). In the omnibus test, items only one
         group responded to are held at their pooled values, and the pooled person
         locations are shifted by the difference between the pooled and
@@ -3774,7 +3774,7 @@ class RSM(Rasch):
         constant, threshold_constant, method, matrix_power, log_lik_tol :
         default None
             Calibration arguments for the group models. None uses the value
-            of this object's last calibrate() call (or calibrate()'s
+            of the object's last calibrate() call (or calibrate()'s
             default), so the groups are calibrated as the full data were.
 
         Attributes set

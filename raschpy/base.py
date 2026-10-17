@@ -2427,7 +2427,7 @@ class Rasch:
 
     def _calibration_kw(self, **passed):
         """
-        calibrate() arguments for refits of this object's data (bootstrap
+        calibrate() arguments for refits of the object's data (bootstrap
         resamples, and the group models of dif_test() and global_fit()):
         those of its last calibrate() call, overridden by any passed
         explicitly (not None), so a refit uses the same method as the
@@ -3551,7 +3551,7 @@ class Rasch:
         return {str(lv): resp.index[(values == lv).values] for lv in levels}
 
     def _global_fit_needs_bootstrap(self):
-        """True if this object's calibration settings have no sandwich
+        """True if the object's calibration settings have no sandwich
         covariance (method='cos', 'ls' or 'evm', for SLM, PCM, and RSM with
         estimation='pair-cpat'), so global_fit() uses bootstrap covariances."""
         if getattr(self, "estimation", "pair-cpat") != "pair-cpat":
@@ -3695,7 +3695,7 @@ class Rasch:
             covariance of method='log-lik' only. se_correction does not
             apply then.
 
-        Each group is calibrated with this object's last calibrate()
+        Each group is calibrated with the object's last calibrate()
         settings. In null simulations under method='cos', 'ls' or 'evm'
         (bootstrap covariances), PCM's test was liberal (0.08-0.10 at
         alpha = 0.05, 300 persons per group; SLM and RSM 0.03-0.065). For a

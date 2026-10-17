@@ -9658,7 +9658,7 @@ class MFRM(Rasch):
         thresholds are averages of the facet-element-specific ones over the
         facet elements that scored that group. When the two groups were
         scored by different facet elements, each group is anchored on the
-        facet elements both groups share (calibrate_anchor(), re-estimated in
+        facet elements shared by both groups (calibrate_anchor(), re-estimated in
         each bootstrap resample) before item locations and thresholds are
         compared, and the 'Reference' and 'Focal' columns are on that
         anchored scale. DIF that differs between facet elements is then
@@ -9680,8 +9680,8 @@ class MFRM(Rasch):
         false-positive rate, use model='bivector' (0.06 in the same design)
         if it fits the data.
 
-        Each group is calibrated on the items it responded to, and only items both
-        groups share are compared (ValueError if there are none, possible
+        Each group is calibrated on the items it responded to, and only items shared
+        by both groups are compared (ValueError if there are none, possible
         with more than two groups); for 'matrix', the anchored thresholds
         are then averaged over the shared items. The omnibus tests shift
         the pooled person locations by the difference between the pooled
@@ -9912,8 +9912,8 @@ class MFRM(Rasch):
                 ll_focal = focal_model._log_likelihood(model=model)
 
             # Groups rated by different facet elements: compare item
-            # locations and thresholds anchored on the facet elements both
-            # groups share (see _dif_common_frame).
+            # locations and thresholds anchored on the facet elements shared
+            # by both groups (see _dif_common_frame).
             focal_panel = set(focal_model.facet_names)
             common_fe = [fe for fe in ref_model.facet_names if fe in focal_panel]
             panels_differ = set(ref_model.facet_names) != focal_panel
@@ -10470,8 +10470,8 @@ class MFRM(Rasch):
 
     def _drf_matrix_threshold_marginal(self, m, samples, eligible, items):
         """
-        drf_test()'s 'matrix' threshold track over `items` (the items both
-        groups share): the group's marginal, its bootstrap standard errors,
+        drf_test()'s 'matrix' threshold track over `items` (the items shared
+        by both groups): the group's marginal, its bootstrap standard errors,
         and the per-threshold bootstrap matrices, as for the stored
         all-item marginal.
         """
@@ -10822,10 +10822,10 @@ class MFRM(Rasch):
         constant per focal group; for 'items'/'thresholds'/'bivector'/
         'matrix' there is one per item or threshold.
 
-        Each group is calibrated on the items it responded to, and only items both
-        groups share are tested. Where a parameter depends on which facet
+        Each group is calibrated on the items it responded to, and only items shared
+        by both groups are tested. Where a parameter depends on which facet
         elements or items it is relative to, both groups are first anchored
-        on the facet elements and items both groups share: 'matrix''s
+        on the facet elements and items shared by both groups: 'matrix''s
         threshold marginal is averaged over
         the shared items; for 'centrality'/'pseudo_halo'/'bistretch', the
         tested facet elements are the reference (mean shift 0, mean
@@ -11133,7 +11133,7 @@ class MFRM(Rasch):
                     f"{self.facet_label} panel overlap between groups."
                 )
 
-            # items both groups share: only these are compared, and for
+            # items shared by both groups: only these are compared, and for
             # 'matrix' thresholds and the stretch models' lambda, averaged or
             # centred over
             shared_items = ref_model.responses.columns.intersection(
@@ -11270,7 +11270,7 @@ class MFRM(Rasch):
                     focal_samples, thr_attr, eligible
                 )
                 if model == "matrix" and items_differ:
-                    # threshold marginal over the items both groups share
+                    # threshold marginal over the items shared by both groups
                     ref_thr_df, ref_se_thr_df, ref_boot_thr = (
                         self._drf_matrix_threshold_marginal(
                             ref_model, ref_samples, eligible, shared_items
