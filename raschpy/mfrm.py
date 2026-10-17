@@ -9640,11 +9640,19 @@ class MFRM(Rasch):
         under two different models can use different item-estimation
         methods; pass method= explicitly for directly comparable results.
 
-        With estimation='pair-cpat', a UserWarning is raised for the six
-        models at risk of compressed item locations and thresholds
-        which can produce apparent DIF/DCF when the two
-        groups' facet element panels differ; 'global', 'items' and
-        'pseudo_halo' carry no warning.
+        With estimation='pair-cpat', item locations and thresholds are
+        compressed under 'thresholds', 'matrix', 'bivector', 'bistretch' and
+        'centrality' (known issue #17). When the groups were scored by
+        different facet elements, this produced apparent DIF and DCF in
+        null simulations with strong facet element effects (twice the
+        simulation defaults; 4 of 8 facet elements shared): per-item DIF up
+        to 0.15 and DCF up to 0.13 at alpha = 0.05, against 0.04-0.06 and
+        0.02-0.08 with estimation='cp-full-rcl' in the same design (except
+        'matrix', see below). A UserWarning says so; for a test with a
+        nominal false-positive rate, re-run with estimation='cp-full-rcl'.
+        With fewer facet elements or larger samples the two methods were
+        similar and near nominal; with 15 items, per-item DIF was mildly
+        liberal under both (0.06-0.09; 'matrix' 0.13).
 
         Under every model except 'global', each group's item locations and
         thresholds are averages of the facet-element-specific ones over the
@@ -9655,7 +9663,7 @@ class MFRM(Rasch):
         compared, and the 'Reference' and 'Focal' columns are on that
         anchored scale. DIF that differs between facet elements is then
         measured as its average over the common facet elements. The
-        omnibus tests anchor the pooled model on each group's facet
+        omnibus test anchors the pooled model on each group's facet
         elements in turn. With no facet elements in common, only
         model='global' can be tested (ValueError otherwise). The group
         models in dif_reference_model / dif_focal_models keep the anchored
@@ -9789,22 +9797,6 @@ class MFRM(Rasch):
         model = self._MODEL_ALIASES.get(model, model)
         if model not in self._MODELS:
             raise ValueError(f"model must be one of {self._MODELS}")
-        # issue #17 arises from 'pair-cpat''s staged estimation; the groups are calibrated with the latest
-        # estimation method (_refit_kw), 'cp-full-rcl' if none
-        if (
-            model in self._DIF_RISK
-            and (getattr(self, "estimation", None) or "cp-full-rcl") == "pair-cpat"
-        ):
-            warnings.warn(
-                f"model='{model}' with estimation='pair-cpat': risk of compressed item "
-                f"locations and thresholds: {self._DIF_RISK[model]} "
-                f"If the reference and focal groups' {self.facet_label_eg} panels differ in "
-                f"composition, this compression can produce apparent DIF/DCF "
-                f"that is an artefact of the comparison, not a genuine group "
-                f"difference.",
-                UserWarning,
-                stacklevel=2,
-            )
         self._dif_validate(
             correction,
             selection_method,
@@ -9899,7 +9891,8 @@ class MFRM(Rasch):
             ll_ref = ref_model._log_likelihood(model=model)
 
         all_item_rows = []
-        frame_flags = {"matrix": [], "omnibus": []}
+        frame_flags = {"matrix": [], "omnibus": [], "pair_cpat": []}
+        pair_cpat = (getattr(self, "estimation", None) or "cp-full-rcl") == "pair-cpat"
         all_threshold_rows = []
         focal_models = {}
         tc_dict = {}
@@ -10228,6 +10221,14 @@ class MFRM(Rasch):
             focal_models[focal] = focal_model
             if model == "matrix" and panels_differ:
                 frame_flags["matrix"].append(focal)
+            # 'matrix' has its own warning (cp-full-rcl does not remove it)
+            if (
+                model in self._DIF_RISK
+                and model != "matrix"
+                and pair_cpat
+                and panels_differ
+            ):
+                frame_flags["pair_cpat"].append(focal)
             if omnibus and (
                 items_differ
                 or (
@@ -10246,6 +10247,21 @@ class MFRM(Rasch):
             else:
                 plot_dict[focal] = None
 
+        if frame_flags["pair_cpat"]:
+            warnings.warn(
+                f"model='{model}' with estimation='pair-cpat' and groups scored by "
+                f"different {self.facets_label} (focal group(s) "
+                f"{frame_flags['pair_cpat']}): 'pair-cpat' compresses item locations "
+                f"and thresholds ({self._DIF_RISK[model]}), and in null simulations "
+                f"with strong {self.facet_label} effects this produced apparent DIF and "
+                f"DCF (false-positive rates up to 0.15 and 0.13 at alpha = 0.05). For a "
+                f"test with a nominal false-positive rate, re-run with "
+                f"estimation='cp-full-rcl' (0.04-0.08): "
+                f"mfrm.calibrate(model='{model}', estimation='cp-full-rcl'), then "
+                f"mfrm.dif_test({covariate!r}, model='{model}').",
+                UserWarning,
+                stacklevel=2,
+            )
         if frame_flags["matrix"]:
             warnings.warn(
                 f"model='matrix' with groups scored by different {self.facets_label} "

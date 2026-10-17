@@ -995,19 +995,23 @@ def test_calibrate_anchor_passes_estimation():
 
 
 def test_mfrm_dif_issue17_warning_pair_cpat_only():
-    """The known issue #17 DIF warning (compression from pair-cpat's staged estimation) is raised for
-    representations at risk only when the groups are calibrated with estimation='pair-cpat'."""
-    import numpy as np
-    sim = MFRM_Sim_Global(no_of_items=5, no_of_persons=300, no_of_facet_elements=4, max_score=3, seed=3)
-    persons = sim.responses.index.get_level_values(1).unique()
-    exo = pd.DataFrame({"g": np.where(np.arange(len(persons)) % 2, "a", "b")}, index=persons)
-    for est, expected in (("cp-full-rcl", False), ("pair-cpat", True)):
-        m = rp.MFRM(sim.responses, max_score=3, exogenous=exo, validate=False)
+    """The known issue #17 DIF warning (compression from pair-cpat's staged estimation) is raised
+    for representations at risk only with estimation='pair-cpat' and groups scored by different
+    facet elements, and names the re-run with estimation='cp-full-rcl'."""
+    for est, raters_b, expected in (
+        ("cp-full-rcl", slice(2, 6), False),
+        ("pair-cpat", slice(0, 4), False),
+        ("pair-cpat", slice(2, 6), True),
+    ):
+        m = _mfrm_dif_two_panels("thresholds", 3, slice(0, 4), raters_b, no_of_persons=300)
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             m.calibrate(model="thresholds", estimation=est)
-            m.dif_test("g", model="thresholds", no_of_samples=20, seed=1)
-        assert any("risk of compressed item" in str(x.message) for x in w) == expected
+            m.dif_test("g", model="thresholds", no_of_samples=20, seed=1, omnibus=False)
+        hit = [x for x in w if "compresses item locations" in str(x.message)]
+        assert bool(hit) == expected, (est, raters_b)
+        if hit:
+            assert "estimation='cp-full-rcl'" in str(hit[0].message)
 
 
 def _mfrm_dif_two_panels(model, seed, raters_a, raters_b, no_of_persons=400):
