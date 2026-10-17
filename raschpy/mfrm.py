@@ -9376,7 +9376,7 @@ class MFRM(Rasch):
         `facet_elements`, the facet elements common to the groups being
         compared (calibrate_anchor()), with bootstrap standard errors from
         its stored resamples, each anchored the same way with its own
-        adjustment, so the sampling variance of the common facet elements'
+        adjustment, so the sampling variance of the shared facet elements'
         mean is included. Under every sub-model except 'global', each
         group's item locations and thresholds are averages over its own
         facet elements of the facet-element-specific ones, so groups with
@@ -9511,11 +9511,11 @@ class MFRM(Rasch):
             margins of the pooled effects over the group's facet elements
             and items, which the group's own estimates have absorbed
             (_dif_fe_margins); items only this group took are held at their
-            pooled locations, as under H0, so only the common items are
+            pooled locations, as under H0, so only the shared items are
             free.
         shift : to subtract from the pooled person locations with those:
             the mean pooled-model threshold location over the group's facet
-            elements and the common items, less the group's.
+            elements and the shared items, less the group's.
         """
         fes = list(group.facet_names)
         items = list(group.responses.columns)
@@ -9620,12 +9620,12 @@ class MFRM(Rasch):
         The omnibus likelihood-ratio test (dif_omnibus_table) is evaluated
         at the pooled (combined-group) model's person locations and tests
         items only: facet effects are held at their pooled values in both
-        groups, items and thresholds are free per group, df = common items
+        groups, items and thresholds are free per group, df = shared items
         - 1. In null simulations (estimation='cp-full-rcl') it was at or below
         nominal when both groups
         took every item (0.00-0.08 at alpha = 0.05; 0.00 for 'matrix', whose
         likelihood ratio is often 0), but liberal when they took partly
-        overlapping item sets (up to 0.23 with 2 of 8 items in common) and,
+        overlapping item sets (up to 0.23 with 2 of 8 items shared) and,
         with estimation='pair-cpat', when they were scored by partly
         overlapping facet elements (0.23-0.87). For
         a test with a nominal false-positive rate, use the per-item Wald
@@ -9658,14 +9658,15 @@ class MFRM(Rasch):
         thresholds are averages of the facet-element-specific ones over the
         facet elements that scored that group. When the two groups were
         scored by different facet elements, each group is anchored on the
-        facet elements common to both (calibrate_anchor(), re-estimated in
+        facet elements both groups share (calibrate_anchor(), re-estimated in
         each bootstrap resample) before item locations and thresholds are
         compared, and the 'Reference' and 'Focal' columns are on that
         anchored scale. DIF that differs between facet elements is then
-        measured as its average over the common facet elements. In the
+        measured as its average over the shared facet elements. In the
         omnibus test, each group's item locations and thresholds are
         adjusted by the pooled model's mean facet element effects over the
-        group's own facet elements. With no facet elements in common, only
+        facet elements that scored the group. If the groups share no facet
+        elements, only
         model='global' can be tested (ValueError otherwise). The group
         models in dif_reference_model / dif_focal_models keep the anchored
         estimates (anchor_items_{model} etc.).
@@ -9680,9 +9681,9 @@ class MFRM(Rasch):
         if it fits the data.
 
         Each group is calibrated on the items it took, and only items both
-        groups took are compared (ValueError if there are none, possible
+        groups share are compared (ValueError if there are none, possible
         with more than two groups); for 'matrix', the anchored thresholds
-        are then averaged over the common items. The omnibus tests shift
+        are then averaged over the shared items. The omnibus tests shift
         the pooled person locations by the difference between the pooled
         and group models' mean locations over the group's facet elements
         and items.
@@ -9700,7 +9701,7 @@ class MFRM(Rasch):
         selection_method : {'wald', 'robust_z', 'none'}, default 'wald'
             Purification of the item-location scale: sequential Wald tests
             ('wald'), modified z-score exclusion ('robust_z'), or a mean
-            shift over all common items ('none').
+            shift over all shared items ('none').
         corr_tol, sd_ratio_tol, min_anchors, wald_alpha : floats/int
             Settings of the active selection method.
         test : {'wald', 'lr', 'both'}, default 'wald'
@@ -9911,15 +9912,15 @@ class MFRM(Rasch):
                 ll_focal = focal_model._log_likelihood(model=model)
 
             # Groups rated by different facet elements: compare item
-            # locations and thresholds anchored on the facet elements
-            # common to both (see _dif_common_frame).
+            # locations and thresholds anchored on the facet elements both
+            # groups share (see _dif_common_frame).
             focal_panel = set(focal_model.facet_names)
             common_fe = [fe for fe in ref_model.facet_names if fe in focal_panel]
             panels_differ = set(ref_model.facet_names) != focal_panel
             if panels_differ and model != "global" and not common_fe:
                 raise ValueError(
-                    f"The reference and focal group ({focal!r}) have no "
-                    f"{self.facets_label_eg} in common, so under model='{model}' "
+                    f"The reference and focal group ({focal!r}) share no "
+                    f"{self.facets_label_eg}, so under model='{model}' "
                     f"their item locations and thresholds are not comparable. "
                     f"Use model='global'."
                 )
@@ -10470,7 +10471,7 @@ class MFRM(Rasch):
     def _drf_matrix_threshold_marginal(self, m, samples, eligible, items):
         """
         drf_test()'s 'matrix' threshold track over `items` (the items both
-        groups took): the group's marginal, its bootstrap standard errors,
+        groups share): the group's marginal, its bootstrap standard errors,
         and the per-threshold bootstrap matrices, as for the stored
         all-item marginal.
         """
@@ -10498,7 +10499,7 @@ class MFRM(Rasch):
 
     def _drf_stretch_values(self, model, m, eligible, common_items):
         """
-        A fitted stretch model's parameters re-referenced for DRF: the
+        A fitted stretch model's parameters anchored for DRF: the
         tested facet elements `eligible` as the reference (mean shift 0,
         mean stretches 1, as in calibrate_anchor()) and item locations
         centred over `common_items`. Each group's stretches are otherwise
@@ -10584,7 +10585,7 @@ class MFRM(Rasch):
 
         common_items : list or None
             If given (the groups' facet elements or items differ), each
-            group's parameters are first re-referenced on the tested facet
+            group's parameters are first anchored on the tested facet
             elements and these items (_drf_stretch_values), with standard
             errors and covariances from its bootstrap resamples treated the
             same way.
@@ -10822,16 +10823,17 @@ class MFRM(Rasch):
         'matrix' there is one per item or threshold.
 
         Each group is calibrated on the items it took, and only items both
-        groups took are tested. Where a parameter depends on which facet
-        elements or items it is relative to, both groups are first put on
-        the same reference: 'matrix''s threshold marginal is averaged over
-        the common items; for 'centrality'/'pseudo_halo'/'bistretch', the
+        groups share are tested. Where a parameter depends on which facet
+        elements or items it is relative to, both groups are first anchored
+        on the facet elements and items both groups share: 'matrix''s
+        threshold marginal is averaged over
+        the shared items; for 'centrality'/'pseudo_halo'/'bistretch', the
         tested facet elements are the reference (mean shift 0, mean
         stretches 1, as in calibrate_anchor()) and item locations are
-        centred over the common items, which changes lambda_r by
+        centred over the shared items, which changes lambda_r by
         (omega_items_r - 1) times the change in centre. Standard errors and
         covariances come from the bootstrap resamples treated the same
-        way. With no items in common (possible with more than two groups),
+        way. If the groups share no items (possible with more than two groups),
         'items', 'bivector', 'matrix', 'pseudo_halo' and 'bistretch' raise
         a ValueError.
 
@@ -10937,8 +10939,8 @@ class MFRM(Rasch):
         drf_group_sizes : dict {group_value: int}
         drf_excluded_groups : dict {focal_value: str}
             Focal groups left out because they cannot be compared with the
-            reference group (fewer than two facet elements, or no items
-            where the model needs them, in common; possible with more than
+            reference group (sharing fewer than two facet elements with it,
+            or no items where the model needs them; possible with more than
             two groups), with the reason. Their drf_omnibus_table rows are
             NaN.
         """
@@ -11131,7 +11133,7 @@ class MFRM(Rasch):
                     f"{self.facet_label} panel overlap between groups."
                 )
 
-            # items both groups took: only these are compared, and for
+            # items both groups share: only these are compared, and for
             # 'matrix' thresholds and the stretch models' lambda, averaged or
             # centred over
             shared_items = ref_model.responses.columns.intersection(
@@ -11268,7 +11270,7 @@ class MFRM(Rasch):
                     focal_samples, thr_attr, eligible
                 )
                 if model == "matrix" and items_differ:
-                    # threshold marginal over the items both groups took
+                    # threshold marginal over the items both groups share
                     ref_thr_df, ref_se_thr_df, ref_boot_thr = (
                         self._drf_matrix_threshold_marginal(
                             ref_model, ref_samples, eligible, shared_items

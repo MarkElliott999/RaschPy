@@ -513,7 +513,7 @@ print(slm.global_fit_summary)   # statistic, df, p-value, decision
 print(slm.global_fit_table)     # per-parameter differences, SEs and z
 ```
 
-`dif_test()` is available on all four model classes, including `MFRM`. `dif_test()`, `drf_test()` and `global_fit()` calibrate each group with the object's own `calibrate()` settings, and each group on the items it took; only items (and, for `MFRM`, raters) both groups have in common are compared. (`andersen_lr_test()` is deprecated: with PAIR/CPAT estimates, Andersen's likelihood-ratio test was not calibrated in simulation; it is reserved for conditional maximum likelihood estimates in a later version.)
+`dif_test()` is available on all four model classes, including `MFRM`. `dif_test()`, `drf_test()` and `global_fit()` calibrate each group with the object's `calibrate()` settings, and each group on the items it took; only items (and, for `MFRM`, raters) both groups share are compared. (`andersen_lr_test()` is deprecated: with PAIR/CPAT estimates, Andersen's likelihood-ratio test was not calibrated in simulation; it is reserved for conditional maximum likelihood estimates in a later version.)
 
 On `PCM`, `RSM`, and `MFRM`, `dif_test()` also tests **differential category functioning (DCF)**: whether the category widths differ by group, via `threshold_dif_table`, alongside the item-location `dif_table`. `size_adjust=True` inflates standard errors at very large N so that trivially small differences are not flagged: item-location SEs are scaled to `reference_n`, and category-width SEs are capped by `dcf_cap` (in information-weight units on `PCM`/`RSM`, in persons on `MFRM`).
 
@@ -529,7 +529,7 @@ mfrm.drf_test(covariate='Gender', model='global')
 print(mfrm.drf_table)             # per-rater DRF, raters scored in both groups
 ```
 
-When the two groups were scored by different (partly overlapping) sets of raters, `dif_test()` anchors each group on the raters common to both before comparing item locations and thresholds, since under every parameterisation except `global` each group's estimates are averages over the raters who scored it. With no raters in common, only `model='global'` can be tested.
+When the two groups were scored by different (partly overlapping) sets of raters, `dif_test()` anchors each group on the raters both groups share before comparing item locations and thresholds, since under every parameterisation except `global` each group's estimates are averages over the raters who scored it. With no raters in common, only `model='global'` can be tested.
 
 What `drf_test()` tests depends on `model`: one Wald test per rater for `global`; a separate test of each rater's effect on each item or threshold for `items`/`thresholds`/`bivector`/`matrix`; and one joint test of each rater's shift and stretch parameters for `centrality`/`pseudo_halo`/`bistretch`. Only raters who scored at least `min_persons_per_group` persons in each group are tested.
 

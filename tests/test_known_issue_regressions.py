@@ -1126,9 +1126,9 @@ def test_mfrm_dif_drf_groups_took_different_items():
     m = rp.MFRM(r, max_score=3, exogenous=pd.DataFrame({"g": g}), validate=False)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        with pytest.raises(ValueError, match="no items in common"):
+        with pytest.raises(ValueError, match="no shared items"):
             m.dif_test("g", model="items", reference="a", no_of_samples=20, seed=1, omnibus=False)
-        with pytest.raises(ValueError, match="no items in common"):
+        with pytest.raises(ValueError, match="no shared items"):
             m.drf_test("g", model="items", reference="a", no_of_samples=20, seed=1)
 
 
@@ -1242,7 +1242,7 @@ def test_mfrm_dif_no_common_facet_elements():
     m = _mfrm_dif_two_panels("items", 3, slice(0, 3), slice(3, 6))
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        with pytest.raises(ValueError, match="in common"):
+        with pytest.raises(ValueError, match="no shared"):
             m.dif_test("g", model="items", reference="a", no_of_samples=20, seed=1, omnibus=False)
         m.dif_test("g", model="global", reference="a", no_of_samples=20, seed=1, omnibus=False)
     assert len(m.dif_table) == 6

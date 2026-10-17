@@ -2470,10 +2470,10 @@ class Rasch:
         A group model's log-likelihood at the pooled (combined-group)
         model's person locations, for dif_test()'s omnibus test (H1). When
         the groups took different items, the items only this group took are
-        held at their pooled values, as under H0, so that only the common
-        items are free (df = common items - 1), and the pooled person
+        held at their pooled values, as under H0, so that only the shared
+        items are free (df = shared items - 1), and the pooled person
         locations are shifted by the difference between the pooled and
-        group models' mean locations over the common items
+        group models' mean locations over the shared items
         (_mean_location), since each model is centred over its own items.
         """
         own = list(group.responses.columns)
@@ -2582,11 +2582,11 @@ class Rasch:
     ):
         """
         The focal groups that can be compared with the reference group in
-        dif_test() / drf_test(): those with at least one item in common with
+        dif_test() / drf_test(): those that share at least one item with
         it (need_items) and, for MFRM, at least `need_facets` facet elements
         that scored at least `min_persons` persons in each. With more than
         two groups the data can be connected through other groups while a
-        focal group has none of these in common with the reference; such
+        focal group shares none of these with the reference; such
         groups are left out, with one warning, and a ValueError is raised
         if no focal group is left.
 
@@ -2613,10 +2613,14 @@ class Rasch:
             idx = cov_values.index[cov_values == focal]
             why = []
             if need_items and not ref_items & _items(idx):
-                why.append("no items in common")
+                why.append("no shared items")
             if need_facets and len(ref_facets & _facets(idx)) < need_facets:
                 why.append(
-                    f"fewer than {need_facets} {self.facets_label} in common"
+                    (
+                        f"no shared {self.facets_label}"
+                        if need_facets == 1
+                        else f"fewer than {need_facets} shared {self.facets_label}"
+                    )
                     + (
                         f" (each scoring at least {min_persons} persons in both)"
                         if min_persons > 1
@@ -2811,7 +2815,7 @@ class Rasch:
             # possible with more than two groups: the data can be connected
             # through another group
             raise ValueError(
-                "The reference and focal group took no items in common, so there "
+                "The reference and focal group share no items, so there "
                 "is nothing to compare."
             )
         ref_items = ref_model.items.loc[common_items]
@@ -3772,7 +3776,7 @@ class Rasch:
         if not keep.any():
             raise ValueError(
                 "The two groups have no parameters estimable in both (e.g. they "
-                "took no items in common), so there is nothing to compare."
+                "share no items), so there is nothing to compare."
             )
         idx = np.flatnonzero(keep)
         C = np.eye(len(idx))

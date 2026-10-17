@@ -3531,14 +3531,14 @@ class RSM(Rasch):
         individually — a reference-group design, not all-pairwise.
 
         Each group is calibrated on the items it took, and only items both
-        groups took are compared (ValueError if there are none, possible
+        groups share are compared (ValueError if there are none, possible
         with more than two groups). In the omnibus test, items only one
         group took are held at their pooled values, and the pooled person
         locations are shifted by the difference between the pooled and
-        group models' mean locations over the common items, since each
-        model is centred over its own items.
+        group models' mean locations over the shared items, since each
+        model is centred over the items it was fitted to.
         In null simulations it was mildly liberal when the groups shared
-        few items (0.09-0.13 at alpha = 0.05 with 2 of 10 items in common,
+        few items (0.09-0.13 at alpha = 0.05 with 2 of 10 items shared,
         across the three estimation methods) and at or below nominal
         otherwise (0.015-0.05 with 6 or 10). For a test with a nominal
         false-positive rate when few items are shared, use the per-item
@@ -3611,7 +3611,7 @@ class RSM(Rasch):
             Passed to _robust_anchor_selection() (selection_method=
             'robust_z' only).
         min_anchors : int, default 6
-            Floor on surviving common items — passed to whichever
+            Floor on surviving shared items — passed to whichever
             selection method is active ('robust_z' or 'wald').
         wald_alpha : float, default 0.05
             Significance level for each item's Wald test during
