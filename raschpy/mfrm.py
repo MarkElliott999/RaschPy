@@ -9680,7 +9680,7 @@ class MFRM(Rasch):
         false-positive rate, use model='bivector' (0.06 in the same design)
         if it fits the data.
 
-        Each group is calibrated on the items it responded to, and only items shared
+        Each group is calibrated on the items its persons responded to, and only items shared
         by both groups are compared (ValueError if there are none, possible
         with more than two groups); for 'matrix', the anchored thresholds
         are then averaged over the shared items. The omnibus tests shift
@@ -10822,7 +10822,7 @@ class MFRM(Rasch):
         constant per focal group; for 'items'/'thresholds'/'bivector'/
         'matrix' there is one per item or threshold.
 
-        Each group is calibrated on the items it responded to, and only items shared
+        Each group is calibrated on the items its persons responded to, and only items shared
         by both groups are tested. Where a parameter depends on which facet
         elements or items it is relative to, both groups are first anchored
         on the facet elements and items shared by both groups: 'matrix''s
