@@ -437,6 +437,10 @@ def test_mfrm_conditional_extras_bootstrap_and_pca():
     for tab in (m.item_restscore_table_global, m.rater_restscore_table_global):
         assert {"Observed gamma", "Expected gamma", "p (BH)", "p (bootstrap, Westfall-Young)"} <= set(tab.columns)
     assert len(m.q3_bootstrap_global) == 6 and m.person_conditional_p_global.notna().any()
+    rc = m.residual_contrast_bootstrap_global
+    first = np.linalg.eigvalsh(m.std_residual_df_global.astype(float).corr().values)[-1]
+    assert rc["first_contrast"] == pytest.approx(first, abs=1e-10)
+    assert 1 / 26 <= rc["p"] <= 1 and rc["cutoff_95"] >= rc["expected"] > 1
     m.fit_statistics(**kw)
     pd.testing.assert_frame_equal(m.item_fit_bootstrap_global, it)
     # residual analyses: eigenvalues of the correlation matrices; item correlations of the raw residuals; Q3*

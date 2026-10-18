@@ -8217,8 +8217,9 @@ class MFRM(Rasch):
         Conditional statistics from the virtual items (R facet elements x I items, facet element-major):
         item infit/outfit pooled over facet elements, facet element infit/outfit pooled over items,
         restscore gamma minus its expected value on tables pooled per item and per facet element, the
-        tables themselves, and Yen's Q3 for each item pair (residual correlations over facet element x
-        person rows, upper triangle). Used for the observed data and every bootstrap replicate.
+        tables themselves, Yen's Q3 for each item pair (residual correlations over facet element x
+        person rows, upper triangle) and the first residual contrast (largest eigenvalue of the
+        correlations of the standardised residuals over the same rows). Used for the observed data and every bootstrap replicate.
         """
         from raschpy import _esf
 
@@ -8255,6 +8256,11 @@ class MFRM(Rasch):
             out[f"{label}_gdiff"] = g[:, 0] - ge
         rows = resid.reshape(-1, R, I).transpose(1, 0, 2).reshape(-1, I)
         out["q3"] = pd.DataFrame(rows).corr().values[np.triu_indices(I, 1)]
+        with np.errstate(invalid="ignore", divide="ignore"):
+            z = np.where(valid, resid / np.sqrt(np.where(valid, V, 1.0)), np.nan)
+        zrows = z.reshape(-1, R, I).transpose(1, 0, 2).reshape(-1, I)
+        C = pd.DataFrame(zrows).corr().values
+        out["eig1"] = float(np.linalg.eigvalsh(np.where(np.isfinite(C), C, 0.0))[-1])
         out["mom"] = mom
         return out
 
@@ -8316,7 +8322,8 @@ class MFRM(Rasch):
         (_refit_kw; 'mixed' as 'matrix' with the object's per-facet element models), and the statistics of
         _mfrm_conditional_stats recomputed. Studentised marginal and Westfall-Young p-values (two-sided for
         fit and restscore, upper one-sided for Q3), 95% highest-density bands for fit, bootstrap mean and
-        95th percentile for Q3. Datasets that cannot be recalibrated are skipped and counted.
+        95th percentile for Q3, and the bootstrap mean, 95th percentile and p-value of the first residual
+        contrast. Datasets that cannot be recalibrated are skipped and counted.
         """
         from raschpy import _esf
 
@@ -8332,6 +8339,7 @@ class MFRM(Rasch):
             "item_gdiff",
             "rater_gdiff",
             "q3",
+            "eig1",
         )
         sims, skipped = {k: [] for k in keys}, 0
         for _ in range(B):
@@ -8432,6 +8440,17 @@ class MFRM(Rasch):
                     "p (Westfall-Young)": wy,
                 }
             ).sort_values("Q3", ascending=False, ignore_index=True),
+        )
+        eig = np.asarray(sims["eig1"])
+        setattr(
+            self,
+            f"residual_contrast_bootstrap_{model}",
+            dict(
+                first_contrast=obs["eig1"],
+                expected=float(eig.mean()),
+                cutoff_95=float(np.percentile(eig, 95)),
+                p=float((1 + (eig >= obs["eig1"]).sum()) / (n + 1)),
+            ),
         )
         setattr(
             self,
@@ -9395,7 +9414,9 @@ class MFRM(Rasch):
             facet element infit/outfit (item_fit_bootstrap_{model},
             rater_fit_bootstrap_{model}), bootstrap p-values for the
             item-restscore tests (columns added) and for Q3 on every item pair
-            (q3_bootstrap_{model}).
+            (q3_bootstrap_{model}), and the first residual contrast's
+            bootstrap mean, 95% cutoff and p-value
+            (residual_contrast_bootstrap_{model}).
 
         Attributes set (model-suffixed)
         --------------------------------
@@ -9523,6 +9544,8 @@ class MFRM(Rasch):
             "item_fit_bootstrap",
             "rater_fit_bootstrap",
             "q3_bootstrap",
+            "residual_contrast_bootstrap",
+            "fit_bootstrap_info",
         ):
             setattr(self, f"{name}_{model}", None)
         if conditional:
