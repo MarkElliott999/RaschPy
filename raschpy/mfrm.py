@@ -2316,6 +2316,7 @@ class MFRM(Rasch):
         model,
         facet_effects,
         item_locations=None,
+        log_numerators=False,
     ):
         """
         Vectorised MFRM category probability engine.
@@ -2392,6 +2393,9 @@ class MFRM(Rasch):
                     - cumtau_total[:, None, None]
                 )  # (K+1, N, I)
 
+            if log_numerators:
+                result[facet_element] = log_num  # unnormalised (log_numerators=True)
+                continue
             log_num -= log_num.max(axis=0, keepdims=True)
             probs = np.exp(log_num)
             probs /= probs.sum(axis=0, keepdims=True)
@@ -8151,6 +8155,55 @@ class MFRM(Rasch):
         std_residual_df = residual_df / (info_df**0.5)
         return exp_score_df, info_df, kurtosis_df, residual_df, std_residual_df
 
+    def _conditional_cat_prob_dict(self, model, index):
+        """
+        Category probabilities conditional on each person's total over all the ratings they received, for
+        fit_statistics(conditional=True): each facet element x item is a virtual item whose thresholds are
+        that cell of the model's location grid (read from the category probability engine's log numerators
+        at theta = 0, so every representation is covered), and the conditional probabilities come from
+        their ESFs (persons cancel). Persons who contribute nothing (a single rating, or an extreme total)
+        get their observed category with probability 1. Same layout as cat_prob_dict ({k: (facet element,
+        person) x items DataFrame}), on the given index.
+        """
+        from raschpy import _esf
+
+        _, thresholds, facet_effects = self._get_params(model, anchor=False)
+        item_names, facets = list(self.item_names), list(self.facet_names)
+        logn, _ = self._cat_probs_mfrm(
+            np.zeros(1),
+            item_names,
+            facets,
+            thresholds,
+            model,
+            facet_effects,
+            log_numerators=True,
+        )
+        persons = self.responses.index.get_level_values(1).unique()
+        R, I, K1 = len(facets), len(item_names), int(self.max_score) + 1
+        thr, cols = [], []
+        for r in facets:
+            le = logn[r][:, 0, :] - logn[r][0, 0, :]  # log eps (K + 1, I)
+            b = -np.diff(le, axis=0)  # thresholds of each virtual item
+            for j in range(I):
+                thr.append(b[:, j])
+            cols.append(self.responses.loc[r].reindex(persons)[item_names].values)
+        Xv = np.hstack(cols).astype(float)  # persons x (facet element, item)
+        P = _esf.conditional_moments(Xv, thr, probs=True)["P"]
+        obs = ~np.isnan(Xv)
+        fixed = obs & np.isnan(P[:, :, 0])
+        nn, cc = np.nonzero(fixed)
+        P[nn, cc, :] = 0.0
+        P[nn, cc, Xv[nn, cc].astype(int)] = 1.0
+        P = P.reshape(len(persons), R, I, K1)
+        cpd = {}
+        for k in range(K1):
+            frames = [
+                pd.DataFrame(P[:, ri, :, k], index=persons, columns=item_names)
+                for ri in range(R)
+            ]
+            cpd[k] = pd.concat(frames, keys=facets).reindex(index)
+        return cpd
+
     def _ensure_fit_matrices(self, model, **kw):
         """Ensure calibration, person_locations, cat_prob_dict and fit matrices exist."""
         calib_kw = {
@@ -9029,6 +9082,7 @@ class MFRM(Rasch):
         no_of_samples=500,
         interval=None,
         seed=None,
+        conditional=False,
     ):
         """
         Compute all item, threshold, facet_element, person, and test-level fit statistics.
@@ -9074,6 +9128,17 @@ class MFRM(Rasch):
         seed : int or None, default None
             Seed passed through to the internal std_errors() call (only
             relevant the first time SEs are computed for this model).
+        conditional : bool, default False
+            If True, the expected scores, variances and fourth central moments
+            behind the residuals and the item, facet element and person
+            infit/outfit statistics are their conditional values given each
+            person's total over all the ratings they received (Christensen &
+            Kreiner), which do not involve the person locations: each facet
+            element x item is treated as a virtual item whose thresholds are
+            that cell of the model's location grid. The output is otherwise the
+            same. A person with an extreme total or a single rating is left
+            out. Threshold fit, which is defined through the person locations,
+            is unchanged. Works with any estimation method.
 
         Attributes set (model-suffixed)
         --------------------------------
@@ -9164,6 +9229,25 @@ class MFRM(Rasch):
             log_lik_tol=log_lik_tol,
         )
         self._ensure_fit_matrices(model)
+        flag = f"fit_conditional_{model}"
+        if conditional or getattr(self, flag, False):
+            if conditional:
+                idx = getattr(self, f"exp_score_df_{model}").index
+                cpd = self._conditional_cat_prob_dict(model, idx)
+            else:  # back to person-based frames after a conditional run
+                cpd = getattr(self, f"cat_prob_dict_{model}")
+            for name, val in zip(
+                (
+                    "exp_score_df",
+                    "info_df",
+                    "kurtosis_df",
+                    "residual_df",
+                    "std_residual_df",
+                ),
+                self.fit_matrices(cpd),
+            ):
+                setattr(self, f"{name}_{model}", val)
+        setattr(self, flag, bool(conditional))
         self._run_item_fit(model)
         self._run_threshold_fit(model, anchors=anchors)
         self._run_facet_fit(model)

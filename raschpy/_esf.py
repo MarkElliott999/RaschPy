@@ -683,7 +683,7 @@ def _cell_probabilities(bt, LE, Kmax):
     return P
 
 
-def conditional_moments(X, thresholds, prepared=None, tables=False):
+def conditional_moments(X, thresholds, prepared=None, tables=False, probs=False):
     """
     Conditional moments of each item score given the person's total over the items they responded to:
     for every person and item, E[X_i | r], Var(X_i | r) and the fourth central moment, from
@@ -694,6 +694,9 @@ def conditional_moments(X, thresholds, prepared=None, tables=False):
     tables=True also returns, for each item, the expected item-score x restscore table: entry (k, s) =
     sum over the persons who responded to the item of P(X_i = k | r), with s = r - k their restscore
     (rows k = 0..K_i, columns s = 0..largest restscore).
+
+    probs=True also returns P (n_persons, n_items, Kmax + 1): P(X_i = k | r) for each contributing person's
+    observed responses (NaN elsewhere).
 
     Returns a dict: E, V, M4 (n_persons, n_items) and, with tables=True, tables (list of arrays).
     """
@@ -722,6 +725,7 @@ def conditional_moments(X, thresholds, prepared=None, tables=False):
         return dict(out, tables=unflatten()) if tables else out
     cellE = np.full((prep.n_cells, I), np.nan)
     cellV, cellM4 = cellE.copy(), cellE.copy()
+    cellP = np.full((prep.n_cells, I, K1), np.nan) if probs else None
     kk = np.arange(K1)
     for bt in prep.batches:
         P = _cell_probabilities(bt, LE, Kmax)  # (cells, n, K1)
@@ -734,6 +738,8 @@ def conditional_moments(X, thresholds, prepared=None, tables=False):
         cellE[rows[:, None], cols] = E
         cellV[rows[:, None], cols] = V
         cellM4[rows[:, None], cols] = M4
+        if probs:
+            cellP[rows[:, None], cols] = P
         if tables:
             for j in range(bt.n):
                 items = cols[:, j]
@@ -764,6 +770,12 @@ def conditional_moments(X, thresholds, prepared=None, tables=False):
         vals = cell[prep.person_cell]
         vals[~obs] = np.nan
         out[key][who] = vals
+    if probs:
+        Pfull = np.full(X.shape + (K1,), np.nan)
+        vals = cellP[prep.person_cell]
+        vals[~obs] = np.nan
+        Pfull[who] = vals
+        out["P"] = Pfull
     if tables:
         out["tables"] = unflatten()
     return out

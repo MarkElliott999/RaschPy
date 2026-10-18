@@ -389,3 +389,34 @@ def test_conditional_fit_bootstrap():
     assert (rt["p (bootstrap, Westfall-Young)"] >= rt["p (bootstrap)"] - 1e-12).all()
     with pytest.raises(ValueError, match="needs conditional=True"):
         m.fit_statistics(se=False, bootstrap_samples=10)
+
+
+def test_mfrm_conditional_fit():
+    from raschpy import MFRM
+    from raschpy.simulation import MFRM_Sim
+
+    sim = MFRM_Sim(no_of_items=4, no_of_persons=120, no_of_facet_elements=3, max_score=2, model="matrix", seed=3)
+    m = MFRM(sim.responses)
+    items, facets = list(m.item_names), list(m.facet_names)
+    for model in ("global", "matrix", "bistretch"):
+        m.fit_statistics(model=model, se=False)
+        before = getattr(m, f"item_infit_ms_{model}").copy()
+        m.fit_statistics(model=model, se=False, conditional=True)
+        assert getattr(m, f"fit_conditional_{model}")
+        # the grid read from the log numerators reproduces the engine's probabilities at another theta
+        _, thr, fe = m._get_params(model)
+        logn, _ = m._cat_probs_mfrm(np.zeros(1), items, facets, thr, model, fe, log_numerators=True)
+        probs, _ = m._cat_probs_mfrm(np.array([0.7]), items, facets, thr, model, fe)
+        for r in facets:
+            le = logn[r][:, 0, :] - logn[r][0, 0, :]
+            lp = np.arange(le.shape[0])[:, None] * 0.7 + le
+            p = np.exp(lp - lp.max(0))
+            np.testing.assert_allclose(p / p.sum(0), probs[r][:, 0, :], atol=1e-12)
+        # conditional expectations sum to each person's total
+        E = getattr(m, f"exp_score_df_{model}")
+        X = m.responses.loc[E.index]
+        np.testing.assert_allclose(
+            E.groupby(level=1).sum().sum(1).values, X.groupby(level=1).sum().sum(1).values, atol=1e-9
+        )
+        m.fit_statistics(model=model, se=False)
+        np.testing.assert_allclose(getattr(m, f"item_infit_ms_{model}").values, before.values, atol=1e-12)
