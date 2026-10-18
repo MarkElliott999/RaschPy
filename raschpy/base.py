@@ -2569,19 +2569,57 @@ class Rasch:
         ).loc[idx]
         self._conditional_tables = mom["tables"]
         self.fit_conditional = True
-        self.item_fit_bootstrap = None
+        self.item_fit_bootstrap = self.q3_bootstrap = None
+        self.residual_contrast_bootstrap = None
         if bootstrap_samples:
             self._conditional_fit_bootstrap(X, names, int(bootstrap_samples), seed)
 
+    @staticmethod
+    def _conditional_replicate_stats(Xa, thr, prep):
+        """The statistics referred to the bootstrap, for responses Xa at thresholds thr, all from the
+        conditional moments: item infit and outfit; item-restscore gamma minus its expected value; Yen's
+        Q3 for each item pair (correlations of the conditional residuals, upper triangle); and the first
+        residual contrast (largest eigenvalue of the correlations of the standardised residuals).
+        """
+        from raschpy import _esf
+
+        mom = _esf.conditional_moments(Xa, thr, prepared=prep, tables=True)
+        E, V = mom["E"], mom["V"]
+        valid = np.isfinite(V) & (V > 0)
+        resid = np.where(valid, Xa - E, np.nan)
+        r2 = np.where(valid, resid**2, 0.0)
+        Vv = np.where(valid, V, 0.0)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            infit = r2.sum(0) / Vv.sum(0)
+            outfit = (r2 / np.where(valid, V, 1.0)).sum(0) / valid.sum(0)
+        obs_all = ~np.isnan(Xa)
+        xi = np.where(obs_all, Xa, 0).astype(int)
+        tot = xi.sum(1)
+        gdiff = np.empty(Xa.shape[1])
+        for i, tab in enumerate(mom["tables"]):
+            who = obs_all[:, i]
+            observed = np.zeros_like(tab)
+            np.add.at(observed, (xi[who, i], tot[who] - xi[who, i]), 1.0)
+            gdiff[i] = _esf.gk_gamma(observed)[0] - _esf.gk_gamma(tab)[0]
+        iu = np.triu_indices(Xa.shape[1], 1)
+        q3 = pd.DataFrame(resid).corr().values[iu]
+        with np.errstate(invalid="ignore", divide="ignore"):
+            R = pd.DataFrame(resid / np.sqrt(np.where(valid, V, np.nan))).corr().values
+        R = np.where(np.isfinite(R), R, 0.0)
+        eig1 = float(np.linalg.eigvalsh(R)[-1])
+        return dict(infit=infit, outfit=outfit, gdiff=gdiff, q3=q3, eig1=eig1)
+
     def _conditional_fit_bootstrap(self, X, names, B, seed):
         """
-        Parametric bootstrap reference distributions for the conditional item infit and outfit (Johansson,
-        2025, 2026): B datasets simulated from the fitted model given each person's total over the items they
-        responded to (so the score distribution is the observed one and no person estimates are needed),
-        each recalibrated with the object's calibrate() settings (CML refits reuse the observed Hessian) and
-        its conditional infit/outfit computed. Each observed statistic is studentised by its simulated mean
-        and SD; p-values are marginal and Westfall-Young step-down (familywise), and the 95% highest-density
-        interval of the simulated values is a descriptive band. Simulated datasets in which an item has no
+        Parametric bootstrap reference distributions (Johansson, 2025, 2026): B datasets simulated from the
+        fitted model given each person's total over the items they responded to (so the score
+        distribution is the observed one and no person estimates are needed), each recalibrated with the
+        object's calibrate() settings (CML refits reuse the observed Hessian). For each, the conditional
+        item infit and outfit, item-restscore gamma minus its expected value, Q3 for every item pair and
+        the first residual contrast are computed. Each observed statistic is studentised by its simulated
+        mean and SD; p-values are marginal and Westfall-Young step-down (two-sided for item fit and
+        restscore, upper one-sided for Q3), with a 95% highest-density band for item fit, the 95th
+        percentile as the Q3 and first-contrast cutoffs. Simulated datasets in which an item has no
         estimate are skipped and counted.
         """
         from raschpy import _esf
@@ -2589,7 +2627,7 @@ class Rasch:
         rng = np.random.default_rng(seed)
         thr = self._cml_threshold_list(names)
         prep = _esf.prepare(X, self._cml_max_scores(names).astype(int))
-        obs_in, obs_out = _esf.conditional_fit_ms(X, thr, prepared=prep)
+        obs = self._conditional_replicate_stats(X, thr, prep)
         cml = getattr(self, "estimation", None) == "cml"
         H = self._cml_observed_hessian() if cml else None
         clone = copy.copy(self)
@@ -2606,37 +2644,75 @@ class Rasch:
             if list(m.item_names) != names:
                 skipped += 1  # an item without an estimate in this dataset
                 continue
-            inf_b, out_b = _esf.conditional_fit_ms(
-                Y, m._cml_threshold_list(names), prepared=prep
+            sims.append(
+                self._conditional_replicate_stats(Y, m._cml_threshold_list(names), prep)
             )
-            sims.append(np.r_[inf_b, out_b])
         if not sims:
             raise ValueError(
                 "No bootstrap dataset could be recalibrated with every item; the "
-                "bootstrap item-fit p-values are not available."
+                "bootstrap p-values are not available."
             )
-        S = np.array(sims)
-        k = len(names)
-        cols = {}
-        for label, obs, sim in (
-            ("Infit", obs_in, S[:, :k]),
-            ("Outfit", obs_out, S[:, k:]),
-        ):
+        n = len(sims)
+
+        def studentise(o, sim):
             mu, sd = np.nanmean(sim, 0), np.nanstd(sim, 0, ddof=1)
             sd = np.where(sd > 0, sd, np.nan)
-            t_obs, t_sim = (obs - mu) / sd, (sim - mu) / sd
-            band = np.array([_esf.hdi(sim[:, i]) for i in range(k)])
-            cols[f"{label} MS"] = obs
+            return (o - mu) / sd, (sim - mu) / sd
+
+        def marginal(t_o, t_s, two_sided=True):
+            if two_sided:
+                return (1 + (np.abs(t_s) >= np.abs(t_o)).sum(0)) / (n + 1)
+            return (1 + (t_s >= t_o).sum(0)) / (n + 1)
+
+        cols = {}
+        for label in ("Infit", "Outfit"):
+            o = obs[label.lower()]
+            sim = np.array([r[label.lower()] for r in sims])
+            t_o, t_s = studentise(o, sim)
+            band = np.array([_esf.hdi(sim[:, i]) for i in range(len(names))])
+            cols[f"{label} MS"] = o
             cols[f"{label} 95% low"] = band[:, 0]
             cols[f"{label} 95% high"] = band[:, 1]
-            cols[f"{label} p"] = (1 + (np.abs(t_sim) >= np.abs(t_obs)).sum(0)) / (
-                len(S) + 1
-            )
+            cols[f"{label} p"] = marginal(t_o, t_s)
             cols[f"{label} p (Westfall-Young)"] = _esf.westfall_young(
-                np.nan_to_num(t_obs), np.nan_to_num(t_sim)
+                np.nan_to_num(t_o), np.nan_to_num(t_s)
             )
         self.item_fit_bootstrap = pd.DataFrame(cols, index=names)
-        self.item_fit_bootstrap_info = dict(samples=len(S), skipped=skipped, seed=seed)
+
+        sim = np.array([r["gdiff"] for r in sims])
+        t_o, t_s = studentise(obs["gdiff"], sim)
+        self.item_restscore_table["p (bootstrap)"] = pd.Series(
+            marginal(t_o, t_s), index=names
+        )
+        self.item_restscore_table["p (bootstrap, Westfall-Young)"] = pd.Series(
+            _esf.westfall_young(np.nan_to_num(t_o), np.nan_to_num(t_s)), index=names
+        )
+
+        sim = np.array([r["q3"] for r in sims])
+        t_o, t_s = studentise(obs["q3"], sim)
+        iu = np.triu_indices(len(names), 1)
+        self.q3_bootstrap = pd.DataFrame(
+            {
+                "Item 1": [names[i] for i in iu[0]],
+                "Item 2": [names[j] for j in iu[1]],
+                "Q3": obs["q3"],
+                "Expected Q3": np.nanmean(sim, 0),
+                "95% cutoff": np.nanpercentile(sim, 95, axis=0),
+                "p": marginal(t_o, t_s, two_sided=False),
+                "p (Westfall-Young)": _esf.westfall_young(
+                    np.nan_to_num(t_o), np.nan_to_num(t_s), two_sided=False
+                ),
+            }
+        ).sort_values("Q3", ascending=False, ignore_index=True)
+
+        eig = np.array([r["eig1"] for r in sims])
+        self.residual_contrast_bootstrap = dict(
+            first_contrast=obs["eig1"],
+            expected=float(eig.mean()),
+            cutoff_95=float(np.percentile(eig, 95)),
+            p=float((1 + (eig >= obs["eig1"]).sum()) / (n + 1)),
+        )
+        self.item_fit_bootstrap_info = dict(samples=n, skipped=skipped, seed=seed)
 
     @staticmethod
     def _check_cml_solver(solver, estimation):

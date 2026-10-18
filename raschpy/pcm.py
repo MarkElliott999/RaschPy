@@ -2807,7 +2807,10 @@ class PCM(Rasch):
             (familywise error control across items; the recommended decision
             rule, on infit) and a 95% highest-density band
             (item_fit_bootstrap; the samples used and seed= in
-            item_fit_bootstrap_info).
+            item_fit_bootstrap_info). The same simulated datasets give
+            bootstrap p-values for item-restscore (columns added to
+            item_restscore_table), Q3 for every item pair (q3_bootstrap) and
+            the first residual contrast (residual_contrast_bootstrap).
 
         Attributes set
         --------------
@@ -2826,6 +2829,17 @@ class PCM(Rasch):
             bootstrap_samples only: for infit and outfit, the observed mean
             square, the 95% band of its bootstrap distribution, the marginal
             p-value and the Westfall-Young p-value.
+        q3_bootstrap : pandas.DataFrame or None
+            bootstrap_samples only: Yen's Q3 (correlation of the conditional
+            residuals) for every item pair, sorted from largest, with its
+            mean and 95th percentile under the bootstrap and upper one-sided
+            marginal and Westfall-Young p-values (local dependence shows as
+            excess positive correlation).
+        residual_contrast_bootstrap : dict or None
+            bootstrap_samples only: the first residual contrast (largest
+            eigenvalue of the correlations of the standardised conditional
+            residuals), its bootstrap mean and 95th percentile (the
+            simulation-based cutoff, Chou & Wang) and the one-sided p-value.
         person_conditional_p : pandas.Series
             conditional=True only: for each non-extreme person, the
             probability, given their total over the items they responded to,

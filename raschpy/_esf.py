@@ -774,28 +774,23 @@ def gk_gamma(table):
     standard error, as vcdExtra::GKgamma: C and D are the concordant and discordant pairs.
     """
     x = np.asarray(table, float)
-    cs = x.cumsum(0).cumsum(1)
-    tot = cs[-1, -1]
+    if x.sum() == 0:
+        return np.nan, np.nan
 
-    def block(r0, r1, c0, c1):
-        # sum of x[r0:r1, c0:c1] from the 2-D cumulative sum (exclusive upper bounds)
-        if r1 <= r0 or c1 <= c0:
-            return 0.0
-        a = cs[r1 - 1, c1 - 1]
-        b = cs[r0 - 1, c1 - 1] if r0 > 0 else 0.0
-        c = cs[r1 - 1, c0 - 1] if c0 > 0 else 0.0
-        d = cs[r0 - 1, c0 - 1] if (r0 > 0 and c0 > 0) else 0.0
-        return a - b - c + d
+    def below_left(a):
+        # sum of a[k, l] over k < i, l < j
+        c = a.cumsum(0).cumsum(1)
+        out = np.zeros_like(a)
+        out[1:, 1:] = c[:-1, :-1]
+        return out
 
-    n, m = x.shape
-    pc = np.zeros_like(x)
-    pd_ = np.zeros_like(x)
-    for i in range(n):
-        for j in range(m):
-            pc[i, j] = block(0, i, 0, j) + block(i + 1, n, j + 1, m)
-            pd_[i, j] = block(0, i, j + 1, m) + block(i + 1, n, 0, j)
+    ll = below_left(x)  # k < i, l < j
+    gg = below_left(x[::-1, ::-1])[::-1, ::-1]  # k > i, l > j
+    lg = below_left(x[:, ::-1])[:, ::-1]  # k < i, l > j
+    gl = below_left(x[::-1, :])[::-1, :]  # k > i, l < j
+    pc, pd_ = ll + gg, lg + gl
     C, D = (pc * x).sum() / 2, (pd_ * x).sum() / 2
-    if C + D == 0 or tot == 0:
+    if C + D == 0:
         return np.nan, np.nan
     psi = 2 * (D * pc - C * pd_) / (C + D) ** 2
     sigma2 = (x * psi**2).sum() - (x * psi).sum() ** 2
@@ -883,11 +878,15 @@ def conditional_fit_ms(X, thresholds, prepared=None):
     return infit, outfit
 
 
-def westfall_young(t_obs, t_sim):
+def westfall_young(t_obs, t_sim, two_sided=True):
     """Westfall-Young step-down (max-T) familywise p-values for observed statistics t_obs (k,) against
-    simulated t_sim (B, k) under the null, two-sided (absolute values), with monotonicity enforced.
+    simulated t_sim (B, k) under the null, two-sided (absolute values) or upper one-sided, with
+    monotonicity enforced.
     """
-    a, A = np.abs(t_obs), np.abs(t_sim)
+    if two_sided:
+        a, A = np.abs(t_obs), np.abs(t_sim)
+    else:
+        a, A = np.asarray(t_obs, float), np.asarray(t_sim, float)
     order = np.argsort(-a)  # most extreme first
     B = A.shape[0]
     p = np.empty(len(a))

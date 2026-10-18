@@ -377,5 +377,15 @@ def test_conditional_fit_bootstrap():
     assert ((b1["Infit 95% low"] <= b1["Infit 95% high"])).all()
     m.fit_statistics(se=False, conditional=True, conditional_samples=20, bootstrap_samples=60, seed=7)
     pd.testing.assert_frame_equal(m.item_fit_bootstrap, b1)
+    q3 = m.q3_bootstrap
+    assert len(q3) == 15 * 14 // 2 and (q3["p (Westfall-Young)"] >= q3["p"] - 1e-12).all()
+    assert q3["Q3"].is_monotonic_decreasing
+    r = m.residual_contrast_bootstrap
+    assert r["first_contrast"] == pytest.approx(
+        np.linalg.eigvalsh(m.std_residual_df.corr().values)[-1], abs=1e-10
+    )
+    assert 0 < r["p"] <= 1 and r["cutoff_95"] > r["expected"]
+    rt = m.item_restscore_table
+    assert (rt["p (bootstrap, Westfall-Young)"] >= rt["p (bootstrap)"] - 1e-12).all()
     with pytest.raises(ValueError, match="needs conditional=True"):
         m.fit_statistics(se=False, bootstrap_samples=10)
