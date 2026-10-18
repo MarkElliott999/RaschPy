@@ -728,6 +728,7 @@ class PCM(Rasch):
         log_lik_tol=0.000001,
         robust=False,
         estimation="pair",
+        solver=None,
     ):
         """
         Estimate item thresholds using the PAIR (Pairwise) algorithm, or by
@@ -784,15 +785,23 @@ class PCM(Rasch):
             a UserWarning, and listed in convergence['dropped_items'] with the
             reason. estimation='pair' keeps them.
 
+        solver : {None, 'newton', 'chord', 'lbfgs'}, default None
+            estimation='cml' only: how the maximum is found (all reach the
+            same estimates). 'newton': exact Hessian at each step. 'chord':
+            one exact Hessian at the start, then steps with it held fixed and
+            the exact gradient (the Hessian for standard errors is computed
+            by std_errors()). 'lbfgs': quasi-Newton with the exact gradient.
+            None: 'chord'.
+
         Attributes set
         --------------
         estimation : str
             The estimation method used.
         convergence : dict or None
             estimation='cml': iterations, whether the fit converged, the
-            solver ('newton', or 'lbfgs' above 500 thresholds), the
-            conditional log-likelihood and the items dropped ({item: reason}).
-            None for 'pair'.
+            solver used, the number of Hessians computed, the conditional
+            log-likelihood and the items dropped ({item: reason}). None for
+            'pair'.
         cml_dropped_responses : pandas.DataFrame
             estimation='cml': responses to the items dropped; empty if none.
         thresholds_uncentred : dict
@@ -822,8 +831,10 @@ class PCM(Rasch):
             matrix_power=matrix_power,
             log_lik_tol=log_lik_tol,
             estimation=estimation,
+            solver=solver,
         )
         self.estimation = estimation
+        self._cml_solver = self._check_cml_solver(solver, estimation)
         self.convergence = None
 
         if len(self.responses.columns) == 1:
@@ -949,6 +960,7 @@ class PCM(Rasch):
             b0 - b0.mean(),
             list(Ks),
             fixed_hessian=getattr(self, "_cml_fixed_hessian", None),
+            solver=getattr(self, "_cml_solver", None),
         )
         self.threshold_list = pd.Series(
             fit["b"],
@@ -962,6 +974,7 @@ class PCM(Rasch):
             solver=fit["solver"],
             log_likelihood=fit["ll"],
             dropped_items=dropped,
+            hessians=fit["hessians"],
         )
         if not fit["converged"]:
             warnings.warn(
@@ -1728,6 +1741,10 @@ class PCM(Rasch):
         samples = []
         collector = _BootstrapWarnings()
         no_cml = 0
+        # CML resamples share the design: reuse the observed Hessian as a fixed Newton matrix
+        H_fix = (
+            self._cml_observed_hessian() if cal_kw.get("estimation") == "cml" else None
+        )
         for _ in range(no_of_samples):
             with collector.resample():
                 sample = PCM(
@@ -1737,6 +1754,9 @@ class PCM(Rasch):
                 with warnings.catch_warnings():
                     warnings.filterwarnings(
                         "ignore", message="CML estimates do not exist"
+                    )
+                    sample._cml_fixed_hessian = (
+                        H_fix  # chord: reuse the observed Hessian
                     )
                     sample.calibrate(robust=robust, **cal_kw)
                 if len(sample.item_names) < len(self.item_names):

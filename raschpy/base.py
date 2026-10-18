@@ -2479,6 +2479,35 @@ class Rasch:
         kw.update({k: v for k, v in passed.items() if v is not None})
         return kw
 
+    @staticmethod
+    def _check_cml_solver(solver, estimation):
+        """calibrate(solver=): validated; applies to estimation='cml' only (else ignored, with a warning)."""
+        from raschpy import _esf
+
+        if solver not in _esf.SOLVERS:
+            raise ValueError(f"solver must be one of {_esf.SOLVERS}, got {solver!r}.")
+        if solver is not None and estimation != "cml":
+            warnings.warn(
+                f"solver={solver!r} applies to estimation='cml' only and is ignored with "
+                f"estimation={estimation!r}.",
+                UserWarning,
+                stacklevel=3,
+            )
+            return None
+        return solver
+
+    def _cml_observed_hessian(self):
+        """Hessian of the conditional log-likelihood at the CML estimates (computed if not kept)."""
+        from raschpy import _esf
+
+        H = getattr(self, "_cml_hessian", None)
+        if H is None:
+            items = list(self.item_names)
+            X = np.array(self.responses.loc[:, items], dtype=np.float64)
+            H = _esf.cond_loglik(X, self._cml_threshold_list(items), hessian=True)[2]
+            self._cml_hessian = H
+        return H
+
     def _cml_drop_items(self, Ks, per_item_categories=True):
         """
         Before a CML fit (SLM, PCM, RSM): remove the items whose CML estimates

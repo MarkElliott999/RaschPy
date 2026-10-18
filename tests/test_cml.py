@@ -284,3 +284,35 @@ def test_martin_lof_monte_carlo():
     assert r1["Monte Carlo samples"] + r1["Monte Carlo samples skipped"] == 20
     with pytest.raises(ValueError, match="p_method"):
         m.global_fit(method="martin-lof", p_method="exact")
+
+
+# ---------------------------------------------------------------- solvers
+
+@pytest.mark.parametrize("cls,name", [(SLM, "slm_missing"), (PCM, "pcm_missing"), (RSM, "rsm_missing")])
+def test_cml_solvers_reach_the_same_maximum(cls, name):
+    X = pd.read_csv(os.path.join(DATA, f"cml_{name}.csv"))
+    fits = {}
+    for solver in ("newton", "chord", "lbfgs"):
+        m = cls(X)
+        m.calibrate(estimation="cml", solver=solver)
+        m.std_errors()
+        fits[solver] = m
+        assert m.convergence["converged"] and m.convergence["solver"] == solver
+    ref = fits["newton"]
+    for solver in ("chord", "lbfgs"):
+        m = fits[solver]
+        assert m.convergence["log_likelihood"] == pytest.approx(ref.convergence["log_likelihood"], abs=1e-6)
+        np.testing.assert_allclose(m.items.values, ref.items.values, atol=1e-4)
+        np.testing.assert_allclose(np.asarray(m.item_se), np.asarray(ref.item_se), atol=1e-5)
+    assert fits["chord"].convergence["hessians"] == 1
+
+
+def test_solver_rules():
+    X = pd.read_csv(os.path.join(DATA, "cml_slm_complete.csv"))
+    m = SLM(X)
+    with pytest.raises(ValueError, match="solver must be"):
+        m.calibrate(estimation="cml", solver="bfgs")
+    with pytest.warns(UserWarning, match="applies to estimation='cml' only"):
+        m.calibrate(solver="chord")
+    m.calibrate(estimation="cml", solver="chord")
+    assert m._calibration_kw()["solver"] == "chord"

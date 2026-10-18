@@ -825,6 +825,7 @@ class RSM(Rasch):
         threshold_method=None,
         no_info="mean",
         estimation=None,
+        solver=None,
     ):
         """
         Calibrate item locations and the shared Rasch-Andrich thresholds.
@@ -936,15 +937,23 @@ class RSM(Rasch):
             'pair-cpat' only; other values passed with 'cp-full-rcl',
             'cpat-rcl' or 'cml' are ignored, with a UserWarning.
 
+        solver : {None, 'newton', 'chord', 'lbfgs'}, default None
+            estimation='cml' only: how the maximum is found (all reach the
+            same estimates). 'newton': exact Hessian at each step. 'chord':
+            one exact Hessian at the start, then steps with it held fixed and
+            the exact gradient (the Hessian for standard errors is computed
+            by std_errors()). 'lbfgs': quasi-Newton with the exact gradient.
+            None: 'chord'.
+
         Attributes set
         --------------
         estimation : str
             The estimation method used.
         convergence : dict or None
             estimation='cp-full-rcl' or 'cpat-rcl': Newton-Raphson iterations and
-            whether the fit converged. 'cml': also the solver ('newton', or
-            'lbfgs' above 500 parameters), the conditional log-likelihood and
-            the items dropped ({item: reason}). None for 'pair-cpat'.
+            whether the fit converged. 'cml': also the solver used, the number
+            of Hessians computed, the conditional log-likelihood and the items
+            dropped ({item: reason}). None for 'pair-cpat'.
         cml_dropped_responses : pandas.DataFrame
             estimation='cml': responses to the items dropped; empty if none.
         items : pandas.Series
@@ -1003,7 +1012,9 @@ class RSM(Rasch):
             threshold_constant=threshold_constant,
             no_info=no_info,
             estimation=estimation,
+            solver=solver,
         )
+        self._cml_solver = self._check_cml_solver(solver, estimation)
         if estimation == "pair-cpat":
             self._calibrate_args.update(
                 method=method,
@@ -1158,6 +1169,7 @@ class RSM(Rasch):
             b0,
             [K] * len(names),
             fixed_hessian=getattr(self, "_cml_fixed_hessian", None),
+            solver=getattr(self, "_cml_solver", None),
         )
         B = fit["b"].reshape(len(names), K)
         loc = B.mean(axis=1)
@@ -1171,6 +1183,7 @@ class RSM(Rasch):
             solver=fit["solver"],
             log_likelihood=fit["ll"],
             dropped_items=dropped,
+            hessians=fit["hessians"],
         )
         if not fit["converged"]:
             warnings.warn(
@@ -2117,6 +2130,10 @@ class RSM(Rasch):
         samples = []
         collector = _BootstrapWarnings()
         no_cml = 0
+        # CML resamples share the design: reuse the observed Hessian as a fixed Newton matrix
+        H_fix = (
+            self._cml_observed_hessian() if cal_kw.get("estimation") == "cml" else None
+        )
         for _ in range(no_of_samples):
             with collector.resample():
                 sample = RSM(
@@ -2127,6 +2144,9 @@ class RSM(Rasch):
                     with warnings.catch_warnings():
                         warnings.filterwarnings(
                             "ignore", message="CML estimates do not exist"
+                        )
+                        sample._cml_fixed_hessian = (
+                            H_fix  # chord: reuse the observed Hessian
                         )
                         sample.calibrate(**cal_kw)
                 except ValueError as e:

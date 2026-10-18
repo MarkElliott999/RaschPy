@@ -352,37 +352,80 @@ NEWTON_MAX = (
 )
 
 
+SOLVERS = (None, "newton", "chord", "lbfgs")
+
+
 def fit_cml(
-    X, A, b0, Ks, tol=1e-7, max_iter=100, newton_max=NEWTON_MAX, fixed_hessian=None
+    X,
+    A,
+    b0,
+    Ks,
+    tol=1e-7,
+    max_iter=100,
+    newton_max=NEWTON_MAX,
+    fixed_hessian=None,
+    solver=None,
 ):
     """
     Conditional maximum likelihood: maximise cond_loglik over thresholds b = A @ theta, starting from b0.
 
     A (p, q) maps the free parameters theta to the stacked thresholds (it carries the identification, e.g. a
-    zero-sum basis). With q <= newton_max: Newton-Raphson on the exact Hessian, halving the step while the
-    log-likelihood falls, until the largest change in b is below tol. Otherwise: L-BFGS-B with the exact
-    gradient, and the Hessian left to be computed when standard errors are wanted.
+    zero-sum basis). Every solver stops when the largest change in b is below tol, so all reach the same
+    maximum; they differ in cost:
 
-    fixed_hessian (p, p): the chord method instead: Newton steps with this matrix (e.g. the Hessian of a fit to
-    data of the same design, at nearby estimates) and the exact gradient at each step, so no Hessian is
-    computed; it converges to the same maximum (the stopping rule uses the exact gradient's step), and falls
-    back to Newton-Raphson if it does not converge in max_iter steps.
+    - 'newton': Newton-Raphson on the exact Hessian at each step (step halved while the log-likelihood falls).
+    - 'chord': one exact Hessian at the start, then Newton steps with it as a fixed matrix and the exact
+      gradient at each step (no further Hessians). Falls back to 'newton' (q <= newton_max) or 'lbfgs' if
+      it does not converge in max_iter steps.
+    - 'lbfgs': L-BFGS-B with the exact gradient.
+    - None: 'chord' (fastest, or within about 10% of the fastest, in timing tests from 30 to 1,000
+      items, complete and missing data).
 
-    Returns a dict: b, theta, ll, iterations, converged, solver ('newton', 'lbfgs' or 'chord'), max_gradient
-    (largest |A' grad| at the end), hessian (p, p) at b for Newton, else None.
+    fixed_hessian (p, p), e.g. the Hessian of a fit to data of the same design at nearby estimates: the
+    chord method with this matrix, so no Hessian is computed at all.
+
+    The chord method stops at tol / 100 (its convergence is linear) for a final gradient comparable to
+    Newton-Raphson's.
+
+    Returns a dict: b, theta, ll, iterations, converged, solver (the one that finished), max_gradient
+    (largest |A' grad| at the end), hessian ((p, p) at b for 'newton', else None), hessians (the number of
+    Hessians computed).
     """
     from scipy.linalg import cho_factor, cho_solve, LinAlgError
     from scipy.optimize import minimize
+
+    if solver not in SOLVERS:
+        raise ValueError(f"solver must be one of {SOLVERS}, got {solver!r}.")
 
     def unstack(b):
         off = np.concatenate([[0], np.cumsum(Ks)])
         return [b[off[i] : off[i + 1]] for i in range(len(Ks))]
 
+    def result(theta, ll, g, it, converged, name, H, hessians):
+        return dict(
+            b=A @ theta,
+            theta=theta,
+            ll=ll,
+            iterations=it,
+            converged=converged,
+            solver=name,
+            max_gradient=float(np.max(np.abs(A.T @ g))) if A.shape[1] else 0.0,
+            hessian=H,
+            hessians=hessians,
+        )
+
     theta = np.linalg.lstsq(A, np.asarray(b0, float), rcond=None)[0]
     q = A.shape[1]
+    hessians = 0
+    H0 = None
     if fixed_hessian is not None and fixed_hessian.shape[0] == A.shape[0]:
+        H0 = fixed_hessian
+    elif solver in (None, "chord"):
+        _, _, H0 = cond_loglik(X, unstack(A @ theta), hessian=True)
+        hessians += 1
+    if H0 is not None:
         try:
-            cf = cho_factor(-(A.T @ fixed_hessian @ A))
+            cf = cho_factor(-(A.T @ H0 @ A))
         except LinAlgError:
             cf = None
         if cf is not None:
@@ -398,19 +441,13 @@ def fit_cml(
                     s /= 2
                 change = np.max(np.abs(A @ (th_new - theta)))
                 theta, ll, g = th_new, ll_new, g_new
-                if change < tol:
-                    return dict(
-                        b=A @ theta,
-                        theta=theta,
-                        ll=ll,
-                        iterations=it,
-                        converged=True,
-                        solver="chord",
-                        max_gradient=float(np.max(np.abs(A.T @ g))),
-                        hessian=None,
-                    )
-    if q <= newton_max:
+                # linear convergence: stop 100x tighter than Newton for a comparable final gradient
+                if change < tol * 1e-2:
+                    return result(theta, ll, g, it, True, "chord", None, hessians)
+        solver = "fallback"  # chord did not converge (or the matrix was unusable)
+    if solver == "newton" or (solver == "fallback" and q <= newton_max):
         ll, g, H = cond_loglik(X, unstack(A @ theta), hessian=True)
+        hessians += 1
         converged, it = False, 0
         while it < max_iter:
             gt, Ht = A.T @ g, A.T @ H @ A
@@ -422,6 +459,7 @@ def fit_cml(
             while True:
                 th_new = theta + s * step
                 ll_new, g_new, H_new = cond_loglik(X, unstack(A @ th_new), hessian=True)
+                hessians += 1
                 if ll_new >= ll - 1e-12 * abs(ll) or s < 1e-6:
                     break
                 s /= 2
@@ -431,16 +469,7 @@ def fit_cml(
             if change < tol:
                 converged = True
                 break
-        return dict(
-            b=A @ theta,
-            theta=theta,
-            ll=ll,
-            iterations=it,
-            converged=converged,
-            solver="newton",
-            max_gradient=float(np.max(np.abs(A.T @ g))) if q else 0.0,
-            hessian=H,
-        )
+        return result(theta, ll, g, it, converged, "newton", H, hessians)
 
     def neg(th):
         ll, g, _ = cond_loglik(X, unstack(A @ th))
@@ -453,16 +482,9 @@ def fit_cml(
         method="L-BFGS-B",
         options=dict(maxiter=50 * max_iter, maxcor=20, ftol=1e-15, gtol=1e-8),
     )
-    _, gt = neg(res.x)
-    return dict(
-        b=A @ res.x,
-        theta=res.x,
-        ll=-res.fun,
-        iterations=int(res.nit),
-        converged=bool(res.success),
-        solver="lbfgs",
-        max_gradient=float(np.max(np.abs(gt))),
-        hessian=None,
+    ll, g, _ = cond_loglik(X, unstack(A @ res.x))
+    return result(
+        res.x, ll, g, int(res.nit), bool(res.success), "lbfgs", None, hessians
     )
 
 

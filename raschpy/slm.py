@@ -321,6 +321,7 @@ class SLM(Rasch):
         log_lik_tol=0.000001,
         robust=False,
         estimation="pair",
+        solver=None,
     ):
         """
         Estimate item locations using Choppin's pairwise matrix method, or by
@@ -387,13 +388,21 @@ class SLM(Rasch):
             listed in convergence['dropped_items']; estimation='pair' keeps
             them.
 
+        solver : {None, 'newton', 'chord', 'lbfgs'}, default None
+            estimation='cml' only: how the maximum is found (all reach the
+            same estimates). 'newton': exact Hessian at each step. 'chord':
+            one exact Hessian at the start, then steps with it held fixed and
+            the exact gradient (the Hessian for standard errors is computed
+            by std_errors()). 'lbfgs': quasi-Newton with the exact gradient.
+            None: 'chord'.
+
         Attributes set
         --------------
         estimation : str
             The estimation method used.
         convergence : dict or None
             estimation='cml': iterations, whether the fit converged, the
-            solver ('newton', or 'lbfgs' above 500 items), the conditional
+            solver used, the number of Hessians computed, the conditional
             log-likelihood and the items dropped ({item: reason}). None for
             'pair'.
         cml_dropped_responses : pandas.DataFrame
@@ -418,8 +427,10 @@ class SLM(Rasch):
             matrix_power=matrix_power,
             log_lik_tol=log_lik_tol,
             estimation=estimation,
+            solver=solver,
         )
         self.estimation = estimation
+        self._cml_solver = self._check_cml_solver(solver, estimation)
         self.convergence = None
 
         if len(self.responses.columns) == 1:
@@ -527,6 +538,7 @@ class SLM(Rasch):
             b0 - b0.mean(),
             [1] * I,
             fixed_hessian=getattr(self, "_cml_fixed_hessian", None),
+            solver=getattr(self, "_cml_solver", None),
         )
         self.items = pd.Series(fit["b"], index=names)
         self._cml_hessian = fit["hessian"]
@@ -536,6 +548,7 @@ class SLM(Rasch):
             solver=fit["solver"],
             log_likelihood=fit["ll"],
             dropped_items=dropped,
+            hessians=fit["hessians"],
         )
         if not fit["converged"]:
             warnings.warn(
@@ -914,6 +927,10 @@ class SLM(Rasch):
         samples = []
         collector = _BootstrapWarnings()
         no_cml = 0
+        # CML resamples share the design: reuse the observed Hessian as a fixed Newton matrix
+        H_fix = (
+            self._cml_observed_hessian() if cal_kw.get("estimation") == "cml" else None
+        )
         for _ in range(no_of_samples):
             with collector.resample():
                 sample = SLM(
@@ -923,6 +940,9 @@ class SLM(Rasch):
                 with warnings.catch_warnings():
                     warnings.filterwarnings(
                         "ignore", message="CML estimates do not exist"
+                    )
+                    sample._cml_fixed_hessian = (
+                        H_fix  # chord: reuse the observed Hessian
                     )
                     sample.calibrate(robust=robust, **cal_kw)
                 if len(sample.item_names) < len(self.item_names):
