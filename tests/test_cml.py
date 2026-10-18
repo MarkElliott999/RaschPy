@@ -228,3 +228,59 @@ def test_rsm_cml_raises_when_a_category_is_unused_everywhere():
         warnings.simplefilter("ignore")
         with pytest.raises(ValueError, match="category 2 is unused"):
             m.calibrate(estimation="cml")
+
+
+# ---------------------------------------------------------------- Andersen LR (global_fit)
+
+@pytest.mark.parametrize("cls,name", [(SLM, "slm_complete"), (PCM, "pcm_complete"), (RSM, "rsm_complete")])
+def test_andersen_lr_is_the_conditional_likelihood_ratio(cls, name):
+    X = pd.read_csv(os.path.join(DATA, f"cml_{name}.csv"))
+    m = cls(X)
+    m.calibrate(estimation="cml")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = m.global_fit(method="andersen-lr", split="random", seed=3)
+    groups = m._global_fit_groups("random", None, 3)
+    items = [c for c in m.item_names if c not in m.global_fit_excluded]
+    fits = [m._global_fit_subset(groups[n], items=items) for n in groups]
+    pooled = m._global_fit_subset(groups["A"].append(groups["B"]), items=items)
+    lr = 2 * (sum(f.convergence["log_likelihood"] for f in fits) - pooled.convergence["log_likelihood"])
+    assert r["statistic"] == pytest.approx(lr, abs=1e-8) and r["statistic"] >= 0
+    assert r["df"] == pooled._cml_free_parameters()
+
+
+def test_andersen_lr_needs_cml():
+    m = SLM(pd.read_csv(os.path.join(DATA, "cml_slm_complete.csv")))
+    m.calibrate()
+    with pytest.raises(ValueError, match="calibrate\\(estimation='cml'\\)"):
+        m.global_fit(method="andersen-lr")
+
+
+# ---------------------------------------------------------------- Martin-Lof (global_fit)
+
+@pytest.mark.parametrize(
+    "cls,name,lr,df",
+    [
+        (SLM, "slm_complete", 62.5736, 55),   # eRm::MLoef: 62.5736, df 55
+        (PCM, "pcm_complete", 149.356, 224),  # eRm::MLoef: 149.356, df 224
+        (RSM, "rsm_complete", 193.0884, 226),  # eRm::MLoef: 193.0884, df 224 (omits the K - 1 extra widths)
+    ],
+)
+def test_martin_lof_matches_erm(cls, name, lr, df):
+    X = pd.read_csv(os.path.join(DATA, f"cml_{name}.csv"))
+    m = cls(X)
+    m.calibrate(estimation="cml")
+    r = m.global_fit(method="martin-lof", split=list(X.columns[: X.shape[1] // 2]))
+    assert r["statistic"] == pytest.approx(lr, abs=1e-3) and r["df"] == df
+
+
+def test_martin_lof_monte_carlo():
+    X = pd.read_csv(os.path.join(DATA, "cml_slm_complete.csv"))
+    m = SLM(X)
+    m.calibrate(estimation="cml")
+    r1 = m.global_fit(method="martin-lof", p_method="monte-carlo", no_of_samples=20, seed=4)
+    r2 = m.global_fit(method="martin-lof", p_method="monte-carlo", no_of_samples=20, seed=4)
+    assert r1["p-value"] == r2["p-value"] and 0 < r1["p-value"] <= 1
+    assert r1["Monte Carlo samples"] + r1["Monte Carlo samples skipped"] == 20
+    with pytest.raises(ValueError, match="p_method"):
+        m.global_fit(method="martin-lof", p_method="exact")

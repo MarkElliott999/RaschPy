@@ -943,7 +943,13 @@ class PCM(Rasch):
             ]
         )
         A = _rcl.zero_sum_basis(len(b0))
-        fit = _esf.fit_cml(X, A, b0 - b0.mean(), list(Ks))
+        fit = _esf.fit_cml(
+            X,
+            A,
+            b0 - b0.mean(),
+            list(Ks),
+            fixed_hessian=getattr(self, "_cml_fixed_hessian", None),
+        )
         self.threshold_list = pd.Series(
             fit["b"],
             index=[f"{n}_{k}" for n, K in zip(names, Ks) for k in range(1, K + 1)],
@@ -3292,15 +3298,40 @@ class PCM(Rasch):
     # Residual correlation / PCA
     # ------------------------------------------------------------------
 
-    def _global_fit_subset(self, idx):
-        """Calibrated PCM on a subset of persons (global_fit())."""
+    def _item_locations_for_split(self):
+        """Central item locations (global_fit(method='martin-lof', split='median'))."""
+        return self.items
+
+    def _cml_max_scores(self, items):
+        """Maximum score of each item (Martin-Lof score tables)."""
+        return self.max_score_vector.reindex(items).to_numpy(dtype=float)
+
+    def _cml_threshold_list(self, items):
+        """Fitted uncentred thresholds per item, as cond_loglik takes them."""
+        return [
+            self.thresholds_uncentred.loc[n].dropna().values.astype(float)
+            for n in items
+        ]
+
+    def _cml_free_parameters(self):
+        """Free parameters of the CML fit (uncentred thresholds, centred)."""
+        return int(self.max_score_vector.reindex(self.item_names).sum()) - 1
+
+    def _global_fit_subset(self, idx, items=None, cml_hessian=None):
+        """Calibrated PCM on a subset of persons (global_fit()); items restricts
+        the items (all by default)."""
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            resp = self._answered_items(self.responses.loc[idx])
+            resp = self._answered_items(
+                self.responses.loc[idx, items if items is not None else slice(None)]
+            )
             m = PCM(
                 resp,
                 max_score_vector=self.max_score_vector.loc[resp.columns].tolist(),
                 validate=False,
+            )
+            m._cml_fixed_hessian = (
+                cml_hessian  # chord method for CML (Monte Carlo replicates)
             )
             m.calibrate(**self._calibration_kw())
         return m

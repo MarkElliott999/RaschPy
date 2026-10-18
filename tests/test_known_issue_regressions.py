@@ -506,7 +506,7 @@ def test_global_fit_wald():
     for SLM, RSM and PCM. Under the null it should mostly not reject; with
     large DIF between exogenous groups it should reject; parameters next to a
     category unused in one group are excluded and reported; andersen_lr_test
-    is deprecated, and method='andersen-lr' needs an exogenous split."""
+    is deprecated, and method='andersen-lr' needs CML estimates."""
     import numpy as np
     from raschpy.simulation import SLM_Sim, RSM_Sim, PCM_Sim
     I = 12; items = np.linspace(-1.5, 1.5, I); shifted = items.copy(); shifted[[2, 8]] += 1.0
@@ -534,7 +534,7 @@ def test_global_fit_wald():
             r0 = m.global_fit(split="random", seed=3, se_correction=None)
         assert r0["df"] == r["df"]
         assert 1.0 <= r0["statistic"] / r["statistic"] < 1.2
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(ValueError, match="estimation='cml'"):
         m.global_fit(method="andersen-lr", split="exogenous", covariate="G")
     with pytest.raises(ValueError):
         m.global_fit(se_correction="hc1")

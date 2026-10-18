@@ -133,3 +133,46 @@ def test_invalid_responses_raise():
     X[0, 0] = 3
     with pytest.raises(ValueError):
         _esf.cond_loglik(X, b)
+
+
+def test_sample_given_totals_matches_conditional_distribution():
+    from scipy.stats import chi2
+
+    rng = np.random.default_rng(2)
+    Ks, t = [2, 2, 2, 2], 3
+    b = [np.sort(rng.normal(0, 1, K)) for K in Ks]
+    X = np.tile(np.array([2, 1, 0, 0], float), (60000, 1))  # every person: total 3
+    S = _esf.sample_given_totals(X, b, rng)
+    assert np.all(S.sum(1) == t)
+    le = [np.concatenate([[0.0], -np.cumsum(x)]) for x in b]
+    pats = [c for c in itertools.product(*[range(K + 1) for K in Ks]) if sum(c) == t]
+    lp = np.array([sum(le[i][c] for i, c in enumerate(cs)) for cs in pats])
+    p = np.exp(lp - logsumexp(lp))
+    counts = np.array([np.sum(np.all(S == np.array(cs), axis=1)) for cs in pats])
+    stat = ((counts - p * len(S)) ** 2 / (p * len(S))).sum()
+    assert chi2.sf(stat, len(pats) - 1) > 0.001
+
+
+def test_sample_given_totals_keeps_missingness_and_totals():
+    rng = np.random.default_rng(3)
+    b, X = _design([1, 3, 2, 4], 200, 0.3, 11)
+    S = _esf.sample_given_totals(X, b, rng)
+    np.testing.assert_array_equal(np.isnan(S), np.isnan(X))
+    np.testing.assert_array_equal(np.nansum(S, 1), np.nansum(X, 1))
+
+
+def test_fit_cml_chord_reaches_the_newton_maximum():
+    from raschpy import _rcl
+
+    b, X = _design([1, 3, 2, 4, 2, 2], 400, 0.2, 12)
+    Ks = [len(x) for x in b]
+    p = sum(Ks)
+    A = _rcl.zero_sum_basis(p)
+    b0 = np.zeros(p)
+    newton = _esf.fit_cml(X, A, b0, Ks)
+    # a fixed matrix from nearby estimates (the start), as for same-design refits
+    _, _, H0 = _esf.cond_loglik(X, [np.zeros(K) for K in Ks], hessian=True)
+    chord = _esf.fit_cml(X, A, b0, Ks, fixed_hessian=H0)
+    assert chord["solver"] == "chord" and chord["converged"] and chord["hessian"] is None
+    np.testing.assert_allclose(chord["b"], newton["b"], atol=1e-6)
+    assert chord["ll"] == pytest.approx(newton["ll"], abs=1e-9)

@@ -352,7 +352,9 @@ NEWTON_MAX = (
 )
 
 
-def fit_cml(X, A, b0, Ks, tol=1e-7, max_iter=100, newton_max=NEWTON_MAX):
+def fit_cml(
+    X, A, b0, Ks, tol=1e-7, max_iter=100, newton_max=NEWTON_MAX, fixed_hessian=None
+):
     """
     Conditional maximum likelihood: maximise cond_loglik over thresholds b = A @ theta, starting from b0.
 
@@ -361,8 +363,13 @@ def fit_cml(X, A, b0, Ks, tol=1e-7, max_iter=100, newton_max=NEWTON_MAX):
     log-likelihood falls, until the largest change in b is below tol. Otherwise: L-BFGS-B with the exact
     gradient, and the Hessian left to be computed when standard errors are wanted.
 
-    Returns a dict: b, theta, ll, iterations, converged, solver ('newton' or 'lbfgs'), max_gradient (largest
-    |A' grad| at the end), hessian (p, p) at b for Newton, else None.
+    fixed_hessian (p, p): the chord method instead: Newton steps with this matrix (e.g. the Hessian of a fit to
+    data of the same design, at nearby estimates) and the exact gradient at each step, so no Hessian is
+    computed; it converges to the same maximum (the stopping rule uses the exact gradient's step), and falls
+    back to Newton-Raphson if it does not converge in max_iter steps.
+
+    Returns a dict: b, theta, ll, iterations, converged, solver ('newton', 'lbfgs' or 'chord'), max_gradient
+    (largest |A' grad| at the end), hessian (p, p) at b for Newton, else None.
     """
     from scipy.linalg import cho_factor, cho_solve, LinAlgError
     from scipy.optimize import minimize
@@ -373,6 +380,35 @@ def fit_cml(X, A, b0, Ks, tol=1e-7, max_iter=100, newton_max=NEWTON_MAX):
 
     theta = np.linalg.lstsq(A, np.asarray(b0, float), rcond=None)[0]
     q = A.shape[1]
+    if fixed_hessian is not None and fixed_hessian.shape[0] == A.shape[0]:
+        try:
+            cf = cho_factor(-(A.T @ fixed_hessian @ A))
+        except LinAlgError:
+            cf = None
+        if cf is not None:
+            ll, g, _ = cond_loglik(X, unstack(A @ theta))
+            for it in range(1, max_iter + 1):
+                step = cho_solve(cf, A.T @ g)
+                s = 1.0
+                while True:
+                    th_new = theta + s * step
+                    ll_new, g_new, _ = cond_loglik(X, unstack(A @ th_new))
+                    if ll_new >= ll - 1e-12 * abs(ll) or s < 1e-6:
+                        break
+                    s /= 2
+                change = np.max(np.abs(A @ (th_new - theta)))
+                theta, ll, g = th_new, ll_new, g_new
+                if change < tol:
+                    return dict(
+                        b=A @ theta,
+                        theta=theta,
+                        ll=ll,
+                        iterations=it,
+                        converged=True,
+                        solver="chord",
+                        max_gradient=float(np.max(np.abs(A.T @ g))),
+                        hessian=None,
+                    )
     if q <= newton_max:
         ll, g, H = cond_loglik(X, unstack(A @ theta), hessian=True)
         converged, it = False, 0
@@ -499,3 +535,49 @@ def screen_items(X, Ks, per_item_categories=True):
                     reasons[int(i)] = "not connected"
             continue
         return keep, reasons
+
+
+def sample_given_totals(X, thresholds, rng):
+    """
+    Simulate responses from the Rasch model given each person's total over the items they responded to:
+    the conditional distribution P(x | r) = prod_i eps[i, x_i] / gamma_r does not involve the person
+    location, so it is sampled exactly, item by item, using the suffix ESFs of the person's items:
+    P(x_j = k | items j.. sum to t) = eps[j, k] gamma^(j+1..)_{t-k} / gamma^(j..)_t (log space).
+    The missingness pattern and every person's total are those of X. Returns an array like X.
+    """
+    b_list = _as_threshold_list(thresholds)
+    X = np.asarray(X, float)
+    Ks = np.array([len(x) for x in b_list])
+    Kmax = int(Ks.max())
+    LE = np.full((len(b_list), Kmax + 1), NEG)
+    for i, x in enumerate(b_list):
+        LE[i, : Ks[i] + 1] = np.concatenate([[0.0], -np.cumsum(x)])
+    obs = ~np.isnan(X)
+    out = np.full(X.shape, np.nan)
+    keys, inv = _patterns(obs)
+    totals = np.where(obs, X, 0).sum(1).astype(np.int64)
+    kk = np.arange(Kmax + 1)
+    for g, key in enumerate(keys):
+        rows = np.nonzero(inv == g)[0]
+        items = np.nonzero(key)[0]
+        if not len(items):
+            continue
+        le = LE[items]  # (n, K1)
+        n = len(items)
+        suf = [None] * (n + 1)
+        suf[n] = np.zeros(1)
+        for j in range(n - 1, -1, -1):
+            suf[j] = _logconv_small(suf[j + 1], le[j])
+        t = totals[rows].copy()
+        for j in range(n):
+            nxt = suf[j + 1]
+            idx = t[:, None] - kk[None, :]  # remaining total after x_j = k
+            ok = (idx >= 0) & (idx < len(nxt))
+            lp = np.where(ok, le[j][None, :] + nxt[np.clip(idx, 0, len(nxt) - 1)], NEG)
+            lp = lp - _lse(lp, axis=1)[:, None]
+            with np.errstate(invalid="ignore"):
+                p = np.nan_to_num(np.exp(lp))
+            x = (p.cumsum(1) > rng.random((len(rows), 1))).argmax(1)
+            out[rows, items[j]] = x
+            t = t - x
+    return out

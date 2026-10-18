@@ -1,5 +1,6 @@
 import colorsys
 import re
+import copy
 import warnings
 from contextlib import contextmanager
 import numpy as np
@@ -180,6 +181,9 @@ def _save_table(table, filename, file_format="csv"):
         table.to_excel(f"{filename}.xlsx")
     else:
         raise ValueError(f"file_format must be 'csv' or 'xlsx', not {file_format!r}.")
+
+
+MARTIN_LOF_SPARSE = 0.25  # share of score cells with < 5 persons above which the chi-square p is conservative
 
 
 class Rasch:
@@ -2495,6 +2499,12 @@ class Rasch:
         if not dropped:
             return dropped
         kept = [n for n, k in zip(names, keep) if k]
+        if len(kept) < 2:
+            raise ValueError(
+                f"CML estimates do not exist for these data: {len(kept)} item(s) would remain "
+                f"after dropping {dict(list(dropped.items())[:10])}. Use the default "
+                f"estimation, whose smoothing constant gives finite estimates."
+            )
         self.responses = self.responses.loc[:, kept]
         empty = self.responses.index[self.responses.isnull().all(axis=1)]
         if len(empty):
@@ -3610,7 +3620,7 @@ class Rasch:
     # Global fit: parameter invariance across person groups
     # ------------------------------------------------------------------
 
-    _GLOBAL_FIT_METHODS = ("wald", "andersen-lr")
+    _GLOBAL_FIT_METHODS = ("wald", "andersen-lr", "martin-lof")
     _GLOBAL_FIT_SPLITS = ("score", "person_location", "random", "exogenous")
 
     def _global_fit_groups(self, split, covariate, seed, split_prop=0.5):
@@ -3647,6 +3657,302 @@ class Rasch:
                 f"{covariate!r} has {len(levels)}."
             )
         return {str(lv): resp.index[(values == lv).values] for lv in levels}
+
+    @staticmethod
+    def _martin_lof_stat(resp, A, fA, fB, f):
+        """Martin-Lof LR and df from the subset and joint CML fits and the responses (A + B columns)."""
+        X = resp.to_numpy(dtype=float)
+        obs = ~np.isnan(X)
+        nA = len(A)
+        maxes = f._cml_max_scores(list(resp.columns))
+        Xi = np.where(obs, X, 0)
+        r, s_ = Xi[:, :nA].sum(1), Xi[:, nA:].sum(1)
+        MA, MB = obs[:, :nA] @ maxes[:nA], obs[:, nA:] @ maxes[nA:]
+        keys = np.unique(obs, axis=0, return_inverse=True)[1].ravel()
+        sat1 = sat0 = 0.0
+        df_scores = 0
+        sparse = cells = 0
+        for key in np.unique(keys):
+            g = keys == key
+            Ng = g.sum()
+            _, n_rs = np.unique(np.c_[r[g], s_[g]], axis=0, return_counts=True)
+            n_cells = int((MA[g][0] + 1) * (MB[g][0] + 1))
+            cells += n_cells
+            sparse += n_cells - int(
+                (n_rs >= 5).sum()
+            )  # cells with fewer than 5 persons
+            _, n_t = np.unique(r[g] + s_[g], return_counts=True)
+            sat1 += float((n_rs * np.log(n_rs / Ng)).sum())
+            sat0 += float((n_t * np.log(n_t / Ng)).sum())
+            df_scores += int(MA[g][0] * MB[g][0])
+        ll_A, ll_B, ll = (m.convergence["log_likelihood"] for m in (fA, fB, f))
+        LR = max(2.0 * (ll_A + ll_B - ll + sat1 - sat0), 0.0)
+        df = (
+            df_scores
+            + fA._cml_free_parameters()
+            + fB._cml_free_parameters()
+            - f._cml_free_parameters()
+        )
+        return LR, df, (ll_A, ll_B, ll), int(len(np.unique(keys))), sparse / cells
+
+    def _martin_lof(
+        self,
+        split,
+        alpha,
+        p_method="chi2",
+        no_of_samples=500,
+        seed=None,
+        mc_exceedances=None,
+    ):
+        """
+        global_fit(method='martin-lof'): Martin-Lof's test of unidimensionality
+        for two item subsets A and B,
+        LR = 2 (ll_A + ll_B - ll + sum n_rs log(n_rs / N) - sum n_t log(n_t / N)),
+        with ll the CML log-likelihoods of A, B and all items, n_rs the persons
+        with subtotals r on A and s on B and n_t those with total t, both
+        within each missingness pattern (N its persons);
+        df = sum over patterns of M_A M_B, plus q_A + q_B - q (free parameters).
+        Items without CML estimates in their subset's fit or the joint fit are
+        left out (repeated until stable).
+        """
+        names = list(self.item_names)
+        if isinstance(split, str):
+            if split != "median":
+                raise ValueError(
+                    f"For method='martin-lof', split must be 'median' or a list of the "
+                    f"items in the first subset, got {split!r}."
+                )
+            order = self._item_locations_for_split().reindex(names).rank(method="first")
+            A = [n for n in names if order[n] <= len(names) // 2]
+            label = "median"
+        else:
+            A = [n for n in names if n in set(split)]
+            unknown = [n for n in split if n not in set(names)]
+            if unknown:
+                raise ValueError(f"Items not in the data: {unknown[:10]}.")
+            label = "items"
+        B = [n for n in names if n not in set(A)]
+        if len(A) < 2 or len(B) < 2:
+            raise ValueError(
+                "method='martin-lof' needs at least two items in each subset."
+            )
+        everyone = self.responses.index
+        while True:
+            try:
+                fA = self._global_fit_subset(everyone, items=A)
+                fB = self._global_fit_subset(everyone, items=B)
+                f = self._global_fit_subset(everyone, items=A + B)
+            except ValueError as e:
+                if str(e).startswith("CML estimates do not exist"):
+                    reason = str(e).split(": ", 1)[-1].split(". ")[0]
+                    raise ValueError(
+                        f"method='martin-lof': CML estimates do not exist for one item "
+                        f"subset ({reason})."
+                    ) from None
+                raise
+            kA = [n for n in A if n in fA.item_names and n in f.item_names]
+            kB = [n for n in B if n in fB.item_names and n in f.item_names]
+            if kA == A and kB == B:
+                break
+            A, B = kA, kB
+            if len(A) < 2 or len(B) < 2:
+                raise ValueError(
+                    "method='martin-lof': fewer than two items with CML estimates "
+                    "remain in one subset."
+                )
+        resp = self.responses.loc[:, A + B]
+        LR, df, (ll_A, ll_B, ll), n_patterns, sparse = self._martin_lof_stat(
+            resp, A, fA, fB, f
+        )
+        p_chi2 = float(chi2_dist.sf(LR, df))
+        p, used, skipped, stopped = p_chi2, None, None, None
+        if p_method == "monte-carlo":
+            # simulate from the joint fit given each person's total and observed items (the
+            # conditional distribution does not involve the persons), refit, recompute the LR
+            from raschpy import _esf
+
+            rng = np.random.default_rng(seed)
+            thr = f._cml_threshold_list(A + B)
+            clone = copy.copy(self)
+            exceed, used, skipped, stopped = 0, 0, 0, False
+
+            def observed_hessian(m):
+                # the replicates' fits use it as a fixed Newton matrix (chord method): same design,
+                # nearby estimates, so a few gradient evaluations replace a Hessian per step
+                H = getattr(m, "_cml_hessian", None)
+                if H is None:
+                    items = list(m.item_names)
+                    Xm = np.array(m.responses.loc[:, items], dtype=np.float64)
+                    H = _esf.cond_loglik(
+                        Xm, m._cml_threshold_list(items), hessian=True
+                    )[2]
+                return H
+
+            H_A, H_B, H_all = (observed_hessian(m) for m in (fA, fB, f))
+            for _ in range(no_of_samples):
+                sim = _esf.sample_given_totals(resp.to_numpy(dtype=float), thr, rng)
+                clone.responses = pd.DataFrame(
+                    sim, index=resp.index, columns=resp.columns
+                )
+                try:
+                    gA = clone._global_fit_subset(everyone, items=A, cml_hessian=H_A)
+                    gB = clone._global_fit_subset(everyone, items=B, cml_hessian=H_B)
+                    g = clone._global_fit_subset(
+                        everyone, items=A + B, cml_hessian=H_all
+                    )
+                except ValueError:
+                    skipped += 1
+                    continue
+                if (
+                    len(gA.item_names) < len(A)
+                    or len(gB.item_names) < len(B)
+                    or len(g.item_names) < len(A) + len(B)
+                ):
+                    skipped += 1  # an item without CML estimates: not comparable
+                    continue
+                exceed += self._martin_lof_stat(clone.responses, A, gA, gB, g)[0] >= LR
+                used += 1
+                if mc_exceedances is not None and exceed >= mc_exceedances:
+                    stopped = True  # Besag-Clifford sequential stopping
+                    break
+            if not used:
+                raise ValueError(
+                    "method='martin-lof': no Monte Carlo sample had CML estimates for every item."
+                )
+            p = exceed / used if stopped else (1 + exceed) / (1 + used)
+        excluded = [n for n in names if n not in set(A + B)]
+        self.global_fit_table = None
+        self.global_fit_excluded = excluded
+        self.global_fit_groups = {"A": fA, "B": fB, "all": f}
+        self.global_fit_summary = pd.Series(
+            {
+                "method": "martin-lof",
+                "split": label,
+                "statistic": LR,
+                "df": df,
+                "subsets": {"A": A, "B": B},
+                "log-likelihoods": {"A": ll_A, "B": ll_B, "all": ll},
+                "p_method": p_method,
+                "p-value": p,
+                "p-value (chi-square)": p_chi2,
+                "Monte Carlo samples": used,
+                "Monte Carlo samples skipped": skipped,
+                "Monte Carlo stopped early": stopped,
+                "reject": bool(p < alpha),
+                "missingness patterns": n_patterns,
+                "score cells with < 5 persons": sparse,
+                "items excluded": len(excluded),
+            },
+            name="Global fit",
+        )
+        if p_method == "chi2" and sparse > MARTIN_LOF_SPARSE:
+            warnings.warn(
+                f"{sparse:.0%} of the Martin-Lof score table's cells (subtotal on subset A by "
+                f"subtotal on subset B) have fewer than 5 persons, so the chi-square p-value is "
+                f"likely conservative (in null simulations, rejection rates fell towards 0 at "
+                f"alpha = 0.05 as this share grew). For a test with a nominal false-positive "
+                f"rate, re-run with global_fit(method='martin-lof', p_method='monte-carlo').",
+                UserWarning,
+                stacklevel=3,
+            )
+        if excluded:
+            warnings.warn(
+                f"{len(excluded)} item(s) left out of the Martin-Lof test because they "
+                f"have no CML estimates in their subset or in all items: "
+                f"{excluded[:10]}{' ...' if len(excluded) > 10 else ''}. See "
+                f"global_fit_excluded.",
+                UserWarning,
+                stacklevel=3,
+            )
+        return self.global_fit_summary
+
+    def _andersen_lr(self, split, covariate, seed, split_prop, alpha):
+        """
+        global_fit(method='andersen-lr'): Andersen's conditional likelihood
+        ratio test, LR = 2 (sum_g ll_g - ll_pooled), each conditional
+        log-likelihood at its own CML maximum, with df = (groups - 1) x the
+        model's free parameters. All fits use the items with CML estimates
+        in both groups (repeated until stable, since dropping an item changes
+        which persons contribute); the pooled model is fitted to the persons
+        of the two groups only.
+        """
+        groups = self._global_fit_groups(split, covariate, seed, split_prop)
+        names = list(groups)
+        common = [
+            c
+            for c in self.item_names
+            if all(self.responses.loc[groups[n], c].notna().any() for n in names)
+        ]
+        fitted = {}
+        while True:
+            try:
+                for n in names:
+                    fitted[n] = self._global_fit_subset(groups[n], items=common)
+            except ValueError as e:
+                if str(e).startswith("CML estimates do not exist"):
+                    reason = str(e).split(": ", 1)[-1].split(". ")[0]
+                    raise ValueError(
+                        f"method='andersen-lr': CML estimates do not exist in one group "
+                        f"({reason}). Use method='wald', which leaves out the parameters "
+                        f"not estimable in both groups."
+                    ) from None
+                raise
+            kept = [c for c in common if all(c in fitted[n].item_names for n in names)]
+            if kept == common:
+                break
+            common = kept
+        if len(common) < 2:
+            raise ValueError(
+                "method='andersen-lr': fewer than two items have CML estimates in both "
+                "groups, so there is nothing to compare."
+            )
+        both = groups[names[0]].append(groups[names[1]])
+        pooled = self._global_fit_subset(both, items=common)
+        ll_groups = {n: fitted[n].convergence["log_likelihood"] for n in names}
+        ll0 = pooled.convergence["log_likelihood"]
+        LR = max(2.0 * (sum(ll_groups.values()) - ll0), 0.0)
+        df = pooled._cml_free_parameters()
+        p = float(chi2_dist.sf(LR, df))
+        excluded = [c for c in self.item_names if c not in common]
+        self.global_fit_table = None
+        self.global_fit_excluded = excluded
+        self.global_fit_groups = fitted
+        summary = {"method": "andersen-lr", "split": split, "statistic": LR, "df": df}
+        if split in ("score", "person_location"):
+            summary["split_prop"] = split_prop
+        summary.update(
+            {
+                "log-likelihoods": {**ll_groups, "pooled": ll0},
+                "p-value": p,
+                "reject": bool(p < alpha),
+                "group sizes": {n: len(groups[n]) for n in names},
+                "items excluded": len(excluded),
+            }
+        )
+        self.global_fit_summary = pd.Series(summary, name="Global fit")
+        not_converged = [
+            n
+            for n, m in {**fitted, "pooled": pooled}.items()
+            if not m.convergence["converged"]
+        ]
+        if not_converged:
+            warnings.warn(
+                f"The CML fit did not converge for {not_converged}; the likelihood ratio "
+                f"may be unreliable.",
+                UserWarning,
+                stacklevel=3,
+            )
+        if excluded:
+            warnings.warn(
+                f"{len(excluded)} item(s) left out of the likelihood ratio test because "
+                f"they have no CML estimates in one group (not responded to, an unused "
+                f"category, or not compared with the other items in both directions): "
+                f"{excluded[:10]}{' ...' if len(excluded) > 10 else ''}. See "
+                f"global_fit_excluded.",
+                UserWarning,
+                stacklevel=3,
+            )
+        return self.global_fit_summary
 
     def _global_fit_needs_bootstrap(self):
         """True if the object's calibration settings have no sandwich
@@ -3701,7 +4007,7 @@ class Rasch:
     def global_fit(
         self,
         method="wald",
-        split="score",
+        split=None,
         covariate=None,
         welch=True,
         alpha=0.05,
@@ -3709,6 +4015,8 @@ class Rasch:
         split_prop=0.5,
         se_correction="kauermann-carroll",
         no_of_samples=500,
+        p_method="chi2",
+        mc_exceedances=None,
     ):
         """
         Global test of parameter invariance across two groups of persons.
@@ -3744,25 +4052,65 @@ class Rasch:
         comes from splits correlated with the misfit -- the score split for
         discrimination differences, an exogenous variable for DIF.
 
-        method='andersen-lr': Andersen's likelihood ratio test. Reserved for
-        conditional maximum likelihood (CML) estimates, not yet available, and
-        raises NotImplementedError: with PAIR/CPAT estimates, which do not
-        maximise the likelihood the statistic evaluates, it was not calibrated
-        in simulation: it floored at 0 on score and person-location splits,
-        and on exogenous splits was conservative for RSM and PCM (rejection
-        rate 0-3% at 0.05), with a null distribution that no rescaling makes
-        chi-square (RSM: exactly 0 in 42-46% of datasets; PCM: variance 25%
-        above a scaled chi-square's).
+        method='andersen-lr': Andersen's conditional likelihood ratio test
+        (SLM, PCM, RSM; estimates from calibrate(estimation='cml') only),
+        LR = 2 (ll_1 + ll_2 - ll_pooled), each the conditional log-likelihood
+        at its own CML maximum, referred to chi-square with df = the model's
+        free parameters. The pooled model is fitted to the persons of the two
+        groups. Items without CML estimates in both groups (an item one group
+        did not respond to, an unused category, or an item not compared with
+        the others in both directions) are left out of every fit, with a
+        UserWarning; with PCM, the score and person-location splits often
+        leave out items whose top category is unused in the low group or
+        bottom category in the high group. In null simulations (SLM, PCM and
+        RSM; I = 10, K = 3 for PCM/RSM; N = 500 and 2,000; score, random,
+        exogenous and person-location splits; 300 datasets each), the
+        rejection rate at alpha = 0.05 was 0.023-0.070 and the mean LR/df
+        0.94-1.04; PCM's score split left out 3.8 of 10 items on average at
+        N = 500 and 1.9 at N = 2,000. With estimates from the default
+        estimation, which do not maximise the likelihood the statistic
+        evaluates, it raises a ValueError: in simulation it then floored at
+        0 on score and person-location splits, and its null distribution was
+        not a rescaled chi-square.
+
+        method='martin-lof': Martin-Lof's test of unidimensionality for two
+        item subsets (split=), SLM, PCM and RSM, estimates from
+        calibrate(estimation='cml') only. LR = 2 (ll_A + ll_B - ll_all +
+        sum n_rs log(n_rs / N) - sum n_t log(n_t / N)), the conditional
+        log-likelihoods of the two subsets' and all items' CML fits plus the
+        persons' subtotal (r on A, s on B) and total (t) distributions, both
+        within each missingness pattern; df = sum of M_A M_B over patterns +
+        q_A + q_B - q (M: maximum subtotal; q: the fits' free parameters). For
+        RSM, each subset has its own category widths, so df is K - 1 larger
+        than for PCM with the same maximum scores. The chi-square reference
+        is conservative when the subtotal table is sparse: in null
+        simulations (SLM, PCM, RSM; I = 6 and 10; K = 2 and 3; N = 500 to
+        10,000; complete and booklet designs) it held its level (rejection
+        rate 0.027-0.067 at alpha = 0.05) only when at most about a quarter
+        of the table's cells had fewer than 5 persons, which few designs
+        reach, and fell to 0 as that share grew. A UserWarning is then raised,
+        naming p_method='monte-carlo': the p-value from datasets simulated
+        from the joint fit given each person's total and observed items, each
+        refitted (in timing tests, 0.03-13 s per sample, from 10 items and
+        500 persons to 30 items, 2,000 persons and 20% missing responses).
+        In the sparsest of those designs (PCM and RSM, I = 10, K = 3; 150-300
+        datasets each, 200 samples) its rejection rate was 0.027-0.077 (the highest, RSM
+        with N = 2,000, over 300 datasets), against 0.000-0.013 for the
+        chi-square p-value.
 
         Parameters
         ----------
-        method : {'wald', 'andersen-lr'}, default 'wald'
-            'andersen-lr' raises NotImplementedError until CML is available.
-        split : {'score', 'person_location', 'random', 'exogenous'}, default 'score'
-            How persons are split: at the median mean observed score
-            (Andersen's split; the mean handles missing data), at the median
-            person location, at random, or by a two-valued exogenous
-            covariate.
+        method : {'wald', 'andersen-lr', 'martin-lof'}, default 'wald'
+            'andersen-lr' and 'martin-lof' need estimates from
+            calibrate(estimation='cml').
+        split : str, list or None, default None
+            'wald' and 'andersen-lr': how persons are split, one of 'score'
+            (the default), 'person_location', 'random' or 'exogenous': at the
+            median mean observed score (Andersen's split; the mean handles
+            missing data), at the median person location, at random, or by a
+            two-valued exogenous covariate. 'martin-lof': how items are split,
+            'median' (the default: the items below and above the median item
+            location) or a list of the items in the first subset.
         covariate : str or None, default None
             Column of self.exogenous, for split='exogenous'.
         split_prop : float, default 0.5
@@ -3787,11 +4135,28 @@ class Rasch:
             Carroll, 2001; Bell & McCaffrey, 2002). Negligible with many
             persons per parameter. None uses the uncorrected sandwich.
         no_of_samples : int, default 500
-            Bootstrap resamples per group, used instead of the sandwich when
-            the object was calibrated with method='cos', 'ls' or 'evm'
+            Wald: bootstrap resamples per group, used instead of the sandwich
+            when the object was calibrated with method='cos', 'ls' or 'evm'
             (SLM, PCM; RSM with estimation='pair-cpat'): the sandwich is the
             covariance of method='log-lik' only. se_correction does not
-            apply then.
+            apply then. 'martin-lof' with p_method='monte-carlo': the number
+            of simulated datasets.
+        p_method : {'chi2', 'monte-carlo'}, default 'chi2'
+            'martin-lof' only: the p-value from the chi-square reference, or
+            from no_of_samples datasets simulated from the joint CML fit given
+            each person's total and observed items (each refitted and its
+            statistic recomputed; seed= for reproducibility). Each refit
+            starts from the PAIR (RSM: cp-full-rcl) estimates and uses the
+            observed fit's Hessian as a fixed Newton matrix (the chord
+            method), converging to the same maximum with gradient evaluations
+            only. Simulated datasets in which an item has no CML estimates are
+            left out and counted.
+        mc_exceedances : int or None, default None
+            'martin-lof' with p_method='monte-carlo': stop sampling once this
+            many simulated statistics reach the observed one (Besag and
+            Clifford's sequential p-value, h / samples drawn), so a clearly
+            non-significant result needs only a few dozen samples; None draws
+            all no_of_samples. E.g. 10.
 
         Each group is calibrated with the object's last calibrate()
         settings. In null simulations under method='cos', 'ls' or 'evm'
@@ -3806,11 +4171,14 @@ class Rasch:
         --------------
         global_fit_summary : pandas.Series
             Method, split, statistic, df, (denominator df), covariance
-            ('sandwich' or 'bootstrap'), se_correction, p-value, decision.
+            ('sandwich', 'bootstrap' or 'hessian'), se_correction, p-value,
+            decision; for 'andersen-lr', the conditional log-likelihoods of
+            the groups and the pooled model instead of the covariance.
         global_fit_table : pandas.DataFrame or None
             Wald only: each compared parameter's difference, SE and z.
         global_fit_excluded : list
-            Wald only: parameters not compared (not estimable in both groups).
+            Parameters (Wald) or items ('andersen-lr') not compared, not
+            estimable in both groups.
         global_fit_groups : dict
             {group name: calibrated model}.
         """
@@ -3818,6 +4186,30 @@ class Rasch:
             raise ValueError(
                 f"method must be one of {self._GLOBAL_FIT_METHODS}, got {method!r}."
             )
+        if method == "martin-lof":
+            if getattr(self, "estimation", None) != "cml":
+                raise ValueError(
+                    "method='martin-lof' needs conditional maximum likelihood (CML) "
+                    "estimates. Re-run with calibrate(estimation='cml')."
+                )
+            if p_method not in ("chi2", "monte-carlo"):
+                raise ValueError(
+                    f"p_method must be 'chi2' or 'monte-carlo', got {p_method!r}."
+                )
+            if mc_exceedances is not None and int(mc_exceedances) < 1:
+                raise ValueError(
+                    f"mc_exceedances must be a positive integer or None, got {mc_exceedances!r}."
+                )
+            return self._martin_lof(
+                "median" if split is None else split,
+                alpha,
+                p_method=p_method,
+                no_of_samples=no_of_samples,
+                seed=seed,
+                mc_exceedances=mc_exceedances,
+            )
+        if split is None:
+            split = "score"
         if split not in self._GLOBAL_FIT_SPLITS:
             raise ValueError(
                 f"split must be one of {self._GLOBAL_FIT_SPLITS}, got {split!r}."
@@ -3831,16 +4223,19 @@ class Rasch:
             # statistic floored at 0 on score/person-location splits, and on
             # exogenous splits was conservative for RSM/PCM, with a null
             # distribution that is not a scaled chi-square (RSM: 0 in 42-46%
-            # of datasets), so no rescaling calibrates it. Kept for the
-            # planned CML estimator.
-            raise NotImplementedError(
-                "method='andersen-lr' needs conditional maximum likelihood (CML) "
-                "estimates, which are not yet available; with PAIR/CPAT estimates "
-                "the likelihood ratio is not calibrated (in simulation it often "
-                "floored at 0, and its null distribution was not a rescaled "
-                "chi-square). Use method='wald' (the default), which is "
-                "calibrated for every split."
-            )
+            # of datasets), so no rescaling calibrates it.
+            if getattr(self, "estimation", None) != "cml":
+                raise ValueError(
+                    "method='andersen-lr' needs conditional maximum likelihood (CML) "
+                    "estimates: with the default estimates the likelihood ratio is not "
+                    "calibrated (in simulation it often floored at 0, and its null "
+                    "distribution was not a rescaled chi-square). Re-run with "
+                    "calibrate(estimation='cml'), or use method='wald' (the default), "
+                    "which is calibrated for every split."
+                )
+            if not 0 < split_prop <= 0.5:
+                raise ValueError(f"split_prop must be in (0, 0.5], got {split_prop!r}.")
+            return self._andersen_lr(split, covariate, seed, split_prop, alpha)
 
         if se_correction not in ("kauermann-carroll", None):
             raise ValueError(
@@ -3912,8 +4307,11 @@ class Rasch:
             summary["split_prop"] = split_prop
         if welch:
             summary["denominator df"] = ddf
-        summary["covariance"] = "bootstrap" if boot else "sandwich"
-        summary["se_correction"] = None if boot else se_correction
+        cml = getattr(self, "estimation", None) == "cml"
+        summary["covariance"] = (
+            "bootstrap" if boot else ("hessian" if cml else "sandwich")
+        )
+        summary["se_correction"] = None if (boot or cml) else se_correction
         summary.update(
             {
                 "p-value": p,

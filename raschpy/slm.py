@@ -521,7 +521,13 @@ class SLM(Rasch):
         I = len(names)
         A = _rcl.zero_sum_basis(I)
         b0 = self.items.reindex(names).values.astype(float)
-        fit = _esf.fit_cml(X, A, b0 - b0.mean(), [1] * I)
+        fit = _esf.fit_cml(
+            X,
+            A,
+            b0 - b0.mean(),
+            [1] * I,
+            fixed_hessian=getattr(self, "_cml_fixed_hessian", None),
+        )
         self.items = pd.Series(fit["b"], index=names)
         self._cml_hessian = fit["hessian"]
         self.convergence = dict(
@@ -2009,11 +2015,36 @@ class SLM(Rasch):
             self.persons.loc[self.std_residual_df.index], axis=0
         )
 
-    def _global_fit_subset(self, idx):
-        """Calibrated SLM on a subset of persons (global_fit())."""
+    def _item_locations_for_split(self):
+        """Item locations (global_fit(method='martin-lof', split='median'))."""
+        return self.items
+
+    def _cml_max_scores(self, items):
+        """Maximum score of each item (Martin-Lof score tables)."""
+        return np.ones(len(items))
+
+    def _cml_threshold_list(self, items):
+        """Fitted thresholds per item, as cond_loglik takes them."""
+        return [np.array([self.items[n]]) for n in items]
+
+    def _cml_free_parameters(self):
+        """Free parameters of the CML fit (item locations, centred)."""
+        return self.no_of_items - 1
+
+    def _global_fit_subset(self, idx, items=None, cml_hessian=None):
+        """Calibrated SLM on a subset of persons (global_fit()); items restricts
+        the items (all by default)."""
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            m = SLM(self._answered_items(self.responses.loc[idx]), validate=False)
+            m = SLM(
+                self._answered_items(
+                    self.responses.loc[idx, items if items is not None else slice(None)]
+                ),
+                validate=False,
+            )
+            m._cml_fixed_hessian = (
+                cml_hessian  # chord method for CML (Monte Carlo replicates)
+            )
             m.calibrate(**self._calibration_kw())
         return m
 

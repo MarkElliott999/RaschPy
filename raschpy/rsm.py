@@ -1152,7 +1152,13 @@ class RSM(Rasch):
         b0 = (
             self.items.reindex(names).values[:, None] + self.thresholds.values[None, :]
         ).ravel()
-        fit = _esf.fit_cml(X, A, b0, [K] * len(names))
+        fit = _esf.fit_cml(
+            X,
+            A,
+            b0,
+            [K] * len(names),
+            fixed_hessian=getattr(self, "_cml_fixed_hessian", None),
+        )
         B = fit["b"].reshape(len(names), K)
         loc = B.mean(axis=1)
         self.items = pd.Series(loc - loc.mean(), index=names)
@@ -3380,14 +3386,37 @@ class RSM(Rasch):
     # Residual correlation / PCA
     # ------------------------------------------------------------------
 
-    def _global_fit_subset(self, idx):
-        """Calibrated RSM on a subset of persons (global_fit())."""
+    def _item_locations_for_split(self):
+        """Item locations (global_fit(method='martin-lof', split='median'))."""
+        return self.items
+
+    def _cml_max_scores(self, items):
+        """Maximum score of each item (Martin-Lof score tables)."""
+        return np.full(len(items), float(self.max_score))
+
+    def _cml_threshold_list(self, items):
+        """Fitted thresholds per item (item location + shared thresholds), as cond_loglik takes them."""
+        tau = self.thresholds.values.astype(float)
+        return [self.items[n] + tau for n in items]
+
+    def _cml_free_parameters(self):
+        """Free parameters of the CML fit (item locations and category widths)."""
+        return self.no_of_items - 1 + self.max_score - 1
+
+    def _global_fit_subset(self, idx, items=None, cml_hessian=None):
+        """Calibrated RSM on a subset of persons (global_fit()); items restricts
+        the items (all by default)."""
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             m = RSM(
-                self._answered_items(self.responses.loc[idx]),
+                self._answered_items(
+                    self.responses.loc[idx, items if items is not None else slice(None)]
+                ),
                 max_score=self.max_score,
                 validate=False,
+            )
+            m._cml_fixed_hessian = (
+                cml_hessian  # chord method for CML (Monte Carlo replicates)
             )
             m.calibrate(**self._calibration_kw())
         return m
