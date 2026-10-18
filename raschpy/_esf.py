@@ -126,6 +126,7 @@ def prepare(X, Ks, budget=BUDGET):
     maxr = (obs * Ks[None, :]).sum(1)
     keep = (obs.sum(1) >= 2) & (r_all > 0) & (r_all < maxr)
     obs, Xi, r_all = obs[keep], Xi[keep], r_all[keep]
+    prep.keep, prep.n_persons = keep, len(keep)
     if not keep.any():
         prep.empty = True
         return prep
@@ -152,6 +153,9 @@ def prepare(X, Ks, budget=BUDGET):
     o2 = np.argsort(key2)
     cg, cr, cw = key2[o2] // (S + 1), key2[o2] % (S + 1), cw[o2].astype(float)
     nobs_g = keys.sum(1)
+    # each contributing person's cell (index into the sorted cells)
+    prep.person_cell = np.searchsorted(key2[o2], rank[inv] * (S + 1) + r_all)
+    prep.n_cells = len(cg)
 
     batches = []
     for n in np.unique(nobs_g):
@@ -196,6 +200,7 @@ def prepare(X, Ks, budget=BUDGET):
             batches.append(
                 SimpleNamespace(
                     n=int(n),
+                    c0=int(c0),
                     Gb=Gb,
                     item_idx=item_idx,
                     lp=lp,
@@ -651,4 +656,211 @@ def sample_given_totals(X, thresholds, rng):
             x = (p.cumsum(1) > rng.random((len(rows), 1))).argmax(1)
             out[rows, items[j]] = x
             t = t - x
+    return out
+
+
+def _cell_probabilities(bt, LE, Kmax):
+    """One batch's per-cell category probabilities P(X_j = k | r) (cells, n, Kmax + 1) for its groups' items."""
+    n, Gb, lp, r = bt.n, bt.Gb, bt.lp, bt.r
+    le = LE[bt.item_idx]
+    kk = np.arange(Kmax + 1)
+    pre = [np.zeros((Gb, 1))]
+    for j in range(n):
+        pre.append(_logconv_small(pre[-1], le[:, j, :]))
+    suf = [np.zeros((Gb, 1))]
+    for j in range(n - 1, -1, -1):
+        suf.append(_logconv_small(suf[-1], le[:, j, :]))
+    suf = suf[::-1]
+    lgc = pre[n][lp, r]
+    lo1 = bt.rmin - Kmax
+    m1 = int((bt.rmax - lo1).max() + 1)
+    P = np.empty((len(r), n, Kmax + 1))
+    for j in range(n):
+        V = _selconv_range(pre[j], suf[j + 1], lo1, m1)
+        v = V[lp[:, None], r[:, None] - kk[None, :] - lo1[lp][:, None]]
+        with np.errstate(invalid="ignore"):
+            P[:, j, :] = np.nan_to_num(np.exp(le[lp, j, :] + v - lgc[:, None]))
+    return P
+
+
+def conditional_moments(X, thresholds, prepared=None, tables=False):
+    """
+    Conditional moments of each item score given the person's total over the items they responded to:
+    for every person and item, E[X_i | r], Var(X_i | r) and the fourth central moment, from
+    P(X_i = k | r) = eps[i, k] gamma^(-i)_{r-k} / gamma_r (they do not involve the person location).
+    Persons who contribute nothing (a single response, or an extreme total) and unobserved responses
+    get NaN.
+
+    tables=True also returns, for each item, the expected item-score x restscore table: entry (k, s) =
+    sum over the persons who responded to the item of P(X_i = k | r), with s = r - k their restscore
+    (rows k = 0..K_i, columns s = 0..largest restscore).
+
+    Returns a dict: E, V, M4 (n_persons, n_items) and, with tables=True, tables (list of arrays).
+    """
+    b_list = _as_threshold_list(thresholds)
+    X = np.asarray(X, float)
+    Ks = np.array([len(x) for x in b_list])
+    prep = prepare(X, Ks) if prepared is None else prepared
+    I, Kmax, K1 = prep.I, prep.Kmax, prep.K1
+    LE = np.full((I, K1), NEG)
+    for i, x in enumerate(b_list):
+        LE[i, : Ks[i] + 1] = np.concatenate([[0.0], -np.cumsum(x)])
+    out = {k: np.full(X.shape, np.nan) for k in ("E", "V", "M4")}
+    if tables:
+        smax = int(np.where(np.isnan(X), 0, Ks[None, :]).sum(1).max())
+        sizes = (Ks + 1) * (smax + 1)
+        t_off = np.concatenate([[0], np.cumsum(sizes)])
+        flat = np.zeros(int(t_off[-1]))
+
+        def unflatten():
+            return [
+                flat[t_off[i] : t_off[i + 1]].reshape(Ks[i] + 1, smax + 1)
+                for i in range(I)
+            ]
+
+    if prep.empty:
+        return dict(out, tables=unflatten()) if tables else out
+    cellE = np.full((prep.n_cells, I), np.nan)
+    cellV, cellM4 = cellE.copy(), cellE.copy()
+    kk = np.arange(K1)
+    for bt in prep.batches:
+        P = _cell_probabilities(bt, LE, Kmax)  # (cells, n, K1)
+        rows = bt.c0 + np.arange(len(bt.r))
+        E = (P * kk).sum(2)
+        d = kk[None, None, :] - E[:, :, None]
+        V = (P * d**2).sum(2)
+        M4 = (P * d**4).sum(2)
+        cols = bt.item_idx[bt.lp]  # (cells, n) item index of each position
+        cellE[rows[:, None], cols] = E
+        cellV[rows[:, None], cols] = V
+        cellM4[rows[:, None], cols] = M4
+        if tables:
+            for j in range(bt.n):
+                items = cols[:, j]
+                for k in range(K1):
+                    srest = bt.r - k
+                    ok = (srest >= 0) & (k <= Ks[items])
+                    np.add.at(
+                        flat,
+                        t_off[items[ok]] + k * (smax + 1) + srest[ok],
+                        bt.w[ok] * P[ok, j, k],
+                    )
+    if tables:
+        # persons who contribute nothing (single response, extreme total): their item score and
+        # restscore are fixed by their total, so the observed cell is also the expected one
+        rest_idx = np.nonzero(~prep.keep & (~np.isnan(X)).any(axis=1))[0]
+        if len(rest_idx):
+            Xr = X[rest_idx]
+            ob = ~np.isnan(Xr)
+            xr = np.where(ob, Xr, 0).astype(np.int64)
+            tot = xr.sum(1)
+            pp, ii = np.nonzero(ob)
+            np.add.at(
+                flat, t_off[ii] + xr[pp, ii] * (smax + 1) + (tot[pp] - xr[pp, ii]), 1.0
+            )
+    who = np.nonzero(prep.keep)[0]
+    obs = ~np.isnan(X[who])
+    for key, cell in (("E", cellE), ("V", cellV), ("M4", cellM4)):
+        vals = cell[prep.person_cell]
+        vals[~obs] = np.nan
+        out[key][who] = vals
+    if tables:
+        out["tables"] = unflatten()
+    return out
+
+
+def gk_gamma(table):
+    """Goodman and Kruskal's gamma of a two-way table (ordered rows and columns) and its asymptotic
+    standard error, as vcdExtra::GKgamma: C and D are the concordant and discordant pairs.
+    """
+    x = np.asarray(table, float)
+    cs = x.cumsum(0).cumsum(1)
+    tot = cs[-1, -1]
+
+    def block(r0, r1, c0, c1):
+        # sum of x[r0:r1, c0:c1] from the 2-D cumulative sum (exclusive upper bounds)
+        if r1 <= r0 or c1 <= c0:
+            return 0.0
+        a = cs[r1 - 1, c1 - 1]
+        b = cs[r0 - 1, c1 - 1] if r0 > 0 else 0.0
+        c = cs[r1 - 1, c0 - 1] if c0 > 0 else 0.0
+        d = cs[r0 - 1, c0 - 1] if (r0 > 0 and c0 > 0) else 0.0
+        return a - b - c + d
+
+    n, m = x.shape
+    pc = np.zeros_like(x)
+    pd_ = np.zeros_like(x)
+    for i in range(n):
+        for j in range(m):
+            pc[i, j] = block(0, i, 0, j) + block(i + 1, n, j + 1, m)
+            pd_[i, j] = block(0, i, j + 1, m) + block(i + 1, n, 0, j)
+    C, D = (pc * x).sum() / 2, (pd_ * x).sum() / 2
+    if C + D == 0 or tot == 0:
+        return np.nan, np.nan
+    psi = 2 * (D * pc - C * pd_) / (C + D) ** 2
+    sigma2 = (x * psi**2).sum() - (x * psi).sum() ** 2
+    return (C - D) / (C + D), float(np.sqrt(max(sigma2, 0.0)))
+
+
+def person_pattern_pvalues(X, thresholds, samples=1000, rng=None, prepared=None):
+    """
+    Conditional person fit: for each person, the probability, given their total over the items they
+    responded to, of a response pattern no more likely than theirs (the person location cancels). Pattern
+    probabilities given the total are proportional to exp(sum_i log eps[i, y_i]), so patterns are compared
+    on that sum; the p-value is estimated from `samples` patterns drawn exactly from the conditional
+    distribution (item by item, from each group's suffix ESFs, computed once): (1 + #{simulated <=
+    observed}) / (1 + samples). Persons who contribute nothing (a single response, or an extreme total)
+    get NaN: their pattern is fixed by their total.
+    """
+    b_list = _as_threshold_list(thresholds)
+    X = np.asarray(X, float)
+    Ks = np.array([len(x) for x in b_list])
+    prep = prepare(X, Ks) if prepared is None else prepared
+    rng = np.random.default_rng(rng)
+    out = np.full(X.shape[0], np.nan)
+    if prep.empty:
+        return out
+    I, K1 = prep.I, prep.K1
+    LE = np.full((I, K1), NEG)
+    for i, x in enumerate(b_list):
+        LE[i, : Ks[i] + 1] = np.concatenate([[0.0], -np.cumsum(x)])
+    who = np.nonzero(prep.keep)[0]
+    Xk = np.where(np.isnan(X[who]), 0, X[who]).astype(np.int64)
+    kk = np.arange(K1)
+    for bt in prep.batches:
+        n = bt.n
+        le = LE[bt.item_idx]  # (Gb, n, K1)
+        suf = [None] * (n + 1)
+        suf[n] = np.zeros((bt.Gb, 1))
+        for j in range(n - 1, -1, -1):
+            suf[j] = _logconv_small(suf[j + 1], le[:, j, :])
+        cells = bt.c0 + np.arange(len(bt.r))
+        pmask = np.isin(prep.person_cell, cells)
+        persons = np.nonzero(pmask)[0]  # positions among the contributing persons
+        lp = bt.lp[prep.person_cell[persons] - bt.c0]  # local group of each person
+        items = bt.item_idx[lp]  # (P, n)
+        x_obs = np.take_along_axis(Xk[persons], items, 1)
+        s_obs = np.take_along_axis(le[lp], x_obs[:, :, None], 2)[:, :, 0].sum(1)
+        tot = x_obs.sum(1)
+        count = np.zeros(len(persons))
+        for _ in range(samples):
+            t = tot.copy()
+            s_sim = np.zeros(len(persons))
+            for j in range(n):
+                nxt = suf[j + 1]
+                idx = t[:, None] - kk[None, :]
+                ok = (idx >= 0) & (idx < nxt.shape[1])
+                lpj = np.where(
+                    ok,
+                    le[lp, j, :] + nxt[lp[:, None], np.clip(idx, 0, nxt.shape[1] - 1)],
+                    NEG,
+                )
+                lpj = lpj - _lse(lpj, axis=1)[:, None]
+                with np.errstate(invalid="ignore"):
+                    p = np.nan_to_num(np.exp(lpj))
+                x = (p.cumsum(1) > rng.random((len(persons), 1))).argmax(1)
+                s_sim += le[lp, j, x]
+                t = t - x
+            count += s_sim <= s_obs + 1e-12 * np.abs(s_obs)
+        out[who[persons]] = (1 + count) / (1 + samples)
     return out

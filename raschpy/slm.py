@@ -1719,6 +1719,8 @@ class SLM(Rasch):
         no_of_samples=500,
         interval=None,
         seed=None,
+        conditional=False,
+        conditional_samples=1000,
     ):
         """
         Compute all item, person, and test-level fit statistics.
@@ -1770,8 +1772,42 @@ class SLM(Rasch):
             used if item SEs aren't already computed). None draws fresh
             entropy each call.
 
+        conditional : bool, default False
+            If True, the expected scores, variances and fourth central moments
+            behind the residuals and the item and person infit/outfit
+            statistics are their conditional values given each person's total
+            over the items they responded to (Christensen & Kreiner), which do
+            not involve the person locations; the output is otherwise the
+            same. Persons with an extreme total are left out, as before, and
+            so is a person with a single response. Outputs that need person
+            locations (point-measure correlations, discrimination, CSEM/RSEM,
+            separation and reliability) are unchanged. Works with any
+            estimation method; the theory assumes CML item estimates
+            (calibrate(estimation='cml')).
+
+        conditional_samples : int, default 1000
+            conditional=True only: Monte Carlo samples for each person's
+            conditional p-value (person_conditional_p).
+
         Attributes set
         --------------
+        fit_conditional : bool
+            Whether the fit statistics were computed conditionally
+            (conditional=True).
+        item_restscore_table : pandas.DataFrame
+            conditional=True only: item-restscore association (Kreiner):
+            Goodman-Kruskal gamma of each item's score against its restscore
+            (the total over the person's other items), observed and expected
+            under the model (from P(X_i = k | total)), the observed gamma's
+            asymptotic SE, and the two-sided p-value of the difference
+            ('p', and BH-adjusted 'p (BH)'). Every person who responded to the
+            item is included.
+        person_conditional_p : pandas.Series
+            conditional=True only: for each non-extreme person, the
+            probability, given their total over the items they responded to,
+            of a response pattern no more likely than theirs (estimated from
+            conditional_samples patterns drawn exactly from the conditional
+            distribution; NaN for a person with a single response).
         cat_prob_dict : dict
             {0: DataFrame, 1: DataFrame} of category probabilities for
             all persons and items.
@@ -2034,6 +2070,10 @@ class SLM(Rasch):
         self.person_residual_corr = self.std_residual_df.corrwith(
             self.persons.loc[self.std_residual_df.index], axis=0
         )
+
+        self.fit_conditional = False
+        if conditional:
+            self._apply_conditional_fit(samples=conditional_samples, seed=seed)
 
     def _item_locations_for_split(self):
         """Item locations (global_fit(method='martin-lof', split='median'))."""
@@ -2824,10 +2864,11 @@ class SLM(Rasch):
         se=True,
     ):
         """
-        Analyse standardised residual correlations for local item dependence.
+        Analyse residual correlations for local item dependence.
 
-        Computes the inter-item correlation matrix of standardised residuals
-        and performs a Principal Component Analysis (PCA) on it to detect
+        Computes the inter-item correlation matrix of the residuals (Q3),
+        and a Principal Component Analysis (PCA) of the correlations of the
+        standardised residuals to detect
         violations of local item independence and unidimensionality. A large
         first eigenvalue (conventionally > 2.0) suggests a second dimension
         in the data. Auto-triggers fit_statistics() if not yet run.
@@ -2863,8 +2904,8 @@ class SLM(Rasch):
         Attributes set
         --------------
         residual_correlations : pandas.DataFrame
-            Item-by-item correlation matrix of standardised residuals,
-            shape (no_of_items, no_of_items).
+            Item-by-item correlation matrix of the residuals (observed minus
+            expected), shape (no_of_items, no_of_items).
         eigenvectors : pandas.DataFrame or None
             PCA eigenvectors (principal component loadings matrix),
             shape (no_of_items - 1, no_of_items), index labelled
@@ -2881,6 +2922,13 @@ class SLM(Rasch):
             PCA loadings (eigenvectors scaled by sqrt(eigenvalue)),
             shape (no_of_items, no_of_items - 1), items as rows, PCs as columns.
             None if PCA fails.
+        q3_star : pandas.DataFrame
+            Q3* (Christensen, Makransky & Horton, 2017): Yen's Q3 (the
+            correlations of the raw residuals) minus the mean of the
+            off-diagonal ones; with fit_statistics(conditional=True), from
+            conditional residuals.
+        q3_star_max : float
+            The largest off-diagonal Q3*.
         pca_fail : bool
             Set to True (only) if PCA raises an exception.
         """
@@ -2899,7 +2947,13 @@ class SLM(Rasch):
                 log_lik_tol=log_lik_tol,
             )
 
-        self.residual_correlations = self.std_residual_df.corr(numeric_only=False)
+        self.residual_correlations = self.residual_df.corr(numeric_only=False)
+        # Q3* (Christensen, Makransky & Horton, 2017): Yen's Q3 (correlations of the raw residuals) relative
+        # to the mean off-diagonal Q3
+        q3 = self.residual_df.corr(numeric_only=False)
+        off = ~np.eye(len(q3), dtype=bool)
+        self.q3_star = q3 - np.nanmean(q3.values[off])
+        self.q3_star_max = float(np.nanmax(self.q3_star.values[off]))
 
         pca = PCA()
         try:

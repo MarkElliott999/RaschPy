@@ -190,3 +190,57 @@ def test_prepared_structure_gives_identical_results():
             np.testing.assert_array_equal(a[2], c[2])
     with pytest.raises(ValueError, match="different number of thresholds"):
         _esf.cond_loglik(X, [np.zeros(1)] * 5, prepared=prep)
+
+
+def _brute_conditional(X, b):
+    """Per-person P(X_i = k | r) by enumerating every pattern with the person's total."""
+    Ks = [len(x) for x in b]
+    le = [np.concatenate([[0.0], -np.cumsum(x)]) for x in b]
+    probs = {}
+    for n, x in enumerate(X):
+        o = np.nonzero(~np.isnan(x))[0]
+        if len(o) < 2:
+            continue
+        r = int(np.nansum(x))
+        if r == 0 or r == sum(Ks[i] for i in o):
+            continue
+        pats = [cs for cs in itertools.product(*[range(Ks[i] + 1) for i in o]) if sum(cs) == r]
+        lp = np.array([sum(le[i][c] for i, c in zip(o, cs)) for cs in pats])
+        p = np.exp(lp - logsumexp(lp))
+        own = sum(le[i][int(x[i])] for i in o)
+        probs[n] = (o, pats, p, lp, own, r)
+    return probs
+
+
+def test_conditional_moments_match_brute_force():
+    b, X = _design([1, 3, 2, 2, 1], 150, 0.25, 14)
+    out = _esf.conditional_moments(X, b, tables=True)
+    Ks = [len(x) for x in b]
+    for n, (o, pats, p, _, _, r) in _brute_conditional(X, b).items():
+        for j, i in enumerate(o):
+            pk = np.array([p[[cs[j] == k for cs in pats]].sum() for k in range(Ks[i] + 1)])
+            e = (pk * np.arange(Ks[i] + 1)).sum()
+            d = np.arange(Ks[i] + 1) - e
+            assert out["E"][n, i] == pytest.approx(e, abs=1e-12)
+            assert out["V"][n, i] == pytest.approx((pk * d**2).sum(), abs=1e-12)
+            assert out["M4"][n, i] == pytest.approx((pk * d**4).sum(), abs=1e-12)
+
+
+def test_person_pattern_pvalues_match_exact():
+    b, X = _design([1, 2, 2, 3, 1], 40, 0.2, 15)
+    mc = _esf.person_pattern_pvalues(X, b, samples=20000, rng=1)
+    brute = _brute_conditional(X, b)
+    for n in range(len(X)):
+        if n in brute:
+            _, _, p, lp, own, _ = brute[n]
+            assert mc[n] == pytest.approx(p[lp <= own + 1e-12].sum(), abs=0.02)
+        else:
+            assert np.isnan(mc[n])
+
+
+def test_gk_gamma_matches_vcdextra():
+    # vcdExtra::GKgamma(matrix(c(10, 4, 2, 3, 8, 5, 1, 2, 9), 3)): C = 401, D = 67
+    t = np.array([[10, 3, 1], [4, 8, 2], [2, 5, 9]], float)
+    g, se = _esf.gk_gamma(t)
+    assert g == pytest.approx((401 - 67) / (401 + 67), abs=1e-12)
+    assert se == pytest.approx(0.125936754996, abs=1e-9)  # vcdExtra sigma

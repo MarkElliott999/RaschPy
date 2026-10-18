@@ -2480,6 +2480,97 @@ class Rasch:
         return kw
 
     @staticmethod
+    def _wilson_hilferty_z(ms, q):
+        """Standardised mean square: Wilson-Hilferty cube-root transformation with standard deviation q."""
+        return (ms ** (1 / 3) - 1) * (3 / q) + q / 3
+
+    def _apply_conditional_fit(self, samples=1000, seed=None):
+        """
+        fit_statistics(conditional=True): replace the expected scores, variances and fourth central moments
+        with their conditional values given each person's total over the items they responded to (they do
+        not involve the person locations), for the same non-extreme persons, and recompute the residuals and
+        the item and person infit/outfit statistics from them (Christensen & Kreiner): the standardisation
+        uses the exact conditional moments, and counts are of the responses with a conditional variance
+        (a person with a single response has none). Outputs that need person locations (point-measure
+        correlations, discrimination, CSEM/RSEM, separation and reliability) are left as computed.
+        """
+        from raschpy import _esf
+
+        names = list(self.item_names)
+        X = np.array(self.responses.loc[:, names], dtype=np.float64)
+        mom = _esf.conditional_moments(X, self._cml_threshold_list(names), tables=True)
+        idx = self.residual_df.index
+        pos = self.responses.index.get_indexer(idx)
+        frame = lambda a: pd.DataFrame(a[pos], index=idx, columns=names)  # noqa: E731
+        E, V, M4 = frame(mom["E"]), frame(mom["V"]), frame(mom["M4"])
+        V = V.where(V > 0)
+        resid = self.responses.loc[idx, names] - E
+        resid = resid.where(V.notna())
+        std = resid / V**0.5
+        self.exp_score_df, self.info_df, self.kurtosis_df = E, V, M4.where(V.notna())
+        self.residual_df, self.std_residual_df = resid, std
+        n_item, n_person = std.notna().sum(axis=0), std.notna().sum(axis=1)
+        ratio = self.kurtosis_df / V**2
+
+        self.item_outfit_ms = (std**2).mean()
+        self.item_infit_ms = (resid**2).sum() / V.sum()
+        q = ((ratio.sum() / n_item**2) - 1 / n_item) ** 0.5
+        self.item_outfit_zstd = self._wilson_hilferty_z(self.item_outfit_ms, q)
+        q = ((self.kurtosis_df - V**2).sum() / V.sum() ** 2) ** 0.5
+        self.item_infit_zstd = self._wilson_hilferty_z(self.item_infit_ms, q)
+
+        self.person_outfit_ms = (std**2).mean(axis=1).rename("Outfit MS")
+        self.person_infit_ms = ((resid**2).sum(axis=1) / V.sum(axis=1)).rename(
+            "Infit MS"
+        )
+        q = ((ratio.sum(axis=1) / n_person**2) - 1 / n_person) ** 0.5
+        self.person_outfit_zstd = self._wilson_hilferty_z(
+            self.person_outfit_ms, q
+        ).rename("Outfit Z")
+        q = ((self.kurtosis_df - V**2).sum(axis=1) / V.sum(axis=1) ** 2) ** 0.5
+        self.person_infit_zstd = self._wilson_hilferty_z(
+            self.person_infit_ms, q
+        ).rename("Infit Z")
+
+        if hasattr(self, "item_residual_corr"):
+            self.item_residual_corr = std.corrwith(self.items, axis=1)
+        if hasattr(self, "person_residual_corr"):
+            self.person_residual_corr = std.corrwith(self.persons.loc[idx], axis=0)
+        # item-restscore association (Kreiner): Goodman-Kruskal gamma of each item's score against its
+        # restscore, observed vs expected under the model (expected table: sum over persons of
+        # P(X_i = k | r) at restscore r - k), two-sided normal test with the observed gamma's SE
+        obs_all = ~np.isnan(X)
+        Xi = np.where(obs_all, X, 0).astype(int)
+        tot = Xi.sum(1)
+        rows = []
+        for i, item in enumerate(names):
+            who = obs_all[:, i]
+            observed = np.zeros_like(mom["tables"][i])
+            np.add.at(observed, (Xi[who, i], tot[who] - Xi[who, i]), 1.0)
+            g_obs, se = _esf.gk_gamma(observed)
+            g_exp, _ = _esf.gk_gamma(mom["tables"][i])
+            z = (g_obs - g_exp) / se if se and se > 0 else np.nan
+            rows.append(
+                (g_obs, g_exp, se, 2 * norm.sf(abs(z)) if np.isfinite(z) else np.nan)
+            )
+        tab = pd.DataFrame(
+            rows, index=names, columns=["Observed gamma", "Expected gamma", "SE", "p"]
+        )
+        tab["p (BH)"] = self._bh_correction(tab["p"].fillna(1.0)).where(
+            tab["p"].notna()
+        )
+        self.item_restscore_table = tab
+        # conditional person fit: probability of a pattern no more likely than the person's, given total
+        pv = _esf.person_pattern_pvalues(
+            X, self._cml_threshold_list(names), samples=samples, rng=seed
+        )
+        self.person_conditional_p = pd.Series(
+            pv, index=self.responses.index, name="Conditional p"
+        ).loc[idx]
+        self._conditional_tables = mom["tables"]
+        self.fit_conditional = True
+
+    @staticmethod
     def _check_cml_solver(solver, estimation):
         """calibrate(solver=): validated; applies to estimation='cml' only (else ignored, with a warning)."""
         from raschpy import _esf

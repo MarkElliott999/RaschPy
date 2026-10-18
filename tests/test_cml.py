@@ -316,3 +316,50 @@ def test_solver_rules():
         m.calibrate(solver="chord")
     m.calibrate(estimation="cml", solver="chord")
     assert m._calibration_kw()["solver"] == "chord"
+
+
+# ---------------------------------------------------------------- conditional fit
+
+@pytest.mark.parametrize("cls,name", [(SLM, "slm_complete"), (PCM, "pcm_complete")])
+def test_conditional_fit_matches_iarm(cls, name):
+    X = pd.read_csv(os.path.join(DATA, f"cml_{name}.csv"))
+    m = cls(X)
+    m.calibrate(estimation="cml")
+    m.fit_statistics(conditional=True, se=False, conditional_samples=20, seed=1)
+    fit = pd.read_csv(os.path.join(DATA, f"cml_{name}_iarm_fit.csv")).set_index("item")
+    rest = pd.read_csv(os.path.join(DATA, f"cml_{name}_iarm_rest.csv")).set_index("item")
+    # iarm uses eRm's estimates (optimiser tolerance ~1e-5) and prints restscore results to 3 digits
+    np.testing.assert_allclose(m.item_outfit_ms.reindex(fit.index), fit["outfit"], atol=2e-5)
+    np.testing.assert_allclose(m.item_infit_ms.reindex(fit.index), fit["infit"], atol=2e-5)
+    V, M4 = m.info_df, m.kurtosis_df
+    n = m.std_residual_df.notna().sum()
+    q_out = (((M4 / V**2).sum() / n**2) - 1 / n) ** 0.5
+    np.testing.assert_allclose(q_out.reindex(fit.index), fit["outfit_se"], atol=5e-6)
+    t = m.item_restscore_table.reindex(rest.index)
+    np.testing.assert_allclose(t["Observed gamma"], rest["observed"], atol=5e-4)
+    np.testing.assert_allclose(t["Expected gamma"], rest["expected"], atol=5e-4)
+    np.testing.assert_allclose(t["SE"], rest["se"], atol=5e-4)
+    assert m.fit_conditional
+
+
+def test_conditional_false_leaves_fit_statistics_unchanged():
+    X = pd.read_csv(os.path.join(DATA, "cml_pcm_missing.csv"))
+    a, b = PCM(X), PCM(X)
+    a.calibrate()
+    b.calibrate()
+    a.fit_statistics(se=False)
+    b.fit_statistics(se=False, conditional=False)
+    np.testing.assert_array_equal(a.item_infit_ms.values, b.item_infit_ms.values)
+    assert not b.fit_conditional and not hasattr(b, "item_restscore_table")
+
+
+def test_q3_star():
+    X = pd.read_csv(os.path.join(DATA, "cml_rsm_missing.csv"))
+    m = RSM(X)
+    m.calibrate(estimation="cml")
+    m.fit_statistics(se=False, conditional=True, conditional_samples=20, seed=1)
+    m.res_corr_analysis()
+    q3 = m.residual_df.corr()
+    off = ~np.eye(len(q3), dtype=bool)
+    np.testing.assert_allclose(m.q3_star.values, q3.values - q3.values[off].mean(), atol=1e-12)
+    assert m.q3_star_max == pytest.approx((q3.values - q3.values[off].mean())[off].max())

@@ -2727,6 +2727,8 @@ class PCM(Rasch):
         no_of_samples=500,
         interval=None,
         seed=None,
+        conditional=False,
+        conditional_samples=1000,
     ):
         """
         Compute all item, threshold, person, and test-level fit statistics.
@@ -2776,8 +2778,42 @@ class PCM(Rasch):
             used if item SEs aren't already computed). None draws fresh
             entropy each call.
 
+        conditional : bool, default False
+            If True, the expected scores, variances and fourth central moments
+            behind the residuals and the item and person infit/outfit
+            statistics are their conditional values given each person's total
+            over the items they responded to (Christensen & Kreiner), which do
+            not involve the person locations; the output is otherwise the
+            same. Persons with an extreme total are left out, as before, and
+            so is a person with a single response. Outputs that need person
+            locations (point-measure correlations, discrimination, CSEM/RSEM,
+            separation and reliability) are unchanged. Works with any
+            estimation method; the theory assumes CML item estimates
+            (calibrate(estimation='cml')).
+
+        conditional_samples : int, default 1000
+            conditional=True only: Monte Carlo samples for each person's
+            conditional p-value (person_conditional_p).
+
         Attributes set
         --------------
+        fit_conditional : bool
+            Whether the fit statistics were computed conditionally
+            (conditional=True).
+        item_restscore_table : pandas.DataFrame
+            conditional=True only: item-restscore association (Kreiner):
+            Goodman-Kruskal gamma of each item's score against its restscore
+            (the total over the person's other items), observed and expected
+            under the model (from P(X_i = k | total)), the observed gamma's
+            asymptotic SE, and the two-sided p-value of the difference
+            ('p', and BH-adjusted 'p (BH)'). Every person who responded to the
+            item is included.
+        person_conditional_p : pandas.Series
+            conditional=True only: for each non-extreme person, the
+            probability, given their total over the items they responded to,
+            of a response pattern no more likely than theirs (estimated from
+            conditional_samples patterns drawn exactly from the conditional
+            distribution; NaN for a person with a single response).
         cat_prob_dict : dict
             {cat: DataFrame} of category probabilities for all persons and items.
         exp_score_df : pandas.DataFrame
@@ -3314,9 +3350,13 @@ class PCM(Rasch):
             self.person_strata = (4 * self.psi + 1) / 3
             self.person_reliability = self.psi**2 / (1 + self.psi**2)
 
-    # ------------------------------------------------------------------
-    # Residual correlation / PCA
-    # ------------------------------------------------------------------
+        self.fit_conditional = False
+        if conditional:
+            self._apply_conditional_fit(samples=conditional_samples, seed=seed)
+
+        # ------------------------------------------------------------------
+        # Residual correlation / PCA
+        # ------------------------------------------------------------------
 
     def _item_locations_for_split(self):
         """Central item locations (global_fit(method='martin-lof', split='median'))."""
@@ -4627,10 +4667,11 @@ class PCM(Rasch):
         se=True,
     ):
         """
-        Analyse standardised residual correlations for local item dependence.
+        Analyse residual correlations for local item dependence.
 
-        Computes inter-item standardised residual correlations and performs
-        PCA to detect violations of local independence and unidimensionality.
+        Computes the inter-item correlations of the residuals (Q3), and a PCA
+        of the correlations of the standardised residuals, to detect
+        violations of local independence and unidimensionality.
         A first eigenvalue > 2.0 conventionally suggests a second dimension.
         Auto-triggers fit_statistics() if not yet run.
 
@@ -4668,9 +4709,17 @@ class PCM(Rasch):
         Attributes set
         --------------
         residual_correlations : pandas.DataFrame
-            Item-by-item correlation matrix of standardised residuals.
+            Item-by-item correlation matrix of the residuals (observed minus
+            expected).
         eigenvectors, eigenvalues, variance_explained, loadings : DataFrame or None
             PCA results. None if PCA fails.
+        q3_star : pandas.DataFrame
+            Q3* (Christensen, Makransky & Horton, 2017): Yen's Q3 (the
+            correlations of the raw residuals) minus the mean of the
+            off-diagonal ones; with fit_statistics(conditional=True), from
+            conditional residuals.
+        q3_star_max : float
+            The largest off-diagonal Q3*.
         pca_fail : bool
             True only if PCA raises an exception.
         """
@@ -4691,6 +4740,12 @@ class PCM(Rasch):
             )
 
         self.residual_correlations = self.residual_df.corr(numeric_only=False)
+        # Q3* (Christensen, Makransky & Horton, 2017): Yen's Q3 (correlations of the raw residuals) relative
+        # to the mean off-diagonal Q3
+        q3 = self.residual_df.corr(numeric_only=False)
+        off = ~np.eye(len(q3), dtype=bool)
+        self.q3_star = q3 - np.nanmean(q3.values[off])
+        self.q3_star_max = float(np.nanmax(self.q3_star.values[off]))
         pca = PCA()
         try:
             pca.fit(self.std_residual_df.corr())
