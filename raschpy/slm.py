@@ -4,7 +4,6 @@ from scipy.stats import chi2, norm
 
 import numpy as np
 import pandas as pd
-from sklearn.decomposition import PCA
 
 from matplotlib import pyplot as plt
 from matplotlib import colors as colors
@@ -2910,6 +2909,9 @@ class SLM(Rasch):
         violations of local item independence and unidimensionality. A large
         first eigenvalue (conventionally > 2.0) suggests a second dimension
         in the data. Auto-triggers fit_statistics() if not yet run.
+        For a sample-specific cutoff in place of that rule of thumb, see
+        fit_statistics(conditional=True, bootstrap_samples=...)
+        (residual_contrast_bootstrap).
 
         Parameters
         ----------
@@ -2993,35 +2995,13 @@ class SLM(Rasch):
         self.q3_star = q3 - np.nanmean(q3.values[off])
         self.q3_star_max = float(np.nanmax(self.q3_star.values[off]))
 
-        pca = PCA()
         try:
-            pca.fit(self.std_residual_df.corr())
-
-            n = (
-                self.no_of_items - 1
-            )  # rank of correlation matrix is n-1; drop zero eigenvalue
-            pc_labels = [f"PC {pc + 1}" for pc in range(n)]
-            item_labels = list(self.responses.columns)
-
-            self.eigenvectors = pd.DataFrame(pca.components_[:n, :])
-            self.eigenvectors.index = pc_labels
-            self.eigenvectors.columns = [
-                f"Eigenvector {pc + 1}" for pc in range(self.no_of_items)
-            ]
-
-            self.eigenvalues = pd.DataFrame(pca.explained_variance_[:n])
-            self.eigenvalues.index = pc_labels
-            self.eigenvalues.columns = ["Eigenvalue"]
-
-            self.variance_explained = pd.DataFrame(pca.explained_variance_ratio_[:n])
-            self.variance_explained.index = pc_labels
-            self.variance_explained.columns = ["Variance explained"]
-
-            self.loadings = self.eigenvectors.T * (pca.explained_variance_[:n] ** 0.5)
-            self.loadings = pd.DataFrame(self.loadings)
-            self.loadings.index = item_labels
-            self.loadings.columns = pc_labels
-
+            (
+                self.eigenvectors,
+                self.eigenvalues,
+                self.variance_explained,
+                self.loadings,
+            ) = self._residual_pca()
         except Exception:
             self.pca_fail = True
             warnings.warn(

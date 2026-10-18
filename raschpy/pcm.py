@@ -4,7 +4,6 @@ from scipy.stats import chi2, norm
 
 import numpy as np
 import pandas as pd
-from sklearn.decomposition import PCA
 
 from matplotlib import pyplot as plt
 from matplotlib import colors as colors
@@ -4711,6 +4710,9 @@ class PCM(Rasch):
         of the correlations of the standardised residuals, to detect
         violations of local independence and unidimensionality.
         A first eigenvalue > 2.0 conventionally suggests a second dimension.
+        For a sample-specific cutoff in place of that rule of thumb, see
+        fit_statistics(conditional=True, bootstrap_samples=...)
+        (residual_contrast_bootstrap).
         Auto-triggers fit_statistics() if not yet run.
 
         Parameters
@@ -4784,32 +4786,13 @@ class PCM(Rasch):
         off = ~np.eye(len(q3), dtype=bool)
         self.q3_star = q3 - np.nanmean(q3.values[off])
         self.q3_star_max = float(np.nanmax(self.q3_star.values[off]))
-        pca = PCA()
         try:
-            pca.fit(self.std_residual_df.corr())
-            n = (
-                self.no_of_items - 1
-            )  # rank of correlation matrix is n-1; drop zero eigenvalue
-            pc_labels = [f"PC {pc + 1}" for pc in range(n)]
-
-            self.eigenvectors = pd.DataFrame(
-                pca.components_[:n, :],
-                index=pc_labels,
-                columns=[f"Eigenvector {pc + 1}" for pc in range(self.no_of_items)],
-            )
-            self.eigenvalues = pd.DataFrame(
-                pca.explained_variance_[:n], index=pc_labels, columns=["Eigenvalue"]
-            )
-            self.variance_explained = pd.DataFrame(
-                pca.explained_variance_ratio_[:n],
-                index=pc_labels,
-                columns=["Variance explained"],
-            )
-            self.loadings = pd.DataFrame(
-                self.eigenvectors.values.T * (pca.explained_variance_[:n] ** 0.5),
-                index=self.responses.columns,
-                columns=pc_labels,
-            )
+            (
+                self.eigenvectors,
+                self.eigenvalues,
+                self.variance_explained,
+                self.loadings,
+            ) = self._residual_pca()
         except Exception:
             self.pca_fail = True
             warnings.warn(

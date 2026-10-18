@@ -2479,6 +2479,44 @@ class Rasch:
         kw.update({k: v for k, v in passed.items() if v is not None})
         return kw
 
+    def _residual_pca(self):
+        """
+        Principal components of the standardised residuals for res_corr_analysis(): the eigendecomposition
+        of their correlation matrix (eigenvalues in descending order; the first is the first contrast), as
+        DataFrames (eigenvectors, eigenvalues, variance_explained, loadings) with no_of_items - 1
+        components. Each eigenvector's sign is set so its largest-magnitude element is positive. Raises
+        ValueError if the correlation matrix is not finite (e.g. an item without residual variance).
+        """
+        R = self.std_residual_df.corr().values
+        if not np.all(np.isfinite(R)):
+            raise ValueError(
+                "The standardised residuals' correlation matrix is not finite."
+            )
+        values, vectors = np.linalg.eigh(R)
+        order = np.argsort(values)[::-1]
+        values, vectors = values[order], vectors[:, order]
+        signs = np.sign(
+            vectors[np.abs(vectors).argmax(axis=0), np.arange(vectors.shape[1])]
+        )
+        vectors = vectors * np.where(signs == 0, 1.0, signs)
+        n = self.no_of_items - 1
+        pc_labels = [f"PC {pc + 1}" for pc in range(n)]
+        eigenvectors = pd.DataFrame(
+            vectors[:, :n].T,
+            index=pc_labels,
+            columns=[f"Eigenvector {pc + 1}" for pc in range(self.no_of_items)],
+        )
+        eigenvalues = pd.DataFrame(values[:n], index=pc_labels, columns=["Eigenvalue"])
+        variance_explained = pd.DataFrame(
+            values[:n] / np.trace(R), index=pc_labels, columns=["Variance explained"]
+        )
+        loadings = pd.DataFrame(
+            vectors[:, :n] * np.sqrt(np.clip(values[:n], 0, None)),
+            index=self.responses.columns,
+            columns=pc_labels,
+        )
+        return eigenvectors, eigenvalues, variance_explained, loadings
+
     @staticmethod
     def _wilson_hilferty_z(ms, q):
         """Standardised mean square: Wilson-Hilferty cube-root transformation with standard deviation q."""
