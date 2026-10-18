@@ -244,3 +244,20 @@ def test_gk_gamma_matches_vcdextra():
     g, se = _esf.gk_gamma(t)
     assert g == pytest.approx((401 - 67) / (401 + 67), abs=1e-12)
     assert se == pytest.approx(0.125936754996, abs=1e-9)  # vcdExtra sigma
+
+
+def test_westfall_young_step_down():
+    t_obs = np.array([3.0, 1.0, 2.0])
+    t_sim = np.array([[0.5, 2.5, 0.1], [3.5, 0.2, 0.3], [0.1, 0.1, 2.2], [1.2, 0.9, 0.4]])
+    p = _esf.westfall_young(t_obs, t_sim)
+    # step 1 (item 0, |t| = 3): max over all items >= 3 in row 1 only -> (1 + 1) / 5
+    # step 2 (item 2, |t| = 2): max over items {2, 1} >= 2 in rows 0, 2 -> 3 / 5
+    # step 3 (item 1, |t| = 1): max over {1} >= 1 in row 0 -> 2 / 5, raised to 3 / 5 by monotonicity
+    np.testing.assert_allclose(p, [2 / 5, 3 / 5, 3 / 5])
+    marginal = (1 + (np.abs(t_sim) >= np.abs(t_obs)).sum(0)) / 5
+    assert np.all(p >= marginal - 1e-12)
+
+
+def test_hdi():
+    lo, hi = _esf.hdi([5, 1, 2, 3, 4, 100], width=0.8)  # shortest interval holding 5 of 6 values
+    assert (lo, hi) == (1, 5)

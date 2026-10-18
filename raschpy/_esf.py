@@ -864,3 +864,53 @@ def person_pattern_pvalues(X, thresholds, samples=1000, rng=None, prepared=None)
             count += s_sim <= s_obs + 1e-12 * np.abs(s_obs)
         out[who[persons]] = (1 + count) / (1 + samples)
     return out
+
+
+def conditional_fit_ms(X, thresholds, prepared=None):
+    """Conditional item infit and outfit mean squares (Christensen & Kreiner) for responses X at the given
+    thresholds: residuals x - E[X_i | r] over the persons who contribute (non-extreme total, at least two
+    responses). Returns (infit, outfit), arrays over items."""
+    X = np.asarray(X, float)
+    mom = conditional_moments(X, thresholds, prepared=prepared)
+    E, V = mom["E"], mom["V"]
+    valid = np.isfinite(V) & (V > 0)
+    r2 = np.where(valid, (X - E) ** 2, 0.0)
+    Vv = np.where(valid, V, 0.0)
+    n = valid.sum(0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        infit = r2.sum(0) / Vv.sum(0)
+        outfit = np.where(valid, r2 / np.where(valid, V, 1.0), 0.0).sum(0) / n
+    return infit, outfit
+
+
+def westfall_young(t_obs, t_sim):
+    """Westfall-Young step-down (max-T) familywise p-values for observed statistics t_obs (k,) against
+    simulated t_sim (B, k) under the null, two-sided (absolute values), with monotonicity enforced.
+    """
+    a, A = np.abs(t_obs), np.abs(t_sim)
+    order = np.argsort(-a)  # most extreme first
+    B = A.shape[0]
+    p = np.empty(len(a))
+    prev = 0.0
+    for step, i in enumerate(order):
+        rest = order[step:]  # this item and the less extreme ones
+        mx = A[:, rest].max(axis=1)
+        pi = (1 + np.sum(mx >= a[i])) / (B + 1)
+        prev = max(prev, pi)
+        p[i] = prev
+    return p
+
+
+def hdi(samples, width=0.95):
+    """Highest-density interval of 1-d samples: the shortest interval containing ceil(width * n) values."""
+    x = np.sort(np.asarray(samples, float))
+    x = x[np.isfinite(x)]
+    n = len(x)
+    m = int(np.ceil(width * n))
+    if m < 1 or n == 0:
+        return np.nan, np.nan
+    if m >= n:
+        return x[0], x[-1]
+    spans = x[m - 1 :] - x[: n - m + 1]
+    j = int(np.argmin(spans))
+    return x[j], x[j + m - 1]

@@ -2484,7 +2484,7 @@ class Rasch:
         """Standardised mean square: Wilson-Hilferty cube-root transformation with standard deviation q."""
         return (ms ** (1 / 3) - 1) * (3 / q) + q / 3
 
-    def _apply_conditional_fit(self, samples=1000, seed=None):
+    def _apply_conditional_fit(self, samples=1000, seed=None, bootstrap_samples=None):
         """
         fit_statistics(conditional=True): replace the expected scores, variances and fourth central moments
         with their conditional values given each person's total over the items they responded to (they do
@@ -2569,6 +2569,74 @@ class Rasch:
         ).loc[idx]
         self._conditional_tables = mom["tables"]
         self.fit_conditional = True
+        self.item_fit_bootstrap = None
+        if bootstrap_samples:
+            self._conditional_fit_bootstrap(X, names, int(bootstrap_samples), seed)
+
+    def _conditional_fit_bootstrap(self, X, names, B, seed):
+        """
+        Parametric bootstrap reference distributions for the conditional item infit and outfit (Johansson,
+        2025, 2026): B datasets simulated from the fitted model given each person's total over the items they
+        responded to (so the score distribution is the observed one and no person estimates are needed),
+        each recalibrated with the object's calibrate() settings (CML refits reuse the observed Hessian) and
+        its conditional infit/outfit computed. Each observed statistic is studentised by its simulated mean
+        and SD; p-values are marginal and Westfall-Young step-down (familywise), and the 95% highest-density
+        interval of the simulated values is a descriptive band. Simulated datasets in which an item has no
+        estimate are skipped and counted.
+        """
+        from raschpy import _esf
+
+        rng = np.random.default_rng(seed)
+        thr = self._cml_threshold_list(names)
+        prep = _esf.prepare(X, self._cml_max_scores(names).astype(int))
+        obs_in, obs_out = _esf.conditional_fit_ms(X, thr, prepared=prep)
+        cml = getattr(self, "estimation", None) == "cml"
+        H = self._cml_observed_hessian() if cml else None
+        clone = copy.copy(self)
+        everyone = self.responses.index
+        sims, skipped = [], 0
+        for _ in range(B):
+            Y = _esf.sample_given_totals(X, thr, rng)
+            clone.responses = pd.DataFrame(Y, index=everyone, columns=names)
+            try:
+                m = clone._global_fit_subset(everyone, cml_hessian=H)
+            except ValueError:
+                skipped += 1
+                continue
+            if list(m.item_names) != names:
+                skipped += 1  # an item without an estimate in this dataset
+                continue
+            inf_b, out_b = _esf.conditional_fit_ms(
+                Y, m._cml_threshold_list(names), prepared=prep
+            )
+            sims.append(np.r_[inf_b, out_b])
+        if not sims:
+            raise ValueError(
+                "No bootstrap dataset could be recalibrated with every item; the "
+                "bootstrap item-fit p-values are not available."
+            )
+        S = np.array(sims)
+        k = len(names)
+        cols = {}
+        for label, obs, sim in (
+            ("Infit", obs_in, S[:, :k]),
+            ("Outfit", obs_out, S[:, k:]),
+        ):
+            mu, sd = np.nanmean(sim, 0), np.nanstd(sim, 0, ddof=1)
+            sd = np.where(sd > 0, sd, np.nan)
+            t_obs, t_sim = (obs - mu) / sd, (sim - mu) / sd
+            band = np.array([_esf.hdi(sim[:, i]) for i in range(k)])
+            cols[f"{label} MS"] = obs
+            cols[f"{label} 95% low"] = band[:, 0]
+            cols[f"{label} 95% high"] = band[:, 1]
+            cols[f"{label} p"] = (1 + (np.abs(t_sim) >= np.abs(t_obs)).sum(0)) / (
+                len(S) + 1
+            )
+            cols[f"{label} p (Westfall-Young)"] = _esf.westfall_young(
+                np.nan_to_num(t_obs), np.nan_to_num(t_sim)
+            )
+        self.item_fit_bootstrap = pd.DataFrame(cols, index=names)
+        self.item_fit_bootstrap_info = dict(samples=len(S), skipped=skipped, seed=seed)
 
     @staticmethod
     def _check_cml_solver(solver, estimation):

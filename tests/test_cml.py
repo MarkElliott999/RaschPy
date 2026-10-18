@@ -363,3 +363,19 @@ def test_q3_star():
     off = ~np.eye(len(q3), dtype=bool)
     np.testing.assert_allclose(m.q3_star.values, q3.values - q3.values[off].mean(), atol=1e-12)
     assert m.q3_star_max == pytest.approx((q3.values - q3.values[off].mean())[off].max())
+
+
+def test_conditional_fit_bootstrap():
+    X = pd.read_csv(os.path.join(DATA, "cml_slm_complete.csv"))
+    m = SLM(X)
+    m.calibrate(estimation="cml")
+    m.fit_statistics(se=False, conditional=True, conditional_samples=20, bootstrap_samples=60, seed=7)
+    b1 = m.item_fit_bootstrap.copy()
+    assert m.item_fit_bootstrap_info == dict(samples=60, skipped=0, seed=7)
+    np.testing.assert_allclose(b1["Infit MS"].values, m.item_infit_ms.reindex(b1.index).values, atol=1e-12)
+    assert (b1["Infit p (Westfall-Young)"] >= b1["Infit p"] - 1e-12).all()
+    assert ((b1["Infit 95% low"] <= b1["Infit 95% high"])).all()
+    m.fit_statistics(se=False, conditional=True, conditional_samples=20, bootstrap_samples=60, seed=7)
+    pd.testing.assert_frame_equal(m.item_fit_bootstrap, b1)
+    with pytest.raises(ValueError, match="needs conditional=True"):
+        m.fit_statistics(se=False, bootstrap_samples=10)

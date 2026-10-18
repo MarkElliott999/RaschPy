@@ -2729,6 +2729,7 @@ class PCM(Rasch):
         seed=None,
         conditional=False,
         conditional_samples=1000,
+        bootstrap_samples=None,
     ):
         """
         Compute all item, threshold, person, and test-level fit statistics.
@@ -2795,6 +2796,19 @@ class PCM(Rasch):
             conditional=True only: Monte Carlo samples for each person's
             conditional p-value (person_conditional_p).
 
+        bootstrap_samples : int or None, default None
+            conditional=True only: if set (e.g. 1000; at least 400
+            recommended), parametric bootstrap reference distributions for the
+            conditional item infit and outfit (Johansson): this many datasets
+            simulated from the fitted model given each person's total over the
+            items they responded to, each recalibrated with the object's
+            calibrate() settings, give each item's observed mean square a
+            studentised marginal p-value, a Westfall-Young step-down p-value
+            (familywise error control across items; the recommended decision
+            rule, on infit) and a 95% highest-density band
+            (item_fit_bootstrap; the samples used and seed= in
+            item_fit_bootstrap_info).
+
         Attributes set
         --------------
         fit_conditional : bool
@@ -2808,6 +2822,10 @@ class PCM(Rasch):
             asymptotic SE, and the two-sided p-value of the difference
             ('p', and BH-adjusted 'p (BH)'). Every person who responded to the
             item is included.
+        item_fit_bootstrap : pandas.DataFrame or None
+            bootstrap_samples only: for infit and outfit, the observed mean
+            square, the 95% band of its bootstrap distribution, the marginal
+            p-value and the Westfall-Young p-value.
         person_conditional_p : pandas.Series
             conditional=True only: for each non-extreme person, the
             probability, given their total over the items they responded to,
@@ -3352,7 +3370,13 @@ class PCM(Rasch):
 
         self.fit_conditional = False
         if conditional:
-            self._apply_conditional_fit(samples=conditional_samples, seed=seed)
+            self._apply_conditional_fit(
+                samples=conditional_samples,
+                seed=seed,
+                bootstrap_samples=bootstrap_samples,
+            )
+        elif bootstrap_samples:
+            raise ValueError("bootstrap_samples= needs conditional=True.")
 
         # ------------------------------------------------------------------
         # Residual correlation / PCA
