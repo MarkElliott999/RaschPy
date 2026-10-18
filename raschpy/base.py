@@ -2479,19 +2479,18 @@ class Rasch:
         kw.update({k: v for k, v in passed.items() if v is not None})
         return kw
 
-    def _residual_pca(self):
+    @staticmethod
+    def _eig_pca(R, labels):
         """
-        Principal components of the standardised residuals for res_corr_analysis(): the eigendecomposition
-        of their correlation matrix (eigenvalues in descending order; the first is the first contrast), as
-        DataFrames (eigenvectors, eigenvalues, variance_explained, loadings) with no_of_items - 1
-        components. Each eigenvector's sign is set so its largest-magnitude element is positive. Raises
-        ValueError if the correlation matrix is not finite (e.g. an item without residual variance).
+        Principal components of a correlation matrix R (labels: its rows): the eigendecomposition, as
+        DataFrames (eigenvectors, eigenvalues, variance_explained, loadings) with len(labels) - 1
+        components, eigenvalues in descending order (the first is the first contrast), each eigenvector's
+        sign set so its largest-magnitude element is positive, variance explained = eigenvalue / trace, and
+        loadings = eigenvector x sqrt(eigenvalue). Raises ValueError if R is not finite.
         """
-        R = self.std_residual_df.corr().values
+        R = np.asarray(R, float)
         if not np.all(np.isfinite(R)):
-            raise ValueError(
-                "The standardised residuals' correlation matrix is not finite."
-            )
+            raise ValueError("The residual correlation matrix is not finite.")
         values, vectors = np.linalg.eigh(R)
         order = np.argsort(values)[::-1]
         values, vectors = values[order], vectors[:, order]
@@ -2499,12 +2498,13 @@ class Rasch:
             vectors[np.abs(vectors).argmax(axis=0), np.arange(vectors.shape[1])]
         )
         vectors = vectors * np.where(signs == 0, 1.0, signs)
-        n = self.no_of_items - 1
+        k = len(labels)
+        n = k - 1
         pc_labels = [f"PC {pc + 1}" for pc in range(n)]
         eigenvectors = pd.DataFrame(
             vectors[:, :n].T,
             index=pc_labels,
-            columns=[f"Eigenvector {pc + 1}" for pc in range(self.no_of_items)],
+            columns=[f"Eigenvector {pc + 1}" for pc in range(k)],
         )
         eigenvalues = pd.DataFrame(values[:n], index=pc_labels, columns=["Eigenvalue"])
         variance_explained = pd.DataFrame(
@@ -2512,10 +2512,14 @@ class Rasch:
         )
         loadings = pd.DataFrame(
             vectors[:, :n] * np.sqrt(np.clip(values[:n], 0, None)),
-            index=self.responses.columns,
+            index=labels,
             columns=pc_labels,
         )
         return eigenvectors, eigenvalues, variance_explained, loadings
+
+    def _residual_pca(self):
+        """res_corr_analysis(): principal components of the standardised residuals' correlations."""
+        return self._eig_pca(self.std_residual_df.corr().values, self.responses.columns)
 
     @staticmethod
     def _wilson_hilferty_z(ms, q):

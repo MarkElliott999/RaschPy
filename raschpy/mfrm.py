@@ -6,7 +6,6 @@ import numpy as np
 import pandas as pd
 from scipy.stats import chi2, norm
 from scipy.stats import t as t_dist
-from sklearn.decomposition import PCA
 from sklearn.linear_model import HuberRegressor
 from matplotlib import pyplot as plt
 from matplotlib import colors as colors
@@ -8155,18 +8154,13 @@ class MFRM(Rasch):
         std_residual_df = residual_df / (info_df**0.5)
         return exp_score_df, info_df, kurtosis_df, residual_df, std_residual_df
 
-    def _conditional_cat_prob_dict(self, model, index):
+    def _virtual_items(self, model):
         """
-        Category probabilities conditional on each person's total over all the ratings they received, for
-        fit_statistics(conditional=True): each facet element x item is a virtual item whose thresholds are
-        that cell of the model's location grid (read from the category probability engine's log numerators
-        at theta = 0, so every representation is covered), and the conditional probabilities come from
-        their ESFs (persons cancel). Persons who contribute nothing (a single rating, or an extreme total)
-        get their observed category with probability 1. Same layout as cat_prob_dict ({k: (facet element,
-        person) x items DataFrame}), on the given index.
+        The facet element x item virtual items for conditional fit: responses as persons x (facet element,
+        item) (facet element-major), and each virtual item's thresholds -- that cell of the model's location
+        grid, read from the category probability engine's log numerators at theta = 0, so every
+        representation is covered. Returns (Xv, thresholds, persons).
         """
-        from raschpy import _esf
-
         _, thresholds, facet_effects = self._get_params(model, anchor=False)
         item_names, facets = list(self.item_names), list(self.facet_names)
         logn, _ = self._cat_probs_mfrm(
@@ -8179,16 +8173,30 @@ class MFRM(Rasch):
             log_numerators=True,
         )
         persons = self.responses.index.get_level_values(1).unique()
-        R, I, K1 = len(facets), len(item_names), int(self.max_score) + 1
         thr, cols = [], []
         for r in facets:
             le = logn[r][:, 0, :] - logn[r][0, 0, :]  # log eps (K + 1, I)
-            b = -np.diff(le, axis=0)  # thresholds of each virtual item
-            for j in range(I):
-                thr.append(b[:, j])
+            b = -np.diff(le, axis=0)
+            thr.extend(b[:, j] for j in range(len(item_names)))
             cols.append(self.responses.loc[r].reindex(persons)[item_names].values)
-        Xv = np.hstack(cols).astype(float)  # persons x (facet element, item)
-        P = _esf.conditional_moments(Xv, thr, probs=True)["P"]
+        return np.hstack(cols).astype(float), thr, persons
+
+    def _conditional_cat_prob_dict(self, model, index, mom=None):
+        """
+        Category probabilities conditional on each person's total over all the ratings they received, for
+        fit_statistics(conditional=True), from the virtual items (see _virtual_items; persons cancel).
+        Persons who contribute nothing (a single rating, or an extreme total) get their observed category
+        with probability 1. Same layout as cat_prob_dict ({k: (facet element, person) x items DataFrame}),
+        on the given index.
+        """
+        from raschpy import _esf
+
+        Xv, thr, persons = self._virtual_items(model)
+        facets, item_names = list(self.facet_names), list(self.item_names)
+        R, I, K1 = len(facets), len(item_names), int(self.max_score) + 1
+        if mom is None:
+            mom = _esf.conditional_moments(Xv, thr, probs=True)
+        P = mom["P"].copy()
         obs = ~np.isnan(Xv)
         fixed = obs & np.isnan(P[:, :, 0])
         nn, cc = np.nonzero(fixed)
@@ -8203,6 +8211,233 @@ class MFRM(Rasch):
             ]
             cpd[k] = pd.concat(frames, keys=facets).reindex(index)
         return cpd
+
+    def _mfrm_conditional_stats(self, Xv, thr, prep):
+        """
+        Conditional statistics from the virtual items (R facet elements x I items, facet element-major):
+        item infit/outfit pooled over facet elements, facet element infit/outfit pooled over items,
+        restscore gamma minus its expected value on tables pooled per item and per facet element, the
+        tables themselves, and Yen's Q3 for each item pair (residual correlations over facet element x
+        person rows, upper triangle). Used for the observed data and every bootstrap replicate.
+        """
+        from raschpy import _esf
+
+        R, I = self.no_of_facet_elements, self.no_of_items
+        mom = _esf.conditional_moments(Xv, thr, prepared=prep, tables=True, probs=True)
+        E, V = mom["E"], mom["V"]
+        valid = np.isfinite(V) & (V > 0)
+        resid = np.where(valid, Xv - E, np.nan)
+        r2 = np.where(valid, resid**2, 0.0).reshape(-1, R, I)
+        Vv = np.where(valid, V, 0.0).reshape(-1, R, I)
+        z2 = np.where(valid, resid**2 / np.where(valid, V, 1.0), 0.0).reshape(-1, R, I)
+        n = valid.reshape(-1, R, I)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            out = dict(
+                item_infit=r2.sum((0, 1)) / Vv.sum((0, 1)),
+                item_outfit=z2.sum((0, 1)) / n.sum((0, 1)),
+                rater_infit=r2.sum((0, 2)) / Vv.sum((0, 2)),
+                rater_outfit=z2.sum((0, 2)) / n.sum((0, 2)),
+            )
+        obs_all = ~np.isnan(Xv)
+        xi = np.where(obs_all, Xv, 0).astype(int)
+        tot = xi.sum(1)
+        exp_t = np.array(mom["tables"]).reshape(R, I, *mom["tables"][0].shape)
+        obs_t = np.zeros_like(exp_t)
+        for c in range(R * I):
+            who = obs_all[:, c]
+            np.add.at(obs_t[c // I, c % I], (xi[who, c], tot[who] - xi[who, c]), 1.0)
+        for label, axis, size in (("item", 0, I), ("rater", 1, R)):
+            O, X_ = obs_t.sum(axis), exp_t.sum(axis)
+            g = np.array([_esf.gk_gamma(O[j]) for j in range(size)])
+            ge = np.array([_esf.gk_gamma(X_[j])[0] for j in range(size)])
+            out[f"{label}_gamma"], out[f"{label}_gamma_se"] = g[:, 0], g[:, 1]
+            out[f"{label}_gamma_exp"] = ge
+            out[f"{label}_gdiff"] = g[:, 0] - ge
+        rows = resid.reshape(-1, R, I).transpose(1, 0, 2).reshape(-1, I)
+        out["q3"] = pd.DataFrame(rows).corr().values[np.triu_indices(I, 1)]
+        out["mom"] = mom
+        return out
+
+    @staticmethod
+    def _restscore_frame(gamma, se, gexp, labels, bh):
+        """Item-restscore table: gamma observed and expected, SE, two-sided normal p and BH-adjusted p."""
+        with np.errstate(invalid="ignore", divide="ignore"):
+            z = (gamma - gexp) / se
+        p = np.where(np.isfinite(z), 2 * norm.sf(np.abs(z)), np.nan)
+        tab = pd.DataFrame(
+            {"Observed gamma": gamma, "Expected gamma": gexp, "SE": se, "p": p},
+            index=labels,
+        )
+        tab["p (BH)"] = bh(tab["p"].fillna(1.0)).where(tab["p"].notna())
+        return tab
+
+    def _mfrm_conditional_extras(
+        self, model, st, Xv, thr, prep, persons, samples, seed
+    ):
+        """fit_statistics(conditional=True): item and facet element restscore tables, person p-values."""
+        from raschpy import _esf
+
+        items, facets = list(self.item_names), list(self.facet_names)
+        setattr(
+            self,
+            f"item_restscore_table_{model}",
+            self._restscore_frame(
+                st["item_gamma"],
+                st["item_gamma_se"],
+                st["item_gamma_exp"],
+                items,
+                self._bh_correction,
+            ),
+        )
+        setattr(
+            self,
+            f"rater_restscore_table_{model}",
+            self._restscore_frame(
+                st["rater_gamma"],
+                st["rater_gamma_se"],
+                st["rater_gamma_exp"],
+                facets,
+                self._bh_correction,
+            ),
+        )
+        pv = _esf.person_pattern_pvalues(
+            Xv, thr, samples=samples, rng=seed, prepared=prep
+        )
+        setattr(
+            self,
+            f"person_conditional_p_{model}",
+            pd.Series(pv, index=persons, name="Conditional p"),
+        )
+
+    def _mfrm_conditional_bootstrap(self, model, obs, Xv, thr, prep, persons, B, seed):
+        """
+        Parametric bootstrap for MFRM conditional fit: B datasets simulated from the fitted model given each
+        person's total over all their ratings (virtual items), each recalibrated with the object's settings
+        (_refit_kw; 'mixed' as 'matrix' with the object's per-facet element models), and the statistics of
+        _mfrm_conditional_stats recomputed. Studentised marginal and Westfall-Young p-values (two-sided for
+        fit and restscore, upper one-sided for Q3), 95% highest-density bands for fit, bootstrap mean and
+        95th percentile for Q3. Datasets that cannot be recalibrated are skipped and counted.
+        """
+        from raschpy import _esf
+
+        rng = np.random.default_rng(seed)
+        items, facets = list(self.item_names), list(self.facet_names)
+        R, I = len(facets), len(items)
+        cal_model = "matrix" if model == "mixed" else model
+        keys = (
+            "item_infit",
+            "item_outfit",
+            "rater_infit",
+            "rater_outfit",
+            "item_gdiff",
+            "rater_gdiff",
+            "q3",
+        )
+        sims, skipped = {k: [] for k in keys}, 0
+        for _ in range(B):
+            Yv = _esf.sample_given_totals(Xv, thr, rng)
+            Y = pd.concat(
+                [
+                    pd.DataFrame(
+                        Yv[:, r * I : (r + 1) * I], index=persons, columns=items
+                    )
+                    for r in range(R)
+                ],
+                keys=facets,
+            )
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    s_ = MFRM(
+                        Y,
+                        self.max_score,
+                        validate=False,
+                        facet=(
+                            self.facet if self.facet_label != "facet element" else None
+                        ),
+                        facet_plural=(
+                            self.facets if self.facet_label != "facet element" else None
+                        ),
+                        _keep_empty=True,
+                    )
+                    s_.calibrate(**self._refit_kw(cal_model), model=cal_model)
+                    if model == "mixed":
+                        s_.facet_effects_mixed = s_._apply_rater_models(
+                            s_.facet_effects_matrix, self.rater_models
+                        )
+                    Xb, thr_b, persons_b = s_._virtual_items(model)
+            except (ValueError, np.linalg.LinAlgError):
+                skipped += 1
+                continue
+            if len(persons_b) != len(persons) or not np.array_equal(
+                np.isnan(Xb), np.isnan(Xv)
+            ):
+                skipped += 1
+                continue
+            st = s_._mfrm_conditional_stats(Xb, thr_b, prep)
+            for k in keys:
+                sims[k].append(st[k])
+        n = len(sims["q3"])
+        if not n:
+            raise ValueError(
+                "No bootstrap dataset could be recalibrated; the bootstrap p-values are not available."
+            )
+
+        def family(o, sim, two_sided=True):
+            sim = np.asarray(sim)
+            mu, sd = np.nanmean(sim, 0), np.nanstd(sim, 0, ddof=1)
+            sd = np.where(sd > 0, sd, np.nan)
+            t_o, t_s = (o - mu) / sd, (sim - mu) / sd
+            if two_sided:
+                marg = (1 + (np.abs(t_s) >= np.abs(t_o)).sum(0)) / (n + 1)
+            else:
+                marg = (1 + (t_s >= t_o).sum(0)) / (n + 1)
+            wy = _esf.westfall_young(
+                np.nan_to_num(t_o), np.nan_to_num(t_s), two_sided=two_sided
+            )
+            return sim, marg, wy
+
+        for who, labels in (("item", items), ("rater", facets)):
+            cols = {}
+            for stat in ("infit", "outfit"):
+                key = f"{who}_{stat}"
+                sim, marg, wy = family(obs[key], sims[key])
+                band = np.array([_esf.hdi(sim[:, j]) for j in range(len(labels))])
+                label = stat.capitalize()
+                cols[f"{label} MS"] = obs[key]
+                cols[f"{label} 95% low"], cols[f"{label} 95% high"] = (
+                    band[:, 0],
+                    band[:, 1],
+                )
+                cols[f"{label} p"], cols[f"{label} p (Westfall-Young)"] = marg, wy
+            setattr(
+                self, f"{who}_fit_bootstrap_{model}", pd.DataFrame(cols, index=labels)
+            )
+            _, marg, wy = family(obs[f"{who}_gdiff"], sims[f"{who}_gdiff"])
+            tab = getattr(self, f"{who}_restscore_table_{model}")
+            tab["p (bootstrap)"], tab["p (bootstrap, Westfall-Young)"] = marg, wy
+        sim, marg, wy = family(obs["q3"], sims["q3"], two_sided=False)
+        iu = np.triu_indices(I, 1)
+        setattr(
+            self,
+            f"q3_bootstrap_{model}",
+            pd.DataFrame(
+                {
+                    "Item 1": [items[i] for i in iu[0]],
+                    "Item 2": [items[j] for j in iu[1]],
+                    "Q3": obs["q3"],
+                    "Expected Q3": np.nanmean(sim, 0),
+                    "95% cutoff": np.nanpercentile(sim, 95, axis=0),
+                    "p": marg,
+                    "p (Westfall-Young)": wy,
+                }
+            ).sort_values("Q3", ascending=False, ignore_index=True),
+        )
+        setattr(
+            self,
+            f"fit_bootstrap_info_{model}",
+            dict(samples=n, skipped=skipped, seed=seed),
+        )
 
     def _ensure_fit_matrices(self, model, **kw):
         """Ensure calibration, person_locations, cat_prob_dict and fit matrices exist."""
@@ -9083,6 +9318,8 @@ class MFRM(Rasch):
         interval=None,
         seed=None,
         conditional=False,
+        conditional_samples=1000,
+        bootstrap_samples=None,
     ):
         """
         Compute all item, threshold, facet_element, person, and test-level fit statistics.
@@ -9138,7 +9375,27 @@ class MFRM(Rasch):
             that cell of the model's location grid. The output is otherwise the
             same. A person with an extreme total or a single rating is left
             out. Threshold fit, which is defined through the person locations,
-            is unchanged. Works with any estimation method.
+            is unchanged. Works with any estimation method. Also sets
+            item_restscore_table_{model} and rater_restscore_table_{model}
+            (Kreiner's item-restscore gamma, observed against expected under
+            the model, on tables pooled over facet elements and over items
+            respectively) and person_conditional_p_{model} (each person's
+            probability, given their total, of a rating pattern no more
+            likely than theirs). Q3* is set by item_res_corr_analysis
+            (item_q3_star_{model}).
+        conditional_samples : int, default 1000
+            conditional=True only: Monte Carlo samples for
+            person_conditional_p_{model}.
+        bootstrap_samples : int or None, default None
+            conditional=True only: if set (at least 400 recommended),
+            parametric bootstrap reference distributions (Johansson): this many
+            datasets simulated from the fitted model given each person's total,
+            each recalibrated with the object's settings, give studentised
+            marginal and Westfall-Young p-values and 95% bands for item and
+            facet element infit/outfit (item_fit_bootstrap_{model},
+            rater_fit_bootstrap_{model}), bootstrap p-values for the
+            item-restscore tests (columns added) and for Q3 on every item pair
+            (q3_bootstrap_{model}).
 
         Attributes set (model-suffixed)
         --------------------------------
@@ -9232,8 +9489,13 @@ class MFRM(Rasch):
         flag = f"fit_conditional_{model}"
         if conditional or getattr(self, flag, False):
             if conditional:
+                from raschpy import _esf
+
                 idx = getattr(self, f"exp_score_df_{model}").index
-                cpd = self._conditional_cat_prob_dict(model, idx)
+                Xv, thr, persons = self._virtual_items(model)
+                prep = _esf.prepare(Xv, [int(self.max_score)] * len(thr))
+                cstats = self._mfrm_conditional_stats(Xv, thr, prep)
+                cpd = self._conditional_cat_prob_dict(model, idx, mom=cstats["mom"])
             else:  # back to person-based frames after a conditional run
                 cpd = getattr(self, f"cat_prob_dict_{model}")
             for name, val in zip(
@@ -9254,6 +9516,25 @@ class MFRM(Rasch):
         self._run_person_fit(model)
         if test_stats:
             self._run_test_fit(model)
+        for name in (
+            "item_restscore_table",
+            "rater_restscore_table",
+            "person_conditional_p",
+            "item_fit_bootstrap",
+            "rater_fit_bootstrap",
+            "q3_bootstrap",
+        ):
+            setattr(self, f"{name}_{model}", None)
+        if conditional:
+            self._mfrm_conditional_extras(
+                model, cstats, Xv, thr, prep, persons, conditional_samples, seed
+            )
+            if bootstrap_samples:
+                self._mfrm_conditional_bootstrap(
+                    model, cstats, Xv, thr, prep, persons, int(bootstrap_samples), seed
+                )
+        elif bootstrap_samples:
+            raise ValueError("bootstrap_samples= needs conditional=True.")
 
     # Backwards-compatible aliases
     def fit_statistics_global(self, **kw):
@@ -12820,48 +13101,34 @@ class MFRM(Rasch):
     # Residual correlation analysis
     # ------------------------------------------------------------------
 
-    def item_res_corr_analysis(self, std_residual_df):
+    def item_res_corr_analysis(self, std_residual_df, residual_df=None):
         """
-        Analyse item standardised residual correlations.
+        Analyse item residual correlations.
 
-        Computes the inter-item correlation matrix of standardised residuals
-        and performs PCA to detect violations of local item independence.
+        Computes the inter-item correlations of the residuals (Yen's Q3; of
+        the standardised residuals if residual_df is not given) and a PCA of
+        the correlations of the standardised residuals (eigendecomposition;
+        the first eigenvalue is the first contrast) to detect violations of
+        local item independence.
 
         Parameters
         ----------
         std_residual_df : pandas.DataFrame
             Standardised residuals with (Rater, Person) MultiIndex and
             items as columns.
+        residual_df : pandas.DataFrame or None, default None
+            Raw residuals, same layout, for the correlations.
 
         Returns
         -------
         tuple of (correlations, eigenvectors, eigenvalues, variance_explained, loadings)
-            All are DataFrames (or None if PCA fails).
+            All are DataFrames (the last four None if the PCA fails).
         """
-        item_residual_correlations = std_residual_df.corr(numeric_only=False)
-        pca = PCA()
+        source = std_residual_df if residual_df is None else residual_df
+        item_residual_correlations = source.corr(numeric_only=False)
         try:
-            pca.fit(item_residual_correlations)
-            n = (
-                self.no_of_items - 1
-            )  # rank of correlation matrix is n-1; drop zero eigenvalue
-            pc_labels = [f"PC {pc + 1}" for pc in range(n)]
-            eigvec_labels = [f"Eigenvector {pc + 1}" for pc in range(self.no_of_items)]
-            eigenvectors = pd.DataFrame(
-                pca.components_[:n, :], index=pc_labels, columns=eigvec_labels
-            )
-            eigenvalues = pd.DataFrame(
-                pca.explained_variance_[:n], index=pc_labels, columns=["Eigenvalue"]
-            )
-            variance_explained = pd.DataFrame(
-                pca.explained_variance_ratio_[:n],
-                index=pc_labels,
-                columns=["Variance explained"],
-            )
-            loadings = pd.DataFrame(
-                eigenvectors.values.T * (pca.explained_variance_[:n] ** 0.5),
-                index=self.responses.columns,
-                columns=pc_labels,
+            eigenvectors, eigenvalues, variance_explained, loadings = self._eig_pca(
+                std_residual_df.corr(numeric_only=False).values, self.responses.columns
             )
         except Exception:
             warnings.warn(
@@ -12884,7 +13151,8 @@ class MFRM(Rasch):
         Analyse facet_element residual correlations.
 
         Pivots the residual DataFrame to (Person×Items, Facet elements (e.g. raters)) shape,
-        computes the inter-facet_element correlation matrix, and performs PCA.
+        computes the inter-facet_element correlation matrix of the residuals, and a PCA
+        (eigendecomposition) of the correlations of the standardised residuals.
         A large first eigenvalue suggests systematic facet_element bias.
 
         Parameters
@@ -12902,31 +13170,9 @@ class MFRM(Rasch):
         rater_res = self.facet_pivot(residual_df)
         rater_std_res = self.facet_pivot(std_residual_df)
         correlations = rater_res.corr(numeric_only=False)
-        pca = PCA()
         try:
-            pca.fit(rater_std_res.corr(numeric_only=False))
-            n = (
-                self.no_of_facet_elements - 1
-            )  # rank of correlation matrix is n-1; drop zero eigenvalue
-            pc_labels = [f"PC {pc + 1}" for pc in range(n)]
-            eigvec_labels = [
-                f"Eigenvector {pc + 1}" for pc in range(self.no_of_facet_elements)
-            ]
-            eigenvectors = pd.DataFrame(
-                pca.components_[:n, :], index=pc_labels, columns=eigvec_labels
-            )
-            eigenvalues = pd.DataFrame(
-                pca.explained_variance_[:n], index=pc_labels, columns=["Eigenvalue"]
-            )
-            variance_explained = pd.DataFrame(
-                pca.explained_variance_ratio_[:n],
-                index=pc_labels,
-                columns=["Variance explained"],
-            )
-            loadings = pd.DataFrame(
-                eigenvectors.values.T * (pca.explained_variance_[:n] ** 0.5),
-                index=self.facet_names,
-                columns=pc_labels,
+            eigenvectors, eigenvalues, variance_explained, loadings = self._eig_pca(
+                rater_std_res.corr(numeric_only=False).values, self.facet_names
             )
         except Exception:
             warnings.warn(
@@ -12942,7 +13188,19 @@ class MFRM(Rasch):
         """Internal dispatcher: run item residual correlation analysis for the given model."""
         if not hasattr(self, f"std_residual_df_{model}"):
             self.fit_statistics(model=model, **kw)
-        results = self.item_res_corr_analysis(getattr(self, f"std_residual_df_{model}"))
+        results = self.item_res_corr_analysis(
+            getattr(self, f"std_residual_df_{model}"),
+            getattr(self, f"residual_df_{model}"),
+        )
+        # Q3* (Christensen, Makransky & Horton, 2017): Yen's Q3 relative to the mean off-diagonal Q3
+        q3 = results[0]
+        off = ~np.eye(len(q3), dtype=bool)
+        setattr(self, f"item_q3_star_{model}", q3 - np.nanmean(q3.values[off]))
+        setattr(
+            self,
+            f"item_q3_star_max_{model}",
+            float(np.nanmax(q3.values[off] - np.nanmean(q3.values[off]))),
+        )
         for name, val in zip(
             [
                 "item_residual_correlations",

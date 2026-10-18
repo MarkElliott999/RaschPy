@@ -420,3 +420,35 @@ def test_mfrm_conditional_fit():
         )
         m.fit_statistics(model=model, se=False)
         np.testing.assert_allclose(getattr(m, f"item_infit_ms_{model}").values, before.values, atol=1e-12)
+
+
+def test_mfrm_conditional_extras_bootstrap_and_pca():
+    from raschpy import MFRM
+    from raschpy.simulation import MFRM_Sim
+
+    sim = MFRM_Sim(no_of_items=4, no_of_persons=150, no_of_facet_elements=3, max_score=2, model="global", seed=6)
+    m = MFRM(sim.responses)
+    kw = dict(model="global", se=False, conditional=True, conditional_samples=30, bootstrap_samples=25, seed=2)
+    m.fit_statistics(**kw)
+    it = m.item_fit_bootstrap_global.copy()
+    np.testing.assert_allclose(it["Infit MS"].values, m.item_infit_ms_global.reindex(it.index).values, atol=1e-12)
+    for tab in (m.item_fit_bootstrap_global, m.rater_fit_bootstrap_global):
+        assert (tab["Infit p (Westfall-Young)"] >= tab["Infit p"] - 1e-12).all()
+    for tab in (m.item_restscore_table_global, m.rater_restscore_table_global):
+        assert {"Observed gamma", "Expected gamma", "p (BH)", "p (bootstrap, Westfall-Young)"} <= set(tab.columns)
+    assert len(m.q3_bootstrap_global) == 6 and m.person_conditional_p_global.notna().any()
+    m.fit_statistics(**kw)
+    pd.testing.assert_frame_equal(m.item_fit_bootstrap_global, it)
+    # residual analyses: eigenvalues of the correlation matrices; item correlations of the raw residuals; Q3*
+    m._run_item_res_corr("global")
+    m._run_facet_res_corr("global")
+    R = m.std_residual_df_global.corr().values
+    np.testing.assert_allclose(
+        m.item_eigenvalues_global.values[:, 0], np.sort(np.linalg.eigvalsh(R))[::-1][:-1], atol=1e-10
+    )
+    q3 = m.residual_df_global.corr()
+    np.testing.assert_allclose(m.item_residual_correlations_global.values, q3.values, atol=1e-12)
+    off = ~np.eye(len(q3), dtype=bool)
+    assert m.item_q3_star_max_global == pytest.approx((q3.values - q3.values[off].mean())[off].max())
+    with pytest.raises(ValueError, match="needs conditional=True"):
+        m.fit_statistics(model="global", se=False, bootstrap_samples=5)
