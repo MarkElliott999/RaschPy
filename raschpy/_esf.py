@@ -91,46 +91,31 @@ def _as_threshold_list(thresholds):
     return [np.atleast_1d(np.asarray(x, float)) for x in thresholds]
 
 
-def cond_loglik(X, thresholds, hessian=False, budget=BUDGET):
+def prepare(X, Ks, budget=BUDGET):
     """
-    Conditional log-likelihood of responses X given each person's total over the items they responded to.
-
-    Parameters
-    ----------
-    X : array (n_persons, n_items)
-        Integer responses 0..K_i, NaN = no response.
-    thresholds : list of 1-d arrays, or 2-d array with NaN padding
-        b[i, h], h = 1..K_i, for each item (uncentred: item location plus centred threshold).
-    hessian : bool
-        Also return the Hessian.
-    budget : float
-        Target size (floats) of the largest temporary array.
-
-    Returns
-    -------
-    ll : float
-    grad : array (p,)
-        Gradient with respect to the thresholds stacked item by item (p = sum_i K_i).
-    hess : array (p, p) or None
+    The parts of cond_loglik that depend only on the data (responses X and each item's number of
+    thresholds Ks): validation, the persons who contribute, the observed category counts, the
+    missingness groups and their cells (group x total), and the batches. Computed once per fit and
+    passed to cond_loglik(prepared=...), so that each evaluation does only the parameter-dependent work.
     """
-    b_list = _as_threshold_list(thresholds)
+    from types import SimpleNamespace
+
     X = np.asarray(X, float)
-    I = len(b_list)
+    Ks = np.asarray(Ks, dtype=np.int64)
+    I = len(Ks)
     if X.shape[1] != I:
         raise ValueError(f"X has {X.shape[1]} items but thresholds has {I}.")
-    Ks = np.array([len(x) for x in b_list])
     Kmax = int(Ks.max())
     K1 = Kmax + 1
     D = I * K1
     off = np.concatenate([[0], np.cumsum(Ks)])
     p = int(off[-1])
-    LE = np.full((I, K1), NEG)
-    for i, x in enumerate(b_list):
-        LE[i, : Ks[i] + 1] = np.concatenate([[0.0], -np.cumsum(x)])
     bidx = np.full((I, Kmax), p)  # stacked index of b[i, h]; absent h -> dummy index p
     for i, K in enumerate(Ks):
         bidx[i, :K] = off[i] + np.arange(K)
-
+    prep = SimpleNamespace(
+        I=I, Ks=Ks, Kmax=Kmax, K1=K1, D=D, off=off, p=p, bidx=bidx, empty=False
+    )
     obs = ~np.isnan(X)
     Xi = np.where(obs, X, 0).astype(np.int64)
     if np.any(Xi < 0) or np.any(Xi > Ks[None, :]):
@@ -142,14 +127,12 @@ def cond_loglik(X, thresholds, hessian=False, budget=BUDGET):
     keep = (obs.sum(1) >= 2) & (r_all > 0) & (r_all < maxr)
     obs, Xi, r_all = obs[keep], Xi[keep], r_all[keep]
     if not keep.any():
-        return 0.0, np.zeros(p), (np.zeros((p, p)) if hessian else None)
+        prep.empty = True
+        return prep
 
-    # observed part of the log-likelihood and gradient (log-eps space)
     pr, pc = np.nonzero(obs)
-    xv = Xi[pr, pc]
-    ll = LE[pc, xv].sum()
-    gle = np.bincount(pc * K1 + xv, minlength=D).astype(float)
-
+    prep.pc, prep.xv = pc, Xi[pr, pc]
+    prep.gle_obs = np.bincount(pc * K1 + prep.xv, minlength=D).astype(float)
     # cells (group x total), groups ordered by size, spread of totals, lowest total
     keys, inv = _patterns(obs)
     G = len(keys)
@@ -170,33 +153,7 @@ def cond_loglik(X, thresholds, hessian=False, budget=BUDGET):
     cg, cr, cw = key2[o2] // (S + 1), key2[o2] % (S + 1), cw[o2].astype(float)
     nobs_g = keys.sum(1)
 
-    Hflat = np.zeros((p + 1) * (p + 1)) if hessian else None
-    acc_i, acc_w, acc_n = [], [], [0]
-
-    def flush():
-        if acc_i:
-            Hflat[:] += np.bincount(
-                np.concatenate(acc_i),
-                weights=np.concatenate(acc_w),
-                minlength=(p + 1) ** 2,
-            )
-            acc_i.clear()
-            acc_w.clear()
-            acc_n[0] = 0
-
-    def scatter(ia, ib, C):
-        """Add log-eps-space blocks C (B, K1, K1) for item pairs (ia, ib), mapped to b:
-        B[h, j] = sum_{k > h, l > j} C[k, l]."""
-        Bm = C[:, ::-1, ::-1].cumsum(1).cumsum(2)[:, ::-1, ::-1][:, 1:, 1:]
-        ri = bidx[ia][:, :, None] * (p + 1) + bidx[ib][:, None, :]
-        acc_i.append(ri.ravel())
-        acc_w.append(Bm.ravel())
-        acc_n[0] += ri.size
-        if acc_n[0] > 3e7:
-            flush()
-
-    kk = np.arange(K1)
-    km = kk[:, None] + kk[None, :]
+    batches = []
     for n in np.unique(nobs_g):
         gs = np.nonzero(nobs_g == n)[0]
         nb = max(1, int(budget / (2 * (n + 1) * (n * Kmax + 1))))
@@ -228,7 +185,6 @@ def cond_loglik(X, thresholds, hessian=False, budget=BUDGET):
             gb = gs[s0:s1]
             Gb = len(gb)
             item_idx = np.nonzero(keys[gb])[1].reshape(Gb, n)
-            le = LE[item_idx]  # (Gb, n, K1)
             c0, c1 = np.searchsorted(cg, gb[0]), np.searchsorted(
                 cg, gb[-1], side="right"
             )
@@ -237,106 +193,194 @@ def cond_loglik(X, thresholds, hessian=False, budget=BUDGET):
             starts = np.concatenate([[0], np.nonzero(np.diff(lp))[0] + 1])
             rmin = np.minimum.reduceat(r, starts)
             rmax = np.maximum.reduceat(r, starts)
-            pre = [np.zeros((Gb, 1))]
-            for j in range(n):
-                pre.append(_logconv_small(pre[-1], le[:, j, :]))
-            lgc = pre[n][lp, r]  # log gamma_r per cell
-            ll -= (w * lgc).sum()
-            W = int(rmax.max()) + 1
-            # weights pushed back through the items: Q[b](q) = sum_t suffix_{b+1}[t] u_{q+t}
-            U = np.full((Gb, W), NEG)
-            with np.errstate(divide="ignore"):
-                U[lp, r] = np.log(w) - lgc
-            Q = [None] * n
-            Q[n - 1] = U
-            padK = np.full((Gb, Kmax), NEG)
-            for b in range(n - 2, -1, -1):
-                Qp = np.concatenate([Q[b + 1], padK], axis=1)
-                Q[b] = _lse(
-                    np.stack(
-                        [Qp[:, j : j + W] + le[:, b + 1, j, None] for j in range(K1)], 0
-                    ),
-                    axis=0,
+            batches.append(
+                SimpleNamespace(
+                    n=int(n),
+                    Gb=Gb,
+                    item_idx=item_idx,
+                    lp=lp,
+                    r=r,
+                    w=w,
+                    starts=starts,
+                    rmin=rmin,
+                    rmax=rmax,
                 )
-            if not hessian:
-                # expected category counts: eps[a, k] sum_s prefix_a[s] Q_a(s + k)
-                for a in range(n):
-                    Mv = np.full((Gb, W), NEG)
-                    x = pre[a][:, :W]
-                    Mv[:, : x.shape[1]] = x
-                    Qa = sliding_window_view(
-                        np.concatenate([Q[a], padK], 1), W, axis=1
-                    )  # (Gb, K1, W)
-                    with np.errstate(invalid="ignore"):
-                        E = np.nan_to_num(
-                            np.exp(le[:, a, :] + _lse(Mv[:, None, :] + Qa, axis=2))
-                        )
-                    gle -= np.bincount(
-                        (item_idx[:, a][:, None] * K1 + kk[None, :]).ravel(),
-                        weights=E.ravel(),
-                        minlength=D,
-                    )
-                continue
-            # per-cell probabilities P(X_j = k | r) (needed for the covariance's product term)
-            suf = [np.zeros((Gb, 1))]
-            for j in range(n - 1, -1, -1):
-                suf.append(_logconv_small(suf[-1], le[:, j, :]))
-            suf = suf[::-1]
-            lo1 = rmin - Kmax
-            m1 = int((rmax - lo1).max() + 1)
-            P = np.empty((len(r), n, K1))
-            for j in range(n):
-                V = _selconv_range(pre[j], suf[j + 1], lo1, m1)
-                v = V[lp[:, None], r[:, None] - kk[None, :] - lo1[lp][:, None]]
+            )
+    prep.batches = batches
+    return prep
+
+
+def cond_loglik(X, thresholds, hessian=False, budget=BUDGET, prepared=None):
+    """
+    Conditional log-likelihood of responses X given each person's total over the items they responded to.
+
+    Parameters
+    ----------
+    X : array (n_persons, n_items)
+        Integer responses 0..K_i, NaN = no response.
+    thresholds : list of 1-d arrays, or 2-d array with NaN padding
+        b[i, h], h = 1..K_i, for each item (uncentred: item location plus centred threshold).
+    hessian : bool
+        Also return the Hessian.
+    budget : float
+        Target size (floats) of the largest temporary array.
+    prepared : namespace or None
+        prepare(X, Ks)'s result for these data (re-used across evaluations in a fit); None computes it.
+
+    Returns
+    -------
+    ll : float
+    grad : array (p,)
+        Gradient with respect to the thresholds stacked item by item (p = sum_i K_i).
+    hess : array (p, p) or None
+    """
+    b_list = _as_threshold_list(thresholds)
+    Ks = np.array([len(x) for x in b_list])
+    prep = prepare(X, Ks, budget) if prepared is None else prepared
+    if len(prep.Ks) != len(Ks) or np.any(prep.Ks != Ks):
+        raise ValueError(
+            "prepared= was made for a different number of thresholds per item."
+        )
+    I, Kmax, K1, D, p, bidx = prep.I, prep.Kmax, prep.K1, prep.D, prep.p, prep.bidx
+    if prep.empty:
+        return 0.0, np.zeros(p), (np.zeros((p, p)) if hessian else None)
+    LE = np.full((I, K1), NEG)
+    for i, x in enumerate(b_list):
+        LE[i, : Ks[i] + 1] = np.concatenate([[0.0], -np.cumsum(x)])
+    ll = LE[prep.pc, prep.xv].sum()
+    gle = prep.gle_obs.copy()
+
+    Hflat = np.zeros((p + 1) * (p + 1)) if hessian else None
+    acc_i, acc_w, acc_n = [], [], [0]
+
+    def flush():
+        if acc_i:
+            Hflat[:] += np.bincount(
+                np.concatenate(acc_i),
+                weights=np.concatenate(acc_w),
+                minlength=(p + 1) ** 2,
+            )
+            acc_i.clear()
+            acc_w.clear()
+            acc_n[0] = 0
+
+    def scatter(ia, ib, C):
+        """Add log-eps-space blocks C (B, K1, K1) for item pairs (ia, ib), mapped to b:
+        B[h, j] = sum_{k > h, l > j} C[k, l]."""
+        Bm = C[:, ::-1, ::-1].cumsum(1).cumsum(2)[:, ::-1, ::-1][:, 1:, 1:]
+        ri = bidx[ia][:, :, None] * (p + 1) + bidx[ib][:, None, :]
+        acc_i.append(ri.ravel())
+        acc_w.append(Bm.ravel())
+        acc_n[0] += ri.size
+        if acc_n[0] > 3e7:
+            flush()
+
+    kk = np.arange(K1)
+    km = kk[:, None] + kk[None, :]
+    for bt in prep.batches:
+        n, Gb, item_idx, lp, r, w = bt.n, bt.Gb, bt.item_idx, bt.lp, bt.r, bt.w
+        starts, rmin, rmax = bt.starts, bt.rmin, bt.rmax
+        le = LE[item_idx]  # (Gb, n, K1)
+        pre = [np.zeros((Gb, 1))]
+        for j in range(n):
+            pre.append(_logconv_small(pre[-1], le[:, j, :]))
+        lgc = pre[n][lp, r]  # log gamma_r per cell
+        ll -= (w * lgc).sum()
+        W = int(rmax.max()) + 1
+        # weights pushed back through the items: Q[b](q) = sum_t suffix_{b+1}[t] u_{q+t}
+        U = np.full((Gb, W), NEG)
+        with np.errstate(divide="ignore"):
+            U[lp, r] = np.log(w) - lgc
+        Q = [None] * n
+        Q[n - 1] = U
+        padK = np.full((Gb, Kmax), NEG)
+        for b in range(n - 2, -1, -1):
+            Qp = np.concatenate([Q[b + 1], padK], axis=1)
+            Q[b] = _lse(
+                np.stack(
+                    [Qp[:, j : j + W] + le[:, b + 1, j, None] for j in range(K1)], 0
+                ),
+                axis=0,
+            )
+        if not hessian:
+            # expected category counts: eps[a, k] sum_s prefix_a[s] Q_a(s + k)
+            for a in range(n):
+                Mv = np.full((Gb, W), NEG)
+                x = pre[a][:, :W]
+                Mv[:, : x.shape[1]] = x
+                Qa = sliding_window_view(
+                    np.concatenate([Q[a], padK], 1), W, axis=1
+                )  # (Gb, K1, W)
                 with np.errstate(invalid="ignore"):
-                    P[:, j, :] = np.nan_to_num(np.exp(le[lp, j, :] + v - lgc[:, None]))
+                    E = np.nan_to_num(
+                        np.exp(le[:, a, :] + _lse(Mv[:, None, :] + Qa, axis=2))
+                    )
                 gle -= np.bincount(
-                    (item_idx[lp, j][:, None] * K1 + kk[None, :]).ravel(),
-                    weights=(w[:, None] * P[:, j, :]).ravel(),
+                    (item_idx[:, a][:, None] * K1 + kk[None, :]).ravel(),
+                    weights=E.ravel(),
                     minlength=D,
                 )
-            del suf
-            Pw = P * w[:, None, None]
-            pad2 = np.full((Gb, 2 * Kmax), NEG)
-            Qw = [
-                sliding_window_view(np.concatenate([q, pad2], 1), W, axis=1) for q in Q
-            ]  # (Gb, 2K+1, W)
-            for a in range(n):
-                nb_ = n - a
-                C = -np.add.reduceat(
-                    Pw[:, a, None, :, None] * P[:, a:, None, :], starts, axis=0
-                )  # (Gb, nb_, K1, K1)
-                C[:, 0] += np.add.reduceat(Pw[:, a, :], starts, axis=0)[
-                    :, :, None
-                ] * np.eye(K1)
-                if a < n - 1:
-                    Sab = np.empty((Gb, nb_ - 1, 2 * Kmax + 1))
-                    Mv = np.full((Gb, W), NEG)
-                    x = pre[a][:, :W]
-                    Mv[:, : x.shape[1]] = x
-                    for t_, b in enumerate(range(a + 1, n)):
-                        Sab[:, t_, :] = _lse(Mv[:, None, :] + Qw[b], axis=2)
-                        if b < n - 1:
-                            Mv = _logconv_small(Mv, le[:, b, :])[:, :W]
-                    with np.errstate(invalid="ignore"):
-                        C[:, 1:] += np.nan_to_num(
-                            np.exp(
-                                le[:, a, None, :, None]
-                                + le[:, a + 1 :, None, :]
-                                + Sab[:, :, km]
-                            )
+            continue
+        # per-cell probabilities P(X_j = k | r) (needed for the covariance's product term)
+        suf = [np.zeros((Gb, 1))]
+        for j in range(n - 1, -1, -1):
+            suf.append(_logconv_small(suf[-1], le[:, j, :]))
+        suf = suf[::-1]
+        lo1 = rmin - Kmax
+        m1 = int((rmax - lo1).max() + 1)
+        P = np.empty((len(r), n, K1))
+        for j in range(n):
+            V = _selconv_range(pre[j], suf[j + 1], lo1, m1)
+            v = V[lp[:, None], r[:, None] - kk[None, :] - lo1[lp][:, None]]
+            with np.errstate(invalid="ignore"):
+                P[:, j, :] = np.nan_to_num(np.exp(le[lp, j, :] + v - lgc[:, None]))
+            gle -= np.bincount(
+                (item_idx[lp, j][:, None] * K1 + kk[None, :]).ravel(),
+                weights=(w[:, None] * P[:, j, :]).ravel(),
+                minlength=D,
+            )
+        del suf
+        Pw = P * w[:, None, None]
+        pad2 = np.full((Gb, 2 * Kmax), NEG)
+        Qw = [
+            sliding_window_view(np.concatenate([q, pad2], 1), W, axis=1) for q in Q
+        ]  # (Gb, 2K+1, W)
+        for a in range(n):
+            nb_ = n - a
+            C = -np.add.reduceat(
+                Pw[:, a, None, :, None] * P[:, a:, None, :], starts, axis=0
+            )  # (Gb, nb_, K1, K1)
+            C[:, 0] += np.add.reduceat(Pw[:, a, :], starts, axis=0)[
+                :, :, None
+            ] * np.eye(K1)
+            if a < n - 1:
+                Sab = np.empty((Gb, nb_ - 1, 2 * Kmax + 1))
+                Mv = np.full((Gb, W), NEG)
+                x = pre[a][:, :W]
+                Mv[:, : x.shape[1]] = x
+                for t_, b in enumerate(range(a + 1, n)):
+                    Sab[:, t_, :] = _lse(Mv[:, None, :] + Qw[b], axis=2)
+                    if b < n - 1:
+                        Mv = _logconv_small(Mv, le[:, b, :])[:, :W]
+                with np.errstate(invalid="ignore"):
+                    C[:, 1:] += np.nan_to_num(
+                        np.exp(
+                            le[:, a, None, :, None]
+                            + le[:, a + 1 :, None, :]
+                            + Sab[:, :, km]
                         )
-                scatter(
-                    np.repeat(item_idx[:, a], nb_),
-                    item_idx[:, a:].ravel(),
-                    -C.reshape(-1, K1, K1),
-                )
-                if a < n - 1:
-                    scatter(
-                        item_idx[:, a + 1 :].ravel(),
-                        np.repeat(item_idx[:, a], nb_ - 1),
-                        -np.swapaxes(C[:, 1:], 2, 3).reshape(-1, K1, K1),
                     )
+            scatter(
+                np.repeat(item_idx[:, a], nb_),
+                item_idx[:, a:].ravel(),
+                -C.reshape(-1, K1, K1),
+            )
+            if a < n - 1:
+                scatter(
+                    item_idx[:, a + 1 :].ravel(),
+                    np.repeat(item_idx[:, a], nb_ - 1),
+                    -np.swapaxes(C[:, 1:], 2, 3).reshape(-1, K1, K1),
+                )
     # gradient: map log-eps space to b (d log eps[i, k] / d b[i, h] = -1{h <= k})
     G2 = gle.reshape(I, K1)
     gpad = -G2[:, ::-1].cumsum(1)[:, ::-1][:, 1:]
@@ -416,12 +460,13 @@ def fit_cml(
 
     theta = np.linalg.lstsq(A, np.asarray(b0, float), rcond=None)[0]
     q = A.shape[1]
+    prep = prepare(X, Ks)  # the data-only structure, once per fit
     hessians = 0
     H0 = None
     if fixed_hessian is not None and fixed_hessian.shape[0] == A.shape[0]:
         H0 = fixed_hessian
     elif solver in (None, "chord"):
-        _, _, H0 = cond_loglik(X, unstack(A @ theta), hessian=True)
+        _, _, H0 = cond_loglik(X, unstack(A @ theta), hessian=True, prepared=prep)
         hessians += 1
     if H0 is not None:
         try:
@@ -429,13 +474,15 @@ def fit_cml(
         except LinAlgError:
             cf = None
         if cf is not None:
-            ll, g, _ = cond_loglik(X, unstack(A @ theta))
+            ll, g, _ = cond_loglik(X, unstack(A @ theta), prepared=prep)
             for it in range(1, max_iter + 1):
                 step = cho_solve(cf, A.T @ g)
                 s = 1.0
                 while True:
                     th_new = theta + s * step
-                    ll_new, g_new, _ = cond_loglik(X, unstack(A @ th_new))
+                    ll_new, g_new, _ = cond_loglik(
+                        X, unstack(A @ th_new), prepared=prep
+                    )
                     if ll_new >= ll - 1e-12 * abs(ll) or s < 1e-6:
                         break
                     s /= 2
@@ -446,7 +493,7 @@ def fit_cml(
                     return result(theta, ll, g, it, True, "chord", None, hessians)
         solver = "fallback"  # chord did not converge (or the matrix was unusable)
     if solver == "newton" or (solver == "fallback" and q <= newton_max):
-        ll, g, H = cond_loglik(X, unstack(A @ theta), hessian=True)
+        ll, g, H = cond_loglik(X, unstack(A @ theta), hessian=True, prepared=prep)
         hessians += 1
         converged, it = False, 0
         while it < max_iter:
@@ -458,7 +505,9 @@ def fit_cml(
             s = 1.0
             while True:
                 th_new = theta + s * step
-                ll_new, g_new, H_new = cond_loglik(X, unstack(A @ th_new), hessian=True)
+                ll_new, g_new, H_new = cond_loglik(
+                    X, unstack(A @ th_new), hessian=True, prepared=prep
+                )
                 hessians += 1
                 if ll_new >= ll - 1e-12 * abs(ll) or s < 1e-6:
                     break
@@ -472,7 +521,7 @@ def fit_cml(
         return result(theta, ll, g, it, converged, "newton", H, hessians)
 
     def neg(th):
-        ll, g, _ = cond_loglik(X, unstack(A @ th))
+        ll, g, _ = cond_loglik(X, unstack(A @ th), prepared=prep)
         return -ll, -(A.T @ g)
 
     res = minimize(
@@ -482,7 +531,7 @@ def fit_cml(
         method="L-BFGS-B",
         options=dict(maxiter=50 * max_iter, maxcor=20, ftol=1e-15, gtol=1e-8),
     )
-    ll, g, _ = cond_loglik(X, unstack(A @ res.x))
+    ll, g, _ = cond_loglik(X, unstack(A @ res.x), prepared=prep)
     return result(
         res.x, ll, g, int(res.nit), bool(res.success), "lbfgs", None, hessians
     )

@@ -176,3 +176,17 @@ def test_fit_cml_chord_reaches_the_newton_maximum():
     assert chord["solver"] == "chord" and chord["converged"] and chord["hessian"] is None
     np.testing.assert_allclose(chord["b"], newton["b"], atol=1e-6)
     assert chord["ll"] == pytest.approx(newton["ll"], abs=1e-9)
+
+
+def test_prepared_structure_gives_identical_results():
+    b, X = _design([1, 3, 2, 4, 2], 300, 0.3, 13)
+    prep = _esf.prepare(X, [len(x) for x in b])
+    for hess in (False, True):
+        a = _esf.cond_loglik(X, b, hessian=hess)
+        c = _esf.cond_loglik(X, b, hessian=hess, prepared=prep)
+        assert a[0] == c[0]
+        np.testing.assert_array_equal(a[1], c[1])
+        if hess:
+            np.testing.assert_array_equal(a[2], c[2])
+    with pytest.raises(ValueError, match="different number of thresholds"):
+        _esf.cond_loglik(X, [np.zeros(1)] * 5, prepared=prep)
