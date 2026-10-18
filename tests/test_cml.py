@@ -456,3 +456,61 @@ def test_mfrm_conditional_extras_bootstrap_and_pca():
     assert m.item_q3_star_max_global == pytest.approx((q3.values - q3.values[off].mean())[off].max())
     with pytest.raises(ValueError, match="needs conditional=True"):
         m.fit_statistics(model="global", se=False, bootstrap_samples=5)
+
+
+def _anchor_model(name, seed=4):
+    from raschpy.simulation import PCM_Sim, RSM_Sim, SLM_Sim
+
+    Sim, Cls, kw = dict(
+        SLM=(SLM_Sim, SLM, {}),
+        PCM=(PCM_Sim, PCM, dict(max_score_vector=[2, 3] * 4)),
+        RSM=(RSM_Sim, RSM, dict(max_score=3)),
+    )[name]
+    m = Cls(Sim(no_of_items=8, no_of_persons=400, seed=seed, **kw).responses)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m.calibrate(estimation="cml")
+    return m
+
+
+@pytest.mark.parametrize("name", ["SLM", "PCM", "RSM"])
+def test_fixed_anchor_cml(name):
+    m = _anchor_model(name)
+    kw = dict(selection_method="none", plot=False)
+    # anchors = CML estimates + a constant: the fixed fit is that shift exactly
+    m.calibrate_anchor(m.items.iloc[:4] + 0.7, **kw)
+    np.testing.assert_allclose(m.anchor_items, m.items + 0.7, atol=1e-8)
+    assert list(m.anchor_cml.fixed_items) == list(m.items.index[:4])
+    assert (m.anchor_cml.item_se.iloc[:4] == 0).all() and (m.anchor_cml.item_se.iloc[4:] > 0).all()
+    assert m.anchor_summary["Anchors fixed (CML)"] == 4
+    if name == "PCM":
+        np.testing.assert_allclose(m.anchor_cml.thresholds.values, m.thresholds_uncentred.values + 0.7, atol=1e-8)
+    if name == "RSM":
+        np.testing.assert_allclose(m.anchor_cml.thresholds, m.thresholds, atol=1e-8)
+    # perturbed anchors: kept at their values, the same maximum from independent solvers
+    anch = m.items.iloc[:4] + 0.5 + np.array([0.3, -0.2, 0.1, -0.25])
+    fits = []
+    for solver in ("newton", "lbfgs"):
+        m._cml_solver = solver
+        m.calibrate_anchor(anch, **kw)
+        fits.append(m.anchor_items.copy())
+    np.testing.assert_allclose(fits[0][anch.index], anch, atol=1e-12)
+    np.testing.assert_allclose(fits[0], fits[1], atol=1e-5)
+    assert not np.allclose(fits[0].iloc[4:], m.items.iloc[4:] + m.anchor_adj, atol=1e-3)
+    # translation on request; calibrate=True keeps CML
+    m.calibrate_anchor(anch, fix_anchors=False, **kw)
+    assert m.anchor_cml is None
+    np.testing.assert_allclose(m.anchor_items.iloc[4:], m.items.iloc[4:] + m.anchor_adj)
+    m.calibrate_anchor(anch, calibrate=True, **kw)
+    assert m.estimation == "cml" and m.anchor_cml is not None
+
+
+def test_fixed_anchor_needs_cml():
+    from raschpy.simulation import SLM_Sim
+
+    m = SLM(SLM_Sim(no_of_items=8, no_of_persons=300, seed=1).responses)
+    m.calibrate()
+    with pytest.raises(ValueError, match="fix_anchors=True needs CML"):
+        m.calibrate_anchor(m.items.iloc[:3], selection_method="none", plot=False, fix_anchors=True)
+    m.calibrate_anchor(m.items.iloc[:3], selection_method="none", plot=False)
+    assert m.anchor_cml is None and "Anchors fixed (CML)" not in m.anchor_summary

@@ -1298,6 +1298,38 @@ class RSM(Rasch):
     # Anchor calibration
     # ------------------------------------------------------------------
 
+    def _cml_anchor_design(self, fixed):
+        """calibrate_anchor(fix_anchors=True): (X, A, offset, b0, Ks, decode) for the CML fit with the item
+        locations in fixed (name -> value) held at those values and the other item locations and the shared
+        thresholds (centred cumulative category widths) estimated; decode(b) gives (item locations, centred
+        thresholds, the map from b to the item locations)."""
+        names = list(self.item_names)
+        I, K = len(names), self.max_score
+        X = np.array(self.responses.loc[:, names], dtype=np.float64)
+        is_fixed = np.isin(names, fixed.index)
+        delta = np.zeros(I)
+        delta[is_fixed] = fixed.reindex(np.array(names)[is_fixed]).values
+        c = np.repeat(delta, K)
+        A = np.hstack(
+            [
+                np.kron(np.eye(I)[:, ~is_fixed], np.ones((K, 1))),
+                np.kron(np.ones((I, 1)), _rcl.threshold_basis(K)),
+            ]
+        )
+        b0 = (
+            self.anchor_items.reindex(names).values[:, None]
+            + self.thresholds.values[None, :]
+        ).ravel()
+        L = np.kron(np.eye(I), np.full((1, K), 1.0 / K))
+
+        def decode(b):
+            B = b.reshape(I, K)
+            loc = B.mean(axis=1)
+            tau = B[0] - loc[0]
+            return pd.Series(loc, index=names), pd.Series(tau, index=range(1, K + 1)), L
+
+        return X, A, c, b0, [K] * I, decode
+
     def calibrate_anchor(
         self,
         anchors,
@@ -1327,6 +1359,7 @@ class RSM(Rasch):
         seed=None,
         estimation=None,
         threshold_method=None,
+        fix_anchors=None,
     ):
         """
         Anchor item location estimates onto externally-supplied values.
@@ -1405,9 +1438,10 @@ class RSM(Rasch):
             Externally-supplied reference item locations, keyed/indexed by
             item name. Only items also present in this dataset are used.
         calibrate : bool, default False
-            If True, (re-)runs calibrate() before anchoring. If False,
-            calibrate() is still auto-triggered if self.items does not
-            yet exist.
+            If True, (re-)runs calibrate() before anchoring, with the
+            estimation method and solver of the latest calibration. If
+            False, calibrate() is still auto-triggered if self.items does
+            not yet exist.
         selection_method : {'robust_z', 'wald', 'none'}, default 'robust_z'
             'robust_z': _robust_anchor_selection() — Iglewicz & Hoaglin
             modified z-score / MAD-based iterative trim (corr_tol,
@@ -1506,10 +1540,31 @@ class RSM(Rasch):
             As for calibrate(), used only if calibrate is triggered. None
             resolves as in calibrate().
 
+        fix_anchors : bool or None, default None
+            If True, fits CML with the anchor items' locations held at their
+            supplied values and the shared thresholds estimated, and every
+            other item estimated given them; anchor_items then holds those
+            estimates, so the other items take up the spacing of the
+            supplied anchors, not only their mean. The anchors held fixed
+            are those that keep their supplied values under
+            overwrite_anchors (with 'all', none are, and anchor_items is the
+            translation). Anchor selection (selection_method) runs first, on
+            the CML estimates without anchors. If False, anchor_items is the
+            translation (calibrated + translation constant). None (default):
+            True for CML estimates (calibrate(estimation='cml')), else
+            False; True with other estimation methods raises a ValueError.
+
         Attributes set
         --------------
         anchor_items : pandas.Series
-            Item locations shifted onto the anchor scale.
+            Item locations on the anchor scale: shifted by the translation constant, or
+            from the CML fit with the anchors fixed (fix_anchors=True).
+        anchor_cml : types.SimpleNamespace or None
+            fix_anchors=True only (else None): the CML fit with the anchors
+            fixed -- fixed_items, items, item_se (from the Hessian; 0 for
+            the fixed items), thresholds (the centred shared thresholds),
+            log_likelihood and convergence. anchor_summary then also reports
+            'Anchors fixed (CML)'.
         anchor_item_names : pandas.Index
             Names of the items supplied as anchors.
         anchor_adj : float
@@ -1568,9 +1623,16 @@ class RSM(Rasch):
                 method=method,
                 matrix_power=matrix_power,
                 log_lik_tol=log_lik_tol,
-                estimation=estimation,
+                estimation=(
+                    estimation
+                    if estimation is not None
+                    else getattr(self, "estimation", None)
+                ),
+                solver=getattr(self, "_cml_solver", None),
                 threshold_method=threshold_method,
             )
+
+        fix = self._resolve_fix_anchors(fix_anchors)
 
         self._calibrate_anchor_core(
             anchors,
@@ -1593,6 +1655,10 @@ class RSM(Rasch):
                 log_lik_tol=log_lik_tol,
             ),
         )
+        if fix:
+            self._fit_fixed_anchor_cml(anchors)
+        else:
+            self.anchor_cml = None
 
         if anchor_thresholds is not None:
             if not isinstance(anchor_thresholds, pd.Series):

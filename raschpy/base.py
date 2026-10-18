@@ -2242,6 +2242,7 @@ class Rasch:
             keep_given = common_anchor_items
 
         self.anchor_items.loc[keep_given] = anchors.loc[keep_given]
+        self._anchor_kept = keep_given
 
         n_selected = (
             len(self.anchor_selected_items)
@@ -2274,6 +2275,78 @@ class Rasch:
             )
         else:
             self.anchor_plot = None
+
+    def _resolve_fix_anchors(self, fix_anchors):
+        """calibrate_anchor(fix_anchors=): None means True for CML estimates, else False; True needs CML."""
+        cml = getattr(self, "estimation", None) == "cml"
+        if fix_anchors is None:
+            return cml
+        if fix_anchors and not cml:
+            raise ValueError(
+                f"fix_anchors=True needs CML estimates (calibrate(estimation='cml'), or "
+                f"calibrate_anchor(calibrate=True) after it); these were estimated with "
+                f"estimation={getattr(self, 'estimation', None)!r}, for which anchoring is a "
+                f"translation (fix_anchors=False)."
+            )
+        return bool(fix_anchors)
+
+    def _fit_fixed_anchor_cml(self, anchors):
+        """
+        calibrate_anchor(fix_anchors=True): CML with the anchor items that keep their supplied values
+        (self._anchor_kept, from _calibrate_anchor_core) held at those values and every other parameter
+        estimated given them, starting from the translated estimates. Sets anchor_items to the fitted item
+        locations and anchor_cml to the fit (fixed items, item locations and their SEs from the Hessian,
+        thresholds, log-likelihood, convergence). With no anchors kept (overwrite_anchors='all'), nothing
+        is fixed: anchor_items stays the translation and anchor_cml is None.
+        """
+        from types import SimpleNamespace
+        from raschpy import _esf
+
+        fixed = pd.Index([n for n in self.item_names if n in set(self._anchor_kept)])
+        self.anchor_cml = None
+        if not len(fixed):
+            return
+        X, A, c, b0, Ks, decode = self._cml_anchor_design(anchors.loc[fixed])
+        fit = _esf.fit_cml(
+            X, A, b0, Ks, offset=c, solver=getattr(self, "_cml_solver", None)
+        )
+        off = np.concatenate([[0], np.cumsum(Ks)])
+        H = fit["hessian"]
+        if H is None:
+            H = _esf.cond_loglik(
+                X,
+                [fit["b"][off[i] : off[i + 1]] for i in range(len(Ks))],
+                hessian=True,
+            )[2]
+        cov_b = A @ np.linalg.solve(-(A.T @ H @ A), A.T)
+        items, thresholds, L = decode(fit["b"])
+        se = np.sqrt(np.clip(np.einsum("ip,pq,iq->i", L, cov_b, L), 0, None))
+        se[items.index.isin(fixed)] = 0.0
+        self.anchor_items = items
+        self.anchor_cml = SimpleNamespace(
+            fixed_items=fixed,
+            items=items,
+            item_se=pd.Series(se, index=items.index),
+            thresholds=thresholds,
+            log_likelihood=fit["ll"],
+            convergence=dict(
+                iterations=fit["iterations"],
+                converged=fit["converged"],
+                solver=fit["solver"],
+                hessians=fit["hessians"],
+            ),
+        )
+        summary = self.anchor_summary.copy()
+        summary["Anchors fixed (CML)"] = len(fixed)
+        self.anchor_summary = summary
+        if not fit["converged"]:
+            warnings.warn(
+                f"The CML fit with the anchors fixed did not converge in {fit['iterations']} iterations "
+                f"(solver {fit['solver']!r}, largest gradient {fit['max_gradient']:.2g}); anchor_items may "
+                f"be unreliable. calibrate_anchor(fix_anchors=False) gives the translation instead.",
+                UserWarning,
+                stacklevel=3,
+            )
 
     def _snapshot_calibrate_anchor_run(self, anchors, extra=None):
         """
@@ -2313,6 +2386,7 @@ class Rasch:
             anchor_sd_ratio=self.anchor_sd_ratio,
             anchor_summary=self.anchor_summary,
             anchor_plot=self.anchor_plot,
+            anchor_cml=getattr(self, "anchor_cml", None),
         )
         if extra:
             fields.update(extra)

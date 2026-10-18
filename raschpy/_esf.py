@@ -414,9 +414,11 @@ def fit_cml(
     newton_max=NEWTON_MAX,
     fixed_hessian=None,
     solver=None,
+    offset=None,
 ):
     """
-    Conditional maximum likelihood: maximise cond_loglik over thresholds b = A @ theta, starting from b0.
+    Conditional maximum likelihood: maximise cond_loglik over thresholds b = offset + A @ theta (offset 0 by default), starting
+    from b0.
 
     A (p, q) maps the free parameters theta to the stacked thresholds (it carries the identification, e.g. a
     zero-sum basis). Every solver stops when the largest change in b is below tol, so all reach the same
@@ -429,6 +431,8 @@ def fit_cml(
     - 'lbfgs': L-BFGS-B with the exact gradient.
     - None: 'chord' (fastest, or within about 10% of the fastest, in timing tests from 30 to 1,000
       items, complete and missing data).
+
+    offset (p,): fixed part of b, e.g. anchor values held fixed while the other parameters are estimated.
 
     fixed_hessian (p, p), e.g. the Hessian of a fit to data of the same design at nearby estimates: the
     chord method with this matrix, so no Hessian is computed at all.
@@ -452,7 +456,7 @@ def fit_cml(
 
     def result(theta, ll, g, it, converged, name, H, hessians):
         return dict(
-            b=A @ theta,
+            b=c + A @ theta,
             theta=theta,
             ll=ll,
             iterations=it,
@@ -463,7 +467,8 @@ def fit_cml(
             hessians=hessians,
         )
 
-    theta = np.linalg.lstsq(A, np.asarray(b0, float), rcond=None)[0]
+    c = np.zeros(A.shape[0]) if offset is None else np.asarray(offset, float)
+    theta = np.linalg.lstsq(A, np.asarray(b0, float) - c, rcond=None)[0]
     q = A.shape[1]
     prep = prepare(X, Ks)  # the data-only structure, once per fit
     hessians = 0
@@ -471,7 +476,7 @@ def fit_cml(
     if fixed_hessian is not None and fixed_hessian.shape[0] == A.shape[0]:
         H0 = fixed_hessian
     elif solver in (None, "chord"):
-        _, _, H0 = cond_loglik(X, unstack(A @ theta), hessian=True, prepared=prep)
+        _, _, H0 = cond_loglik(X, unstack(c + A @ theta), hessian=True, prepared=prep)
         hessians += 1
     if H0 is not None:
         try:
@@ -479,14 +484,14 @@ def fit_cml(
         except LinAlgError:
             cf = None
         if cf is not None:
-            ll, g, _ = cond_loglik(X, unstack(A @ theta), prepared=prep)
+            ll, g, _ = cond_loglik(X, unstack(c + A @ theta), prepared=prep)
             for it in range(1, max_iter + 1):
                 step = cho_solve(cf, A.T @ g)
                 s = 1.0
                 while True:
                     th_new = theta + s * step
                     ll_new, g_new, _ = cond_loglik(
-                        X, unstack(A @ th_new), prepared=prep
+                        X, unstack(c + A @ th_new), prepared=prep
                     )
                     if ll_new >= ll - 1e-12 * abs(ll) or s < 1e-6:
                         break
@@ -498,7 +503,7 @@ def fit_cml(
                     return result(theta, ll, g, it, True, "chord", None, hessians)
         solver = "fallback"  # chord did not converge (or the matrix was unusable)
     if solver == "newton" or (solver == "fallback" and q <= newton_max):
-        ll, g, H = cond_loglik(X, unstack(A @ theta), hessian=True, prepared=prep)
+        ll, g, H = cond_loglik(X, unstack(c + A @ theta), hessian=True, prepared=prep)
         hessians += 1
         converged, it = False, 0
         while it < max_iter:
@@ -511,7 +516,7 @@ def fit_cml(
             while True:
                 th_new = theta + s * step
                 ll_new, g_new, H_new = cond_loglik(
-                    X, unstack(A @ th_new), hessian=True, prepared=prep
+                    X, unstack(c + A @ th_new), hessian=True, prepared=prep
                 )
                 hessians += 1
                 if ll_new >= ll - 1e-12 * abs(ll) or s < 1e-6:
@@ -526,7 +531,7 @@ def fit_cml(
         return result(theta, ll, g, it, converged, "newton", H, hessians)
 
     def neg(th):
-        ll, g, _ = cond_loglik(X, unstack(A @ th), prepared=prep)
+        ll, g, _ = cond_loglik(X, unstack(c + A @ th), prepared=prep)
         return -ll, -(A.T @ g)
 
     res = minimize(
@@ -536,7 +541,7 @@ def fit_cml(
         method="L-BFGS-B",
         options=dict(maxiter=50 * max_iter, maxcor=20, ftol=1e-15, gtol=1e-8),
     )
-    ll, g, _ = cond_loglik(X, unstack(A @ res.x), prepared=prep)
+    ll, g, _ = cond_loglik(X, unstack(c + A @ res.x), prepared=prep)
     return result(
         res.x, ll, g, int(res.nit), bool(res.success), "lbfgs", None, hessians
     )

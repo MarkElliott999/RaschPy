@@ -1063,6 +1063,43 @@ class PCM(Rasch):
     # Anchor calibration
     # ------------------------------------------------------------------
 
+    def _cml_anchor_design(self, fixed):
+        """calibrate_anchor(fix_anchors=True): (X, A, offset, b0, Ks, decode) for the CML fit with the
+        locations (means of the uncentred thresholds) of the items in fixed (name -> value) held at those
+        values, their threshold shapes and every other item's thresholds estimated; decode(b) gives (item
+        locations, uncentred thresholds as items x thresholds, the map from b to the item locations)."""
+        names = list(self.item_names)
+        Ks = self.max_score_vector.reindex(names).to_numpy().astype(int)
+        X = np.array(self.responses.loc[:, names], dtype=np.float64)
+        p, I = int(Ks.sum()), len(names)
+        off = np.concatenate([[0], np.cumsum(Ks)])
+        c, cols, L = np.zeros(p), [], np.zeros((I, p))
+        for i, (n, K) in enumerate(zip(names, Ks)):
+            block = np.zeros((p, K))
+            block[off[i] : off[i + 1]] = np.eye(K)
+            if n in fixed.index:
+                c[off[i] : off[i + 1]] = fixed[n]
+                block = block @ _rcl.zero_sum_basis(K) if K > 1 else block[:, :0]
+            cols.append(block)
+            L[i, off[i] : off[i + 1]] = 1.0 / K
+        A = np.hstack(cols)
+        b0 = np.concatenate(
+            [
+                self.thresholds.loc[n].dropna().values.astype(float)
+                + float(self.anchor_items[n])
+                for n in names
+            ]
+        )
+
+        def decode(b):
+            rows = {
+                n: pd.Series(b[off[i] : off[i + 1]], index=range(1, K + 1))
+                for i, (n, K) in enumerate(zip(names, Ks))
+            }
+            return pd.Series(L @ b, index=names), pd.DataFrame(rows).T, L
+
+        return X, A, c, b0, list(Ks), decode
+
     def calibrate_anchor(
         self,
         anchors,
@@ -1091,6 +1128,7 @@ class PCM(Rasch):
         matrix_power=None,
         log_lik_tol=0.000001,
         seed=None,
+        fix_anchors=None,
     ):
         """
         Anchor item location estimates onto externally-supplied values.
@@ -1147,9 +1185,10 @@ class PCM(Rasch):
             Externally-supplied reference locations, keyed/indexed by
             item name. Only items also present in this dataset are used.
         calibrate : bool, default False
-            If True, (re-)runs calibrate() before anchoring. If False,
-            calibrate() is still auto-triggered if self.items does not
-            yet exist.
+            If True, (re-)runs calibrate() before anchoring, with the
+            estimation method and solver of the latest calibration. If
+            False, calibrate() is still auto-triggered if self.items does
+            not yet exist.
         selection_method : {'robust_z', 'wald', 'none'}, default 'robust_z'
             'robust_z': _robust_anchor_selection() — Iglewicz & Hoaglin
             modified z-score / MAD-based iterative trim (corr_tol,
@@ -1245,10 +1284,32 @@ class PCM(Rasch):
         constant, method, matrix_power, log_lik_tol : floats
             Calibration kwargs, used only if calibrate is triggered.
 
+        fix_anchors : bool or None, default None
+            If True, fits CML with the anchor items' locations (the means of
+            their uncentred thresholds) held at their supplied values, their
+            threshold shapes estimated, and every other item estimated given
+            them; anchor_items then holds those estimates, so the other
+            items take up the spacing of the supplied anchors, not only
+            their mean. The anchors held fixed are those that keep their
+            supplied values under overwrite_anchors (with 'all', none are,
+            and anchor_items is the translation). Anchor selection
+            (selection_method) runs first, on the CML estimates without
+            anchors. If False, anchor_items is the translation (calibrated +
+            translation constant). None (default): True for CML estimates
+            (calibrate(estimation='cml')), else False; True with other
+            estimation methods raises a ValueError.
+
         Attributes set
         --------------
         anchor_items : pandas.Series
-            Item locations shifted onto the anchor scale.
+            Item locations on the anchor scale: shifted by the translation constant, or
+            from the CML fit with the anchors fixed (fix_anchors=True).
+        anchor_cml : types.SimpleNamespace or None
+            fix_anchors=True only (else None): the CML fit with the anchors
+            fixed -- fixed_items, items, item_se (from the Hessian; 0 for
+            the fixed items), thresholds (the uncentred thresholds, items x
+            thresholds), log_likelihood and convergence. anchor_summary then
+            also reports 'Anchors fixed (CML)'.
         anchor_item_names : pandas.Index
             Names of the items supplied as anchors.
         anchor_adj : float
@@ -1313,7 +1374,11 @@ class PCM(Rasch):
                 method=method,
                 matrix_power=matrix_power,
                 log_lik_tol=log_lik_tol,
+                estimation=getattr(self, "estimation", "pair"),
+                solver=getattr(self, "_cml_solver", None),
             )
+
+        fix = self._resolve_fix_anchors(fix_anchors)
 
         self._calibrate_anchor_core(
             anchors,
@@ -1336,6 +1401,10 @@ class PCM(Rasch):
                 log_lik_tol=log_lik_tol,
             ),
         )
+        if fix:
+            self._fit_fixed_anchor_cml(anchors)
+        else:
+            self.anchor_cml = None
 
         if threshold_check != "none" and anchor_thresholds:
             for item, offsets in anchor_thresholds.items():
