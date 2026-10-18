@@ -13,6 +13,7 @@ import seaborn as sns
 import matplotlib.patheffects as path_effects
 
 from raschpy.base import Rasch, _BootstrapWarnings, _save_table
+from raschpy import _esf, _rcl
 
 
 class SLM(Rasch):
@@ -319,9 +320,11 @@ class SLM(Rasch):
         matrix_power=None,
         log_lik_tol=0.000001,
         robust=False,
+        estimation="pair",
     ):
         """
-        Estimate item locations using Choppin's pairwise matrix method.
+        Estimate item locations using Choppin's pairwise matrix method, or by
+        conditional maximum likelihood (estimation='cml').
 
         Constructs a pairwise comparison matrix from the response data and
         raises it to successive powers until all off-diagonal elements are
@@ -371,9 +374,31 @@ class SLM(Rasch):
             Deprecated, and has no effect: the default ``constant=None`` is now
             data-adaptive (see ``constant``). Passing ``robust=True`` raises a
             FutureWarning; the argument will be removed in a future release.
+        estimation : {'pair', 'cml'}, default 'pair'
+            'pair': the pairwise method above. 'cml': conditional maximum
+            likelihood, conditioning on each person's total score over the
+            items they responded to, starting from the PAIR estimates (with
+            the other arguments above). CML estimates exist only for a
+            strongly connected set of items (every pair compared in both
+            directions through chains of persons' responses; an item answered
+            correctly, or incorrectly, by everyone with a non-extreme total
+            has none). Items outside the largest such set are removed from
+            responses (to cml_dropped_responses), with a UserWarning, and
+            listed in convergence['dropped_items']; estimation='pair' keeps
+            them.
 
         Attributes set
         --------------
+        estimation : str
+            The estimation method used.
+        convergence : dict or None
+            estimation='cml': iterations, whether the fit converged, the
+            solver ('newton', or 'lbfgs' above 500 items), the conditional
+            log-likelihood and the items dropped ({item: reason}). None for
+            'pair'.
+        cml_dropped_responses : pandas.DataFrame
+            estimation='cml': responses to the items dropped (no CML
+            estimates); empty if none.
         diffs : pandas.Series
             Item location estimates indexed by item name, in logits,
             zero-centred across all items.
@@ -384,13 +409,18 @@ class SLM(Rasch):
             Persons dropped prior to calibration due to entirely missing
             response patterns.
         """
+        if estimation not in ("pair", "cml"):
+            raise ValueError(f"estimation must be 'pair' or 'cml', got {estimation!r}.")
         # arguments as passed, for refits (see _calibration_kw)
         self._calibrate_args = dict(
             constant=constant,
             method=method,
             matrix_power=matrix_power,
             log_lik_tol=log_lik_tol,
+            estimation=estimation,
         )
+        self.estimation = estimation
+        self.convergence = None
 
         if len(self.responses.columns) == 1:
             warnings.warn(
@@ -476,6 +506,52 @@ class SLM(Rasch):
 
         # 5. Extract Priority Vector using the corrected numerical matrix
         self.items = self.priority_vector(mat, method=method, log_lik_tol=log_lik_tol)
+
+        if estimation == "cml":
+            self._calibrate_cml()
+
+    def _calibrate_cml(self):
+        """CML item locations from the PAIR estimates in self.items (zero-centred), with self.convergence; the
+        Hessian at the estimates is kept for std_errors() when Newton-Raphson computed it. Items outside the
+        largest strongly connected set have no CML estimates and are removed, with a UserWarning.
+        """
+        dropped = self._cml_drop_items([1] * len(self.item_names))
+        names = list(self.item_names)
+        X = np.array(self.responses.loc[:, names], dtype=np.float64)
+        I = len(names)
+        A = _rcl.zero_sum_basis(I)
+        b0 = self.items.reindex(names).values.astype(float)
+        fit = _esf.fit_cml(X, A, b0 - b0.mean(), [1] * I)
+        self.items = pd.Series(fit["b"], index=names)
+        self._cml_hessian = fit["hessian"]
+        self.convergence = dict(
+            iterations=fit["iterations"],
+            converged=fit["converged"],
+            solver=fit["solver"],
+            log_likelihood=fit["ll"],
+            dropped_items=dropped,
+        )
+        if not fit["converged"]:
+            warnings.warn(
+                f"CML calibration did not converge in {fit['iterations']} iterations "
+                f"(solver {fit['solver']!r}, largest gradient {fit['max_gradient']:.2g}); the estimates may be "
+                f"unreliable.",
+                UserWarning,
+                stacklevel=3,
+            )
+
+    def _cml_covariance(self):
+        """Covariance of the CML item locations from the Hessian of the conditional log-likelihood."""
+        names = list(self.item_names)
+        X = np.array(self.responses.loc[:, names], dtype=np.float64)
+        A = _rcl.zero_sum_basis(len(names))
+        return _esf.cml_covariance(
+            X,
+            A,
+            self.items.reindex(names).values.astype(float),
+            [1] * len(names),
+            hessian=getattr(self, "_cml_hessian", None),
+        )
 
     def calibrate_anchor(
         self,
@@ -738,9 +814,13 @@ class SLM(Rasch):
         estimates across samples as the standard error. Optionally computes
         bootstrap confidence intervals.
 
-        se_method=None (default) uses the sandwich for estimates from
-        method='log-lik' and the bootstrap otherwise. self.se_method records
-        the method used.
+        se_method='hessian' (estimates from estimation='cml' only) is the
+        inverse of the information matrix of the conditional likelihood
+        (minus its exact Hessian at the estimates).
+
+        se_method=None (default) uses the Hessian for estimates from
+        estimation='cml', the sandwich for method='log-lik' and the bootstrap
+        otherwise. self.se_method records the method used.
 
         Parameters
         ----------
@@ -760,17 +840,17 @@ class SLM(Rasch):
         seed : int or None, default None
             Seed for the bootstrap resampling RNG. Pass an int for fully
             reproducible standard errors; None (default) draws fresh entropy.
-        se_method : {None, 'sandwich', 'bootstrap'}, default None
-            Standard error method; see above. With 'sandwich', confidence
-            intervals are estimate +/- z * SE, and the bootstrap attributes
-            are None.
+        se_method : {None, 'sandwich', 'bootstrap', 'hessian'}, default None
+            Standard error method; see above. With 'sandwich' or 'hessian',
+            confidence intervals are estimate +/- z * SE, and the bootstrap
+            attributes are None.
 
         Attributes set
         --------------
         se_method : str
             The method used.
         se_covariance : pandas.DataFrame or None
-            Sandwich covariance of the item locations (sandwich only).
+            Covariance of the item locations ('sandwich' and 'hessian' only).
         item_se : pandas.Series
             Standard error for each item location, indexed by item name.
         item_low : pandas.Series or None
@@ -787,9 +867,9 @@ class SLM(Rasch):
             Dictionary of item location Series from each bootstrap resample,
             keyed by 'Sample_1', 'Sample_2', etc. (None with the sandwich).
         """
-        if se_method not in (None, "sandwich", "bootstrap"):
+        if se_method not in (None, "sandwich", "bootstrap", "hessian"):
             raise ValueError(
-                f"se_method must be None, 'sandwich' or 'bootstrap', got {se_method!r}."
+                f"se_method must be None, 'sandwich', 'bootstrap' or 'hessian', got {se_method!r}."
             )
         cal_kw = self._calibration_kw(
             constant=constant,
@@ -801,8 +881,12 @@ class SLM(Rasch):
             self.calibrate(robust=robust, **cal_kw)
         se_method = self._resolve_se_method(se_method)
         self.se_method = se_method
-        if se_method == "sandwich":
-            V = self._sandwich_covariance()
+        if se_method in ("sandwich", "hessian"):
+            V = (
+                self._sandwich_covariance()
+                if se_method == "sandwich"
+                else self._cml_covariance()
+            )
             names = list(self.item_names)
             self.se_covariance = pd.DataFrame(V, index=names, columns=names)
             self.item_se = pd.Series(np.sqrt(np.clip(np.diag(V), 0, None)), index=names)
@@ -823,15 +907,34 @@ class SLM(Rasch):
         rng = np.random.default_rng(seed)
         samples = []
         collector = _BootstrapWarnings()
+        no_cml = 0
         for _ in range(no_of_samples):
             with collector.resample():
                 sample = SLM(
                     self.responses.sample(frac=1, replace=True, random_state=rng),
                     validate=False,
                 )
-                sample.calibrate(robust=robust, **cal_kw)
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(
+                        "ignore", message="CML estimates do not exist"
+                    )
+                    sample.calibrate(robust=robust, **cal_kw)
+                if len(sample.item_names) < len(self.item_names):
+                    no_cml += (
+                        1  # CML estimates do not exist for some items in this resample
+                    )
+                    continue
             samples.append(sample)
         collector.emit()
+        if no_cml:
+            warnings.warn(
+                f"{no_cml} of {no_of_samples} bootstrap resamples had no CML estimates for some items "
+                f"(an item, or set of items, answered the same way relative to the rest by everyone "
+                f"with a non-extreme total) and were left out; the bootstrap standard errors may be "
+                f"too small. se_method='hessian' does not resample.",
+                UserWarning,
+                stacklevel=2,
+            )
 
         self.bootstrap_sample_diffs = {
             f"Sample_{i + 1}": sample.items for i, sample in enumerate(samples)
@@ -871,7 +974,7 @@ class SLM(Rasch):
 
         self.item_bootstrap = pd.DataFrame(item_ests)
         self.item_bootstrap.columns = self.responses.columns
-        self.item_bootstrap.index = [f"Sample {i + 1}" for i in range(no_of_samples)]
+        self.item_bootstrap.index = [f"Sample {i + 1}" for i in range(len(samples))]
 
     def person(
         self,
@@ -1929,7 +2032,14 @@ class SLM(Rasch):
                 for i in range(len(names))
             ]
         )
-        V = m._sandwich_covariance(small_sample=small_sample) if covariance else None
+        if not covariance:
+            V = None
+        elif getattr(m, "estimation", "pair") == "cml":
+            V = (
+                m._cml_covariance()
+            )  # Hessian covariance: no small-sample correction applies
+        else:
+            V = m._sandwich_covariance(small_sample=small_sample)
         return names, est - est.mean(), V, ok, [np.arange(len(names))]
 
     def andersen_lr_test(
@@ -2522,12 +2632,12 @@ class SLM(Rasch):
                 category_alpha,
                 ref_cov=(
                     ref_model.se_covariance
-                    if ref_model.se_method == "sandwich"
+                    if ref_model.se_method in ("sandwich", "hessian")
                     else None
                 ),
                 focal_cov=(
                     focal_model.se_covariance
-                    if focal_model.se_method == "sandwich"
+                    if focal_model.se_method in ("sandwich", "hessian")
                     else None
                 ),
             )

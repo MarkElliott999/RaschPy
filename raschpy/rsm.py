@@ -5,7 +5,7 @@ from scipy.stats import chi2, norm
 import numpy as np
 import pandas as pd
 
-from raschpy import _rcl
+from raschpy import _esf, _rcl
 
 from sklearn.decomposition import PCA
 from matplotlib import pyplot as plt
@@ -919,12 +919,22 @@ class RSM(Rasch):
         no_info : {'mean', 'raise'}, default 'mean'
             Handling of a threshold distance with no information at all; see
             threshold_set().
-        estimation : {'cp-full-rcl', 'cpat-rcl', 'pair-cpat'} or None, default None
-            Estimation method; see above. None resolves to the method of the
-            object's last calibration, or 'cp-full-rcl' for the first one.
+        estimation : {'cp-full-rcl', 'cpat-rcl', 'pair-cpat', 'cml'} or None, default None
+            Estimation method; see above. 'cml': conditional maximum
+            likelihood, conditioning on each person's total score over the
+            items they responded to, starting from the 'cp-full-rcl'
+            estimates; item locations and thresholds are each centred to
+            mean 0. CML estimates do not exist for an item not compared with
+            the others in both directions (e.g. scored 0 by everyone with a
+            non-extreme total); such items are removed from responses (to
+            cml_dropped_responses), with a UserWarning, and listed in
+            convergence['dropped_items'] with the reason. An item may leave
+            a category unused; a category unused on every item raises a
+            ValueError. None resolves to the method of the object's last
+            calibration, or 'cp-full-rcl' for the first one.
             method, matrix_power, log_lik_tol and threshold_method apply to
-            'pair-cpat' only; other values passed with 'cp-full-rcl' or 'cpat-rcl'
-            are ignored, with a UserWarning.
+            'pair-cpat' only; other values passed with 'cp-full-rcl',
+            'cpat-rcl' or 'cml' are ignored, with a UserWarning.
 
         Attributes set
         --------------
@@ -932,7 +942,11 @@ class RSM(Rasch):
             The estimation method used.
         convergence : dict or None
             estimation='cp-full-rcl' or 'cpat-rcl': Newton-Raphson iterations and
-            whether the fit converged. None for 'pair-cpat'.
+            whether the fit converged. 'cml': also the solver ('newton', or
+            'lbfgs' above 500 parameters), the conditional log-likelihood and
+            the items dropped ({item: reason}). None for 'pair-cpat'.
+        cml_dropped_responses : pandas.DataFrame
+            estimation='cml': responses to the items dropped; empty if none.
         items : pandas.Series
             Item location estimates, zero-centred.
         thresholds : pandas.Series
@@ -977,9 +991,9 @@ class RSM(Rasch):
         self.threshold_constant = thresh_constant
         if estimation is None:
             estimation = getattr(self, "estimation", "cp-full-rcl")
-        if estimation not in ("cp-full-rcl", "cpat-rcl", "pair-cpat"):
+        if estimation not in ("cp-full-rcl", "cpat-rcl", "pair-cpat", "cml"):
             raise ValueError(
-                f"estimation must be 'cp-full-rcl', 'cpat-rcl', 'pair-cpat' or None, got {estimation!r}."
+                f"estimation must be 'cp-full-rcl', 'cpat-rcl', 'pair-cpat', 'cml' or None, got {estimation!r}."
             )
         self.estimation = estimation
         # arguments as passed (estimation resolved), for refits (see
@@ -997,7 +1011,7 @@ class RSM(Rasch):
                 log_lik_tol=log_lik_tol,
                 threshold_method=threshold_method,
             )
-        if estimation in ("cp-full-rcl", "cpat-rcl"):
+        if estimation in ("cp-full-rcl", "cpat-rcl", "cml"):
             ignored = [
                 f"{name}={value!r}"
                 for name, value, default in (
@@ -1020,8 +1034,10 @@ class RSM(Rasch):
                 item_constant,
                 thresh_constant,
                 no_info,
-                full=estimation == "cp-full-rcl",
+                full=estimation in ("cp-full-rcl", "cml"),
             )
+            if estimation == "cml":
+                self._calibrate_cml()
             return
         self.convergence = None
         if method is None:
@@ -1094,6 +1110,89 @@ class RSM(Rasch):
             ),
             index=range(1, self.max_score + 1),
         )
+
+    def _cml_basis(self):
+        """b = A @ (u, D): item locations Zi u (zero-sum basis), shared thresholds T D (centred cumulative
+        category widths D); returns (A, M) with (delta, widths) = M @ (u, D)."""
+        I, K = self.no_of_items, self.max_score
+        Zi, T = _rcl.zero_sum_basis(I), _rcl.threshold_basis(K)
+        A = np.hstack([np.kron(Zi, np.ones((K, 1))), np.kron(np.ones((I, 1)), T)])
+        M = np.zeros((I + K - 1, I - 1 + K - 1))
+        M[:I, : I - 1] = Zi
+        M[I:, I - 1 :] = np.eye(K - 1)
+        return A, M
+
+    def _calibrate_cml(self):
+        """CML item locations and shared thresholds (each centred to mean 0) from the cp-full-rcl estimates,
+        with self.convergence; the Hessian at the estimates is kept for std_errors() when Newton-Raphson
+        computed it. Items whose CML estimates do not exist are removed first, with a UserWarning; a
+        category unused by every person with a non-extreme total raises a ValueError (no item can be
+        dropped to give it a finite estimate)."""
+        K = self.max_score
+        dropped = self._cml_drop_items(
+            [K] * self.no_of_items, per_item_categories=False
+        )
+        names = list(self.item_names)
+        X = np.array(self.responses.loc[:, names], dtype=np.float64)
+        obs = ~np.isnan(X)
+        Xi = np.where(obs, X, 0).astype(int)
+        tot, mx = Xi.sum(1), obs.sum(1) * K
+        contrib = (obs.sum(1) >= 2) & (tot > 0) & (tot < mx)
+        unused = [
+            k for k in range(K + 1) if not (obs[contrib] & (Xi[contrib] == k)).any()
+        ]
+        if unused:
+            raise ValueError(
+                f"CML estimates do not exist for these data: category {unused[0]} is unused by every "
+                f"person with a non-extreme total, so the thresholds next to it have no finite "
+                f"estimates. Collapse the category (rescore), or use estimation='cp-full-rcl', whose "
+                f"smoothing gives finite estimates."
+            )
+        A, _ = self._cml_basis()
+        b0 = (
+            self.items.reindex(names).values[:, None] + self.thresholds.values[None, :]
+        ).ravel()
+        fit = _esf.fit_cml(X, A, b0, [K] * len(names))
+        B = fit["b"].reshape(len(names), K)
+        loc = B.mean(axis=1)
+        self.items = pd.Series(loc - loc.mean(), index=names)
+        tau = B[0] - loc[0]
+        self.thresholds = pd.Series(tau - tau.mean(), index=range(1, K + 1))
+        self._cml_hessian = fit["hessian"]
+        self.convergence = dict(
+            iterations=fit["iterations"],
+            converged=fit["converged"],
+            solver=fit["solver"],
+            log_likelihood=fit["ll"],
+            dropped_items=dropped,
+        )
+        if not fit["converged"]:
+            warnings.warn(
+                f"CML calibration did not converge in {fit['iterations']} iterations "
+                f"(solver {fit['solver']!r}, largest gradient {fit['max_gradient']:.2g}); the "
+                f"estimates may be unreliable.",
+                UserWarning,
+                stacklevel=3,
+            )
+
+    def _cml_covariance(self, full=False):
+        """Covariance of (item locations, category widths) for CML estimates, from the Hessian of the
+        conditional log-likelihood, in _sandwich_covariance's layout."""
+        names = list(self.item_names)
+        K = self.max_score
+        X = np.array(self.responses.loc[:, names], dtype=np.float64)
+        A, M = self._cml_basis()
+        b = (
+            self.items.reindex(names).values[:, None] + self.thresholds.values[None, :]
+        ).ravel()
+        H = getattr(self, "_cml_hessian", None)
+        if H is None:
+            H = _esf.cond_loglik(X, list(b.reshape(len(names), K)), hessian=True)[2]
+        V = M @ np.linalg.solve(-(A.T @ H @ A), M.T)
+        I = len(names)
+        if full:
+            return V
+        return V[:I, :I], V[I:, I:]
 
     def _calibrate_rcl(self, item_constant, thresh_constant, no_info="mean", full=True):
         """RCL calibration (see calibrate()): items and category widths fitted jointly, on the full pattern set
@@ -1709,6 +1808,9 @@ class RSM(Rasch):
         penalised composite log-likelihood at the estimates and the meat the
         sum over persons of their score outer products (see _rcl).
         """
+        if getattr(self, "estimation", "pair-cpat") == "cml":
+            # Hessian covariance (no small-sample correction applies)
+            return self._cml_covariance(full=full)
         if getattr(self, "estimation", "pair-cpat") in ("cp-full-rcl", "cpat-rcl"):
             return self._rcl_sandwich_covariance(full=full, small_sample=small_sample)
         K = self.max_score
@@ -1917,10 +2019,13 @@ class RSM(Rasch):
         seed : int or None, default None
             Seed for the bootstrap resampling RNG. Pass an int for fully
             reproducible standard errors; None (default) draws fresh entropy.
-        se_method : {None, 'sandwich', 'bootstrap'}, default None
-            Standard error method; see above. With 'sandwich', confidence
-            intervals are estimate +/- z * SE, and the bootstrap attributes
-            are None.
+        se_method : {None, 'sandwich', 'bootstrap', 'hessian'}, default None
+            Standard error method; see above. 'hessian' (estimates from
+            estimation='cml' only, and their default) is the inverse
+            information matrix of the conditional likelihood; 'sandwich' is
+            not yet available for 'cml'. With 'sandwich' or 'hessian',
+            confidence intervals are estimate +/- z * SE, and the bootstrap
+            attributes are None.
 
         Attributes set
         --------------
@@ -1943,9 +2048,9 @@ class RSM(Rasch):
         cat_width_bootstrap : pandas.DataFrame
             Bootstrap category width estimates (None with the sandwich).
         """
-        if se_method not in (None, "sandwich", "bootstrap"):
+        if se_method not in (None, "sandwich", "bootstrap", "hessian"):
             raise ValueError(
-                f"se_method must be None, 'sandwich' or 'bootstrap', got {se_method!r}."
+                f"se_method must be None, 'sandwich', 'bootstrap' or 'hessian', got {se_method!r}."
             )
         cal_kw = self._calibration_kw(
             constant=constant,
@@ -1956,6 +2061,20 @@ class RSM(Rasch):
         )
         if not hasattr(self, "thresholds"):
             self.calibrate(**cal_kw)
+        cml = getattr(self, "estimation", None) == "cml"
+        if cml and se_method == "sandwich":
+            raise ValueError(
+                "se_method='sandwich' is not yet available for estimation='cml'; use "
+                "se_method='hessian' (or None) or 'bootstrap'."
+            )
+        if not cml and se_method == "hessian":
+            raise ValueError(
+                f"se_method='hessian' is the covariance of estimation='cml'; these estimates are "
+                f"from estimation={self.estimation!r}, so use se_method='sandwich', 'bootstrap' "
+                f"or None."
+            )
+        if cml and se_method is None:
+            se_method = "hessian"
         if getattr(self, "estimation", None) == "pair-cpat" and (
             se_method is not None
             or (getattr(self, "_calibrate_args", {}).get("method") or "log-lik")
@@ -1984,22 +2103,47 @@ class RSM(Rasch):
                     stacklevel=2,
                 )
         self.se_method = se_method
-        if se_method == "sandwich":
+        if se_method in ("sandwich", "hessian"):
             self._sandwich_std_errors(interval)
             return
 
         rng = np.random.default_rng(seed)
         samples = []
         collector = _BootstrapWarnings()
+        no_cml = 0
         for _ in range(no_of_samples):
             with collector.resample():
                 sample = RSM(
                     self.responses.sample(frac=1, replace=True, random_state=rng),
                     max_score=self.max_score,
                 )
-                sample.calibrate(**cal_kw)
+                try:
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings(
+                            "ignore", message="CML estimates do not exist"
+                        )
+                        sample.calibrate(**cal_kw)
+                except ValueError as e:
+                    if not str(e).startswith("CML estimates do not exist"):
+                        raise
+                    no_cml += 1
+                    continue
+                if len(sample.item_names) < len(self.item_names):
+                    no_cml += (
+                        1  # CML estimates do not exist for some items in this resample
+                    )
+                    continue
             samples.append(sample)
         collector.emit()
+        if no_cml:
+            warnings.warn(
+                f"{no_cml} of {no_of_samples} bootstrap resamples had no CML estimates for some "
+                f"items or thresholds and were left out; the bootstrap standard errors may be too "
+                f"small. se_method='hessian' does not resample.",
+                UserWarning,
+                stacklevel=2,
+            )
+        no_of_samples = len(samples)
 
         item_ests = np.array([s.items.values for s in samples])  # (B, I)
         threshold_ests = np.array([s.thresholds.values for s in samples])  # (B, K)
@@ -3935,12 +4079,12 @@ class RSM(Rasch):
                 category_alpha,
                 ref_cov=(
                     ref_model.se_covariance["items"]
-                    if ref_model.se_method == "sandwich"
+                    if ref_model.se_method in ("sandwich", "hessian")
                     else None
                 ),
                 focal_cov=(
                     focal_model.se_covariance["items"]
-                    if focal_model.se_method == "sandwich"
+                    if focal_model.se_method in ("sandwich", "hessian")
                     else None
                 ),
             )

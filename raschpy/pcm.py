@@ -13,6 +13,7 @@ import seaborn as sns
 import matplotlib.patheffects as path_effects
 
 from raschpy.base import Rasch, _BootstrapWarnings, _save_table
+from raschpy import _esf, _rcl
 
 
 class PCM(Rasch):
@@ -726,9 +727,11 @@ class PCM(Rasch):
         matrix_power=None,
         log_lik_tol=0.000001,
         robust=False,
+        estimation="pair",
     ):
         """
-        Estimate item thresholds using the PAIR (Pairwise) algorithm.
+        Estimate item thresholds using the PAIR (Pairwise) algorithm, or by
+        conditional maximum likelihood (estimation='cml').
 
         Constructs a joint score-category frequency matrix across all item
         pairs and threshold combinations using vectorised operations, then
@@ -769,9 +772,29 @@ class PCM(Rasch):
             by the data-adaptive ``constant=None`` default, including in the
             sparse, many-category designs it was built for. It will be
             removed in a future release.
+        estimation : {'pair', 'cml'}, default 'pair'
+            'pair': the pairwise method above. 'cml': conditional maximum
+            likelihood, conditioning on each person's total score over the
+            items they responded to, starting from the PAIR estimates (with
+            the other arguments above); all uncentred thresholds are centred
+            to mean 0, as for 'pair'. CML estimates do not exist for an item
+            with a category unused by the persons with a non-extreme total,
+            or an item not compared with the others in both directions; such
+            items are removed from responses (to cml_dropped_responses), with
+            a UserWarning, and listed in convergence['dropped_items'] with the
+            reason. estimation='pair' keeps them.
 
         Attributes set
         --------------
+        estimation : str
+            The estimation method used.
+        convergence : dict or None
+            estimation='cml': iterations, whether the fit converged, the
+            solver ('newton', or 'lbfgs' above 500 thresholds), the
+            conditional log-likelihood and the items dropped ({item: reason}).
+            None for 'pair'.
+        cml_dropped_responses : pandas.DataFrame
+            estimation='cml': responses to the items dropped; empty if none.
         thresholds_uncentred : dict
             {item: numpy.ndarray} of uncentred threshold estimates per item.
         items : pandas.Series
@@ -790,13 +813,18 @@ class PCM(Rasch):
         null_persons : pandas.Index
             Persons dropped prior to calibration due to entirely missing data.
         """
+        if estimation not in ("pair", "cml"):
+            raise ValueError(f"estimation must be 'pair' or 'cml', got {estimation!r}.")
         # arguments as passed, for refits (see _calibration_kw)
         self._calibrate_args = dict(
             constant=constant,
             method=method,
             matrix_power=matrix_power,
             log_lik_tol=log_lik_tol,
+            estimation=estimation,
         )
+        self.estimation = estimation
+        self.convergence = None
 
         if len(self.responses.columns) == 1:
             warnings.warn(
@@ -848,7 +876,6 @@ class PCM(Rasch):
         self.no_of_persons = self.responses.shape[0]
 
         matrix, _ = self._build_pairwise_matrix()
-        cum_scores = np.concatenate(([0], np.cumsum(self.max_score_vector.to_numpy())))
 
         constant = resolved_constant
         matrix_power = self._resolve_matrix_power(method, matrix_power)
@@ -891,13 +918,93 @@ class PCM(Rasch):
         self.constant = resolved_constant
         self.cell_constants = cell_constants
 
-        split_indices = cum_scores[1:-1]
+        self._store_thresholds(threshold_vector)
+
+        if estimation == "cml":
+            self._calibrate_cml()
+
+    def _calibrate_cml(self):
+        """CML thresholds from the PAIR estimates (all uncentred thresholds centred to mean 0, as PAIR's), with
+        self.convergence; the Hessian at the estimates is kept for std_errors() when Newton-Raphson computed
+        it. Items whose CML estimates do not exist are removed first, with a UserWarning.
+        """
+        dropped = self._cml_drop_items(
+            self.max_score_vector.reindex(self.item_names).to_numpy()
+        )
+        names = list(self.item_names)
+        if dropped:
+            self.max_score_vector = self.max_score_vector.reindex(names)
+        Ks = self.max_score_vector.to_numpy().astype(int)
+        X = np.array(self.responses.loc[:, names], dtype=np.float64)
+        b0 = np.concatenate(
+            [
+                self.thresholds_uncentred.loc[n].dropna().values.astype(float)
+                for n in names
+            ]
+        )
+        A = _rcl.zero_sum_basis(len(b0))
+        fit = _esf.fit_cml(X, A, b0 - b0.mean(), list(Ks))
+        self.threshold_list = pd.Series(
+            fit["b"],
+            index=[f"{n}_{k}" for n, K in zip(names, Ks) for k in range(1, K + 1)],
+        )
+        self._store_thresholds(fit["b"])
+        self._cml_hessian = fit["hessian"]
+        self.convergence = dict(
+            iterations=fit["iterations"],
+            converged=fit["converged"],
+            solver=fit["solver"],
+            log_likelihood=fit["ll"],
+            dropped_items=dropped,
+        )
+        if not fit["converged"]:
+            warnings.warn(
+                f"CML calibration did not converge in {fit['iterations']} iterations "
+                f"(solver {fit['solver']!r}, largest gradient {fit['max_gradient']:.2g}); the estimates may be "
+                f"unreliable.",
+                UserWarning,
+                stacklevel=3,
+            )
+
+    def _cml_covariance(self):
+        """(covariance, owner) of the CML uncentred thresholds, stacked item by item, from the Hessian of the
+        conditional log-likelihood; owner[j] is the item index of threshold j (as _sandwich_covariance).
+        """
+        names = list(self.item_names)
+        Ks = self.max_score_vector.reindex(names).to_numpy().astype(int)
+        X = np.array(self.responses.loc[:, names], dtype=np.float64)
+        b = np.concatenate(
+            [
+                self.thresholds_uncentred.loc[n].dropna().values.astype(float)
+                for n in names
+            ]
+        )
+        V = _esf.cml_covariance(
+            X,
+            _rcl.zero_sum_basis(len(b)),
+            b,
+            list(Ks),
+            hessian=getattr(self, "_cml_hessian", None),
+        )
+        return V, np.repeat(np.arange(len(names)), Ks)
+
+    def _threshold_covariance(self, small_sample=False):
+        """(covariance, owner) of the uncentred thresholds for the analytic standard errors: the Hessian
+        covariance for CML estimates (no small-sample correction applies), else the sandwich.
+        """
+        if getattr(self, "estimation", "pair") == "cml":
+            return self._cml_covariance()
+        return self._sandwich_covariance(small_sample=small_sample)
+
+    def _store_thresholds(self, threshold_vector):
+        """Set items, thresholds_uncentred and thresholds from the stacked uncentred thresholds."""
+        cum_scores = np.concatenate(([0], np.cumsum(self.max_score_vector.to_numpy())))
         threshold_vector_np = (
             threshold_vector.to_numpy()
             if hasattr(threshold_vector, "to_numpy")
             else np.array(threshold_vector)
         )
-        item_threshold_arrays = np.split(threshold_vector_np, split_indices)
+        item_threshold_arrays = np.split(threshold_vector_np, cum_scores[1:-1])
 
         items_dict = {}
         thresholds_uncentred_dict = {}
@@ -1424,8 +1531,8 @@ class PCM(Rasch):
         return pd.DataFrame(A @ V @ A.T, index=names, columns=names)
 
     def _sandwich_std_errors(self, interval):
-        """Set the std_errors() attributes from the sandwich covariance."""
-        V, owner = self._sandwich_covariance()
+        """Set the std_errors() attributes from the analytic covariance (sandwich, or Hessian for CML)."""
+        V, owner = self._threshold_covariance()
         names = list(self.item_names)
         labels = [
             (it, k)
@@ -1513,7 +1620,8 @@ class PCM(Rasch):
         person-level response data, calibrates each resample, and computes
         the standard deviation of the estimates across samples.
 
-        se_method=None (default) uses the sandwich unless the estimates are
+        se_method=None (default) uses the Hessian for estimates from
+        estimation='cml'. Otherwise it uses the sandwich unless the estimates are
         from method='cos', 'ls' or 'evm' (the sandwich is the covariance of
         the Bradley-Terry estimating equations, which only 'log-lik' solves;
         an explicit se_method='sandwich' with those raises a ValueError) or
@@ -1535,17 +1643,19 @@ class PCM(Rasch):
         seed : int or None, default None
             Seed for the bootstrap resampling RNG. Pass an int for fully
             reproducible standard errors; None (default) draws fresh entropy.
-        se_method : {None, 'sandwich', 'bootstrap'}, default None
-            Standard error method; see above. With 'sandwich', confidence
-            intervals are estimate +/- z * SE, and the bootstrap attributes
-            are None.
+        se_method : {None, 'sandwich', 'bootstrap', 'hessian'}, default None
+            Standard error method; see above. 'hessian' (estimates from
+            estimation='cml' only, and their default) is the inverse
+            information matrix of the conditional likelihood. With 'sandwich'
+            or 'hessian', confidence intervals are estimate +/- z * SE, and
+            the bootstrap attributes are None.
 
         Attributes set
         --------------
         se_method : str
             'sandwich' or 'bootstrap', the method used.
         se_covariance : pandas.DataFrame or None
-            Sandwich covariance of the uncentred thresholds (sandwich only).
+            Covariance of the uncentred thresholds ('sandwich' and 'hessian' only).
         threshold_se : dict
             {item: numpy.ndarray} bootstrap SEs for each item's uncentred thresholds.
         item_se : pandas.Series
@@ -1560,9 +1670,9 @@ class PCM(Rasch):
             {item: DataFrame} of bootstrap threshold estimates (None with
             the sandwich).
         """
-        if se_method not in (None, "sandwich", "bootstrap"):
+        if se_method not in (None, "sandwich", "bootstrap", "hessian"):
             raise ValueError(
-                f"se_method must be None, 'sandwich' or 'bootstrap', got {se_method!r}."
+                f"se_method must be None, 'sandwich', 'bootstrap' or 'hessian', got {se_method!r}."
             )
         cal_kw = self._calibration_kw(
             constant=constant,
@@ -1575,6 +1685,7 @@ class PCM(Rasch):
         if (
             se_method is not None
             or (self._calibrate_args.get("method") or "log-lik") != "log-lik"
+            or self._calibrate_args.get("estimation") == "cml"
         ):
             se_method = self._resolve_se_method(se_method)
         if se_method is None:
@@ -1602,7 +1713,7 @@ class PCM(Rasch):
                     stacklevel=2,
                 )
         self.se_method = se_method
-        if se_method == "sandwich":
+        if se_method in ("sandwich", "hessian"):
             self._sandwich_std_errors(interval)
             return
         self.se_covariance = None
@@ -1610,15 +1721,35 @@ class PCM(Rasch):
         rng = np.random.default_rng(seed)
         samples = []
         collector = _BootstrapWarnings()
+        no_cml = 0
         for _ in range(no_of_samples):
             with collector.resample():
                 sample = PCM(
                     self.responses.sample(frac=1, replace=True, random_state=rng),
                     self.max_score_vector,
                 )
-                sample.calibrate(robust=robust, **cal_kw)
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(
+                        "ignore", message="CML estimates do not exist"
+                    )
+                    sample.calibrate(robust=robust, **cal_kw)
+                if len(sample.item_names) < len(self.item_names):
+                    no_cml += (
+                        1  # CML estimates do not exist for some items in this resample
+                    )
+                    continue
             samples.append(sample)
         collector.emit()
+        if no_cml:
+            warnings.warn(
+                f"{no_cml} of {no_of_samples} bootstrap resamples had no CML estimates for some items "
+                f"(an unused category among the persons with a non-extreme total, or an item not "
+                f"compared with the others in both directions) and were left out; the bootstrap "
+                f"standard errors may be too small. se_method='hessian' does not resample.",
+                UserWarning,
+                stacklevel=2,
+            )
+        no_of_samples = len(samples)
 
         self.bootstrap_sample_thresholds = {
             f"Sample_{i + 1}": sample.thresholds_uncentred
@@ -3188,7 +3319,11 @@ class PCM(Rasch):
                 est.append(thr[k - 1])
                 ok.append((x[:, i] == k).sum() > 0 and (x[:, i] == k - 1).sum() > 0)
         est = np.array(est)
-        V = m._sandwich_covariance(small_sample=small_sample)[0] if covariance else None
+        V = (
+            m._threshold_covariance(small_sample=small_sample)[0]
+            if covariance
+            else None
+        )
         return labels, est - est.mean(), V, np.array(ok), [np.arange(len(est))]
 
     def andersen_lr_test(
@@ -3884,12 +4019,12 @@ class PCM(Rasch):
                 category_alpha,
                 ref_cov=(
                     ref_model._central_covariance()
-                    if ref_model.se_method == "sandwich"
+                    if ref_model.se_method in ("sandwich", "hessian")
                     else None
                 ),
                 focal_cov=(
                     focal_model._central_covariance()
-                    if focal_model.se_method == "sandwich"
+                    if focal_model.se_method in ("sandwich", "hessian")
                     else None
                 ),
             )

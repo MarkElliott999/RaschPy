@@ -2475,6 +2475,53 @@ class Rasch:
         kw.update({k: v for k, v in passed.items() if v is not None})
         return kw
 
+    def _cml_drop_items(self, Ks, per_item_categories=True):
+        """
+        Before a CML fit (SLM, PCM, RSM): remove the items whose CML estimates
+        do not exist (_esf.screen_items), with one UserWarning. They go to
+        self.cml_dropped_responses; persons left with no responses are added
+        to self.null_persons. Returns {item: reason} for the dropped items
+        (empty if none); a subclass also subsets its own per-item attributes.
+        """
+        from raschpy import _esf
+
+        names = list(self.item_names)
+        X = np.array(self.responses.loc[:, names], dtype=np.float64)
+        keep, reasons = _esf.screen_items(
+            X, Ks, per_item_categories=per_item_categories
+        )
+        dropped = {names[i]: reasons[i] for i in sorted(reasons)}
+        self.cml_dropped_responses = self.responses.loc[:, list(dropped)]
+        if not dropped:
+            return dropped
+        kept = [n for n, k in zip(names, keep) if k]
+        self.responses = self.responses.loc[:, kept]
+        empty = self.responses.index[self.responses.isnull().all(axis=1)]
+        if len(empty):
+            self.responses = self.responses.drop(empty)
+            self.null_persons = self.null_persons.append(empty)
+        self.item_names = self.responses.columns
+        self.no_of_items = len(kept)
+        self.person_names = self.responses.index
+        self.no_of_persons = len(self.person_names)
+        if getattr(self, "exogenous", None) is not None:
+            self.exogenous = self.exogenous.reindex(self.person_names)
+        shown = "; ".join(f"{k} ({v})" for k, v in list(dropped.items())[:10])
+        if len(dropped) > 10:
+            shown += f"; and {len(dropped) - 10} more"
+        warnings.warn(
+            f"CML estimates do not exist for {len(dropped)} item(s): {shown}. Among the persons "
+            f"with a non-extreme total, an item with an unused category has no finite estimates "
+            f"for the thresholds next to it, and an item that is not connected is never compared "
+            f"with the others in both directions. They were left out of the CML calibration and "
+            f"removed from responses (see convergence['dropped_items'] and "
+            f"cml_dropped_responses). To keep them, collapse unused categories, or use the "
+            f"default estimation, whose smoothing constant gives finite estimates.",
+            UserWarning,
+            stacklevel=4,
+        )
+        return dropped
+
     def _resolve_se_method(self, se_method):
         """
         SLM/PCM standard error method for the current estimates: the
@@ -2483,6 +2530,20 @@ class Rasch:
         'sandwich' for 'log-lik' and 'bootstrap' for 'cos'/'ls'/'evm', and
         an explicit 'sandwich' with those raises a ValueError.
         """
+        if getattr(self, "_calibrate_args", {}).get("estimation") == "cml":
+            if se_method is None:
+                return "hessian"
+            if se_method == "sandwich":
+                raise ValueError(
+                    "se_method='sandwich' is not yet available for estimation='cml'; use "
+                    "se_method='hessian' (or None) or 'bootstrap'."
+                )
+            return se_method
+        if se_method == "hessian":
+            raise ValueError(
+                "se_method='hessian' is the covariance of estimation='cml'; these estimates are "
+                "from estimation='pair', so use se_method='sandwich', 'bootstrap' or None."
+            )
         method = getattr(self, "_calibrate_args", {}).get("method") or "log-lik"
         if se_method is None:
             return "sandwich" if method == "log-lik" else "bootstrap"
@@ -3591,7 +3652,7 @@ class Rasch:
         """True if the object's calibration settings have no sandwich
         covariance (method='cos', 'ls' or 'evm', for SLM, PCM, and RSM with
         estimation='pair-cpat'), so global_fit() uses bootstrap covariances."""
-        if getattr(self, "estimation", "pair-cpat") != "pair-cpat":
+        if getattr(self, "estimation", "pair-cpat") not in ("pair", "pair-cpat"):
             return False
         return (self._calibration_kw().get("method") or "log-lik") != "log-lik"
 

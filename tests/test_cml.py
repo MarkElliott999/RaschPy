@@ -1,0 +1,230 @@
+"""
+Tests for conditional maximum likelihood (estimation='cml').
+
+External agreement uses stored psychotools::raschmodel fits (tests/external_data/cml_*_psychotools.csv,
+made by cml_fit_psychotools.R), so no R is needed at run time. The stored fits stop at psychotools' own
+optimiser tolerance (gradient ~1e-4), hence the tolerances below.
+"""
+
+import itertools
+import os
+import warnings
+
+import numpy as np
+import pandas as pd
+import pytest
+from scipy.special import logsumexp
+
+from raschpy import PCM, RSM, SLM, _esf
+
+DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "external_data")
+
+
+def _slm_cml(name):
+    X = pd.read_csv(os.path.join(DATA, f"cml_{name}.csv"))
+    ref = pd.read_csv(os.path.join(DATA, f"cml_{name}_psychotools.csv"))
+    m = SLM(X)
+    m.calibrate(estimation="cml")
+    return m, ref
+
+
+@pytest.mark.parametrize("name", ["slm_complete", "slm_missing", "slm_booklet"])
+def test_slm_cml_matches_psychotools(name):
+    m, ref = _slm_cml(name)
+    m.std_errors()
+    np.testing.assert_allclose(m.items.reindex(ref["item"]).values, ref["psy"].values, atol=5e-5)
+    np.testing.assert_allclose(m.item_se.reindex(ref["item"]).values, ref["psy_se"].values, atol=5e-6)
+    assert m.convergence["log_likelihood"] == pytest.approx(ref["psy_ll"][0], abs=1e-6)
+    assert m.convergence["converged"] and m.se_method == "hessian"
+
+
+def test_slm_cml_is_the_conditional_maximum():
+    m, _ = _slm_cml("slm_booklet")
+    X = np.array(m.responses, dtype=float)
+    _, g, _ = _esf.cond_loglik(X, [[v] for v in m.items.values])
+    assert np.max(np.abs(g - g.mean())) < 1e-8
+    assert abs(m.items.mean()) < 1e-12
+
+
+def test_slm_cml_does_not_depend_on_pair_settings():
+    m, _ = _slm_cml("slm_missing")
+    m2 = SLM(m.responses)
+    m2.calibrate(estimation="cml", method="cos", constant=1.0)
+    np.testing.assert_allclose(m2.items.values, m.items.values, atol=1e-7)
+
+
+def test_slm_cml_drops_items_without_estimates():
+    X = pd.read_csv(os.path.join(DATA, "cml_slm_complete.csv"))
+    X.iloc[:, 0] = 1  # an item everyone answers correctly
+    m = SLM(X, validate=False)
+    with pytest.warns(UserWarning, match="CML estimates do not exist for 1 item"):
+        m.calibrate(estimation="cml")
+    assert m.convergence["dropped_items"] == {"I1": "unused category 0"}
+    assert list(m.cml_dropped_responses.columns) == ["I1"] and "I1" not in m.items.index
+    ref = SLM(X.iloc[:, 1:], validate=False)
+    ref.calibrate(estimation="cml")
+    np.testing.assert_allclose(m.items.values, ref.items.values, atol=1e-10)
+    m.std_errors()
+    assert m.item_se.notna().all()
+
+
+def test_se_method_rules():
+    m, _ = _slm_cml("slm_complete")
+    with pytest.raises(ValueError, match="not yet available for estimation='cml'"):
+        m.std_errors(se_method="sandwich")
+    p = SLM(m.responses)
+    p.calibrate()
+    with pytest.raises(ValueError, match="covariance of estimation='cml'"):
+        p.std_errors(se_method="hessian")
+    with pytest.raises(ValueError, match="estimation must be"):
+        p.calibrate(estimation="jml")
+
+
+def test_slm_cml_refits_use_cml():
+    m, _ = _slm_cml("slm_complete")
+    assert m._calibration_kw()["estimation"] == "cml"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m.std_errors(se_method="bootstrap", no_of_samples=5, seed=1)
+    assert m.se_method == "bootstrap" and m.item_bootstrap.shape[0] == 5
+
+
+# ---------------------------------------------------------------- PCM
+
+def _pcm_cml(name):
+    X = pd.read_csv(os.path.join(DATA, f"cml_{name}.csv"))
+    m = PCM(X)
+    m.calibrate(estimation="cml")
+    return m
+
+
+def _stacked(m):
+    return np.concatenate([m.thresholds_uncentred.loc[n].dropna().values for n in m.item_names])
+
+
+@pytest.mark.parametrize("name", ["pcm_complete", "pcm_missing"])
+def test_pcm_cml_matches_psychotools(name):
+    m = _pcm_cml(name)
+    ref = pd.read_csv(os.path.join(DATA, f"cml_{name}_psychotools.csv"))
+    m.std_errors()
+    np.testing.assert_allclose(_stacked(m), ref["psy"].values, atol=5e-5)
+    np.testing.assert_allclose(np.concatenate([m.threshold_se[n] for n in m.item_names]), ref["psy_se"].values,
+                               atol=5e-6)
+    assert m.convergence["log_likelihood"] == pytest.approx(ref["psy_ll"][0], abs=1e-6)
+    assert m.se_method == "hessian" and abs(_stacked(m).mean()) < 1e-12
+
+
+def test_pcm_cml_booklet_matches_brute_force():
+    # psychotools::pcmodel fails silently on this design (positive log-likelihood, code 0), so the reference is
+    # brute-force enumeration of each booklet's response patterns
+    m = _pcm_cml("pcm_booklet")
+    X = np.array(m.responses, float)
+    Ks = m.max_score_vector.values.astype(int)
+    b = _stacked(m)
+    off = np.concatenate([[0], np.cumsum(Ks)])
+    le = [np.concatenate([[0.0], -np.cumsum(b[off[i]:off[i + 1]])]) for i in range(len(Ks))]
+    obs = ~np.isnan(X)
+    total = 0.0
+    for pattern in {tuple(o) for o in obs}:
+        items = [i for i in range(len(Ks)) if pattern[i]]
+        rows = X[np.all(obs == np.array(pattern), axis=1)][:, items].astype(int)
+        by_total = {}
+        for cs in itertools.product(*[range(Ks[i] + 1) for i in items]):
+            by_total.setdefault(sum(cs), []).append(sum(le[i][c] for i, c in zip(items, cs)))
+        lg = {r: logsumexp(v) for r, v in by_total.items()}
+        for row in rows:
+            r = row.sum()
+            if 0 < r < Ks[items].sum():
+                total += sum(le[i][x] for i, x in zip(items, row)) - lg[r]
+    assert m.convergence["log_likelihood"] == pytest.approx(total, abs=1e-8)
+    _, g, _ = _esf.cond_loglik(X, [b[off[i]:off[i + 1]] for i in range(len(Ks))])
+    assert np.max(np.abs(g - g.mean())) < 1e-8
+
+
+def test_pcm_cml_drops_item_with_unused_category():
+    X = pd.read_csv(os.path.join(DATA, "cml_pcm_complete.csv"))
+    X.loc[X["I1"] == 2, "I1"] = 3  # category 2 of I1 unused
+    m = PCM(X, validate=False)
+    with pytest.warns(UserWarning, match="CML estimates do not exist for 1 item"):
+        m.calibrate(estimation="cml")
+    assert m.convergence["dropped_items"] == {"I1": "unused category 2"}
+    assert "I1" not in m.items.index and "I1" not in m.max_score_vector.index
+    m.std_errors()
+    assert np.all(np.isfinite(m.item_se.values))
+
+
+
+# ---------------------------------------------------------------- RSM
+
+def _brute_cond_ll(X, b_rows):
+    """Conditional log-likelihood by enumerating every response pattern of each missingness pattern."""
+    Ks = [len(x) for x in b_rows]
+    le = [np.concatenate([[0.0], -np.cumsum(x)]) for x in b_rows]
+    obs = ~np.isnan(X)
+    total = 0.0
+    for pattern in {tuple(o) for o in obs}:
+        items = [i for i in range(len(Ks)) if pattern[i]]
+        rows = X[np.all(obs == np.array(pattern), axis=1)][:, items].astype(int)
+        by_total = {}
+        for cs in itertools.product(*[range(Ks[i] + 1) for i in items]):
+            by_total.setdefault(sum(cs), []).append(sum(le[i][c] for i, c in zip(items, cs)))
+        lg = {r: logsumexp(v) for r, v in by_total.items()}
+        for row in rows:
+            r = row.sum()
+            if 0 < r < sum(Ks[i] for i in items):
+                total += sum(le[i][x] for i, x in zip(items, row)) - lg[r]
+    return total
+
+
+def _rsm_cml(name):
+    X = pd.read_csv(os.path.join(DATA, f"cml_{name}.csv"))
+    m = RSM(X)
+    m.calibrate(estimation="cml")
+    return m
+
+
+@pytest.mark.parametrize("name", ["rsm_complete", "rsm_missing"])
+def test_rsm_cml_matches_psychotools(name):
+    # psychotools' threshold standard errors (vcov of threshpar(relative = TRUE)) are not compared: in a
+    # replicate simulation of rsm_complete they were about twice the sampling SD for all but the last
+    # threshold, while RaschPy's matched it
+    m = _rsm_cml(name)
+    ref = pd.read_csv(os.path.join(DATA, f"cml_{name}_psychotools.csv"))
+    items, thr = ref[ref["kind"] == "item"], ref[ref["kind"] == "threshold"]
+    m.std_errors()
+    np.testing.assert_allclose(m.items.values, items["psy"].values, atol=5e-5)
+    np.testing.assert_allclose(m.thresholds.values, thr["psy"].values, atol=5e-5)
+    np.testing.assert_allclose(m.item_se.values, items["psy_se"].values, atol=5e-6)
+    assert m.convergence["log_likelihood"] == pytest.approx(ref["psy_ll"].iloc[0], abs=1e-6)
+    assert m.se_method == "hessian" and abs(m.items.mean()) < 1e-12 and abs(m.thresholds.mean()) < 1e-12
+
+
+def test_rsm_cml_booklet_matches_brute_force():
+    # psychotools::rsmodel fails silently on this design (positive log-likelihood, code 0)
+    m = _rsm_cml("rsm_booklet")
+    X = np.array(m.responses, float)
+    b = m.items.values[:, None] + m.thresholds.values[None, :]
+    assert m.convergence["log_likelihood"] == pytest.approx(_brute_cond_ll(X, list(b)), abs=1e-8)
+    A, _ = m._cml_basis()
+    _, g, _ = _esf.cond_loglik(X, list(b))
+    assert np.max(np.abs(A.T @ g)) < 1e-8
+
+
+def test_rsm_cml_keeps_items_with_unused_categories():
+    X = pd.read_csv(os.path.join(DATA, "cml_rsm_complete.csv"))
+    X.loc[X["I1"] == 3, "I1"] = 2  # I1 never uses the top category: fine for RSM (shared thresholds)
+    m = RSM(X, validate=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m.calibrate(estimation="cml")
+    assert m.convergence["dropped_items"] == {} and "I1" in m.items.index
+
+
+def test_rsm_cml_raises_when_a_category_is_unused_everywhere():
+    X = pd.read_csv(os.path.join(DATA, "cml_rsm_complete.csv"))
+    X = X.where(X != 2, 1)  # category 2 unused on every item
+    m = RSM(X, validate=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with pytest.raises(ValueError, match="category 2 is unused"):
+            m.calibrate(estimation="cml")
