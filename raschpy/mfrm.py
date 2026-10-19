@@ -8181,6 +8181,114 @@ class MFRM(Rasch):
             cols.append(self.responses.loc[r].reindex(persons)[item_names].values)
         return np.hstack(cols).astype(float), thr, persons
 
+    def _conditional_ll_mfrm(self, model, Xv, prep, rows=None):
+        """
+        model_selection(likelihood='conditional'): the conditional log-likelihood of the virtual items
+        (_virtual_items) given each person's total over all their ratings, after one Newton step from the
+        model's estimates within its own parameterisation, with the exact Hessian and step-halving. For
+        the models linear in their parameters (global, items, thresholds, bivector, matrix) the location
+        grid is the cell model's Jacobian times its coordinates; for the stretch models (b[r, i, h] =
+        lambda_r + omegaI_r delta_i + omegaT_r tau_h) the Hessian adds the second-derivative term of that
+        bilinear form, in the coordinates of _rcl.StretchModel (delta, tau, lambda zero-sum, mean omega 1).
+        With rows (a subsample of persons), the step uses all the data and the log-likelihood is that of
+        the subsample at the stepped estimates.
+        """
+        from raschpy import _esf, _rcl
+
+        R, I, K = self.no_of_facet_elements, self.no_of_items, int(self.max_score)
+        Ks = [K] * (R * I)
+        _, thr, _ = self._virtual_items(model)
+        b0 = np.concatenate(thr)
+
+        def unstack(b):
+            return list(b.reshape(R * I, K))
+
+        def score(b):
+            if rows is None:
+                return _esf.cond_loglik(Xv, unstack(b), prepared=prep)[0]
+            return _esf.cond_loglik(Xv[rows], unstack(b))[0]
+
+        if model not in ("centrality", "pseudo_halo", "bistretch"):
+            A = _rcl.CellModel(model, R, I, K).jacobian()
+            b1 = _esf.one_step_loglik(Xv, A, b0, Ks, prepared=prep)[1]
+            return score(b1)
+
+        useI, useT = model in ("pseudo_halo", "bistretch"), model in (
+            "centrality",
+            "bistretch",
+        )
+        fe = getattr(self, f"facet_effects_{model}").reindex(self.facet_names)
+        lam = fe["lambda"].to_numpy(float)
+        wI = (
+            fe["omega_items" if model == "bistretch" else "omega"].to_numpy(float)
+            if useI
+            else np.ones(R)
+        )
+        wT = (
+            fe["omega_thresholds" if model == "bistretch" else "omega"].to_numpy(float)
+            if useT
+            else np.ones(R)
+        )
+        delta = np.asarray(getattr(self, f"items_{model}").reindex(self.item_names), float)
+        tau = np.asarray(getattr(self, f"thresholds_{model}"), float)[-K:]
+        oD, oT, oL, oI, oW = 0, I, I + K, I + K + R, I + K + 2 * R
+        NI, NR, T = _rcl.zero_sum_basis(I), _rcl.zero_sum_basis(R), _rcl.threshold_basis(K)
+        blocks = [(oD, NI), (oT, T), (oL, NR)] + ([(oI, NR)] if useI else []) + (
+            [(oW, NR)] if useT else []
+        )
+        p_nat = I + K + 3 * R
+        M = np.zeros((p_nat, sum(B.shape[1] for _, B in blocks)))
+        col = 0
+        for off, B in blocks:
+            M[off : off + B.shape[0], col : col + B.shape[1]] = B
+            col += B.shape[1]
+        phi0 = np.zeros(p_nat)
+        phi0[oI : oI + R] = 1.0
+        phi0[oW : oW + R] = 1.0
+        phi = np.concatenate([delta, tau, lam, wI, wT])
+        theta = np.linalg.lstsq(M, phi - phi0, rcond=None)[0]
+
+        def grid(th):
+            f = phi0 + M @ th
+            d, t, l = f[oD:oT], f[oT:oL], f[oL:oI]
+            wi, wt = f[oI:oW], f[oW:]
+            return (
+                l[:, None, None] + wi[:, None, None] * d[None, :, None] + wt[:, None, None] * t[None, None, :]
+            ).ravel()
+
+        if np.max(np.abs(grid(theta) - b0)) > 1e-8 * max(1.0, np.max(np.abs(b0))):
+            raise RuntimeError(
+                f"Internal error: the {model!r} estimates do not reproduce its location grid in the stretch "
+                f"coordinates."
+            )
+        ll0, g, H = _esf.cond_loglik(Xv, unstack(b0), hessian=True, prepared=prep)
+        f = phi0 + M @ theta
+        d, t, wi, wt = f[oD:oT], f[oT:oL], f[oI:oW], f[oW:]
+        r, i, h = np.meshgrid(np.arange(R), np.arange(I), np.arange(K), indexing="ij")
+        J = np.zeros((R, I, K, p_nat))
+        J[r, i, h, oD + i] = wi[r]
+        J[r, i, h, oT + h] = wt[r]
+        J[r, i, h, oL + r] = 1.0
+        J[r, i, h, oI + r] = d[i]
+        J[r, i, h, oW + r] = t[h]
+        J = J.reshape(R * I * K, p_nat)
+        G = g.reshape(R, I, K)
+        S = np.zeros((p_nat, p_nat))  # second derivatives of the bilinear form, weighted by the gradient
+        S[oD : oD + I, oI : oI + R] = G.sum(axis=2).T
+        S[oT : oT + K, oW : oW + R] = G.sum(axis=1).T
+        S = S + S.T
+        Hth = M.T @ (J.T @ H @ J + S) @ M
+        gth = M.T @ (J.T @ g)
+        info = -(Hth + Hth.T) / 2
+        step = np.linalg.pinv(info, rcond=1e-10, hermitian=True) @ gth
+        for _ in range(30):
+            b1 = grid(theta + step)
+            ll1 = _esf.cond_loglik(Xv, unstack(b1), prepared=prep)[0]
+            if np.isfinite(ll1) and ll1 >= ll0:
+                return score(b1)
+            step = step / 2
+        return score(b0)
+
     def _conditional_cat_prob_dict(self, model, index, mom=None):
         """
         Category probabilities conditional on each person's total over all the ratings they received, for
@@ -11916,7 +12024,8 @@ class MFRM(Rasch):
         aic_sig_test=True,
         alpha=0.05,
         min_effect=0,
-        sampling="dynamic",
+        sampling="auto",
+        likelihood="joint",
         warm_corr=True,
         tolerance=0.00001,
         max_iters=100,
@@ -11998,13 +12107,23 @@ class MFRM(Rasch):
             practical importance rather than improving accuracy. If wanted,
             0.43 and 0.64 mirror the ETS DIF category boundaries (moderate
             and large).
-        sampling : None, 'dynamic', or int, default 'dynamic'
+        sampling : None, 'auto', 'dynamic', or int, default 'auto'
             Subsamples non-extreme persons before LL computation (parameters
             estimated on full data; only the LL evaluation is subsampled).
             'dynamic' uses T = min(20*R*(I-1)*(K-1), 1500), K = max_score
             (K - 1 taken as 1 for dichotomous data); an integer fixes T
             directly; None disables. n_ll (= T when triggered) is used in
-            BIC's ln(n) term.
+            BIC's ln(n) term. 'auto': 'dynamic' with likelihood='joint',
+            None with likelihood='conditional'.
+        likelihood : {'joint', 'conditional'}, default 'joint'
+            'joint': the log-likelihood given the person estimates.
+            'conditional': the conditional log-likelihood given each
+            person's total over all the ratings they received, which does
+            not involve the person locations, treating each facet element x
+            item as an item; each model is scored after one Newton step from
+            its estimates within its own parameterisation (close to its
+            conditional maximum). Estimation is unchanged. Parameter counts
+            and the LR df are the same as for 'joint'.
         warm_corr, tolerance, max_iters, ext_score_adjustment : floats
             Person estimation kwargs.
         constant, method, matrix_power, log_lik_tol : floats
@@ -12042,10 +12161,14 @@ class MFRM(Rasch):
             raise ValueError("test must be 'LR', 'AIC', or 'BIC'")
         if (
             sampling is not None
-            and sampling != "dynamic"
+            and sampling not in ("auto", "dynamic")
             and not isinstance(sampling, int)
         ):
-            raise ValueError("sampling must be None, 'dynamic', or an integer")
+            raise ValueError("sampling must be None, 'auto', 'dynamic', or an integer")
+        if likelihood not in ("joint", "conditional"):
+            raise ValueError("likelihood must be 'joint' or 'conditional'")
+        if sampling == "auto":
+            sampling = "dynamic" if likelihood == "joint" else None
 
         if models is None:
             active_models = list(self._MODELS)
@@ -12103,7 +12226,7 @@ class MFRM(Rasch):
         for mod in active_models:
             if not hasattr(self, f"facet_effects_{mod}"):
                 self.calibrate(model=mod, **cal_kw)
-            if not hasattr(self, f"persons_{mod}"):
+            if likelihood == "joint" and not hasattr(self, f"persons_{mod}"):
                 self.person_estimates(model=mod, **pe_kw)
 
         # Non-extreme persons (aggregate total score across all raters)
@@ -12114,6 +12237,7 @@ class MFRM(Rasch):
 
         # Determine LL responses (optional subsampling of persons)
         ll_responses = None
+        sampled_persons = None
         n_ll = n_persons
         if sampling is not None:
             T = (
@@ -12131,10 +12255,25 @@ class MFRM(Rasch):
                 n_ll = T
 
         # Compute LL for each active model
-        ll = {
-            mod: self._log_likelihood(model=mod, responses=ll_responses)
-            for mod in active_models
-        }
+        if likelihood == "conditional":
+            from raschpy import _esf
+
+            Xv, _, v_persons = self._virtual_items(active_models[0])
+            prep = _esf.prepare(Xv, [int(m)] * Xv.shape[1])
+            rows = (
+                None
+                if sampled_persons is None
+                else np.flatnonzero(v_persons.isin(sampled_persons))
+            )
+            ll = {
+                mod: self._conditional_ll_mfrm(mod, Xv, prep, rows)
+                for mod in active_models
+            }
+        else:
+            ll = {
+                mod: self._log_likelihood(model=mod, responses=ll_responses)
+                for mod in active_models
+            }
 
         if test == "AIC":
             aic = {mod: 2 * k_model[mod] - 2 * ll[mod] for mod in active_models}
@@ -12237,7 +12376,7 @@ class MFRM(Rasch):
                 if lr_stat < 0:
                     warnings.warn(
                         f"LR statistic for {null_mod} vs {alt_mod} is negative "
-                        f"(PAIR approximation) and has been floored at 0.",
+                        f"(the estimates are not maximum likelihood estimates) and has been floored at 0.",
                         UserWarning,
                     )
                     lr_stat = 0.0

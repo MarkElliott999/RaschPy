@@ -547,6 +547,35 @@ def fit_cml(
     )
 
 
+def one_step_loglik(X, A, b0, Ks, prepared=None):
+    """
+    Conditional log-likelihood after one Newton step from b0 over thresholds b = A @ theta (theta free;
+    A carries the identification), with the exact Hessian, halving the step while the log-likelihood falls.
+    For scoring models fitted by other estimators at (close to) their conditional maximum without a full
+    CML fit; at a CML estimate the step is null. A Hessian that is singular in some direction (e.g. an
+    unused category) is pseudo-inverted, so no step is taken along it.
+
+    Returns (ll after the step, b after the step, ll at b0).
+    """
+    off = np.concatenate([[0], np.cumsum(Ks)])
+
+    def unstack(b):
+        return [b[off[i] : off[i + 1]] for i in range(len(Ks))]
+
+    b0 = np.asarray(b0, float)
+    if prepared is None:
+        prepared = prepare(X, Ks)
+    ll0, g, H = cond_loglik(X, unstack(b0), hessian=True, prepared=prepared)
+    info = -(A.T @ H @ A)
+    step = A @ (np.linalg.pinv((info + info.T) / 2, rcond=1e-10, hermitian=True) @ (A.T @ g))
+    for _ in range(30):
+        ll1 = cond_loglik(X, unstack(b0 + step), prepared=prepared)[0]
+        if np.isfinite(ll1) and ll1 >= ll0:
+            return ll1, b0 + step, ll0
+        step = step / 2
+    return ll0, b0, ll0
+
+
 def cml_covariance(X, A, b, Ks, hessian=None):
     """Covariance of the CML thresholds b = A @ theta: A (-A' H A)^{-1} A', H the Hessian of cond_loglik at b
     (computed if not given)."""

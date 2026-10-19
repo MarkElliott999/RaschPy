@@ -4527,7 +4527,8 @@ class PCM(Rasch):
         aic_sig_test=True,
         alpha=0.05,
         min_effect=0,
-        sampling="dynamic",
+        sampling="auto",
+        likelihood="joint",
         warm_corr=True,
         tolerance=0.00001,
         max_iters=100,
@@ -4573,7 +4574,7 @@ class PCM(Rasch):
             practical importance rather than improving accuracy. If wanted,
             0.43 and 0.64 mirror the ETS DIF category boundaries (moderate
             and large).
-        sampling : None, 'dynamic', or int, default 'dynamic'
+        sampling : None, 'auto', 'dynamic', or int, default 'auto'
             Controls subsampling of non-extreme persons before computing
             log-likelihoods (parameters are always estimated on the full
             data; only the LL evaluation is subsampled). Not primarily
@@ -4584,7 +4585,18 @@ class PCM(Rasch):
             comparison from being dominated by sample size. None disables
             subsampling. 'dynamic' uses T = min(20*(I-1)*(m-1), 1500); an
             integer fixes T directly. When n <= T, sampling is skipped.
-            Applies to all three tests.
+            Applies to all three tests. 'auto': 'dynamic' with
+            likelihood='joint', None with likelihood='conditional' (in
+            simulation, subsampling lowered the conditional comparison's
+            rate of correct choices).
+        likelihood : {'joint', 'conditional'}, default 'joint'
+            'joint': the log-likelihood given the person estimates.
+            'conditional': the conditional log-likelihood given each
+            person's total score, which does not involve the person
+            locations, for each model after one Newton step from its
+            estimates (exactly its maximum for CML estimates; close to it
+            otherwise). Parameter counts and the LR df are the same as for
+            'joint'; BIC uses the number of persons with non-extreme totals.
         warm_corr, tolerance, max_iters, ext_score_adjustment : floats
             Person estimation kwargs.
         constant, method, log_lik_tol : floats
@@ -4608,10 +4620,14 @@ class PCM(Rasch):
             raise ValueError("test must be 'LR', 'AIC', or 'BIC'")
         if (
             sampling is not None
-            and sampling != "dynamic"
+            and sampling not in ("auto", "dynamic")
             and not isinstance(sampling, int)
         ):
-            raise ValueError("sampling must be None, 'dynamic', or an integer")
+            raise ValueError("sampling must be None, 'auto', 'dynamic', or an integer")
+        if likelihood not in ("joint", "conditional"):
+            raise ValueError("likelihood must be 'joint' or 'conditional'")
+        if sampling == "auto":
+            sampling = "dynamic" if likelihood == "joint" else None
 
         if not (self.max_score_vector == self.max_score_vector.iloc[0]).all():
             raise ValueError(
@@ -4623,7 +4639,7 @@ class PCM(Rasch):
             self.calibrate(
                 constant=constant, method=method, robust=robust, log_lik_tol=log_lik_tol
             )
-        if not hasattr(self, "persons"):
+        if likelihood == "joint" and not hasattr(self, "persons"):
             self.person_estimates(
                 warm_corr=warm_corr,
                 tolerance=tolerance,
@@ -4639,12 +4655,13 @@ class PCM(Rasch):
         # Fit RSM on full data (parameters used for both full and sampled LL)
         rsm = RSM(self.responses)
         rsm.calibrate(constant=constant, method=method, log_lik_tol=log_lik_tol)
-        rsm.person_estimates(
-            warm_corr=warm_corr,
-            tolerance=tolerance,
-            max_iters=max_iters,
-            ext_score_adjustment=ext_score_adjustment,
-        )
+        if likelihood == "joint":
+            rsm.person_estimates(
+                warm_corr=warm_corr,
+                tolerance=tolerance,
+                max_iters=max_iters,
+                ext_score_adjustment=ext_score_adjustment,
+            )
 
         # Determine responses for LL computation (sample from non-extreme persons)
         ll_responses = None  # None → _log_likelihood uses self.responses
@@ -4662,8 +4679,11 @@ class PCM(Rasch):
                 ll_responses = self.responses.loc[sampled_idx]
                 n_ll = T
 
-        ll_pcm = self._log_likelihood(responses=ll_responses)
-        ll_rsm = rsm._log_likelihood(responses=ll_responses)
+        if likelihood == "conditional":
+            ll_rsm, ll_pcm = self._conditional_ll_rsm_pcm(rsm, self, ll_responses)
+        else:
+            ll_pcm = self._log_likelihood(responses=ll_responses)
+            ll_rsm = rsm._log_likelihood(responses=ll_responses)
 
         k_pcm = int(self.thresholds_uncentred.notna().sum().sum()) - 1
         k_rsm = (self.no_of_items - 1) + (max_score - 1)
@@ -4677,9 +4697,9 @@ class PCM(Rasch):
             lr = -2 * (ll_rsm - ll_pcm)
             if lr < 0:
                 warnings.warn(
-                    "RSM vs PCM LR statistic is negative due to PAIR estimation "
-                    "approximation and has been floored at 0. This indicates no "
-                    "evidence that PCM fits better than RSM.",
+                    "RSM vs PCM LR statistic is negative because the estimates are "
+                    "not maximum likelihood estimates, and has been floored at 0. "
+                    "This indicates no evidence that PCM fits better than RSM.",
                     UserWarning,
                 )
                 lr = 0.0

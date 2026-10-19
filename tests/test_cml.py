@@ -514,3 +514,55 @@ def test_fixed_anchor_needs_cml():
         m.calibrate_anchor(m.items.iloc[:3], selection_method="none", plot=False, fix_anchors=True)
     m.calibrate_anchor(m.items.iloc[:3], selection_method="none", plot=False)
     assert m.anchor_cml is None and "Anchors fixed (CML)" not in m.anchor_summary
+
+
+def test_conditional_model_selection_rsm_pcm():
+    from raschpy.simulation import PCM_Sim
+
+    resp = PCM_Sim(no_of_items=6, no_of_persons=500, max_score_vector=[3] * 6, seed=5).responses
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r, p = RSM(resp), PCM(resp)
+        r.calibrate(estimation="cml")
+        p.calibrate(estimation="cml")
+        # at CML estimates the one step is null: the conditional maxima
+        ll_r, ll_p = RSM._conditional_ll_rsm_pcm(r, p)
+        assert ll_r == pytest.approx(r.convergence["log_likelihood"], abs=1e-8)
+        assert ll_p == pytest.approx(p.convergence["log_likelihood"], abs=1e-8)
+        # from the default estimates: close to the maxima, never above
+        r0, p0 = RSM(resp), PCM(resp)
+        r0.calibrate()
+        p0.calibrate()
+        l0r, l0p = RSM._conditional_ll_rsm_pcm(r0, p0)
+        assert ll_r - 0.05 < l0r <= ll_r + 1e-8 and ll_p - 0.05 < l0p <= ll_p + 1e-8
+        # both entry points agree; PCM-generated data
+        a, b = PCM(resp), RSM(resp)
+        a.model_selection(likelihood="conditional")
+        b.model_selection(likelihood="conditional")
+    assert a.model_comparison_rsm_pcm_aic == pytest.approx(b.model_comparison_rsm_pcm_aic)
+    assert a.model_comparison_rsm_pcm_aic_preferred == "PCM"
+    with pytest.raises(ValueError, match="likelihood must be"):
+        a.model_selection(likelihood="marginal")
+
+
+def test_conditional_model_selection_mfrm():
+    from raschpy import MFRM, _rcl
+    from raschpy.simulation import MFRM_Sim
+
+    R, I, K = 4, 5, 3
+    m = MFRM(MFRM_Sim(no_of_items=I, no_of_persons=300, no_of_facet_elements=R, max_score=K, model="bivector", seed=3).responses)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        for mod in ("bivector", "bistretch"):
+            m.calibrate(model=mod)
+            Xv, thr, _ = m._virtual_items(mod)
+            prep = _esf.prepare(Xv, [K] * (R * I))
+            b0 = np.concatenate(thr)
+            plug = _esf.cond_loglik(Xv, list(b0.reshape(-1, K)), prepared=prep)[0]
+            one = m._conditional_ll_mfrm(mod, Xv, prep)
+            assert one >= plug
+            if mod == "bivector":
+                top = _esf.fit_cml(Xv, _rcl.CellModel(mod, R, I, K).jacobian(), b0, [K] * (R * I), solver="newton")["ll"]
+                assert top - 0.01 < one <= top + 1e-8
+        m.model_selection(likelihood="conditional")
+    assert m.model_comparison_mfrm_aic_preferred == "bivector"

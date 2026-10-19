@@ -2276,6 +2276,49 @@ class Rasch:
         else:
             self.anchor_plot = None
 
+    @staticmethod
+    def _conditional_ll_rsm_pcm(rsm, pcm, responses=None):
+        """
+        model_selection(likelihood='conditional'): the conditional log-likelihoods of a fitted RSM and a
+        fitted PCM on the same items and responses, each after one Newton step from its estimates
+        (_esf.one_step_loglik; exact for CML estimates). With responses (a subsample of persons), the
+        step is taken on all the data and the log-likelihoods are those of the subsample at the stepped
+        estimates. Returns (ll_rsm, ll_pcm).
+        """
+        from raschpy import _esf, _rcl
+
+        names = list(pcm.item_names)
+        if list(rsm.item_names) != names:
+            raise ValueError(
+                "likelihood='conditional' needs RSM and PCM fitted to the same items; these differ "
+                f"({sorted(set(rsm.item_names) ^ set(names))})."
+            )
+        K, I = int(rsm.max_score), len(names)
+        X = np.array(pcm.responses.loc[:, names], dtype=np.float64)
+        prep = _esf.prepare(X, [K] * I)
+        b_rsm = (
+            rsm.items.reindex(names).values[:, None] + rsm.thresholds.values[None, :]
+        ).ravel()
+        b_pcm = np.concatenate(
+            [pcm.thresholds_uncentred.loc[n].dropna().values for n in names]
+        ).astype(float)
+        if len(b_pcm) != I * K or not np.isfinite(b_pcm).all():
+            raise ValueError(
+                "likelihood='conditional' needs a finite PCM threshold for every category of every "
+                "item; use likelihood='joint'."
+            )
+        ll_rsm, b_rsm, _ = _esf.one_step_loglik(
+            X, rsm._cml_basis()[0], b_rsm, [K] * I, prep
+        )
+        ll_pcm, b_pcm, _ = _esf.one_step_loglik(
+            X, _rcl.zero_sum_basis(I * K), b_pcm - b_pcm.mean(), [K] * I, prep
+        )
+        if responses is not None:
+            Xs = np.array(responses.loc[:, names], dtype=np.float64)
+            ll_rsm = _esf.cond_loglik(Xs, list(b_rsm.reshape(I, K)))[0]
+            ll_pcm = _esf.cond_loglik(Xs, list(b_pcm.reshape(I, K)))[0]
+        return ll_rsm, ll_pcm
+
     def _resolve_fix_anchors(self, fix_anchors):
         """calibrate_anchor(fix_anchors=): None means True for CML estimates, else False; True needs CML."""
         cml = getattr(self, "estimation", None) == "cml"
