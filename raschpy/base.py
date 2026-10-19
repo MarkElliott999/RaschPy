@@ -3097,6 +3097,281 @@ class Rasch:
         self.targeting_items = pd.DataFrame(rows).T
         return self.targeting_summary
 
+    def global_stats_df(
+        self,
+        run_all_tests=False,
+        test_kwargs=None,
+        alpha=0.05,
+        dp=3,
+        filename=None,
+        file_format="csv",
+    ):
+        """
+        Build and store a summary of the whole-test results: global tests, counts of flagged items, item
+        pairs and persons, and the targeting and reliability indices, in one table.
+
+        By default the table collects what has been computed and lists the rest as 'not run', so that
+        building it changes nothing else on the object. With run_all_tests=True, the analyses not yet run
+        are run first, each with its own defaults unless overridden in test_kwargs: fit_statistics(
+        conditional=True) (Q1, R1c, item-restscore, person conditional p; with bootstrap_samples given,
+        the bootstrap cutoffs), res_corr_analysis() (Q3*), local_dependence_gamma(), targeting(), and, for
+        CML estimates (calibrate(estimation='cml')), global_fit(method='andersen-lr') and
+        global_fit(method='martin-lof'). Results already present are not recomputed. Note that running the
+        conditional fit replaces the person-based infit/outfit in item_stats and person_stats with their
+        conditional values. With other estimates the CML-only tests are left out, and their rows say so.
+
+        Parameters
+        ----------
+        run_all_tests : bool, default False
+            Run the analyses not yet run (see above), including targeting().
+        test_kwargs : dict or None, default None
+            Keyword arguments for the analyses run, keyed by 'fit_statistics', 'res_corr_analysis',
+            'local_dependence_gamma', 'targeting', 'andersen-lr' and 'martin-lof' (passed to
+            global_fit with that method), e.g. {'fit_statistics': {'bootstrap_samples': 1000,
+            'seed': 1}, 'andersen-lr': {'split': 'exogenous', 'covariate': 'group'}}.
+        alpha : float, default 0.05
+            Level for the counts of flagged items, pairs and persons (BH-adjusted p-values where the
+            source table has them).
+        dp : int, default 3
+            Decimal places.
+        filename : str or None, default None
+            If given, the table is also saved (filename.file_format).
+        file_format : str, default 'csv'
+            'csv' or 'xlsx'.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Also stored as global_stats: one row per result -- Section, Value (the statistic, index or
+            count), df, p, Details (the options defining it, or why it is not available).
+        """
+        kw = {k: dict(v) for k, v in (test_kwargs or {}).items()}
+        cml = getattr(self, "estimation", None) == "cml"
+        if run_all_tests:
+            if not getattr(self, "fit_conditional", False):
+                self.fit_statistics(conditional=True, **kw.get("fit_statistics", {}))
+            if getattr(self, "q3_star_max", None) is None:
+                self.res_corr_analysis(**kw.get("res_corr_analysis", {}))
+            if not hasattr(self, "local_dependence_gamma_table"):
+                self.local_dependence_gamma(**kw.get("local_dependence_gamma", {}))
+            if not hasattr(self, "targeting_summary"):
+                self.targeting(**kw.get("targeting", {}))
+            done = {k[0] for k in getattr(self, "global_fit_results", {})}
+            if cml:
+                for method in ("andersen-lr", "martin-lof"):
+                    if method not in done:
+                        self.global_fit(method=method, **kw.get(method, {}))
+        rows = []
+
+        def row(section, name, value=np.nan, df=np.nan, p=np.nan, details=""):
+            rows.append(
+                dict(
+                    Section=section,
+                    Statistic=name,
+                    Value=value,
+                    df=df,
+                    p=p,
+                    Details=details,
+                )
+            )
+
+        fit = "Overall fit"
+        r1c = (
+            getattr(self, "item_q1_r1c", None)
+            if getattr(self, "fit_conditional", False)
+            else None
+        )
+        if r1c is not None:
+            r = r1c.loc["item scores"]
+            row(
+                fit,
+                "R1c (item scores)",
+                r["Statistic"],
+                r["df"],
+                r["p"],
+                f"{int(r['Groups'])} ability groups; estimates: {r['Estimates']}",
+            )
+        else:
+            row(
+                fit,
+                "R1c (item scores)",
+                details="not run: fit_statistics(conditional=True)",
+            )
+        names = {
+            "wald": "Wald test of invariance",
+            "andersen-lr": "Andersen LR",
+            "martin-lof": "Martin-Lof",
+        }
+        results = getattr(self, "global_fit_results", {})
+        for method in ("andersen-lr", "martin-lof", "wald"):
+            hits = [(k, v) for k, v in results.items() if k[0] == method]
+            for (m_, det), sm in hits:
+                extra = f"; covariance={sm['covariance']}" if "covariance" in sm else ""
+                sparse = sm.get("score cells with < 5 persons")
+                if method == "martin-lof" and sparse is not None:
+                    extra += f"; {sparse:.0%} of score cells with < 5 persons"
+                    if "p_method=chi2" in det and sparse > MARTIN_LOF_SPARSE:
+                        extra += (
+                            " (chi-square p conservative: use p_method='monte-carlo')"
+                        )
+                row(
+                    (
+                        fit
+                        if method != "martin-lof"
+                        else "Dimensionality and local dependence"
+                    ),
+                    names[method],
+                    sm["statistic"],
+                    sm["df"],
+                    sm["p-value"],
+                    det + extra,
+                )
+            if not hits and method != "wald":
+                why = (
+                    "not run: global_fit(method=%r)" % method
+                    if cml
+                    else "needs calibrate(estimation='cml')"
+                )
+                row(
+                    (
+                        fit
+                        if method != "martin-lof"
+                        else "Dimensionality and local dependence"
+                    ),
+                    names[method],
+                    details=why,
+                )
+        dim = "Dimensionality and local dependence"
+        rc = getattr(self, "residual_contrast_bootstrap", None)
+        if rc is not None:
+            row(
+                dim,
+                "First residual contrast",
+                rc["first_contrast"],
+                p=rc["p"],
+                details=f"bootstrap 95% cutoff {rc['cutoff_95']:.{dp}f}",
+            )
+        else:
+            row(
+                dim,
+                "First residual contrast",
+                details="not run: fit_statistics(conditional=True, bootstrap_samples=...)",
+            )
+        if getattr(self, "q3_star_max", None) is not None:
+            row(
+                dim,
+                "Q3* (largest)",
+                self.q3_star_max,
+                details=(
+                    "conditional residuals"
+                    if getattr(self, "fit_conditional", False)
+                    else ""
+                ),
+            )
+        else:
+            row(dim, "Q3* (largest)", details="not run: res_corr_analysis()")
+        ld = getattr(self, "local_dependence_gamma_table", None)
+        if ld is not None:
+            flagged = int((ld["Flagged"] & (ld["Gamma"] > 0)).sum())
+            info = getattr(self, "local_dependence_gamma_info", {})
+            row(
+                dim,
+                "Item pairs with local dependence",
+                flagged,
+                details=f"of {len(ld)} ordered pairs; partial gamma, BH p < {alpha}; "
+                f"p_method={info.get('p_method')}",
+            )
+        else:
+            row(
+                dim,
+                "Item pairs with local dependence",
+                details="not run: local_dependence_gamma()",
+            )
+        itf = "Item fit"
+        n_items = len(self.item_names)
+        if getattr(self, "fit_conditional", False):
+            q1 = self.item_q1_table
+            row(
+                itf,
+                "Items flagged by Q1",
+                int((q1["p (BH)"] < alpha).sum()),
+                details=f"of {n_items}; BH p < {alpha}",
+            )
+            rs = self.item_restscore_table
+            row(
+                itf,
+                "Items flagged by item-restscore",
+                int((rs["p (BH)"] < alpha).sum()),
+                details=f"of {n_items}; BH p < {alpha}",
+            )
+            bt = getattr(self, "item_fit_bootstrap", None)
+            if bt is not None:
+                row(
+                    itf,
+                    "Items flagged by bootstrap infit",
+                    int((bt["Infit p (Westfall-Young)"] < alpha).sum()),
+                    details=f"of {n_items}; Westfall-Young p < {alpha}",
+                )
+            else:
+                row(
+                    itf,
+                    "Items flagged by bootstrap infit",
+                    details="not run: fit_statistics(conditional=True, bootstrap_samples=...)",
+                )
+            pc = self.person_conditional_p.dropna()
+            row(
+                "Person fit",
+                "Persons with unexpected patterns",
+                int((pc < alpha).sum()),
+                details=f"of {len(pc)} with a non-extreme total; conditional p < {alpha} (unadjusted)",
+            )
+        else:
+            for nm in (
+                "Items flagged by Q1",
+                "Items flagged by item-restscore",
+                "Items flagged by bootstrap infit",
+            ):
+                row(itf, nm, details="not run: fit_statistics(conditional=True)")
+            row(
+                "Person fit",
+                "Persons with unexpected patterns",
+                details="not run: fit_statistics(conditional=True)",
+            )
+        tg = getattr(self, "targeting_summary", None)
+        sec = "Targeting and reliability"
+        if tg is not None:
+            notes = {
+                "Population mean": "normal fitted to the totals",
+                "Population SD": "normal fitted to the totals",
+                "Target": "location of maximum test information",
+                "Test difficulty": "location with expected total half the maximum",
+                "Expected |bias|": "WLE, over the population",
+                "Expected SEM": "WLE, over the population",
+                "Expected RMSE": "WLE, over the population",
+                "rho1": "V(T) / V(R)",
+                "rho2": "corr(R1, R2), two independent administrations",
+                "rho3": "V(theta) / V(theta-hat)",
+                "rho4": "corr(theta-hat1, theta-hat2)",
+                "rho5": "corr(theta, theta-hat)",
+                "rho6": "P(R1 < R2 | theta1 < theta2)",
+            }
+            for k, v in tg.items():
+                row(sec, k, v, details=notes.get(k, ""))
+        else:
+            row(
+                sec, "Targeting and reliability indices", details="not run: targeting()"
+            )
+        tab = pd.DataFrame(rows).set_index("Statistic")
+        num = ["Value", "df", "p"]
+        tab[num] = tab[num].astype(float).round(dp)
+        self.global_stats = tab
+        if filename is not None:
+            if file_format == "xlsx":
+                tab.to_excel(f"{filename}.xlsx")
+            else:
+                tab.to_csv(f"{filename}.csv")
+        return tab
+
     def _icc_obs_groups(self, obs_groups):
         """icc(obs_groups=): a column of self.exogenous (str), a Series indexed by person, or labels in
         responses order -> a Series of labels indexed by person."""
@@ -5440,7 +5715,57 @@ class Rasch:
             estimable in both groups.
         global_fit_groups : dict
             {group name: calibrated model}.
+
+        Each result is also kept in global_fit_results, keyed by method, split and its options, so
+        that global_stats_df() can report every test run, not only the latest.
         """
+        out = self._global_fit_run(
+            method=method,
+            split=split,
+            covariate=covariate,
+            welch=welch,
+            alpha=alpha,
+            seed=seed,
+            split_prop=split_prop,
+            se_correction=se_correction,
+            no_of_samples=no_of_samples,
+            p_method=p_method,
+            mc_exceedances=mc_exceedances,
+        )
+        if split is None:
+            split = "median" if method == "martin-lof" else "score"
+        split_label = (
+            "items " + ", ".join(map(str, split))
+            if isinstance(split, (list, tuple))
+            else split
+        )
+        details = [f"split={split_label}"]
+        if covariate is not None:
+            details.append(f"covariate={covariate}")
+        if method == "martin-lof":
+            details.append(f"p_method={p_method}")
+        if not hasattr(self, "global_fit_results"):
+            self.global_fit_results = {}
+        self.global_fit_results[(method, "; ".join(details))] = (
+            self.global_fit_summary.copy()
+        )
+        return out
+
+    def _global_fit_run(
+        self,
+        method="wald",
+        split=None,
+        covariate=None,
+        welch=True,
+        alpha=0.05,
+        seed=None,
+        split_prop=0.5,
+        se_correction="kauermann-carroll",
+        no_of_samples=500,
+        p_method="chi2",
+        mc_exceedances=None,
+    ):
+        """global_fit() itself (see its docstring); global_fit() records each result."""
         if method not in self._GLOBAL_FIT_METHODS:
             raise ValueError(
                 f"method must be one of {self._GLOBAL_FIT_METHODS}, got {method!r}."

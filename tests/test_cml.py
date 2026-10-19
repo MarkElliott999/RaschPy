@@ -779,3 +779,35 @@ def test_r1c(name):
     assert m2.item_q1_r1c.loc["item scores", "Statistic"] == pytest.approx(
         t.loc["item scores", "Statistic"], rel=0.05
     )
+
+
+def test_global_stats_df():
+    from raschpy.simulation import SLM_Sim
+
+    s = SLM_Sim(no_of_items=8, no_of_persons=600, seed=5)
+    g = pd.Series(np.where(np.arange(600) < 300, "A", "B"), index=s.responses.index)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        # collect only: nothing is computed, everything listed as not run
+        m = SLM(s.responses, exogenous=pd.DataFrame({"G": g}))
+        m.calibrate()
+        before = set(vars(m))
+        tab = m.global_stats_df()
+        assert set(vars(m)) - before == {"global_stats"}
+        assert tab["Details"].str.startswith(("not run", "needs")).all()
+        # run_all_tests without CML estimates: the CML-only tests are left out
+        m.global_stats_df(run_all_tests=True)
+        t = m.global_stats
+        assert t.loc["Andersen LR", "Details"] == "needs calibrate(estimation='cml')"
+        assert np.isfinite(t.loc["R1c (item scores)", "Value"]) and np.isfinite(t.loc["rho1", "Value"])
+        # CML: a test already run is kept, not rerun with the defaults; options passed through
+        c = SLM(s.responses, exogenous=pd.DataFrame({"G": g}))
+        c.calibrate(estimation="cml")
+        c.global_fit(method="andersen-lr", split="exogenous", covariate="G")
+        c.global_stats_df(run_all_tests=True, test_kwargs={"martin-lof": {"p_method": "monte-carlo", "no_of_samples": 20, "seed": 1}})
+    t = c.global_stats
+    andersen = t.loc[["Andersen LR"]]
+    assert len(andersen) == 1 and andersen["Details"].iloc[0].startswith("split=exogenous; covariate=G")
+    assert "p_method=monte-carlo" in t.loc["Martin-Lof", "Details"]
+    assert set(c.global_fit_results) == {("andersen-lr", "split=exogenous; covariate=G"),
+                                         ("martin-lof", "split=median; p_method=monte-carlo")}
