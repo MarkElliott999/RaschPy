@@ -2827,14 +2827,229 @@ class Rasch:
         self._q1_group_names = list(uniques)
         return np.where(contributes, codes, -1)
 
+    def _icc_obs_groups(self, obs_groups):
+        """icc(obs_groups=): a column of self.exogenous (str), a Series indexed by person, or labels in
+        responses order -> a Series of labels indexed by person."""
+        if isinstance(obs_groups, str):
+            ex = getattr(self, "exogenous", None)
+            if ex is None or obs_groups not in ex.columns:
+                raise ValueError(
+                    f"obs_groups={obs_groups!r} is not a column of this object's exogenous data."
+                )
+            return ex[obs_groups].reindex(self.responses.index)
+        if isinstance(obs_groups, pd.Series):
+            return obs_groups.reindex(self.responses.index)
+        return pd.Series(list(obs_groups), index=self.responses.index)
+
+    def _icc_overlay_points(self, items, no_of_classes, conditional, obs_groups=None):
+        """
+        Observed (and, with conditional=True, conditional expected) mean item scores by class interval for
+        icc(cond_obs=/obs_groups=): per item, a list of (group label or None, x, observed, expected,
+        half-width) arrays over class intervals. conditional=True uses the conditional item chi-square's
+        grouping (_ability_groups: persons with a non-extreme total, tied locations kept together); the
+        expected mean is the mean over the interval's persons of E[X_i | their total and items], and the
+        half-width 1.96 SD of the interval's observed mean under the model. Otherwise the class intervals
+        of the observed overlay (person-location quantiles). x is the persons' mean location.
+        """
+        from raschpy import _esf
+
+        if not hasattr(self, "persons"):
+            self.person_estimates(warm_corr=False)
+        names = list(self.item_names)
+        X = np.array(self.responses.loc[:, names], dtype=np.float64)
+        loc_all = self.persons.reindex(self.responses.index).to_numpy(float)
+        levels = [None]
+        lab_g = None
+        if obs_groups is not None:
+            lab_g = self._icc_obs_groups(obs_groups)
+            levels = [v for v in pd.unique(lab_g.dropna())]
+        if conditional:
+            mom = _esf.conditional_moments(X, self._cml_threshold_list(names))
+            contributes = (np.isfinite(mom["V"]) & (mom["V"] > 0)).any(axis=1)
+            classes, _ = self._ability_groups(
+                np.where(contributes, loc_all, np.nan), groups=no_of_classes
+            )
+        out = {}
+        for it in items:
+            i = names.index(it)
+            answered = ~np.isnan(X[:, i])
+            if not conditional:
+                loc = np.where(answered, loc_all, np.nan)
+                q = np.nanquantile(
+                    loc, [(k + 1) / no_of_classes for k in range(no_of_classes - 1)]
+                )
+                classes = np.where(
+                    np.isnan(loc), -1, np.searchsorted(q, loc, side="right")
+                )
+            series = []
+            for lev in levels:
+                sel_g = (
+                    np.ones(len(X), bool) if lev is None else (lab_g == lev).to_numpy()
+                )
+                xs, os_, es, hs = [], [], [], []
+                for c in range(int(classes.max()) + 1):
+                    sel = answered & sel_g & (classes == c)
+                    if conditional:
+                        sel &= np.isfinite(mom["V"][:, i]) & (mom["V"][:, i] > 0)
+                    n = int(sel.sum())
+                    if n == 0:
+                        continue
+                    xs.append(np.nanmean(loc_all[sel]))
+                    os_.append(X[sel, i].mean())
+                    if conditional:
+                        es.append(mom["E"][sel, i].mean())
+                        hs.append(1.96 * np.sqrt(mom["V"][sel, i].sum()) / n)
+                series.append(
+                    (lev, np.array(xs), np.array(os_), np.array(es), np.array(hs))
+                )
+            out[it] = series
+        return out
+
+    def _icc_overlay(
+        self,
+        graph,
+        item,
+        no_of_classes,
+        cond_obs,
+        cond_obs_bars,
+        obs_groups,
+        marker_border,
+        legend_loc,
+        filename,
+        file_format,
+        dpi,
+    ):
+        """Draw icc()'s observed overlay with conditional expected points (cond_obs=True: hollow diamonds,
+        with 95% bars for the observed mean if cond_obs_bars) and/or split by obs_groups (single item: one
+        colour and marker per group, against that group's own conditional expectations), on the figure
+        plot_data() returned without its observed overlay, then save it."""
+        from matplotlib.lines import Line2D
+
+        ax = graph.axes[0]
+        items = item if isinstance(item, list) else [item]
+        if isinstance(item, list):
+            obs_groups = None  # one item only: silently ignored for several
+        # the item curves span the location grid; reference lines (e.g. axhline) have 2 points
+        curves = [ln for ln in ax.get_lines() if len(ln.get_xdata()) > 2]
+        colours = [ln.get_color() for ln in curves[: len(items)]]
+        pts = self._icc_overlay_points(items, no_of_classes, cond_obs, obs_groups)
+        edge = "k" if marker_border else "none"
+        markers = ["o", "s", "^", "v", "P", "X", "*", "h"]
+        group_colours = [
+            "#0072B2",
+            "#D55E00",
+            "#009E73",
+            "#CC79A7",
+            "#E69F00",
+            "#56B4E9",
+            "#F0E442",
+            "#000000",
+        ]
+        handles = list(ax.get_legend().legend_handles) if ax.get_legend() else []
+        labels = (
+            [t.get_text() for t in ax.get_legend().get_texts()]
+            if ax.get_legend()
+            else []
+        )
+        for k, it in enumerate(items):
+            for j, (lev, x, o, e, h) in enumerate(pts[it]):
+                col = (
+                    colours[k] if lev is None else group_colours[j % len(group_colours)]
+                )
+                mk = "o" if lev is None else markers[j % len(markers)]
+                ax.scatter(
+                    x,
+                    o,
+                    color=col,
+                    marker=mk,
+                    s=40,
+                    alpha=0.7,
+                    edgecolors=edge,
+                    zorder=3,
+                )
+                if cond_obs:
+                    if cond_obs_bars:
+                        ax.errorbar(
+                            x,
+                            e,
+                            yerr=h,
+                            fmt="none",
+                            ecolor=col,
+                            elinewidth=1,
+                            capsize=3,
+                            alpha=0.8,
+                            zorder=2,
+                        )
+                    ax.scatter(
+                        x,
+                        e,
+                        marker="D",
+                        s=40,
+                        facecolors="none",
+                        edgecolors=col,
+                        linewidths=1.5,
+                        zorder=4,
+                    )
+                if lev is not None:
+                    handles.append(
+                        Line2D(
+                            [],
+                            [],
+                            color=col,
+                            marker=mk,
+                            linestyle="",
+                            markeredgecolor=edge,
+                            alpha=0.7,
+                        )
+                    )
+                    labels.append(str(lev))
+        if cond_obs:
+            if (
+                obs_groups is None
+            ):  # with groups, their own entries mark the observed points
+                handles.append(
+                    Line2D(
+                        [],
+                        [],
+                        color="grey",
+                        marker="o",
+                        linestyle="",
+                        markeredgecolor=edge,
+                        alpha=0.7,
+                    )
+                )
+                labels.append("Observed")
+            handles += [
+                Line2D(
+                    [],
+                    [],
+                    color="grey",
+                    marker="D",
+                    linestyle="",
+                    markerfacecolor="none",
+                    markeredgewidth=1.5,
+                ),
+            ]
+            labels.append("Expected given total")
+        if handles:
+            ax.legend(
+                handles, labels, loc=legend_loc if legend_loc is not None else "best"
+            )
+        if filename is not None:
+            graph.savefig(f"{filename}.{file_format}", dpi=dpi)
+        return graph
+
     def _set_q1_tables(self, X, E, V, labels, names):
         """item_q1_table (Q1, df, p, p (BH)) and item_q1_groups (per item and group: persons, observed and
-        expected mean item score, standardised difference) for fit_statistics(conditional=True)."""
+        expected mean item score, standardised difference) for fit_statistics(conditional=True).
+        """
         st = self._q1_statistics(X, E, V, labels)
         df = st["df"].astype(float)
         p = np.where(df > 0, chi2_dist.sf(st["q1"], np.maximum(df, 1)), np.nan)
         tab = pd.DataFrame({"Q1": st["q1"], "df": st["df"], "p": p}, index=names)
-        tab["p (BH)"] = self._bh_correction(tab["p"].fillna(1.0)).where(tab["p"].notna())
+        tab["p (BH)"] = self._bh_correction(tab["p"].fillna(1.0)).where(
+            tab["p"].notna()
+        )
         self.item_q1_table = tab
         G = st["O"].shape[1]
         if self._q1_ranges is not None:
@@ -2850,9 +3065,11 @@ class Rasch:
                         "Persons": int(n),
                         "Observed mean": st["O"][i, g] / n if n else np.nan,
                         "Expected mean": st["E"][i, g] / n if n else np.nan,
-                        "z": (st["O"][i, g] - st["E"][i, g]) / np.sqrt(st["V"][i, g])
-                        if st["V"][i, g] > 0
-                        else np.nan,
+                        "z": (
+                            (st["O"][i, g] - st["E"][i, g]) / np.sqrt(st["V"][i, g])
+                            if st["V"][i, g] > 0
+                            else np.nan
+                        ),
                     }
                 if self._q1_ranges is not None:
                     row["Location from"], row["Location to"] = self._q1_ranges[g]
@@ -4620,7 +4837,11 @@ class Rasch:
                         "Persons": int(cnt),
                         "Observed mean": st["O"][i, k] / cnt if cnt else np.nan,
                         "Expected mean": st["E"][i, k] / cnt if cnt else np.nan,
-                        "z": (st["O"][i, k] - st["E"][i, k]) / np.sqrt(v) if v > 0 else np.nan,
+                        "z": (
+                            (st["O"][i, k] - st["E"][i, k]) / np.sqrt(v)
+                            if v > 0
+                            else np.nan
+                        ),
                     }
                 )
         self.global_fit_obsexp = pd.DataFrame(
@@ -4644,7 +4865,9 @@ class Rasch:
         tab["Chi-square"] = st["q1"]
         tab["df"] = st["df"]
         tab["p"] = np.where(df > 0, chi2_dist.sf(st["q1"], np.maximum(df, 1)), np.nan)
-        tab["p (BH)"] = self._bh_correction(tab["p"].fillna(1.0)).where(tab["p"].notna())
+        tab["p (BH)"] = self._bh_correction(tab["p"].fillna(1.0)).where(
+            tab["p"].notna()
+        )
         self.global_fit_item_table = tab
 
     def _global_fit_needs_bootstrap(self):
@@ -5008,8 +5231,12 @@ class Rasch:
         if welch:
             summary["denominator df"] = ddf
         cml = getattr(self, "estimation", None) == "cml"
-        cml_cov = "hessian" if getattr(self, "se_method", None) == "hessian" else "sandwich"
-        summary["covariance"] = "bootstrap" if boot else (cml_cov if cml else "sandwich")
+        cml_cov = (
+            "hessian" if getattr(self, "se_method", None) == "hessian" else "sandwich"
+        )
+        summary["covariance"] = (
+            "bootstrap" if boot else (cml_cov if cml else "sandwich")
+        )
         summary["se_correction"] = None if (boot or cml) else se_correction
         summary.update(
             {

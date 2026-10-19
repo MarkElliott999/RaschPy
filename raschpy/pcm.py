@@ -3529,7 +3529,9 @@ class PCM(Rasch):
                 cml_hessian  # chord method for CML (Monte Carlo replicates)
             )
             m.calibrate(**self._calibration_kw())
-        m.se_method = getattr(self, "se_method", None)  # CML: Hessian or sandwich, as the object
+        m.se_method = getattr(
+            self, "se_method", None
+        )  # CML: Hessian or sandwich, as the object
         return m
 
     @staticmethod
@@ -6821,6 +6823,9 @@ class PCM(Rasch):
         item,
         obs=False,
         no_of_classes=5,
+        cond_obs=False,
+        cond_obs_bars=True,
+        obs_groups=None,
         title=None,
         thresh_lines=False,
         central_location=False,
@@ -6873,6 +6878,27 @@ class PCM(Rasch):
             shared).
         no_of_classes : int, default 5
             Number of class intervals for the observed overlay.
+        cond_obs : bool, default False
+            With obs=True: also draws, for each class interval, the mean
+            expected item score given each person's total and items
+            (hollow diamonds), which does not involve the person locations
+            -- the comparison the conditional item chi-square (Q1,
+            fit_statistics(conditional=True)) tests. The observed and
+            expected points then use Q1's grouping: persons with a
+            non-extreme total, no_of_classes groups ordered by location
+            with tied locations kept together (smaller groups merged). No
+            effect if obs=False.
+        cond_obs_bars : bool, default True
+            With cond_obs: bars of +/- 1.96 standard deviations of each
+            class interval's observed mean under the model, around its
+            expected mean, so an observed point outside its bar is
+            unexpected. No effect otherwise.
+        obs_groups : str, pandas.Series, array-like or None, default None
+            With obs=True and a single item: observed points split by group
+            (a column of the exogenous data, a Series indexed by person, or
+            labels in responses order), one colour and marker per group --
+            with cond_obs, each against its own conditional expectations --
+            for a visual check of DIF. Silently ignored if item is a list.
         title : str or None, default None
             Plot title.
         thresh_lines : bool, default False
@@ -6984,7 +7010,8 @@ class PCM(Rasch):
             ).reshape(-1, 1)
             y_max = self.max_score_vector[item]
 
-        return self.plot_data(
+        overlay = bool(obs) and (cond_obs or (obs_groups is not None and not multi))
+        graph = self.plot_data(
             x_data=estimates,
             y_data=y,
             x_obs_data=xobsdata,
@@ -7000,7 +7027,7 @@ class PCM(Rasch):
             ),
             graph_title=title or "",
             y_label="Expected score",
-            obs=obs,
+            obs=None if overlay else obs,
             marker_border=marker_border,
             line_border=line_border,
             thresh_lines=thresh_lines,
@@ -7015,10 +7042,25 @@ class PCM(Rasch):
             title_font_size=title_font_size,
             axis_font_size=axis_font_size,
             labelsize=labelsize,
-            filename=filename,
+            filename=None if overlay else filename,
             plot_density=dpi,
             file_format=file_format,
         )
+        if overlay:
+            graph = self._icc_overlay(
+                graph,
+                item,
+                no_of_classes,
+                cond_obs,
+                cond_obs_bars,
+                obs_groups,
+                marker_border,
+                "upper left" if score_lines is not None else "lower right",
+                filename,
+                file_format,
+                dpi,
+            )
+        return graph
 
     def crcs(
         self,

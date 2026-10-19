@@ -678,3 +678,36 @@ def test_andersen_item_tables():
     # with two groups and opposite deviations, the item chi-square is the square of either z
     np.testing.assert_allclose(oe["z"].groupby(level="Item").apply(lambda z: (z**2).sum()).values,
                                tab["Chi-square"].values, rtol=1e-10)
+
+
+@pytest.mark.parametrize("name", ["SLM", "PCM", "RSM"])
+def test_icc_cond_obs(name):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    m = _anchor_model(name, seed=12)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m.fit_statistics(conditional=True, conditional_samples=10, q1_groups=4)
+    item = m.item_names[1]
+    # same groups as Q1 with the same number of groups: identical observed / expected means
+    lev, x, o, e, h = m._icc_overlay_points([item], 4, True)[item][0]
+    q = m.item_q1_groups.loc[item]
+    np.testing.assert_allclose(o, q["Observed mean"].values, atol=1e-12)
+    np.testing.assert_allclose(e, q["Expected mean"].values, atol=1e-12)
+    np.testing.assert_allclose(np.sign(o - e), np.sign(q["z"].values))
+    assert np.all(h > 0) and np.all(np.diff(x) > 0)
+
+    def markers(fig):
+        return len(fig.axes[0].collections)
+
+    plain = markers(m.icc(item, obs=True))
+    cond = markers(m.icc(item, obs=True, cond_obs=True))
+    nobars = markers(m.icc(item, obs=True, cond_obs=True, cond_obs_bars=False))
+    assert cond > nobars > plain - 1  # observed + expected markers, plus bars
+    assert markers(m.icc(item, obs=False, cond_obs=True)) == 0  # no-op without obs
+    groups = pd.Series(np.where(np.arange(len(m.responses)) % 2 == 0, "a", "b"), index=m.responses.index)
+    fig = m.icc(item, obs=True, cond_obs=True, obs_groups=groups)
+    assert [t.get_text() for t in fig.axes[0].get_legend().get_texts()][:2] == ["a", "b"]
+    two = m.icc(list(m.item_names[:2]), obs=True, cond_obs=True, obs_groups=groups)  # groups ignored
+    assert "a" not in [t.get_text() for t in two.axes[0].get_legend().get_texts()]
