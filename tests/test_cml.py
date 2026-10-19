@@ -31,7 +31,7 @@ def _slm_cml(name):
 @pytest.mark.parametrize("name", ["slm_complete", "slm_missing", "slm_booklet"])
 def test_slm_cml_matches_psychotools(name):
     m, ref = _slm_cml(name)
-    m.std_errors()
+    m.std_errors(se_method="hessian")  # psychotools reports Hessian SEs
     np.testing.assert_allclose(m.items.reindex(ref["item"]).values, ref["psy"].values, atol=5e-5)
     np.testing.assert_allclose(m.item_se.reindex(ref["item"]).values, ref["psy_se"].values, atol=5e-6)
     assert m.convergence["log_likelihood"] == pytest.approx(ref["psy_ll"][0], abs=1e-6)
@@ -70,8 +70,10 @@ def test_slm_cml_drops_items_without_estimates():
 
 def test_se_method_rules():
     m, _ = _slm_cml("slm_complete")
-    with pytest.raises(ValueError, match="not yet available for estimation='cml'"):
-        m.std_errors(se_method="sandwich")
+    m.std_errors()
+    hess = m.item_se.copy()
+    m.std_errors(se_method="sandwich")
+    assert m.se_method == "sandwich" and np.allclose(m.item_se, hess, rtol=0.2)
     p = SLM(m.responses)
     p.calibrate()
     with pytest.raises(ValueError, match="covariance of estimation='cml'"):
@@ -106,7 +108,7 @@ def _stacked(m):
 def test_pcm_cml_matches_psychotools(name):
     m = _pcm_cml(name)
     ref = pd.read_csv(os.path.join(DATA, f"cml_{name}_psychotools.csv"))
-    m.std_errors()
+    m.std_errors(se_method="hessian")  # psychotools reports Hessian SEs
     np.testing.assert_allclose(_stacked(m), ref["psy"].values, atol=5e-5)
     np.testing.assert_allclose(np.concatenate([m.threshold_se[n] for n in m.item_names]), ref["psy_se"].values,
                                atol=5e-6)
@@ -191,7 +193,7 @@ def test_rsm_cml_matches_psychotools(name):
     m = _rsm_cml(name)
     ref = pd.read_csv(os.path.join(DATA, f"cml_{name}_psychotools.csv"))
     items, thr = ref[ref["kind"] == "item"], ref[ref["kind"] == "threshold"]
-    m.std_errors()
+    m.std_errors(se_method="hessian")  # psychotools reports Hessian SEs
     np.testing.assert_allclose(m.items.values, items["psy"].values, atol=5e-5)
     np.testing.assert_allclose(m.thresholds.values, thr["psy"].values, atol=5e-5)
     np.testing.assert_allclose(m.item_se.values, items["psy_se"].values, atol=5e-6)
@@ -597,3 +599,20 @@ def test_cml_dif_omnibus_is_conditional_lr():
         assert int(pm.dif_omnibus_table.iloc[0]["df"]) == 3
         pm.dif_test("G", reference="A", omnibus_scope="full", seed=1)
         assert int(pm.dif_omnibus_table.iloc[0]["df"]) == (3 + 2 + 3 + 2) - 1
+
+
+@pytest.mark.parametrize("name", ["SLM", "PCM", "RSM"])
+def test_cml_sandwich(name):
+    m = _anchor_model(name, seed=9)
+    X = np.array(m.responses.loc[:, list(m.item_names)], dtype=np.float64)
+    thr = m._cml_threshold_list(list(m.item_names))
+    # persons' scores sum to the gradient, which is ~0 at the CML estimate
+    S = _esf.person_scores(X, thr)
+    g = _esf.cond_loglik(X, thr)[1]
+    np.testing.assert_allclose(S.sum(axis=0), g, atol=1e-10)
+    m.std_errors(se_method="hessian")
+    hess = m.item_se.copy()
+    m.std_errors(se_method="sandwich")
+    assert m.se_method == "sandwich"
+    np.testing.assert_allclose(m.item_se, hess, rtol=0.25)
+    assert not np.allclose(m.item_se, hess)

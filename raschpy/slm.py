@@ -558,8 +558,11 @@ class SLM(Rasch):
                 stacklevel=3,
             )
 
-    def _cml_covariance(self):
-        """Covariance of the CML item locations from the Hessian of the conditional log-likelihood."""
+    def _cml_covariance(self, sandwich=None):
+        """Covariance of the CML item locations from the Hessian of the conditional log-likelihood, or the
+        sandwich (sandwich=True; None follows se_method)."""
+        if sandwich is None:
+            sandwich = getattr(self, "se_method", None) != "hessian"
         names = list(self.item_names)
         X = np.array(self.responses.loc[:, names], dtype=np.float64)
         A = _rcl.zero_sum_basis(len(names))
@@ -569,6 +572,7 @@ class SLM(Rasch):
             self.items.reindex(names).values.astype(float),
             [1] * len(names),
             hessian=getattr(self, "_cml_hessian", None),
+            sandwich=sandwich,
         )
 
     def _cml_anchor_design(self, fixed):
@@ -882,10 +886,14 @@ class SLM(Rasch):
 
         se_method='hessian' (estimates from estimation='cml' only) is the
         inverse of the information matrix of the conditional likelihood
-        (minus its exact Hessian at the estimates).
+        (minus its exact Hessian at the estimates). For CML estimates,
+        se_method='sandwich' is the sandwich of the conditional likelihood
+        (that inverse, times the sum over persons of the outer products of
+        their conditional scores, times that inverse), which stays valid
+        when the model does not hold.
 
-        se_method=None (default) uses the Hessian for estimates from
-        estimation='cml', the sandwich for method='log-lik' and the bootstrap
+        se_method=None (default) uses the sandwich of the conditional
+        likelihood for estimates from estimation='cml', the sandwich for method='log-lik' and the bootstrap
         otherwise. self.se_method records the method used.
 
         Parameters
@@ -949,9 +957,9 @@ class SLM(Rasch):
         self.se_method = se_method
         if se_method in ("sandwich", "hessian"):
             V = (
-                self._sandwich_covariance()
-                if se_method == "sandwich"
-                else self._cml_covariance()
+                self._cml_covariance()
+                if getattr(self, "estimation", None) == "cml"
+                else self._sandwich_covariance()
             )
             names = list(self.item_names)
             self.se_covariance = pd.DataFrame(V, index=names, columns=names)
@@ -2191,6 +2199,7 @@ class SLM(Rasch):
                 cml_hessian  # chord method for CML (Monte Carlo replicates)
             )
             m.calibrate(**self._calibration_kw())
+        m.se_method = getattr(self, "se_method", None)  # CML: Hessian or sandwich, as the object
         return m
 
     @staticmethod
@@ -2213,7 +2222,7 @@ class SLM(Rasch):
         elif getattr(m, "estimation", "pair") == "cml":
             V = (
                 m._cml_covariance()
-            )  # Hessian covariance: no small-sample correction applies
+            )  # sandwich or Hessian, as the object: no small-sample correction applies
         else:
             V = m._sandwich_covariance(small_sample=small_sample)
         return names, est - est.mean(), V, ok, [np.arange(len(names))]

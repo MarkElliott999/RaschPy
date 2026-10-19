@@ -2965,12 +2965,7 @@ class Rasch:
         """
         if getattr(self, "_calibrate_args", {}).get("estimation") == "cml":
             if se_method is None:
-                return "hessian"
-            if se_method == "sandwich":
-                raise ValueError(
-                    "se_method='sandwich' is not yet available for estimation='cml'; use "
-                    "se_method='hessian' (or None) or 'bootstrap'."
-                )
+                return "sandwich"
             return se_method
         if se_method == "hessian":
             raise ValueError(
@@ -4804,9 +4799,8 @@ class Rasch:
         if welch:
             summary["denominator df"] = ddf
         cml = getattr(self, "estimation", None) == "cml"
-        summary["covariance"] = (
-            "bootstrap" if boot else ("hessian" if cml else "sandwich")
-        )
+        cml_cov = "hessian" if getattr(self, "se_method", None) == "hessian" else "sandwich"
+        summary["covariance"] = "bootstrap" if boot else (cml_cov if cml else "sandwich")
         summary["se_correction"] = None if (boot or cml) else se_correction
         summary.update(
             {

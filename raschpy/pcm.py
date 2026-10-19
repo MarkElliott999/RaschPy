@@ -984,10 +984,13 @@ class PCM(Rasch):
                 stacklevel=3,
             )
 
-    def _cml_covariance(self):
+    def _cml_covariance(self, sandwich=None):
         """(covariance, owner) of the CML uncentred thresholds, stacked item by item, from the Hessian of the
-        conditional log-likelihood; owner[j] is the item index of threshold j (as _sandwich_covariance).
+        conditional log-likelihood, or the sandwich (sandwich=True; None follows se_method); owner[j] is
+        the item index of threshold j (as _sandwich_covariance).
         """
+        if sandwich is None:
+            sandwich = getattr(self, "se_method", None) != "hessian"
         names = list(self.item_names)
         Ks = self.max_score_vector.reindex(names).to_numpy().astype(int)
         X = np.array(self.responses.loc[:, names], dtype=np.float64)
@@ -1003,6 +1006,7 @@ class PCM(Rasch):
             b,
             list(Ks),
             hessian=getattr(self, "_cml_hessian", None),
+            sandwich=sandwich,
         )
         return V, np.repeat(np.arange(len(names)), Ks)
 
@@ -1708,8 +1712,8 @@ class PCM(Rasch):
         person-level response data, calibrates each resample, and computes
         the standard deviation of the estimates across samples.
 
-        se_method=None (default) uses the Hessian for estimates from
-        estimation='cml'. Otherwise it uses the sandwich unless the estimates are
+        se_method=None (default) uses the sandwich of the conditional
+        likelihood for estimates from estimation='cml'. Otherwise it uses the sandwich unless the estimates are
         from method='cos', 'ls' or 'evm' (the sandwich is the covariance of
         the Bradley-Terry estimating equations, which only 'log-lik' solves;
         an explicit se_method='sandwich' with those raises a ValueError) or
@@ -1733,8 +1737,12 @@ class PCM(Rasch):
             reproducible standard errors; None (default) draws fresh entropy.
         se_method : {None, 'sandwich', 'bootstrap', 'hessian'}, default None
             Standard error method; see above. 'hessian' (estimates from
-            estimation='cml' only, and their default) is the inverse
-            information matrix of the conditional likelihood. With 'sandwich'
+            estimation='cml' only) is the inverse
+            information matrix of the conditional likelihood; for 'cml',
+            'sandwich' is the sandwich of the conditional likelihood (that
+            inverse, times the sum over persons of the outer products of
+            their conditional scores, times that inverse), which stays valid
+            when the model does not hold. With 'sandwich'
             or 'hessian', confidence intervals are estimate +/- z * SE, and
             the bootstrap attributes are None.
 
@@ -3501,6 +3509,7 @@ class PCM(Rasch):
                 cml_hessian  # chord method for CML (Monte Carlo replicates)
             )
             m.calibrate(**self._calibration_kw())
+        m.se_method = getattr(self, "se_method", None)  # CML: Hessian or sandwich, as the object
         return m
 
     @staticmethod

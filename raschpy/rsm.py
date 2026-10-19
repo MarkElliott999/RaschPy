@@ -1193,9 +1193,12 @@ class RSM(Rasch):
                 stacklevel=3,
             )
 
-    def _cml_covariance(self, full=False):
+    def _cml_covariance(self, full=False, sandwich=None):
         """Covariance of (item locations, category widths) for CML estimates, from the Hessian of the
-        conditional log-likelihood, in _sandwich_covariance's layout."""
+        conditional log-likelihood or the sandwich (sandwich=True; None follows se_method), in
+        _sandwich_covariance's layout."""
+        if sandwich is None:
+            sandwich = getattr(self, "se_method", None) != "hessian"
         names = list(self.item_names)
         K = self.max_score
         X = np.array(self.responses.loc[:, names], dtype=np.float64)
@@ -1206,7 +1209,12 @@ class RSM(Rasch):
         H = getattr(self, "_cml_hessian", None)
         if H is None:
             H = _esf.cond_loglik(X, list(b.reshape(len(names), K)), hessian=True)[2]
-        V = M @ np.linalg.solve(-(A.T @ H @ A), M.T)
+        if sandwich:
+            info, meat = _esf.cml_sandwich(X, A, b, [K] * len(names), hessian=H)
+            Binv = np.linalg.inv(info)
+            V = M @ Binv @ meat @ Binv @ M.T
+        else:
+            V = M @ np.linalg.solve(-(A.T @ H @ A), M.T)
         I = len(names)
         if full:
             return V
@@ -1893,7 +1901,7 @@ class RSM(Rasch):
         sum over persons of their score outer products (see _rcl).
         """
         if getattr(self, "estimation", "pair-cpat") == "cml":
-            # Hessian covariance (no small-sample correction applies)
+            # Hessian or sandwich covariance, per se_method (no small-sample correction applies)
             return self._cml_covariance(full=full)
         if getattr(self, "estimation", "pair-cpat") in ("cp-full-rcl", "cpat-rcl"):
             return self._rcl_sandwich_covariance(full=full, small_sample=small_sample)
@@ -2074,7 +2082,8 @@ class RSM(Rasch):
         person-level response data, calibrates each, and computes SDs of the
         estimates across samples.
 
-        se_method=None (default) uses the sandwich unless the threshold
+        se_method=None (default) uses, for estimation='cml', the sandwich of
+        the conditional likelihood; otherwise the sandwich unless the threshold
         estimates rely on something it does not model -- an unused score
         category (targeted smoothing); with estimation='pair-cpat', also a
         poorly informed or uninformative category width (information-
@@ -2105,9 +2114,12 @@ class RSM(Rasch):
             reproducible standard errors; None (default) draws fresh entropy.
         se_method : {None, 'sandwich', 'bootstrap', 'hessian'}, default None
             Standard error method; see above. 'hessian' (estimates from
-            estimation='cml' only, and their default) is the inverse
-            information matrix of the conditional likelihood; 'sandwich' is
-            not yet available for 'cml'. With 'sandwich' or 'hessian',
+            estimation='cml' only) is the inverse
+            information matrix of the conditional likelihood; for 'cml',
+            'sandwich' is the sandwich of the conditional likelihood (that
+            inverse, times the sum over persons of the outer products of
+            their conditional scores, times that inverse), which stays valid
+            when the model does not hold. With 'sandwich' or 'hessian',
             confidence intervals are estimate +/- z * SE, and the bootstrap
             attributes are None.
 
@@ -2146,11 +2158,6 @@ class RSM(Rasch):
         if not hasattr(self, "thresholds"):
             self.calibrate(**cal_kw)
         cml = getattr(self, "estimation", None) == "cml"
-        if cml and se_method == "sandwich":
-            raise ValueError(
-                "se_method='sandwich' is not yet available for estimation='cml'; use "
-                "se_method='hessian' (or None) or 'bootstrap'."
-            )
         if not cml and se_method == "hessian":
             raise ValueError(
                 f"se_method='hessian' is the covariance of estimation='cml'; these estimates are "
@@ -2158,7 +2165,7 @@ class RSM(Rasch):
                 f"or None."
             )
         if cml and se_method is None:
-            se_method = "hessian"
+            se_method = "sandwich"
         if getattr(self, "estimation", None) == "pair-cpat" and (
             se_method is not None
             or (getattr(self, "_calibrate_args", {}).get("method") or "log-lik")
@@ -3582,6 +3589,7 @@ class RSM(Rasch):
                 cml_hessian  # chord method for CML (Monte Carlo replicates)
             )
             m.calibrate(**self._calibration_kw())
+        m.se_method = getattr(self, "se_method", None)  # CML: Hessian or sandwich, as the object
         return m
 
     @staticmethod

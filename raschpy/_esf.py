@@ -547,6 +547,49 @@ def fit_cml(
     )
 
 
+def person_scores(X, thresholds, prepared=None):
+    """
+    Each person's contribution to the gradient of cond_loglik with respect to the stacked thresholds,
+    (n_persons, sum K_i): for threshold k of item i, P(X_i >= k | total) - 1[x_i >= k] (0 for items not
+    responded to, and for persons whose total determines their responses). Summed over persons it is the
+    gradient; its outer products give the meat of the sandwich covariance (cml_sandwich).
+    """
+    Ks = [len(t) for t in thresholds]
+    P = conditional_moments(X, thresholds, prepared=prepared, probs=True)["P"]
+    N = X.shape[0]
+    out = np.zeros((N, sum(Ks)))
+    col = 0
+    for i, K in enumerate(Ks):
+        Pi = P[:, i, : K + 1]
+        ok = np.isfinite(Pi).all(axis=1) & ~np.isnan(X[:, i])
+        tail = np.cumsum(Pi[:, ::-1], axis=1)[:, ::-1][:, 1:]  # P(X_i >= k), k = 1..K
+        x = np.where(np.isnan(X[:, i]), -1, X[:, i])
+        hit = (x[:, None] >= np.arange(1, K + 1)[None, :]).astype(float)
+        out[:, col : col + K] = np.where(ok[:, None], tail - hit, 0.0)
+        col += K
+    return out
+
+
+def cml_sandwich(X, A, b, Ks, hessian=None, prepared=None):
+    """
+    Bread and meat of the sandwich covariance of CML estimates b = A @ theta, in theta's coordinates:
+    (info, meat) with info = -A' H A (H the Hessian of cond_loglik at b, computed if not given) and meat =
+    A' S' S A, S the persons' scores (person_scores, computed once per distinct response row). The covariance of theta is
+    info^{-1} meat info^{-1}; under the model it agrees with info^{-1} (the Hessian covariance) in large
+    samples, and it stays valid when the model does not hold for the persons' response patterns.
+    """
+    off = np.concatenate([[0], np.cumsum(Ks)])
+    thr = [np.asarray(b[off[i] : off[i + 1]], float) for i in range(len(Ks))]
+    if prepared is None:
+        prepared = prepare(X, Ks)
+    if hessian is None:
+        hessian = cond_loglik(X, thr, hessian=True, prepared=prepared)[2]
+    # persons with the same responses have the same scores: compute them once per distinct row
+    rows, counts = np.unique(np.where(np.isnan(X), -1.0, X), axis=0, return_counts=True)
+    U = person_scores(np.where(rows < 0, np.nan, rows), thr) @ A
+    return -(A.T @ hessian @ A), U.T @ (counts[:, None] * U)
+
+
 def one_step_loglik(X, A, b0, Ks, prepared=None):
     """
     Conditional log-likelihood after one Newton step from b0 over thresholds b = A @ theta (theta free;
@@ -576,9 +619,13 @@ def one_step_loglik(X, A, b0, Ks, prepared=None):
     return ll0, b0, ll0
 
 
-def cml_covariance(X, A, b, Ks, hessian=None):
+def cml_covariance(X, A, b, Ks, hessian=None, sandwich=False):
     """Covariance of the CML thresholds b = A @ theta: A (-A' H A)^{-1} A', H the Hessian of cond_loglik at b
-    (computed if not given)."""
+    (computed if not given); with sandwich=True, A B^{-1} M B^{-1} A' with (B, M) from cml_sandwich()."""
+    if sandwich:
+        info, meat = cml_sandwich(X, A, b, Ks, hessian=hessian)
+        Binv = np.linalg.inv(info)
+        return A @ Binv @ meat @ Binv @ A.T
     if hessian is None:
         off = np.concatenate([[0], np.cumsum(Ks)])
         _, _, hessian = cond_loglik(
