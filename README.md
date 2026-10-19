@@ -9,7 +9,7 @@ _RaschPy_ has a parent class `Rasch` for analysis, with the following child clas
 - `MFRM` for the many-facet Rasch model (rating scale model formulation) (Linacre 1994), including extended rater representations (Elliott and Buttery 2022a, Elliott 2025), with eight rater parameterisations (global, items, thresholds, bivector, matrix, centrality/threshold stretch, pseudo_halo/item stretch and bistretch formulations) — centrality and pseudo_halo are restricted forms of thresholds/items respectively (Jin & Wang 2018-style rater centrality/extremity, and an item-difficulty-compression model), with two parameters each; bistretch is a restricted form of bivector with three parameters combining both stretch axes at once.
 
 ## Analysis
-To analyse data, create an object in the appropriate class, passing a pandas DataFrame of response data as an argument along with other arguments relevant to the chosen Rasch model, such as the maximum score for `RSM` or `MFRM`, or a vector of maximum scores for `PCM`. At the time of writing, the `RSM` and `MFRM` classes only support a single response group (i.e. all items must have the same threshold structure), and the `MFRM` class only supports one additional facet for rater severity. Parameter estimation uses variants of PAIR (Choppin 1968, 1985), the eigenvector method (Garner & Engelhard 2002, 2009) and CPAT (Elliott & Buttery 2022a, 2022b).
+To analyse data, create an object in the appropriate class, passing a pandas DataFrame of response data as an argument along with other arguments relevant to the chosen Rasch model, such as the maximum score for `RSM` or `MFRM`, or a vector of maximum scores for `PCM`. At the time of writing, the `RSM` and `MFRM` classes only support a single response group (i.e. all items must have the same threshold structure), and the `MFRM` class only supports one additional facet for rater severity. Parameter estimation uses variants of PAIR (Choppin 1968, 1985), the eigenvector method (Garner & Engelhard 2002, 2009) and CPAT (Elliott & Buttery 2022a, 2022b), and, for `SLM`, `PCM` and `RSM`, conditional maximum likelihood (Andersen 1970; `calibrate(estimation='cml')`).
 
 **Estimation for `RSM` and `MFRM`.** By default (`estimation='cp-full-rcl'`), item locations, category widths and (for `MFRM`) rater parameters are estimated jointly by regularised composite likelihood (RCL): every pair of response patterns (k, l) and (k−1, l+1) on two items (or two raters) with the same total is a comparison in which the person cancels, and all of them are fitted at once, with additive smoothing on CPAT's comparisons and ridge penalties on the rater parameters, by Newton–Raphson. In simulation (194 random `RSM` designs; 155 random `MFRM` `global` designs), median threshold RMSE was on a par with conditional maximum likelihood for `RSM` (paired ratio 1.02) and better than TAM's MML for `MFRM` (0.88), with facet element effects on a par (1.01) and lighter error tails than either. `estimation='cpat-rcl'` restricts the fit to CPAT's comparisons (the v1.4.0 development default). This removes the compression of item locations and thresholds that pooling comparisons over raters causes in the extended `MFRM` parameterisations. `estimation='pair-cpat'` runs the published separate stages instead (items, then thresholds, then raters; v1.3 behaviour, apart from an adjusted `MFRM` threshold stage): its point estimates are faster to compute on very large designs, but less accurate in the extended parameterisations, and its `MFRM` standard errors come from the bootstrap rather than the analytic sandwich. The `MFRM` penalties can be set with `ridge=` (default 0.3, rater parameters of the non-stretch models), `interaction_ridge=` (default 3, the `matrix` model's interactions, shrinking it towards `bivector`) and `stretch_ridge=` (default 1, on `omega − 1` in the stretch models).
 
@@ -419,7 +419,7 @@ print(mfrm.lambda_bistretch, mfrm.omega_items_bistretch, mfrm.omega_thresholds_b
 
 ### Model comparison — RSM vs PCM threshold structure
 
-RSM constrains every item to share the same threshold structure; PCM lets each item have its own. Since RSM is nested within PCM, `model_selection()` compares them directly via a likelihood-ratio test, AIC, or BIC (requires uniform max scores across items):
+RSM constrains every item to share the same threshold structure; PCM lets each item have its own. Since RSM is nested within PCM, `model_selection()` compares them directly via a likelihood-ratio test, AIC, or BIC (requires uniform max scores across items). By default each model is scored by the conditional log-likelihood (`likelihood='conditional'`; `'joint'` uses the person estimates):
 
 ```python
 rsm.model_selection(test='AIC')
@@ -489,6 +489,31 @@ print(mfrm.category_stats_global)
 
 ---
 
+### Conditional (CML) analysis
+
+`SLM`, `PCM` and `RSM` support conditional maximum likelihood estimation and the conditional analyses built on it (Christensen, Kreiner & Mesbah 2013):
+
+```python
+pcm.calibrate(estimation='cml')      # CML estimates; std_errors() default: sandwich ('hessian' also available)
+pcm.fit_statistics(conditional=True, bootstrap_samples=1000, seed=1)
+print(pcm.item_stats)                # conditional infit/outfit, restscore and Q1 BH p-values, Westfall-Young p-values
+print(pcm.item_restscore_table)      # item-restscore gamma (Kreiner 2011)
+print(pcm.item_q1_table)             # conditional item chi-square Q1 (van den Wollenberg 1982)
+print(pcm.item_q1_r1c)               # Glas's (1988) R1c
+print(pcm.q3_bootstrap)              # Q3 with simulated cutoffs; also residual_contrast_bootstrap
+
+pcm.global_fit(method='andersen-lr')       # Andersen (1973); per-item follow-up in global_fit_item_table
+pcm.global_fit(method='martin-lof')        # Martin-Löf (1973); p_method='monte-carlo' for sparse score tables
+pcm.local_dependence_gamma()               # partial gamma tests of local dependence (Kreiner & Christensen 2004)
+pcm.targeting()                            # targeting, expected precision and reliabilities (Kreiner & Christensen 2013)
+pcm.icc('Item_1', obs=True, cond_obs=True) # observed vs conditional expected item scores
+pcm.global_stats_df(run_all_tests=True)    # whole-test summary table
+```
+
+With CML estimates, `calibrate_anchor()` holds the anchor items at their supplied values in a CML fit (`fix_anchors=False` gives the translation) and `dif_test()`'s omnibus test is a conditional likelihood ratio. Conditional fit (`fit_statistics(conditional=True)`) also works with the other estimation methods, and for `MFRM` (`fit_statistics(model=..., conditional=True)`, treating each rater × item as an item).
+
+---
+
 ### Differential Item Functioning (DIF) and invariance testing
 
 `dif_test()` splits persons by an exogenous variable (e.g. Gender, L1), calibrates each group independently, purifies them onto a common scale (so genuine DIF items can't distort the scale used to detect DIF), and tests every item for DIF against a chosen reference group — supporting covariates with any number of levels, each tested individually against the reference:
@@ -513,7 +538,7 @@ print(slm.global_fit_summary)   # statistic, df, p-value, decision
 print(slm.global_fit_table)     # per-parameter differences, SEs and z
 ```
 
-`dif_test()` is available on all four model classes, including `MFRM`. `dif_test()`, `drf_test()` and `global_fit()` calibrate each group with the object's `calibrate()` settings, and each group on the items its persons responded to; only items (and, for `MFRM`, raters) shared by both groups are compared. (`andersen_lr_test()` is deprecated: with PAIR/CPAT estimates, Andersen's likelihood-ratio test was not calibrated in simulation; it is reserved for conditional maximum likelihood estimates in a later version.)
+`dif_test()` is available on all four model classes, including `MFRM`. `dif_test()`, `drf_test()` and `global_fit()` calibrate each group with the object's `calibrate()` settings, and each group on the items its persons responded to; only items (and, for `MFRM`, raters) shared by both groups are compared. (`andersen_lr_test()` is deprecated; for CML estimates, use `global_fit(method='andersen-lr')`.)
 
 On `PCM`, `RSM`, and `MFRM`, `dif_test()` also tests **differential category functioning (DCF)**: whether the category widths differ by group, via `threshold_dif_table`, alongside the item-location `dif_table`. `size_adjust=True` inflates standard errors at very large N so that trivially small differences are not flagged: item-location SEs are scaled to `reference_n`, and category-width SEs are capped by `dcf_cap` (in information-weight units on `PCM`/`RSM`, in persons on `MFRM`).
 
@@ -631,7 +656,7 @@ Set `plot=False` to skip the accompanying recovery plots (identity line, OLS and
 
 ### Standard errors and confidence intervals
 
-Standard errors are computed analytically where possible, by a sandwich (robust, Huber–White) covariance (Huber, 1967) with persons as the independent units: for `SLM` and `PCM` with the default `method='log-lik'`, and for `RSM` and `MFRM` under the default RCL estimation (`'cp-full-rcl'` or `'cpat-rcl'`). With `method='cos'`, `'ls'` or `'evm'` (`SLM`, `PCM`, and `RSM` with `estimation='pair-cpat'`), standard errors come from the bootstrap. The bootstrap (resampling persons and recalibrating) is also used, with a warning giving the reason, when the sandwich cannot be computed — for example when there is an unused score category, calibration did not converge, estimates are not identified, `MFRM` with `estimation='pair-cpat'`, or when the resamples are needed later (`store_bootstrap=True`, e.g. for DIF) — so standard errors are always produced by one of the two methods. `rsm.se_method` records which method was used; pass `se_method='bootstrap'` or `'sandwich'` to choose. Standard errors are triggered automatically inside `fit_statistics()`, or can be run explicitly to request confidence intervals:
+Standard errors are computed analytically where possible, by a sandwich (robust, Huber–White) covariance (Huber, 1967) with persons as the independent units: for `SLM` and `PCM` with the default `method='log-lik'`, and for `RSM` and `MFRM` under the default RCL estimation (`'cp-full-rcl'` or `'cpat-rcl'`). With `method='cos'`, `'ls'` or `'evm'` (`SLM`, `PCM`, and `RSM` with `estimation='pair-cpat'`), standard errors come from the bootstrap. The bootstrap (resampling persons and recalibrating) is also used, with a warning giving the reason, when the sandwich cannot be computed — for example when there is an unused score category, calibration did not converge, estimates are not identified, `MFRM` with `estimation='pair-cpat'`, or when the resamples are needed later (`store_bootstrap=True`, e.g. for DIF) — so standard errors are always produced by one of the two methods. `rsm.se_method` records which method was used; pass `se_method='bootstrap'` or `'sandwich'` to choose. For CML estimates the default is the sandwich of the conditional likelihood, with `se_method='hessian'` (the inverse information matrix) as an alternative. Standard errors are triggered automatically inside `fit_statistics()`, or can be run explicitly to request confidence intervals:
 
 ```python
 rsm.std_errors(interval=0.95)                                        # sandwich where it applies
@@ -670,11 +695,17 @@ _RaschPy_ is provided as freeware under an Apache 2.0 Licence (see LICENSE file 
 Elliott, M. (2026) _RaschPy_. Downloaded from: https://github.com/MarkElliott999/RaschPy
 
 ## References
+Andersen, E. B. (1970). Asymptotic properties of conditional maximum-likelihood estimators. _Journal of the Royal Statistical Society: Series B_, _32_(2), 283–301.
+
+Andersen, E. B. (1973). A goodness of fit test for the Rasch model. _Psychometrika_, _38_(1), 123–140.
+
 Andrich, D. (1978). A rating formulation for ordered response categories. _Psychometrika_, _43_(4), 561–573.
 
 Choppin, B. (1968). Item bank using sample-free calibration. _Nature_, _219_(5156), 870–872.
 
 Choppin, B. (1985). A fully conditional estimation procedure for Rasch model parameters. _Evaluation in Education_, _9_(1), 29–42.
+
+Christensen, K. B., Kreiner, S., & Mesbah, M. (Eds.) (2013). _Rasch Models in Health_. ISTE and Wiley.
 
 Elliott, M. (2025). Extended many-facet Rasch models: Accounting for rater effects in automated essay scoring systems (Doctoral dissertation, University of Cambridge).
 
@@ -686,13 +717,25 @@ Garner, M., & Engelhard, G. (2002). An eigenvector method for estimating item pa
 
 Garner, M., & Engelhard, G. (2009). Using paired comparison matrices to estimate parameters of the partial credit Rasch measurement model for rater-mediated assessments. _Journal of Applied Measurement_, _10_(1), 30–41.
 
+Glas, C. A. W. (1988). The derivation of some tests for the Rasch model from the multinomial distribution. _Psychometrika_, _53_(4), 525–546.
+
 Jin, K.-Y., & Wang, W.-C. (2018). A new facets model for rater's centrality/extremity response style. _Journal of Educational Measurement_, _55_(4), 543–563.
 
+Kreiner, S. (2011). A note on item–restscore association in Rasch models. _Applied Psychological Measurement_, _35_(7), 557–561.
+
+Kreiner, S., & Christensen, K. B. (2004). Analysis of local dependence and multidimensionality in graphical loglinear Rasch models. _Communications in Statistics – Theory and Methods_, _33_(6), 1239–1276.
+
+Kreiner, S., & Christensen, K. B. (2013). Person parameter estimation and measurement in Rasch models. In K. B. Christensen, S. Kreiner & M. Mesbah (Eds.), _Rasch Models in Health_. ISTE and Wiley.
+
 Linacre, J. M. (1994). _Many-Facet Rasch Measurement_. MESA Press.
+
+Martin-Löf, P. (1973). _Statistiska modeller_. Institutet för försäkringsmatematik och matematisk statistik vid Stockholms universitet.
 
 Masters, G. N. (1982). A Rasch model for partial credit scoring. _Psychometrika_, _47_(2), 149–174.
 
 Rasch, G. (1960). _Probabilistic models for some intelligence and attainment tests_. Danmarks Pædagogiske Institut.
+
+van den Wollenberg, A. L. (1982). Two new test statistics for the Rasch model. _Psychometrika_, _47_(2), 123–140.
 
 ## DISCLAIMER
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.

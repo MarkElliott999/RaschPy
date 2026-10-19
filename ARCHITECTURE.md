@@ -28,6 +28,10 @@ raschpy/
                        counts, cell models (linear) and stretch models
                        (bilinear), penalised Newton-Raphson / L-BFGS fits,
                        sandwich covariances (see Estimation approach)
+  _esf.py             conditional (elementary symmetric function) likelihood
+                       for SLM/PCM/RSM: exact gradient and Hessian, CML
+                       fits (chord/Newton/L-BFGS), conditional moments,
+                       sampling given totals, score distributions
   loaders.py          CSV/Excel/JSON readers: loadup_slm, loadup_pcm,
                        loadup_rsm, loadup_mfrm_single, loadup_mfrm_xlsx_tabs,
                        loadup_mfrm_multiple, loadup_exogenous
@@ -105,7 +109,8 @@ calibration code:
   refactors) need to preserve.
 - Standard errors are analytic by default where they can be: a sandwich
   (Huber–White, persons as clusters) for SLM and PCM, and for RSM and MFRM
-  under RCL-CPAT. The bootstrap (`std_errors(se_method='bootstrap')`, or the
+  under RCL-CPAT; for CML estimates, the sandwich of the conditional
+  likelihood (or the Hessian). The bootstrap (`std_errors(se_method='bootstrap')`, or the
   automatic fallback with a warning: unused category, non-convergence,
   unidentified directions, designs too large for the dense bread, MFRM
   `pair-cpat`, `store_bootstrap=True`) is the only place a genuinely repeated
@@ -131,6 +136,25 @@ to an empty category are split out and set by the cpat-cml rule. RSM is the
 case R = 1. `estimation='pair-cpat'` keeps the published separate stages
 (items → thresholds → raters) and reproduces v1.3.1 for RSM. Full derivation:
 `methods_writeup_v1.4.0.docx`, Part C.
+
+### SLM, PCM and RSM: CML (`estimation='cml'`)
+
+`_esf.cond_loglik` computes the conditional log-likelihood with its exact
+gradient and Hessian in log space with no subtractions, grouping persons by
+missingness pattern; `_esf.prepare` caches the data-only structure once per
+fit. `fit_cml` maximises it over `b = offset + A @ theta` (A carries the
+identification), by default with the chord method (one Hessian, then fixed
+Newton steps). Items without CML estimates are removed first
+(`screen_items`). Standard errors: sandwich of the conditional likelihood by
+default (`cml_sandwich`, person scores once per distinct response row), or
+the Hessian. The conditional machinery (`conditional_moments`,
+`sample_given_totals`, `person_scores`) also serves the estimate-free or
+estimate-plugging analyses: conditional fit, Q1/R1c, item-restscore, the
+parametric bootstrap, Andersen/Martin-Löf, the CML DIF omnibus, fixed-anchor
+calibration, conditional model selection (one Newton step from any
+estimates; MFRM via rater × item virtual items) and `targeting`.
+`local_dependence_gamma` needs no estimates (partial gamma with the exact
+within-stratum permutation variance).
 
 ## Class hierarchy
 
@@ -215,6 +239,7 @@ model.fit_statistics()      # infit/outfit, person/item/test fit; auto-triggers
 model.item_stats_df()       # → model.item_stats
 model.person_stats_df()     # → model.person_stats
 model.test_stats_df()       # → model.test_stats
+model.global_stats_df()     # → model.global_stats (whole-test results)
 model.icc(item=...)         # plots: icc, crcs, threshold_ccs, iic, tcc,
                              #   test_info, test_csem, std_residuals_plot,
                              #   wright_map
@@ -394,6 +419,13 @@ least once (see Known structural invariants above) — when you fix a bug that
 was silent/undetected the first time, add a test here, not just to smoke or
 regression, so the *specific* failure mode is pinned down, not just "some
 check somewhere still passes."
+
+`tests/test_esf.py` and `tests/test_cml.py` cover the conditional likelihood
+and everything built on it, against brute-force enumeration, finite
+differences and stored `psychotools`/`eRm`/`iarm` results
+(`tests/external_data/`, with the R scripts that made them; no R needed at
+run time). The regression runner's `conditional` case
+(`tests/regression_data/conditional/`) pins their outputs.
 
 `RaschPy_remediation_plan.docx` (repo root) tracks known weaknesses and an
 agreed priority order for addressing them, if you're looking for what's
