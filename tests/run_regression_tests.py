@@ -1106,12 +1106,14 @@ def _cond_build(model):
             ('person_conditional_p', m.person_conditional_p),
             ('item_fit_bootstrap', m.item_fit_bootstrap),
             ('q3_bootstrap', m.q3_bootstrap),
-            ('residual_contrast_bootstrap', m.residual_contrast_bootstrap)]
+            ('residual_contrast_bootstrap', m.residual_contrast_bootstrap),
+            ('item_q1_table', m.item_q1_table), ('item_q1_groups', m.item_q1_groups)]
     m.res_corr_analysis()
     out.append(('q3_star_max', m.q3_star_max))
     m.global_fit(method='andersen-lr', split='exogenous', covariate='G')
     out.append(('andersen_lr', [m.global_fit_summary['statistic'], m.global_fit_summary['df'],
                                 m.global_fit_summary['p-value']]))
+    out += [('andersen_item_table', m.global_fit_item_table), ('andersen_obsexp', m.global_fit_obsexp)]
     m.global_fit(method='wald', split='exogenous', covariate='G')
     out.append(('wald', [m.global_fit_summary['statistic'], m.global_fit_summary['p-value']]))
     m.global_fit(method='martin-lof')

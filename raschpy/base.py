@@ -2643,7 +2643,9 @@ class Rasch:
         """Standardised mean square: Wilson-Hilferty cube-root transformation with standard deviation q."""
         return (ms ** (1 / 3) - 1) * (3 / q) + q / 3
 
-    def _apply_conditional_fit(self, samples=1000, seed=None, bootstrap_samples=None):
+    def _apply_conditional_fit(
+        self, samples=1000, seed=None, bootstrap_samples=None, q1_groups=None
+    ):
         """
         fit_statistics(conditional=True): replace the expected scores, variances and fourth central moments
         with their conditional values given each person's total over the items they responded to (they do
@@ -2719,6 +2721,9 @@ class Rasch:
             tab["p"].notna()
         )
         self.item_restscore_table = tab
+        # conditional item chi-square (Q1) on ability groups (or supplied groups)
+        self._q1_labels = self._q1_group_labels(mom["V"], q1_groups)
+        self._set_q1_tables(X, mom["E"], mom["V"], self._q1_labels, names)
         # conditional person fit: probability of a pattern no more likely than the person's, given total
         pv = _esf.person_pattern_pvalues(
             X, self._cml_threshold_list(names), samples=samples, rng=seed
@@ -2733,8 +2738,131 @@ class Rasch:
         if bootstrap_samples:
             self._conditional_fit_bootstrap(X, names, int(bootstrap_samples), seed)
 
+    Q1_MIN_GROUP = 30  # smallest ability group for the conditional item chi-square (Q1)
+
     @staticmethod
-    def _conditional_replicate_stats(Xa, thr, prep):
+    def _ability_groups(locations, groups=None, min_size=None):
+        """
+        Groups for the conditional item chi-square (Q1): integer labels 0..G-1 per person (-1 = left out)
+        from person locations (NaN = left out), as G groups of about equal size ordered by location with
+        tied locations kept together (so with complete data they are groups of adjacent total scores);
+        groups smaller than min_size are merged into their neighbour. groups=None chooses G from the
+        number of persons (about one group per 2 * min_size persons, from 2 to 10). Returns the labels and
+        each group's location range.
+        """
+        min_size = Rasch.Q1_MIN_GROUP if min_size is None else int(min_size)
+        loc = np.asarray(locations, float)
+        ok = np.isfinite(loc)
+        n = int(ok.sum())
+        G = int(np.clip(n // (2 * min_size), 2, 10)) if groups is None else int(groups)
+        if G < 2:
+            raise ValueError("The conditional item chi-square needs at least 2 groups.")
+        labels = np.full(len(loc), -1)
+        vals, inv, counts = np.unique(loc[ok], return_inverse=True, return_counts=True)
+        before = np.concatenate([[0], np.cumsum(counts)[:-1]])
+        g_of_val = np.minimum((G * (before + counts / 2.0) / n).astype(int), G - 1)
+        # merge groups below min_size into the neighbour with fewer persons (ends: inward)
+        while True:
+            sizes = np.bincount(g_of_val, weights=counts, minlength=g_of_val.max() + 1)
+            present = np.flatnonzero(sizes > 0)
+            small = [g for g in present if sizes[g] < min_size]
+            if not small or len(present) < 2:
+                break
+            g = small[0]
+            k = int(np.searchsorted(present, g))
+            nbrs = [present[j] for j in (k - 1, k + 1) if 0 <= j < len(present)]
+            target = min(nbrs, key=lambda h: sizes[h])
+            g_of_val[g_of_val == g] = target
+        _, g_of_val = np.unique(g_of_val, return_inverse=True)
+        labels[np.flatnonzero(ok)] = g_of_val[inv]
+        ranges = [
+            (float(vals[g_of_val == g].min()), float(vals[g_of_val == g].max()))
+            for g in range(g_of_val.max() + 1)
+        ]
+        return labels, ranges
+
+    @staticmethod
+    def _q1_statistics(X, E, V, labels):
+        """
+        Conditional item chi-square (van den Wollenberg's Q1) per item: within each group (labels, -1 =
+        left out) the observed item score total O against its conditional expectation E given each
+        person's total and items, Q1 = sum over groups of (O - E)^2 / V (V the sum of the conditional
+        variances), df = groups - 1. Only responses with a conditional variance count. Returns dict(q1,
+        df, O, E, V, n) with q1/df (I,) and the rest (I, G).
+        """
+        G = int(labels.max()) + 1
+        valid = np.isfinite(V) & (V > 0) & (labels[:, None] >= 0)
+        I = X.shape[1]
+        O_, E_, V_, n_ = (np.zeros((I, G)) for _ in range(4))
+        for g in range(G):
+            sel = valid & (labels[:, None] == g)
+            O_[:, g] = np.where(sel, X, 0.0).sum(0)
+            E_[:, g] = np.where(sel, E, 0.0).sum(0)
+            V_[:, g] = np.where(sel, V, 0.0).sum(0)
+            n_[:, g] = sel.sum(0)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            terms = np.where(V_ > 0, (O_ - E_) ** 2 / V_, 0.0)
+        df = (V_ > 0).sum(1) - 1
+        return dict(q1=terms.sum(1), df=df, O=O_, E=E_, V=V_, n=n_)
+
+    def _q1_group_labels(self, V, q1_groups):
+        """Person group labels for Q1 (persons in responses order; -1 = left out): ability groups from
+        the person estimates by default (q1_groups=None or an int G), else the supplied labels (a Series
+        indexed by person, or an array in responses order). Persons without any response with a
+        conditional variance (extreme totals, single responses) are left out."""
+        contributes = (np.isfinite(V) & (V > 0)).any(axis=1)
+        if q1_groups is None or np.isscalar(q1_groups):
+            loc = self.persons.reindex(self.responses.index).to_numpy(float)
+            loc = np.where(contributes, loc, np.nan)
+            labels, ranges = self._ability_groups(loc, groups=q1_groups)
+            self._q1_ranges = ranges
+            return labels
+        lab = (
+            q1_groups.reindex(self.responses.index)
+            if isinstance(q1_groups, pd.Series)
+            else pd.Series(list(q1_groups), index=self.responses.index)
+        )
+        codes, uniques = pd.factorize(lab)
+        self._q1_ranges = None
+        self._q1_group_names = list(uniques)
+        return np.where(contributes, codes, -1)
+
+    def _set_q1_tables(self, X, E, V, labels, names):
+        """item_q1_table (Q1, df, p, p (BH)) and item_q1_groups (per item and group: persons, observed and
+        expected mean item score, standardised difference) for fit_statistics(conditional=True)."""
+        st = self._q1_statistics(X, E, V, labels)
+        df = st["df"].astype(float)
+        p = np.where(df > 0, chi2_dist.sf(st["q1"], np.maximum(df, 1)), np.nan)
+        tab = pd.DataFrame({"Q1": st["q1"], "df": st["df"], "p": p}, index=names)
+        tab["p (BH)"] = self._bh_correction(tab["p"].fillna(1.0)).where(tab["p"].notna())
+        self.item_q1_table = tab
+        G = st["O"].shape[1]
+        if self._q1_ranges is not None:
+            glabels = list(range(1, G + 1))
+        else:
+            glabels = self._q1_group_names[:G]
+        rows = []
+        for i, item in enumerate(names):
+            for g in range(G):
+                n = st["n"][i, g]
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    row = {
+                        "Persons": int(n),
+                        "Observed mean": st["O"][i, g] / n if n else np.nan,
+                        "Expected mean": st["E"][i, g] / n if n else np.nan,
+                        "z": (st["O"][i, g] - st["E"][i, g]) / np.sqrt(st["V"][i, g])
+                        if st["V"][i, g] > 0
+                        else np.nan,
+                    }
+                if self._q1_ranges is not None:
+                    row["Location from"], row["Location to"] = self._q1_ranges[g]
+                rows.append(row)
+        idx = pd.MultiIndex.from_product([names, glabels], names=["Item", "Group"])
+        self.item_q1_groups = pd.DataFrame(rows, index=idx)
+        self._q1_obs = st["q1"]
+
+    @staticmethod
+    def _conditional_replicate_stats(Xa, thr, prep, q1_labels=None):
         """The statistics referred to the bootstrap, for responses Xa at thresholds thr, all from the
         conditional moments: item infit and outfit; item-restscore gamma minus its expected value; Yen's
         Q3 for each item pair (correlations of the conditional residuals, upper triangle); and the first
@@ -2766,7 +2894,10 @@ class Rasch:
             R = pd.DataFrame(resid / np.sqrt(np.where(valid, V, np.nan))).corr().values
         R = np.where(np.isfinite(R), R, 0.0)
         eig1 = float(np.linalg.eigvalsh(R)[-1])
-        return dict(infit=infit, outfit=outfit, gdiff=gdiff, q3=q3, eig1=eig1)
+        out = dict(infit=infit, outfit=outfit, gdiff=gdiff, q3=q3, eig1=eig1)
+        if q1_labels is not None:
+            out["q1"] = Rasch._q1_statistics(Xa, E, V, q1_labels)["q1"]
+        return out
 
     def _conditional_fit_bootstrap(self, X, names, B, seed):
         """
@@ -2786,7 +2917,8 @@ class Rasch:
         rng = np.random.default_rng(seed)
         thr = self._cml_threshold_list(names)
         prep = _esf.prepare(X, self._cml_max_scores(names).astype(int))
-        obs = self._conditional_replicate_stats(X, thr, prep)
+        q1_labels = getattr(self, "_q1_labels", None)
+        obs = self._conditional_replicate_stats(X, thr, prep, q1_labels)
         cml = getattr(self, "estimation", None) == "cml"
         H = self._cml_observed_hessian() if cml else None
         clone = copy.copy(self)
@@ -2804,7 +2936,9 @@ class Rasch:
                 skipped += 1  # an item without an estimate in this dataset
                 continue
             sims.append(
-                self._conditional_replicate_stats(Y, m._cml_threshold_list(names), prep)
+                self._conditional_replicate_stats(
+                    Y, m._cml_threshold_list(names), prep, q1_labels
+                )
             )
         if not sims:
             raise ValueError(
@@ -2863,6 +2997,19 @@ class Rasch:
                 ),
             }
         ).sort_values("Q3", ascending=False, ignore_index=True)
+
+        if q1_labels is not None:
+            sim = np.array([r["q1"] for r in sims])
+            t_o, t_s = studentise(obs["q1"], sim)
+            self.item_q1_table["p (bootstrap)"] = pd.Series(
+                marginal(t_o, t_s, two_sided=False), index=names
+            )
+            self.item_q1_table["p (bootstrap, Westfall-Young)"] = pd.Series(
+                _esf.westfall_young(
+                    np.nan_to_num(t_o), np.nan_to_num(t_s), two_sided=False
+                ),
+                index=names,
+            )
 
         eig = np.array([r["eig1"] for r in sims])
         self.residual_contrast_bootstrap = dict(
@@ -4399,6 +4546,7 @@ class Rasch:
             )
         both = groups[names[0]].append(groups[names[1]])
         pooled = self._global_fit_subset(both, items=common)
+        self._andersen_item_tables(fitted, pooled, groups, names)
         ll_groups = {n: fitted[n].convergence["log_likelihood"] for n in names}
         ll0 = pooled.convergence["log_likelihood"]
         LR = max(2.0 * (sum(ll_groups.values()) - ll0), 0.0)
@@ -4444,6 +4592,60 @@ class Rasch:
                 stacklevel=3,
             )
         return self.global_fit_summary
+
+    def _andersen_item_tables(self, fitted, pooled, groups, names):
+        """
+        global_fit(method='andersen-lr') follow-up, showing which items differ between the groups:
+        global_fit_obsexp (per item and group: persons, observed and expected mean item score under the
+        pooled CML fit, the expectation conditional on each person's total and items, and the
+        standardised difference) and global_fit_item_table (per item: each group's own CML item location,
+        their difference and Wald z, and the conditional item chi-square over the groups with df =
+        groups - 1, its p-value and BH-adjusted p-value).
+        """
+        from raschpy import _esf
+
+        items = list(pooled.item_names)
+        X = np.array(pooled.responses.loc[:, items], dtype=np.float64)
+        mom = _esf.conditional_moments(X, pooled._cml_threshold_list(items))
+        labels = np.full(len(X), -1)
+        for k, n in enumerate(names):
+            labels[pooled.responses.index.isin(groups[n])] = k
+        st = self._q1_statistics(X, mom["E"], mom["V"], labels)
+        rows = []
+        for i, item in enumerate(items):
+            for k, n in enumerate(names):
+                cnt, v = st["n"][i, k], st["V"][i, k]
+                rows.append(
+                    {
+                        "Persons": int(cnt),
+                        "Observed mean": st["O"][i, k] / cnt if cnt else np.nan,
+                        "Expected mean": st["E"][i, k] / cnt if cnt else np.nan,
+                        "z": (st["O"][i, k] - st["E"][i, k]) / np.sqrt(v) if v > 0 else np.nan,
+                    }
+                )
+        self.global_fit_obsexp = pd.DataFrame(
+            rows,
+            index=pd.MultiIndex.from_product([items, names], names=["Item", "Group"]),
+        )
+        tab = pd.DataFrame(index=items)
+        se = {}
+        for n in names:
+            m = fitted[n]
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                m.std_errors()
+            tab[f"Location ({n})"] = m.items.reindex(items).values
+            se[n] = m.item_se.reindex(items).values
+        a, b = names[0], names[1]
+        tab["Difference"] = tab[f"Location ({b})"] - tab[f"Location ({a})"]
+        with np.errstate(invalid="ignore", divide="ignore"):
+            tab["z"] = tab["Difference"] / np.sqrt(se[a] ** 2 + se[b] ** 2)
+        df = st["df"].astype(float)
+        tab["Chi-square"] = st["q1"]
+        tab["df"] = st["df"]
+        tab["p"] = np.where(df > 0, chi2_dist.sf(st["q1"], np.maximum(df, 1)), np.nan)
+        tab["p (BH)"] = self._bh_correction(tab["p"].fillna(1.0)).where(tab["p"].notna())
+        self.global_fit_item_table = tab
 
     def _global_fit_needs_bootstrap(self):
         """True if the object's calibration settings have no sandwich
@@ -4562,7 +4764,14 @@ class Rasch:
         estimation, which do not maximise the likelihood the statistic
         evaluates, it raises a ValueError: in simulation it then floored at
         0 on score and person-location splits, and its null distribution was
-        not a rescaled chi-square.
+        not a rescaled chi-square. To show which items differ, it also sets
+        global_fit_obsexp (per item and group: persons, observed and
+        expected mean item score under the pooled fit, the expectation
+        conditional on each person's total and items, and the standardised
+        difference) and global_fit_item_table (per item: each group's own
+        CML location, their difference and Wald z, and the item's
+        conditional chi-square over the groups, df = groups - 1, with p and
+        BH-adjusted p).
 
         method='martin-lof': Martin-Lof's test of unidimensionality for two
         item subsets (split=), SLM, PCM and RSM, estimates from

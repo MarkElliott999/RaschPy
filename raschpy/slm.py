@@ -1777,6 +1777,7 @@ class SLM(Rasch):
         conditional=False,
         conditional_samples=1000,
         bootstrap_samples=None,
+        q1_groups=None,
     ):
         """
         Compute all item, person, and test-level fit statistics.
@@ -1860,6 +1861,21 @@ class SLM(Rasch):
             bootstrap p-values for item-restscore (columns added to
             item_restscore_table), Q3 for every item pair (q3_bootstrap) and
             the first residual contrast (residual_contrast_bootstrap).
+        q1_groups : int, array-like, pandas.Series or None, default None
+            conditional=True only: groups for the conditional item
+            chi-square (van den Wollenberg's Q1), item_q1_table (Q1, df,
+            p, p (BH); with bootstrap_samples, bootstrap p-values) and
+            item_q1_groups (per item and group: persons, observed and
+            expected mean item score, standardised difference). Within each
+            group, an item's observed score total is compared with its
+            conditional expectation given each person's total and items,
+            Q1 = sum over groups of (O - E)^2 / V, df = groups - 1. None:
+            groups of about equal size ordered by person location (tied
+            locations kept together, so with complete data these are
+            groups of adjacent total scores), about one per 60 persons
+            from 2 to 10, each of at least 30 persons; an int sets the
+            number of groups; labels per person (a Series indexed by
+            person, or an array in responses order) supply the groups.
 
         Attributes set
         --------------
@@ -2164,6 +2180,7 @@ class SLM(Rasch):
                 samples=conditional_samples,
                 seed=seed,
                 bootstrap_samples=bootstrap_samples,
+                q1_groups=q1_groups,
             )
         elif bootstrap_samples:
             raise ValueError("bootstrap_samples= needs conditional=True.")

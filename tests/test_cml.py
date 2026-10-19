@@ -616,3 +616,65 @@ def test_cml_sandwich(name):
     assert m.se_method == "sandwich"
     np.testing.assert_allclose(m.item_se, hess, rtol=0.25)
     assert not np.allclose(m.item_se, hess)
+
+
+@pytest.mark.parametrize("name", ["SLM", "PCM", "RSM"])
+def test_conditional_q1(name):
+    m = _anchor_model(name, seed=11)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m.fit_statistics(conditional=True, conditional_samples=10)
+    names = list(m.item_names)
+    X = np.array(m.responses.loc[:, names], dtype=np.float64)
+    mom = _esf.conditional_moments(X, m._cml_threshold_list(names))
+    lab = m._q1_labels
+    ok = lab >= 0
+    # complete data: ability groups are groups of adjacent total scores
+    tot = np.nansum(X, axis=1)
+    for g in range(lab.max()):
+        assert tot[ok & (lab == g)].max() < tot[ok & (lab == g + 1)].min()
+    # Q1 by hand for the first item; df = groups - 1
+    valid = np.isfinite(mom["V"][:, 0]) & (mom["V"][:, 0] > 0) & ok
+    q1 = sum(
+        (X[valid & (lab == g), 0].sum() - mom["E"][valid & (lab == g), 0].sum()) ** 2
+        / mom["V"][valid & (lab == g), 0].sum()
+        for g in range(lab.max() + 1)
+    )
+    assert m.item_q1_table["Q1"].iloc[0] == pytest.approx(q1, rel=1e-10)
+    assert (m.item_q1_table["df"] == lab.max()).all()
+    # at the CML estimates, each item's observed - expected sums to zero over the groups
+    gq = m.item_q1_groups
+    dev = ((gq["Observed mean"] - gq["Expected mean"]) * gq["Persons"]).groupby(level="Item").sum()
+    np.testing.assert_allclose(dev.values, 0, atol=1e-6)
+    # supplied groups
+    sup = pd.Series(np.where(np.arange(len(m.responses)) % 2 == 0, "even", "odd"), index=m.responses.index)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m.fit_statistics(conditional=True, conditional_samples=10, q1_groups=sup)
+    assert (m.item_q1_table["df"] == 1).all()
+    assert set(m.item_q1_groups.index.get_level_values("Group")) == {"even", "odd"}
+
+
+def test_andersen_item_tables():
+    from raschpy.simulation import SLM_Sim
+
+    s = SLM_Sim(no_of_items=8, no_of_persons=1000, seed=4)
+    r = s.responses.copy()
+    g = pd.Series(np.where(np.arange(1000) < 500, "A", "B"), index=r.index)
+    th = s.persons.values[500:]
+    p = 1 / (1 + np.exp(-(th - (float(s.items.iloc[2]) + 0.8))))
+    r.loc[g == "B", r.columns[2]] = (np.random.default_rng(1).random(500) < p).astype(float)
+    m = SLM(r, exogenous=pd.DataFrame({"G": g}))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m.calibrate(estimation="cml")
+        m.global_fit(method="andersen-lr", split="exogenous", covariate="G")
+    tab, oe = m.global_fit_item_table, m.global_fit_obsexp
+    assert tab["p (BH)"].idxmin() == r.columns[2] and tab.loc[r.columns[2], "p (BH)"] < 0.001
+    assert (tab["df"] == 1).all()
+    # pooled CML: observed - expected sums to zero over the two groups for every item
+    dev = ((oe["Observed mean"] - oe["Expected mean"]) * oe["Persons"]).groupby(level="Item").sum()
+    np.testing.assert_allclose(dev.values, 0, atol=1e-6)
+    # with two groups and opposite deviations, the item chi-square is the square of either z
+    np.testing.assert_allclose(oe["z"].groupby(level="Item").apply(lambda z: (z**2).sum()).values,
+                               tab["Chi-square"].values, rtol=1e-10)
