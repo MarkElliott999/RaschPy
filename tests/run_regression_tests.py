@@ -1115,6 +1115,9 @@ def _cond_build(model):
     m.targeting()
     out += [('targeting_summary', m.targeting_summary), ('targeting_score_table', m.targeting_score_table),
             ('targeting_items', m.targeting_items)]
+    m.item_stats_df(full=True)
+    m.person_stats_df()
+    out += [('item_stats_full', m.item_stats), ('person_stats', m.person_stats)]
     m.global_fit(method='andersen-lr', split='exogenous', covariate='G')
     out.append(('andersen_lr', [m.global_fit_summary['statistic'], m.global_fit_summary['df'],
                                 m.global_fit_summary['p-value']]))

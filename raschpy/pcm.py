@@ -5116,6 +5116,7 @@ class PCM(Rasch):
         if point_measure_corr:
             stats["PM corr"] = self.point_measure.round(dp)
             stats["Exp PM corr"] = self.exp_point_measure.round(dp)
+        stats = self._add_conditional_item_columns(stats, full, dp)
         self.item_stats = stats
         _save_table(self.item_stats, filename, file_format)
         return self.item_stats
@@ -5574,6 +5575,7 @@ class PCM(Rasch):
             stats[col] = np.nan
             stats.loc[src.index, col] = src.round(dp).values
 
+        stats = self._add_conditional_person_columns(stats, dp)
         self.person_stats = stats
         _save_table(self.person_stats, filename, file_format)
         return self.person_stats

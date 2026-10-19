@@ -3372,6 +3372,57 @@ class Rasch:
                 tab.to_csv(f"{filename}.csv")
         return tab
 
+    def _add_conditional_item_columns(self, stats, full, dp):
+        """item_stats_df(): the conditional fit's item columns when fit_statistics(conditional=True) has
+        run -- Restscore p (BH), Q1 p (BH) and, after a bootstrap, Infit/Outfit p (Westfall-Young); with
+        full=True also Observed/Expected gamma, Q1 and Q1 df -- and, with full=True after targeting(),
+        each item's Target and Max information."""
+        idx = stats.index
+        if getattr(self, "fit_conditional", False):
+            rs, q1 = self.item_restscore_table, self.item_q1_table
+            if full:
+                stats["Observed gamma"] = (
+                    rs["Observed gamma"].reindex(idx).astype(float).round(dp)
+                )
+                stats["Expected gamma"] = (
+                    rs["Expected gamma"].reindex(idx).astype(float).round(dp)
+                )
+            stats["Restscore p (BH)"] = (
+                rs["p (BH)"].reindex(idx).astype(float).round(dp)
+            )
+            if full:
+                stats["Q1"] = q1["Q1"].reindex(idx).astype(float).round(dp)
+                stats["Q1 df"] = q1["df"].reindex(idx)
+            stats["Q1 p (BH)"] = q1["p (BH)"].reindex(idx).astype(float).round(dp)
+            bt = getattr(self, "item_fit_bootstrap", None)
+            if bt is not None:
+                for lab in ("Infit", "Outfit"):
+                    stats[f"{lab} p (Westfall-Young)"] = (
+                        bt[f"{lab} p (Westfall-Young)"]
+                        .reindex(idx)
+                        .astype(float)
+                        .round(dp)
+                    )
+        tgt = getattr(self, "targeting_items", None)
+        if full and tgt is not None:
+            stats["Target"] = tgt["Target"].reindex(idx).astype(float).round(dp)
+            stats["Max information"] = (
+                tgt["Maximum information"].reindex(idx).astype(float).round(dp)
+            )
+        return stats
+
+    def _add_conditional_person_columns(self, stats, dp):
+        """person_stats_df(): Conditional p (the probability, given the total, of a response pattern no
+        more likely than the person's) when fit_statistics(conditional=True) has run."""
+        if (
+            getattr(self, "fit_conditional", False)
+            and getattr(self, "person_conditional_p", None) is not None
+        ):
+            stats["Conditional p"] = (
+                self.person_conditional_p.reindex(stats.index).astype(float).round(dp)
+            )
+        return stats
+
     def _icc_obs_groups(self, obs_groups):
         """icc(obs_groups=): a column of self.exogenous (str), a Series indexed by person, or labels in
         responses order -> a Series of labels indexed by person."""

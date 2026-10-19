@@ -811,3 +811,28 @@ def test_global_stats_df():
     assert "p_method=monte-carlo" in t.loc["Martin-Lof", "Details"]
     assert set(c.global_fit_results) == {("andersen-lr", "split=exogenous; covariate=G"),
                                          ("martin-lof", "split=median; p_method=monte-carlo")}
+
+
+@pytest.mark.parametrize("name", ["SLM", "PCM", "RSM"])
+def test_stats_tables_conditional_columns(name):
+    m = _anchor_model(name, seed=15)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m.item_stats_df()
+        base = list(m.item_stats.columns)
+        m.item_stats_df(full=True)  # also after a default call (the SLM interval bug)
+        m.fit_statistics(conditional=True, conditional_samples=20, bootstrap_samples=10, seed=1)
+        m.targeting()
+        m.item_stats_df()
+        added = [c for c in m.item_stats.columns if c not in base]
+        assert added == ["Restscore p (BH)", "Q1 p (BH)", "Infit p (Westfall-Young)", "Outfit p (Westfall-Young)"]
+        np.testing.assert_allclose(m.item_stats["Q1 p (BH)"], m.item_q1_table["p (BH)"].round(3))
+        m.item_stats_df(full=True)
+        for c in ("Observed gamma", "Expected gamma", "Q1", "Q1 df", "Target", "Max information"):
+            assert c in m.item_stats.columns
+        m.person_stats_df()
+        assert m.person_stats["Conditional p"].notna().any()
+        m.fit_statistics()  # back to person-based fit: no stale conditional columns
+        m.item_stats_df()
+        m.person_stats_df()
+    assert list(m.item_stats.columns) == base and "Conditional p" not in m.person_stats.columns

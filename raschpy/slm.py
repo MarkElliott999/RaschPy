@@ -3234,7 +3234,7 @@ class SLM(Rasch):
 
         if se and (
             not hasattr(self, "item_se")
-            or (interval is not None and not hasattr(self, "item_low"))
+            or (interval is not None and getattr(self, "item_low", None) is None)
         ):
             self.std_errors(
                 interval=interval,
@@ -3300,6 +3300,7 @@ class SLM(Rasch):
             )
 
         self.item_stats.index = self.responses.columns
+        self.item_stats = self._add_conditional_item_columns(self.item_stats, full, dp)
         _save_table(self.item_stats, filename, file_format)
         return self.item_stats
 
@@ -3415,6 +3416,7 @@ class SLM(Rasch):
             person_stats_df[col] = np.nan
             person_stats_df.loc[src.index, col] = src.round(dp).values
 
+        person_stats_df = self._add_conditional_person_columns(person_stats_df, dp)
         self.person_stats = person_stats_df
         _save_table(self.person_stats, filename, file_format)
         return self.person_stats
