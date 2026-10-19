@@ -12025,7 +12025,7 @@ class MFRM(Rasch):
         alpha=0.05,
         min_effect=0,
         sampling="auto",
-        likelihood="joint",
+        likelihood="conditional",
         warm_corr=True,
         tolerance=0.00001,
         max_iters=100,
@@ -12115,7 +12115,7 @@ class MFRM(Rasch):
             directly; None disables. n_ll (= T when triggered) is used in
             BIC's ln(n) term. 'auto': 'dynamic' with likelihood='joint',
             None with likelihood='conditional'.
-        likelihood : {'joint', 'conditional'}, default 'joint'
+        likelihood : {'conditional', 'joint'}, default 'conditional'
             'joint': the log-likelihood given the person estimates.
             'conditional': the conditional log-likelihood given each
             person's total over all the ratings they received, which does

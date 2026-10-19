@@ -3349,6 +3349,28 @@ class Rasch:
                 "The reference and focal group share no items, so there "
                 "is nothing to compare."
             )
+        if len(common_items) == 1:
+            dropped = {
+                lab: (getattr(mod, "convergence", None) or {}).get("dropped_items")
+                for lab, mod in (("reference", ref_model), ("focal", focal_model))
+            }
+            dropped = {k: v for k, v in dropped.items() if v}
+            why = (
+                " Items without CML estimates were removed from the group fits ("
+                + "; ".join(
+                    f"{lab} group: " + ", ".join(f"{i} ({r})" for i, r in v.items())
+                    for lab, v in dropped.items()
+                )
+                + "); collapsing their unused categories, or an estimation method with "
+                "smoothing (the default estimation), keeps them."
+                if dropped
+                else ""
+            )
+            raise ValueError(
+                f"The reference and focal group share only one item ({common_items[0]}), and DIF "
+                f"needs at least two: an item's DIF is measured against the other common items."
+                + why
+            )
         ref_items = ref_model.items.loc[common_items]
         focal_items = focal_model.items.loc[common_items]
         ref_se_item = ref_model.item_se.loc[common_items]

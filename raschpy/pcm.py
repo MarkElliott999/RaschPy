@@ -4528,7 +4528,7 @@ class PCM(Rasch):
         alpha=0.05,
         min_effect=0,
         sampling="auto",
-        likelihood="joint",
+        likelihood="conditional",
         warm_corr=True,
         tolerance=0.00001,
         max_iters=100,
@@ -4589,7 +4589,7 @@ class PCM(Rasch):
             likelihood='joint', None with likelihood='conditional' (in
             simulation, subsampling lowered the conditional comparison's
             rate of correct choices).
-        likelihood : {'joint', 'conditional'}, default 'joint'
+        likelihood : {'conditional', 'joint'}, default 'conditional'
             'joint': the log-likelihood given the person estimates.
             'conditional': the conditional log-likelihood given each
             person's total score, which does not involve the person
