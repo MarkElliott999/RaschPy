@@ -1067,7 +1067,8 @@ class PCM(Rasch):
         """calibrate_anchor(fix_anchors=True): (X, A, offset, b0, Ks, decode) for the CML fit with the
         locations (means of the uncentred thresholds) of the items in fixed (name -> value) held at those
         values, their threshold shapes and every other item's thresholds estimated; decode(b) gives (item
-        locations, uncentred thresholds as items x thresholds, the map from b to the item locations)."""
+        locations, uncentred thresholds as items x thresholds, the map from b to the item locations).
+        """
         names = list(self.item_names)
         Ks = self.max_score_vector.reindex(names).to_numpy().astype(int)
         X = np.array(self.responses.loc[:, names], dtype=np.float64)
@@ -3867,6 +3868,16 @@ class PCM(Rasch):
             alone is enough for SLM/RSM (confirmed by null-DIF simulation:
             ~1.3-1.7x nominal Type I error with own-group person locations, ~nominal
             with pooled person locations) but NOT for PCM — see omnibus_scope.
+            With CML estimates (calibrate(estimation='cml')) the
+            omnibus test is instead a conditional likelihood
+            ratio between nested CML fits to the combined
+            reference and focal data: the pooled fit, against
+            the pooled fit plus a focal-group location shift on
+            each common item, the threshold shapes kept common
+            (omnibus_scope='full': all of each common item's
+            thresholds free) (df = common items - 1; 'full':
+            their thresholds - 1), which involves no person
+            locations.
         omnibus_scope : {'item', 'full'}, default 'item'
             Unlike SLM (no thresholds) or RSM (one shared threshold vector
             for the whole test), PCM has a separate threshold/category-
@@ -4246,57 +4257,71 @@ class PCM(Rasch):
                     full_resp, self.max_score_vector.loc[full_resp.columns].tolist()
                 )
                 m_full.calibrate(**cal_kw)
-                m_full.person_estimates(**pe_kw)
-                ll_full = m_full._log_likelihood()
-                pooled_ref_persons = m_full.persons.reindex(ref_model.responses.index)
-                pooled_focal_persons = m_full.persons.reindex(
-                    focal_model.responses.index
-                )
-                if omnibus_scope == "item":
-                    pooled_step_shape = m_full.thresholds_uncentred.sub(
-                        m_full.items, axis=0
+                if getattr(m_full, "estimation", None) == "cml":
+                    lr_omni, df_omni, omni_converged = self._conditional_omnibus(
+                        m_full, focal_idx, common_items, scope=omnibus_scope
                     )
-                    # every item each group responded to; those only this group
-                    # responded to are held at their pooled locations, as under H0
-                    ll_ref_omni = self._item_location_log_likelihood(
-                        ref_model.responses,
-                        pooled_ref_persons,
-                        pooled_step_shape,
-                        list(ref_model.responses.columns),
-                        fixed_items=m_full.items.reindex(
-                            ref_model.responses.columns.difference(common_items)
-                        ),
-                        tolerance=tolerance,
-                        max_iters=max_iters,
-                    )
-                    ll_focal_omni = self._item_location_log_likelihood(
-                        focal_model.responses,
-                        pooled_focal_persons,
-                        pooled_step_shape,
-                        list(focal_model.responses.columns),
-                        fixed_items=m_full.items.reindex(
-                            focal_model.responses.columns.difference(common_items)
-                        ),
-                        tolerance=tolerance,
-                        max_iters=max_iters,
-                    )
-                    df_omni = len(common_items) - 1
-                else:
-                    ll_ref_omni = self._omnibus_h1_log_likelihood(
-                        ref_model, m_full, pooled_ref_persons, common_items
-                    )
-                    ll_focal_omni = self._omnibus_h1_log_likelihood(
-                        focal_model, m_full, pooled_focal_persons, common_items
-                    )
-                    df_omni = (
-                        len(common_items)
-                        - 1
-                        + sum(
-                            int(self.max_score_vector[item]) - 1
-                            for item in common_items
+                    if not omni_converged:
+                        warnings.warn(
+                            "A CML fit for the omnibus test did not converge; its likelihood "
+                            "ratio may be unreliable.",
+                            UserWarning,
+                            stacklevel=2,
                         )
+                else:
+                    m_full.person_estimates(**pe_kw)
+                    ll_full = m_full._log_likelihood()
+                    pooled_ref_persons = m_full.persons.reindex(
+                        ref_model.responses.index
                     )
-                lr_omni = max(0.0, -2 * (ll_full - (ll_ref_omni + ll_focal_omni)))
+                    pooled_focal_persons = m_full.persons.reindex(
+                        focal_model.responses.index
+                    )
+                    if omnibus_scope == "item":
+                        pooled_step_shape = m_full.thresholds_uncentred.sub(
+                            m_full.items, axis=0
+                        )
+                        # every item each group responded to; those only this group
+                        # responded to are held at their pooled locations, as under H0
+                        ll_ref_omni = self._item_location_log_likelihood(
+                            ref_model.responses,
+                            pooled_ref_persons,
+                            pooled_step_shape,
+                            list(ref_model.responses.columns),
+                            fixed_items=m_full.items.reindex(
+                                ref_model.responses.columns.difference(common_items)
+                            ),
+                            tolerance=tolerance,
+                            max_iters=max_iters,
+                        )
+                        ll_focal_omni = self._item_location_log_likelihood(
+                            focal_model.responses,
+                            pooled_focal_persons,
+                            pooled_step_shape,
+                            list(focal_model.responses.columns),
+                            fixed_items=m_full.items.reindex(
+                                focal_model.responses.columns.difference(common_items)
+                            ),
+                            tolerance=tolerance,
+                            max_iters=max_iters,
+                        )
+                        df_omni = len(common_items) - 1
+                    else:
+                        ll_ref_omni = self._omnibus_h1_log_likelihood(
+                            ref_model, m_full, pooled_ref_persons, common_items
+                        )
+                        ll_focal_omni = self._omnibus_h1_log_likelihood(
+                            focal_model, m_full, pooled_focal_persons, common_items
+                        )
+                        df_omni = (
+                            len(common_items)
+                            - 1
+                            + sum(
+                                int(self.max_score_vector[item]) - 1
+                                for item in common_items
+                            )
+                        )
+                    lr_omni = max(0.0, -2 * (ll_full - (ll_ref_omni + ll_focal_omni)))
                 p_omni = float(chi2.sf(lr_omni, df_omni))
                 omnibus_rows[focal] = {
                     "LR": lr_omni,

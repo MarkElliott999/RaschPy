@@ -2996,6 +2996,57 @@ class Rasch:
         estimate in that group's calibration."""
         return responses.loc[:, responses.notna().any(axis=0).values]
 
+    @staticmethod
+    def _conditional_omnibus(pooled, focal_idx, common_items, scope="item"):
+        """
+        dif_test()'s omnibus test for CML estimates: a conditional likelihood ratio between nested CML fits
+        to the combined reference and focal data. H0 is the pooled fit (pooled, calibrated with
+        estimation='cml'); H1 adds, for the focal group, a location shift on each common item (scope='item',
+        threshold shapes shared: uniform DIF) or frees all of each common item's thresholds
+        (scope='full', PCM: DIF and DCF), constrained to sum to zero, since a common shift of the focal
+        group's items is not identified given the persons' totals. LR = 2 (ll_1 - ll_0), df = C - 1
+        ('item') or the common items' thresholds - 1 ('full'). Returns (LR, df, converged).
+        """
+        from raschpy import _esf, _rcl
+
+        names = list(pooled.item_names)
+        Ks = [int(k) for k in pooled._cml_max_scores(names)]
+        b0 = np.concatenate(pooled._cml_threshold_list(names)).astype(float)
+        A0 = (
+            pooled._cml_basis()[0]
+            if hasattr(pooled, "_cml_basis")
+            else _rcl.zero_sum_basis(len(b0))
+        )
+        X = np.array(pooled.responses.loc[:, names], dtype=np.float64)
+        foc = pooled.responses.index.isin(focal_idx)
+        common = [names.index(c) for c in common_items if c in names]
+        off = np.concatenate([[0], np.cumsum(Ks)])
+        n_new = len(common)
+        Xa = np.hstack([X, np.full((len(X), n_new), np.nan)])
+        Xa[np.ix_(foc, np.arange(X.shape[1], X.shape[1] + n_new))] = X[
+            np.ix_(foc, common)
+        ]
+        Xa[np.ix_(foc, common)] = np.nan
+        rows = np.concatenate([np.arange(off[c], off[c + 1]) for c in common])
+        A0a, b0a = np.vstack([A0, A0[rows]]), np.concatenate([b0, b0[rows]])
+        Ka = Ks + [Ks[c] for c in common]
+        S = np.zeros((sum(Ka), n_new if scope == "item" else len(rows)))
+        start, col = off[-1], 0
+        for c in common:
+            if scope == "item":
+                S[start : start + Ks[c], col] = 1.0
+                col += 1
+            else:
+                S[start : start + Ks[c], col : col + Ks[c]] = np.eye(Ks[c])
+                col += Ks[c]
+            start += Ks[c]
+        A1 = np.hstack([A0a, S @ _rcl.zero_sum_basis(S.shape[1])])
+        solver = getattr(pooled, "_cml_solver", None)
+        f0 = _esf.fit_cml(Xa, A0a, b0a, Ka, solver=solver)
+        f1 = _esf.fit_cml(Xa, A1, b0a, Ka, solver=solver)
+        LR = max(0.0, 2.0 * (f1["ll"] - f0["ll"]))
+        return LR, S.shape[1] - 1, bool(f0["converged"] and f1["converged"])
+
     def _omnibus_h1_log_likelihood(self, group, pooled, persons, common_items):
         """
         A group model's log-likelihood at the pooled (combined-group)

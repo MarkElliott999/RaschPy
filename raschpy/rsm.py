@@ -3976,6 +3976,14 @@ class RSM(Rasch):
             inflates the LR statistic beyond what df=k-1 accounts for
             (confirmed by null-DIF simulation: ~1.3-1.7x nominal Type I
             error with own-group person locations, ~nominal with pooled person locations).
+            With CML estimates (calibrate(estimation='cml')) the
+            omnibus test is instead a conditional likelihood
+            ratio between nested CML fits to the combined
+            reference and focal data: the pooled fit, against
+            the pooled fit plus a focal-group location shift on
+            each common item, the shared thresholds kept common
+            (df = common items - 1), which involves no person
+            locations.
         welch : bool, default False
             If True, every Wald test here (item-location AND threshold-
             structure) becomes a Welch's t-test: the statistic is
@@ -4301,20 +4309,34 @@ class RSM(Rasch):
                     max_score=self.max_score,
                 )
                 m_full.calibrate(**cal_kw)
-                m_full.person_estimates(**pe_kw)
-                ll_full = m_full._log_likelihood()
-                pooled_ref_persons = m_full.persons.reindex(ref_model.responses.index)
-                pooled_focal_persons = m_full.persons.reindex(
-                    focal_model.responses.index
-                )
-                ll_ref_omni = self._omnibus_h1_log_likelihood(
-                    ref_model, m_full, pooled_ref_persons, common_items
-                )
-                ll_focal_omni = self._omnibus_h1_log_likelihood(
-                    focal_model, m_full, pooled_focal_persons, common_items
-                )
-                lr_omni = max(0.0, -2 * (ll_full - (ll_ref_omni + ll_focal_omni)))
-                df_omni = len(common_items) - 1
+                if getattr(m_full, "estimation", None) == "cml":
+                    lr_omni, df_omni, omni_converged = self._conditional_omnibus(
+                        m_full, focal_idx, common_items, scope="item"
+                    )
+                    if not omni_converged:
+                        warnings.warn(
+                            "A CML fit for the omnibus test did not converge; its likelihood "
+                            "ratio may be unreliable.",
+                            UserWarning,
+                            stacklevel=2,
+                        )
+                else:
+                    m_full.person_estimates(**pe_kw)
+                    ll_full = m_full._log_likelihood()
+                    pooled_ref_persons = m_full.persons.reindex(
+                        ref_model.responses.index
+                    )
+                    pooled_focal_persons = m_full.persons.reindex(
+                        focal_model.responses.index
+                    )
+                    ll_ref_omni = self._omnibus_h1_log_likelihood(
+                        ref_model, m_full, pooled_ref_persons, common_items
+                    )
+                    ll_focal_omni = self._omnibus_h1_log_likelihood(
+                        focal_model, m_full, pooled_focal_persons, common_items
+                    )
+                    lr_omni = max(0.0, -2 * (ll_full - (ll_ref_omni + ll_focal_omni)))
+                    df_omni = len(common_items) - 1
                 p_omni = float(chi2.sf(lr_omni, df_omni))
                 omnibus_rows[focal] = {
                     "LR": lr_omni,

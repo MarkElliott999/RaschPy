@@ -566,3 +566,34 @@ def test_conditional_model_selection_mfrm():
                 assert top - 0.01 < one <= top + 1e-8
         m.model_selection(likelihood="conditional")
     assert m.model_comparison_mfrm_aic_preferred == "bivector"
+
+
+def test_cml_dif_omnibus_is_conditional_lr():
+    from raschpy.simulation import PCM_Sim, SLM_Sim
+
+    s = SLM_Sim(no_of_items=8, no_of_persons=600, seed=7)
+    g = pd.Series(np.where(np.arange(600) < 300, "A", "B"), index=s.responses.index)
+    m = SLM(s.responses, exogenous=pd.DataFrame({"G": g}))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m.calibrate(estimation="cml")
+        m.dif_test("G", reference="A", seed=1)
+        omni = m.dif_omnibus_table.iloc[0]
+        # SLM, every item common: H1 is the two groups' own CML fits, so the LR is Andersen's
+        m.global_fit(method="andersen-lr", split="exogenous", covariate="G")
+    assert float(omni["LR"]) == pytest.approx(m.global_fit_summary["statistic"], rel=1e-6)
+    assert int(omni["df"]) == m.global_fit_summary["df"] == 7
+    # PCM with partly overlapping item sets: df = common items - 1 ('item'), thresholds - 1 ('full')
+    p = PCM_Sim(no_of_items=6, no_of_persons=600, max_score_vector=[2, 3] * 3, seed=2)
+    r = p.responses.copy()
+    g = pd.Series(np.where(np.arange(600) < 300, "A", "B"), index=r.index)
+    r.loc[g == "A", r.columns[5]] = np.nan
+    r.loc[g == "B", r.columns[0]] = np.nan
+    pm = PCM(r, exogenous=pd.DataFrame({"G": g}), max_score_vector=[2, 3] * 3)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        pm.calibrate(estimation="cml")
+        pm.dif_test("G", reference="A", seed=1)
+        assert int(pm.dif_omnibus_table.iloc[0]["df"]) == 3
+        pm.dif_test("G", reference="A", omnibus_scope="full", seed=1)
+        assert int(pm.dif_omnibus_table.iloc[0]["df"]) == (3 + 2 + 3 + 2) - 1
