@@ -1024,12 +1024,160 @@ def run_bivector(generate=False, verbose=False):
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+# ── Conditional methods (v1.5.0): CML, conditional fit, conditional tests ─────
+
+COND_ITEMS, COND_PERSONS = 8, 400
+
+
+def _cond_value(obj):
+    """A fixture-comparable form: DataFrame / Series as they are, dicts and scalars as arrays."""
+    if isinstance(obj, (pd.DataFrame, pd.Series)):
+        return obj
+    if isinstance(obj, dict):
+        return np.array([float(v) for v in obj.values()], dtype=float)
+    return np.atleast_1d(np.asarray(obj, dtype=float))
+
+
+def _cond_numeric(df):
+    """Numeric columns only (string/bool columns such as 'Preferred' are compared via the numbers)."""
+    df = flatten_columns(df.copy())
+    df.columns = [str(c) for c in df.columns]
+    if isinstance(df.index, pd.MultiIndex):
+        df.index = ['|'.join(map(str, t)) for t in df.index]
+    return df.select_dtypes(include='number')
+
+
+def _cond_save_or_check(label, outputs, base, generate, verbose):
+    """Save (generate) or assert each named output, as a CSV (frames, series) or .npy (arrays)."""
+    for name, obj in outputs:
+        v = _cond_value(obj)
+        path = os.path.join(base, name)
+        if isinstance(v, pd.DataFrame):
+            v = _cond_numeric(v)
+            if generate:
+                save_df(v, path + '.csv')
+            else:
+                assert_df(f'[{label}] {name}', v, path + '.csv', verbose)
+        elif isinstance(v, pd.Series):
+            v = pd.to_numeric(v, errors='coerce').dropna() if v.dtype == object else v
+            if generate:
+                save_series(v.astype(float), path + '.csv')
+            else:
+                assert_series(f'[{label}] {name}', v, path + '.csv', verbose)
+        else:
+            if generate:
+                save_array(v, path)
+            else:
+                assert_array(f'[{label}] {name}', v, path, verbose)
+
+
+def _cond_build(model):
+    """A CML-calibrated SLM/PCM/RSM with an exogenous group, and its conditional outputs."""
+    groups = None
+    if model == 'SLM':
+        sim = SLM_Sim(no_of_items=COND_ITEMS, no_of_persons=COND_PERSONS, seed=SIM_SEED)
+        kw = {}
+    elif model == 'PCM':
+        sim = PCM_Sim(no_of_items=COND_ITEMS, no_of_persons=COND_PERSONS,
+                      max_score_vector=[2, 3] * (COND_ITEMS // 2), seed=SIM_SEED)
+        kw = {'max_score_vector': [2, 3] * (COND_ITEMS // 2)}
+    else:
+        sim = RSM_Sim(no_of_items=COND_ITEMS, no_of_persons=COND_PERSONS, max_score=MAX_SCORE, seed=SIM_SEED)
+        kw = {'max_score': MAX_SCORE}
+    resp = sim.responses
+    groups = pd.Series(np.where(np.arange(len(resp)) % 2 == 0, 'A', 'B'), index=resp.index)
+    m = getattr(rp, model)(resp, exogenous=pd.DataFrame({'G': groups}), **kw)
+    m.calibrate(estimation='cml')
+    out = [('items', m.items)]
+    if model == 'PCM':
+        out.append(('thresholds_uncentred', m.thresholds_uncentred))
+    if model == 'RSM':
+        out.append(('thresholds', m.thresholds))
+    out.append(('log_likelihood', m.convergence['log_likelihood']))
+    m.std_errors()
+    out.append(('item_se_sandwich', m.item_se))
+    m.std_errors(se_method='hessian')
+    out.append(('item_se_hessian', m.item_se))
+    m.std_errors()
+    m.fit_statistics(conditional=True, conditional_samples=50, bootstrap_samples=20, seed=SIM_SEED)
+    out += [('item_infit_ms', m.item_infit_ms), ('item_outfit_ms', m.item_outfit_ms),
+            ('item_infit_zstd', m.item_infit_zstd), ('person_infit_ms', m.person_infit_ms),
+            ('item_restscore_table', m.item_restscore_table),
+            ('person_conditional_p', m.person_conditional_p),
+            ('item_fit_bootstrap', m.item_fit_bootstrap),
+            ('q3_bootstrap', m.q3_bootstrap),
+            ('residual_contrast_bootstrap', m.residual_contrast_bootstrap)]
+    m.res_corr_analysis()
+    out.append(('q3_star_max', m.q3_star_max))
+    m.global_fit(method='andersen-lr', split='exogenous', covariate='G')
+    out.append(('andersen_lr', [m.global_fit_summary['statistic'], m.global_fit_summary['df'],
+                                m.global_fit_summary['p-value']]))
+    m.global_fit(method='wald', split='exogenous', covariate='G')
+    out.append(('wald', [m.global_fit_summary['statistic'], m.global_fit_summary['p-value']]))
+    m.global_fit(method='martin-lof')
+    out.append(('martin_lof', [m.global_fit_summary['statistic'], m.global_fit_summary['df'],
+                               m.global_fit_summary['p-value']]))
+    m.global_fit(method='martin-lof', p_method='monte-carlo', no_of_samples=20, seed=SIM_SEED)
+    out.append(('martin_lof_mc', [m.global_fit_summary['p-value']]))
+    m.dif_test('G', reference='A', seed=SIM_SEED, plot=False)
+    out += [('dif_table', m.dif_table), ('dif_omnibus', m.dif_omnibus_table)]
+    anchors = m.items.iloc[:3] + 0.5 + np.array([0.1, -0.1, 0.05])
+    m.calibrate_anchor(anchors, selection_method='none', plot=False)
+    out += [('anchor_items_fixed', m.anchor_items), ('anchor_item_se_fixed', m.anchor_cml.item_se)]
+    if model == 'RSM':  # the RSM-vs-PCM comparison (PCM's mixed maximum scores rule it out there)
+        m.model_selection(seed=SIM_SEED)
+        out.append(('model_selection_aic', m.model_comparison_rsm_pcm_aic_summary))
+        m.model_selection(test='LR', seed=SIM_SEED)
+        out.append(('model_selection_lr', m.model_comparison_rsm_pcm_lr_summary))
+    return out
+
+
+def _cond_build_mfrm():
+    """MFRM conditional fit (virtual items) and conditional model selection."""
+    sim = MFRM_Sim_Bivector(no_of_items=N_ITEMS, no_of_persons=N_PERSONS, no_of_facet_elements=N_RATERS,
+                            max_score=MAX_SCORE, seed=SIM_SEED)
+    m = rp.MFRM(sim.responses, max_score=MAX_SCORE, validate=False)
+    m.calibrate(model='bivector')
+    m.fit_statistics(model='bivector', se=False, conditional=True, conditional_samples=50,
+                     bootstrap_samples=20, seed=SIM_SEED)
+    out = [('item_infit_ms', m.item_infit_ms_bivector),
+           ('item_restscore_table', m.item_restscore_table_bivector),
+           ('rater_restscore_table', m.rater_restscore_table_bivector),
+           ('person_conditional_p', m.person_conditional_p_bivector),
+           ('item_fit_bootstrap', m.item_fit_bootstrap_bivector),
+           ('rater_fit_bootstrap', m.rater_fit_bootstrap_bivector),
+           ('q3_bootstrap', m.q3_bootstrap_bivector),
+           ('residual_contrast_bootstrap', m.residual_contrast_bootstrap_bivector)]
+    m.model_selection(seed=SIM_SEED)
+    out.append(('model_selection_aic', m.model_comparison_mfrm_aic_summary))
+    return out
+
+
+def run_conditional(generate=False, verbose=False):
+    section('Conditional methods (CML, conditional fit and tests)')
+    builds = [(mod, lambda mod=mod: _cond_build(mod)) for mod in ('SLM', 'PCM', 'RSM')]
+    builds.append(('MFRM', _cond_build_mfrm))
+    for label, build in builds:
+        try:
+            outputs = build()
+        except Exception:
+            check(f'[conditional {label}] build', False, traceback.format_exc())
+            continue
+        base = os.path.join(FIXTURE_DIR, 'conditional', label.lower())
+        if generate:
+            os.makedirs(base, exist_ok=True)
+        _cond_save_or_check(f'conditional {label}', outputs, base, generate, verbose)
+        if generate:
+            print(f'  Fixtures saved → regression_data/conditional/{label.lower()}/')
+
+
 RUNNERS = {
     'slm':      run_slm,
     'pcm':      run_pcm,
     'rsm':      run_rsm,
     'mfrm':     run_mfrm,
     'bivector': run_bivector,
+    'conditional': run_conditional,
 }
 
 
