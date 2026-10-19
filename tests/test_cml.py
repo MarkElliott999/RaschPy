@@ -753,3 +753,29 @@ def test_targeting(name):
     st = m.targeting_score_table
     assert st["Model proportion"].sum() == pytest.approx(1) and st["WLE"].is_monotonic_increasing
     assert len(m.targeting_items) == len(m.item_names)
+
+
+@pytest.mark.parametrize("name", ["SLM", "PCM", "RSM"])
+def test_r1c(name):
+    m = _anchor_model(name, seed=14)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m.fit_statistics(conditional=True, conditional_samples=10, q1_groups=4)
+    t = m.item_q1_r1c
+    I, G = len(m.item_names), 4
+    assert t.loc["item scores", "Groups"] == G and t.loc["item scores", "Estimates"] == "CML"
+    # item scores: each group's deviations sum to zero over items (its totals are fixed), and the
+    # estimated item parameters use I - 1 more: df = (G - 1)(I - 1)
+    assert t.loc["item scores", "df"] == (G - 1) * (I - 1)
+    assert 0 <= t.loc["item scores", "p"] <= 1
+    assert ("thresholds" in t.index) == (name != "SLM")
+    # with the default estimates, one Newton step reaches (nearly) the CML statistic
+    m2 = _anchor_model(name, seed=14)
+    m2.calibrate(estimation="cp-full-rcl" if name == "RSM" else "pair")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m2.fit_statistics(conditional=True, conditional_samples=10, q1_groups=4)
+    assert m2.item_q1_r1c.loc["item scores", "Estimates"] != "CML"
+    assert m2.item_q1_r1c.loc["item scores", "Statistic"] == pytest.approx(
+        t.loc["item scores", "Statistic"], rel=0.05
+    )

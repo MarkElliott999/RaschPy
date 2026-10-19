@@ -2724,6 +2724,7 @@ class Rasch:
         # conditional item chi-square (Q1) on ability groups (or supplied groups)
         self._q1_labels = self._q1_group_labels(mom["V"], q1_groups)
         self._set_q1_tables(X, mom["E"], mom["V"], self._q1_labels, names)
+        self.item_q1_r1c = self._r1c_test(X, names, self._q1_labels)
         # conditional person fit: probability of a pattern no more likely than the person's, given total
         pv = _esf.person_pattern_pvalues(
             X, self._cml_threshold_list(names), samples=samples, rng=seed
@@ -3307,6 +3308,72 @@ class Rasch:
         if filename is not None:
             graph.savefig(f"{filename}.{file_format}", dpi=dpi)
         return graph
+
+    def _r1c_test(self, X, names, labels):
+        """
+        Glas's (1988) R1c: a global test over all items of observed - expected deviations given each
+        person's total and items, stacked over the groups (labels; -1 = left out), with their covariance
+        corrected for the estimation of the item parameters: with V_g each group's conditional
+        covariance of the threshold-level indicators (responses at or above each category; minus the
+        Hessian of the conditional log-likelihood of its persons), V their block diagonal, U them stacked
+        and A the identification basis, W = V - U A (A' I A)^-1 A' U' with I the sum of the V_g; the
+        statistic is d' W^+ d with df = rank(W). Two levels: 'item scores' (d summed over each item's
+        categories, the deviations of the conditional item chi-square Q1) and, for polytomous items,
+        'thresholds' (Glas's category-level R1c). The correction assumes CML estimates; with others, the
+        deviations are taken after one Newton step of the conditional likelihood from them. Returns a
+        DataFrame (rows: level; columns: Statistic, df, p, Groups, Estimates).
+        """
+        from raschpy import _esf, _rcl
+
+        thr = self._cml_threshold_list(names)
+        Ks = [len(t) for t in thr]
+        b = np.concatenate(thr).astype(float)
+        A = (
+            self._cml_basis()[0]
+            if hasattr(self, "_cml_basis")
+            else _rcl.zero_sum_basis(len(b))
+        )
+        cml = getattr(self, "estimation", None) == "cml"
+        if not cml:
+            b = _esf.one_step_loglik(X, A, b, Ks)[1]
+        off = np.concatenate([[0], np.cumsum(Ks)])
+        thr_b = [b[off[i] : off[i + 1]] for i in range(len(Ks))]
+        G = int(labels.max()) + 1
+        S = _esf.person_scores(X, thr_b)  # P(X >= k | total) - 1[x >= k], per person
+        d, Vs = [], []
+        for g in range(G):
+            sel = labels == g
+            d.append(-S[sel].sum(axis=0))
+            Vs.append(-_esf.cond_loglik(X[sel], thr_b, hessian=True)[2])
+        d = np.concatenate(d)
+        p_ = len(b)
+        V = np.zeros((G * p_, G * p_))
+        for g, Vg in enumerate(Vs):
+            V[g * p_ : (g + 1) * p_, g * p_ : (g + 1) * p_] = Vg
+        U = np.vstack(Vs)
+        M = A @ np.linalg.solve(A.T @ sum(Vs) @ A, A.T)
+        W = V - U @ M @ U.T
+
+        def statistic(dv, Wm):
+            Wm = (Wm + Wm.T) / 2
+            ev, vec = np.linalg.eigh(Wm)
+            keep = ev > 1e-9 * max(ev.max(), 1e-300)
+            z = vec[:, keep].T @ dv
+            st, df = float(np.sum(z**2 / ev[keep])), int(keep.sum())
+            return st, df, float(chi2_dist.sf(st, df)) if df > 0 else np.nan
+
+        L1 = np.zeros((len(Ks), p_))
+        for i in range(len(Ks)):
+            L1[i, off[i] : off[i + 1]] = 1.0
+        L = np.kron(np.eye(G), L1)
+        rows = {"item scores": statistic(L @ d, L @ W @ L.T)}
+        if max(Ks) > 1:
+            rows["thresholds"] = statistic(d, W)
+        tab = pd.DataFrame(rows, index=["Statistic", "df", "p"]).T
+        tab["df"] = tab["df"].astype(int)
+        tab["Groups"] = G
+        tab["Estimates"] = "CML" if cml else "one Newton step from the estimates"
+        return tab
 
     def _set_q1_tables(self, X, E, V, labels, names):
         """item_q1_table (Q1, df, p, p (BH)) and item_q1_groups (per item and group: persons, observed and

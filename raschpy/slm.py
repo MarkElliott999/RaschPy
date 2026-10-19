@@ -1876,6 +1876,13 @@ class SLM(Rasch):
             from 2 to 10, each of at least 30 persons; an int sets the
             number of groups; labels per person (a Series indexed by
             person, or an array in responses order) supply the groups.
+            The same groups give item_q1_r1c, Glas's R1c: one global test of
+            all items' deviations with their covariance corrected for the
+            estimation of the item parameters (rows 'item scores' and, for
+            polytomous items, 'thresholds', Glas's category-level form; in
+            null simulations the item-score row held 0.027-0.087 at 0.05 and
+            the threshold row was liberal, 0.08-0.14, in sparse categories,
+            so use the item-score row).
 
         Attributes set
         --------------

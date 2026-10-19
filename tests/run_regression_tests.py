@@ -1107,7 +1107,8 @@ def _cond_build(model):
             ('item_fit_bootstrap', m.item_fit_bootstrap),
             ('q3_bootstrap', m.q3_bootstrap),
             ('residual_contrast_bootstrap', m.residual_contrast_bootstrap),
-            ('item_q1_table', m.item_q1_table), ('item_q1_groups', m.item_q1_groups)]
+            ('item_q1_table', m.item_q1_table), ('item_q1_groups', m.item_q1_groups),
+            ('item_q1_r1c', m.item_q1_r1c)]
     m.res_corr_analysis()
     out.append(('q3_star_max', m.q3_star_max))
     out.append(('local_dependence_gamma', m.local_dependence_gamma().set_index(['Item', 'Paired item']).sort_index()))
