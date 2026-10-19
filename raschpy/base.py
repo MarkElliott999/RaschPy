@@ -2968,6 +2968,134 @@ class Rasch:
         )
         return tab
 
+    def targeting(self, grid=(-6.0, 6.0, 0.05)):
+        """
+        Targeting and population measurement properties of the test (all items), after Kreiner &
+        Christensen (2013, ch. 4), from the item estimates and a normal distribution of person locations
+        fitted to the observed total scores (maximising the marginal likelihood of each person's total
+        over the items they responded to, item parameters fixed).
+
+        The person estimates are weighted likelihood estimates (WLE) for each total on the full test,
+        finite for the extreme totals; bias, SEM and RMSE at each location are their exact values over
+        the distribution of the total there, not asymptotic approximations.
+
+        Parameters
+        ----------
+        grid : tuple, default (-6.0, 6.0, 0.05)
+            (from, to, step) of the locations for targeting_curves.
+
+        Returns
+        -------
+        pandas.Series
+            Also stored as targeting_summary:
+            Population mean, Population SD -- the fitted normal distribution;
+            Target -- the location of maximum test information (where the RMSE of the estimates is
+            typically smallest); Target - population mean;
+            Maximum information, Expected information (over the population), Expected / maximum
+            information;
+            Test difficulty -- the location with expected total half the maximum;
+            Expected |bias|, Expected SEM, Expected RMSE -- of the WLE, over the population;
+            rho1 = V(T) / V(R) (true-score over total-score variance); rho2 = corr(R1, R2) (two
+            independent administrations; equal to rho1 when responses are independent given the
+            location); rho3 = V(theta) / V(theta-hat); rho4 = corr(theta-hat1, theta-hat2); rho5 =
+            corr(theta, theta-hat); rho6 = P(R1 < R2 | theta1 < theta2), the probability that two
+            random persons' totals order them correctly.
+            Also set: targeting_curves (by location: test information, asymptotic SE 1 / sqrt(I),
+            bias, SEM and RMSE of the WLE, population density), targeting_score_table (by total:
+            WLE, model and observed proportions -- observed among persons who responded to every
+            item) and targeting_items (each item's target, the location of its maximum information,
+            and that information).
+        """
+        from scipy.optimize import minimize_scalar
+        from scipy.stats import norm as _norm
+        from raschpy import _esf
+
+        names = list(self.item_names)
+        thr = self._cml_threshold_list(names)
+        X = np.array(self.responses.loc[:, names], dtype=np.float64)
+        obs = ~np.isnan(X)
+        keep = obs.any(axis=1)
+        pats, inv = _esf._patterns(obs[keep])
+        tot = np.where(obs, X, 0).sum(axis=1)[keep].astype(int)
+        lgs, counts = [], []
+        for p_idx, pat in enumerate(pats):
+            lg = _esf.log_gamma([thr[k] for k in np.flatnonzero(pat)])
+            lgs.append(lg)
+            counts.append(
+                np.bincount(tot[inv == p_idx], minlength=len(lg)).astype(float)
+            )
+        mu, sigma = _esf.fit_normal_population(lgs, counts)
+        lg_full = _esf.log_gamma(thr)
+        pp = _esf.population_properties(lg_full, mu, sigma)
+        self.targeting_summary = pd.Series(
+            {
+                "Population mean": mu,
+                "Population SD": sigma,
+                "Target": pp["target"],
+                "Target - population mean": pp["target"] - mu,
+                "Maximum information": pp["max_information"],
+                "Expected information": pp["expected_information"],
+                "Expected / maximum information": pp["expected_information_ratio"],
+                "Test difficulty": pp["test_difficulty"],
+                "Expected |bias|": pp["expected_abs_bias"],
+                "Expected SEM": pp["expected_sem"],
+                "Expected RMSE": pp["expected_rmse"],
+                "rho1": pp["rho1"],
+                "rho2": pp["rho2"],
+                "rho3": pp["rho3"],
+                "rho4": pp["rho4"],
+                "rho5": pp["rho5"],
+                "rho6": pp["rho6"],
+            },
+            name="Targeting",
+        )
+        est = pp["estimates"]
+        th = np.arange(grid[0], grid[1] + grid[2] / 2, grid[2])
+        P = _esf.score_distribution(lg_full, th)
+        _, info, _ = _esf.score_moments(lg_full, th)
+        mean_est = P @ est
+        self.targeting_curves = pd.DataFrame(
+            {
+                "Information": info,
+                "Asymptotic SE": 1 / np.sqrt(info),
+                "Bias": mean_est - th,
+                "SEM": np.sqrt(np.maximum(P @ est**2 - mean_est**2, 0)),
+                "RMSE": np.sqrt((P * (est[None, :] - th[:, None]) ** 2).sum(1)),
+                "Population density": _norm.pdf(th, mu, sigma),
+            },
+            index=pd.Index(np.round(th, 10), name="Location"),
+        )
+        full = obs.all(axis=1)
+        observed = (
+            np.bincount(
+                np.where(obs, X, 0).sum(axis=1)[full].astype(int),
+                minlength=len(lg_full),
+            )
+            / full.sum()
+            if full.any()
+            else np.full(len(lg_full), np.nan)
+        )
+        self.targeting_score_table = pd.DataFrame(
+            {
+                "WLE": est,
+                "Model proportion": pp["marginal"],
+                "Observed proportion": observed,
+            },
+            index=pd.Index(np.arange(len(lg_full)), name="Total"),
+        )
+        rows = {}
+        for n, b in zip(names, thr):
+            lgi = _esf.log_gamma([b])
+            res = minimize_scalar(
+                lambda t: -_esf.score_moments(lgi, [t])[1][0],
+                bounds=(-20, 20),
+                method="bounded",
+                options=dict(xatol=1e-10),
+            )
+            rows[n] = {"Target": float(res.x), "Maximum information": float(-res.fun)}
+        self.targeting_items = pd.DataFrame(rows).T
+        return self.targeting_summary
+
     def _icc_obs_groups(self, obs_groups):
         """icc(obs_groups=): a column of self.exogenous (str), a Series indexed by person, or labels in
         responses order -> a Series of labels indexed by person."""

@@ -1111,6 +1111,9 @@ def _cond_build(model):
     m.res_corr_analysis()
     out.append(('q3_star_max', m.q3_star_max))
     out.append(('local_dependence_gamma', m.local_dependence_gamma().set_index(['Item', 'Paired item']).sort_index()))
+    m.targeting()
+    out += [('targeting_summary', m.targeting_summary), ('targeting_score_table', m.targeting_score_table),
+            ('targeting_items', m.targeting_items)]
     m.global_fit(method='andersen-lr', split='exogenous', covariate='G')
     out.append(('andersen_lr', [m.global_fit_summary['statistic'], m.global_fit_summary['df'],
                                 m.global_fit_summary['p-value']]))

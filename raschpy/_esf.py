@@ -985,6 +985,150 @@ def stratified_kendall_s(tables):
     return C, D, float(np.where(n > 1, v, 0.0).sum())
 
 
+def log_gamma(thresholds):
+    """log gamma_r, r = 0..sum K_i: the elementary symmetric functions of a set of items (thresholds as for
+    cond_loglik), by log-space convolution of the items' generating polynomials. P(R = r | theta) is
+    proportional to exp(r theta + log gamma_r)."""
+    g = np.zeros(1)
+    for b in _as_threshold_list(thresholds):
+        g = _logconv_small(g, np.concatenate([[0.0], -np.cumsum(b)]))
+    return g
+
+
+def score_distribution(lg, theta):
+    """P(R = r | theta) for log gamma lg (length m + 1) at each theta: shape (len(theta), m + 1)."""
+    theta = np.atleast_1d(np.asarray(theta, float))
+    a = theta[:, None] * np.arange(len(lg))[None, :] + np.asarray(lg)[None, :]
+    return np.exp(a - _lse(a, axis=1)[:, None])
+
+
+def score_moments(lg, theta):
+    """E(R | theta), V(R | theta) (the test information) and the third central moment of R."""
+    P = score_distribution(lg, theta)
+    r = np.arange(P.shape[1])
+    E = P @ r
+    d = r[None, :] - E[:, None]
+    return E, (P * d**2).sum(1), (P * d**3).sum(1)
+
+
+def score_wle(lg):
+    """Weighted likelihood estimates of theta for every total r = 0..m (Warm): the root of
+    r - E(R | theta) + mu3(theta) / (2 V(R | theta)) = 0, finite for the extreme totals too.
+    """
+    from scipy.optimize import brentq
+
+    def f(t, r):
+        E, V, M3 = score_moments(lg, [t])
+        return r - E[0] + M3[0] / (2 * V[0])
+
+    out = []
+    for r in range(len(lg)):
+        lo, hi = -5.0, 5.0
+        while f(lo, r) < 0:
+            lo -= 5.0
+        while f(hi, r) > 0:
+            hi += 5.0
+        out.append(brentq(f, lo, hi, args=(r,), xtol=1e-12))
+    return np.array(out)
+
+
+def fit_normal_population(lg_list, counts, start=(0.0, 1.0), nodes=81):
+    """
+    Normal latent distribution fitted to observed totals: maximise sum_p sum_r n_pr log int P_p(r | theta)
+    phi(theta; mu, sigma) d theta over mu and sigma, with each group p's log gamma (lg_list) and counts
+    (n_p, an array over its totals), the item parameters fixed; Gauss-Hermite quadrature. Returns (mu,
+    sigma).
+    """
+    from scipy.optimize import minimize
+
+    x, w = np.polynomial.hermite_e.hermegauss(nodes)
+    w = w / w.sum()
+
+    def nll(par):
+        mu, sig = par[0], np.exp(par[1])
+        th = mu + sig * x
+        tot = 0.0
+        for lg, n in zip(lg_list, counts):
+            P = score_distribution(lg, th)
+            m = P.T @ w
+            tot -= float(np.sum(n * np.log(np.maximum(m, 1e-300))))
+        return tot
+
+    res = minimize(
+        nll,
+        [start[0], np.log(start[1])],
+        method="Nelder-Mead",
+        options=dict(xatol=1e-8, fatol=1e-10, maxiter=4000),
+    )
+    return float(res.x[0]), float(np.exp(res.x[1]))
+
+
+def population_properties(lg, mu, sigma, estimates=None, grid=2000):
+    """
+    Measurement properties of a test (log gamma lg) for a normal population (mu, sigma), after Kreiner &
+    Christensen (2013, ch. 4): the target (theta of maximum test information), the maximum information,
+    the test difficulty (theta with expected score m / 2), the exact bias, SEM and RMSE of the person
+    estimates by total (estimates; default the WLEs) and their population expectations E|Bias|, E(SEM),
+    E(RMSE), the expected information E(I), and reliabilities rho1 = V(T) / V(R), rho2 = corr(R1, R2),
+    rho3 = V(theta) / V(theta-hat), rho4 = corr(theta-hat1, theta-hat2), rho5 = corr(theta, theta-hat)
+    and rho6 = P(R1 < R2 | theta1 < theta2). Expectations use an equal-probability grid of normal quantiles.
+    Returns a dict.
+    """
+    from scipy.optimize import brentq, minimize_scalar
+    from scipy.stats import norm as _norm
+
+    m = len(lg) - 1
+    est = score_wle(lg) if estimates is None else np.asarray(estimates, float)
+    th = mu + sigma * _norm.ppf(
+        (np.arange(grid) + 0.5) / grid
+    )  # equal weights 1 / grid
+    P = score_distribution(lg, th)
+    E, V, _ = score_moments(lg, th)
+    tgt = minimize_scalar(
+        lambda t: -score_moments(lg, [t])[1][0],
+        bounds=(-15, 15),
+        method="bounded",
+        options=dict(xatol=1e-10),
+    ).x
+    info_max = float(score_moments(lg, [tgt])[1][0])
+    diff = brentq(lambda t: score_moments(lg, [t])[0][0] - m / 2, -30, 30, xtol=1e-12)
+    mean_est = P @ est
+    bias = mean_est - th
+    sem = np.sqrt(np.maximum(P @ est**2 - mean_est**2, 0))
+    rmse = np.sqrt((P * (est[None, :] - th[:, None]) ** 2).sum(1))
+    pr = P.mean(0)  # marginal score distribution
+    r = np.arange(m + 1)
+    var_R = pr @ r**2 - (pr @ r) ** 2
+    var_T = np.mean(E**2) - np.mean(E) ** 2
+    joint = P.T @ P / grid  # P(R1 = r1, R2 = r2), conditionally independent given theta
+    cov_R = r @ joint @ r - (pr @ r) ** 2
+    var_est = pr @ est**2 - (pr @ est) ** 2
+    cov_est = est @ joint @ est - (pr @ est) ** 2
+    cov_th_est = np.mean(th * mean_est) - np.mean(th) * np.mean(mean_est)
+    F = np.cumsum(P, axis=1)  # P(R <= r | theta)
+    below = np.hstack([np.zeros((grid, 1)), F[:, :-1]])  # P(R < r | theta)
+    Q = below @ P.T  # Q[a, b] = P(R_a < R_b | theta_a, theta_b)
+    rho6 = 2 * np.triu(Q, 1).sum() / grid**2
+    return dict(
+        target=float(tgt),
+        max_information=info_max,
+        test_difficulty=float(diff),
+        expected_information=float(np.mean(V)),
+        expected_information_ratio=float(np.mean(V) / info_max),
+        expected_abs_bias=float(np.mean(np.abs(bias))),
+        expected_sem=float(np.mean(sem)),
+        expected_rmse=float(np.mean(rmse)),
+        rho1=float(var_T / var_R),
+        rho2=float(cov_R / var_R),
+        rho3=float(sigma**2 / var_est),
+        rho4=float(cov_est / var_est),
+        rho5=float(cov_th_est / (sigma * np.sqrt(var_est))),
+        rho6=float(rho6),
+        estimates=est,
+        marginal=pr,
+    )
+
+
 def person_pattern_pvalues(X, thresholds, samples=1000, rng=None, prepared=None):
     """
     Conditional person fit: for each person, the probability, given their total over the items they

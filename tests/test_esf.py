@@ -297,3 +297,34 @@ def test_partial_gamma_and_stratified_kendall():
     np.add.at(Tt, (st, x, y), 1)
     assert _esf.stratified_kendall_s(Tt)[2] == pytest.approx(np.var(vals), rel=1e-12)
     assert np.mean(vals) == pytest.approx(0, abs=1e-12)
+
+
+def test_targeting_core_reproduces_kreiner_christensen_example():
+    # Rasch Models in Health (2013), ch. 4, Table 4.1 and section 4.6: the DE subscale's score
+    # parameters gamma_r, its WLEs, and the population results for E(theta) = -0.516, SD = 0.855
+    g = np.array([1.00, 15.70, 83.96, 276.58, 690.84, 1344.82, 2088.62, 2635.91, 2582.94,
+                  1921.42, 1130.50, 510.38, 177.95, 46.78, 8.56, 1.00])
+    wle_book = np.array([-3.512, -2.064, -1.437, -1.066, -0.787, -0.545, -0.316, -0.084, 0.156,
+                         0.404, 0.655, 0.911, 1.185, 1.503, 1.933, 2.803])
+    lg = np.log(g)
+    wle = _esf.score_wle(lg)
+    # gamma_r is printed to 2 decimals, which moves the top totals' estimates slightly
+    np.testing.assert_allclose(wle[:14], wle_book[:14], atol=0.005)
+    pp = _esf.population_properties(lg, -0.516, 0.855)
+    assert pp["target"] == pytest.approx(-0.14, abs=0.005)
+    assert pp["max_information"] == pytest.approx(4.05, abs=0.01)
+    assert pp["expected_information"] == pytest.approx(3.26, abs=0.01)
+    assert pp["expected_information_ratio"] > 0.8
+    assert pp["expected_abs_bias"] == pytest.approx(0.011, abs=0.002)
+    assert pp["expected_rmse"] == pytest.approx(0.592, abs=0.006)
+    assert pp["rho1"] == pytest.approx(0.71, abs=0.005)
+    assert pp["rho2"] == pytest.approx(pp["rho1"], abs=1e-9)  # independent given theta
+    assert pp["rho6"] == pytest.approx(0.77, abs=0.01)
+    # the score distribution and its moments
+    E, V, _ = _esf.score_moments(lg, [0.3])
+    P = _esf.score_distribution(lg, [0.3])[0]
+    r = np.arange(16)
+    assert E[0] == pytest.approx(P @ r) and V[0] == pytest.approx(P @ (r - E[0]) ** 2)
+    np.testing.assert_allclose(_esf.log_gamma([np.array([0.2]), np.array([-0.5, 0.4])]),
+                               np.log([1, np.exp(-0.2) + np.exp(0.5), np.exp(-0.2 + 0.5) + np.exp(0.1),
+                                       np.exp(-0.2 + 0.1)]))

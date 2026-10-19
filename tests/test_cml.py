@@ -737,3 +737,19 @@ def test_local_dependence_gamma():
                                tab.set_index(["Item", "Paired item"])["Gamma"].sort_index())
     with pytest.raises(ValueError, match="p_method must be"):
         m.local_dependence_gamma(p_method="exact")
+
+
+@pytest.mark.parametrize("name", ["SLM", "PCM", "RSM"])
+def test_targeting(name):
+    m = _anchor_model(name, seed=13)
+    out = m.targeting()
+    assert abs(out["Population mean"]) < 0.4 and 0.8 < out["Population SD"] < 2.5
+    assert 0 < out["Expected / maximum information"] <= 1
+    for k in ("rho1", "rho3", "rho4", "rho5", "rho6"):
+        assert 0 < out[k] < 1
+    assert out["rho2"] == pytest.approx(out["rho1"], abs=1e-9)
+    curves = m.targeting_curves
+    assert curves["Information"].idxmax() == pytest.approx(out["Target"], abs=0.05)
+    st = m.targeting_score_table
+    assert st["Model proportion"].sum() == pytest.approx(1) and st["WLE"].is_monotonic_increasing
+    assert len(m.targeting_items) == len(m.item_names)
