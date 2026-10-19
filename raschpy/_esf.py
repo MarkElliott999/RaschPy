@@ -610,7 +610,9 @@ def one_step_loglik(X, A, b0, Ks, prepared=None):
         prepared = prepare(X, Ks)
     ll0, g, H = cond_loglik(X, unstack(b0), hessian=True, prepared=prepared)
     info = -(A.T @ H @ A)
-    step = A @ (np.linalg.pinv((info + info.T) / 2, rcond=1e-10, hermitian=True) @ (A.T @ g))
+    step = A @ (
+        np.linalg.pinv((info + info.T) / 2, rcond=1e-10, hermitian=True) @ (A.T @ g)
+    )
     for _ in range(30):
         ll1 = cond_loglik(X, unstack(b0 + step), prepared=prepared)[0]
         if np.isfinite(ll1) and ll1 >= ll0:
@@ -621,7 +623,8 @@ def one_step_loglik(X, A, b0, Ks, prepared=None):
 
 def cml_covariance(X, A, b, Ks, hessian=None, sandwich=False):
     """Covariance of the CML thresholds b = A @ theta: A (-A' H A)^{-1} A', H the Hessian of cond_loglik at b
-    (computed if not given); with sandwich=True, A B^{-1} M B^{-1} A' with (B, M) from cml_sandwich()."""
+    (computed if not given); with sandwich=True, A B^{-1} M B^{-1} A' with (B, M) from cml_sandwich().
+    """
     if sandwich:
         info, meat = cml_sandwich(X, A, b, Ks, hessian=hessian)
         Binv = np.linalg.inv(info)
@@ -888,6 +891,98 @@ def gk_gamma(table):
     psi = 2 * (D * pc - C * pd_) / (C + D) ** 2
     sigma2 = (x * psi**2).sum() - (x * psi).sum() ** 2
     return (C - D) / (C + D), float(np.sqrt(max(sigma2, 0.0)))
+
+
+def partial_gk_gamma(tables):
+    """
+    Partial Goodman and Kruskal's gamma over strata (tables of shape (strata, rows, columns), ordered rows
+    and columns): (C - D) / (C + D) with C and D the concordant and discordant pairs within strata, summed
+    over strata, and its asymptotic standard error with the strata sizes fixed (Davis 1967): the delta
+    method with each cell's derivative 2 (D c - C d) / (C + D)^2 (c, d: the cell's concordant and discordant
+    counts in its stratum), variance sum over strata of sum x psi^2 - (sum x psi)^2 / n. With one stratum it
+    equals gk_gamma.
+    """
+    x = np.asarray(tables, float)
+    if x.ndim == 2:
+        x = x[None]
+
+    def below_left(a):
+        c = a.cumsum(1).cumsum(2)
+        out = np.zeros_like(a)
+        out[:, 1:, 1:] = c[:, :-1, :-1]
+        return out
+
+    ll = below_left(x)
+    gg = below_left(x[:, ::-1, ::-1])[:, ::-1, ::-1]
+    lg = below_left(x[:, :, ::-1])[:, :, ::-1]
+    gl = below_left(x[:, ::-1, :])[:, ::-1, :]
+    pc, pd_ = ll + gg, lg + gl
+    C, D = (pc * x).sum() / 2, (pd_ * x).sum() / 2
+    if C + D == 0:
+        return np.nan, np.nan
+    psi = 2 * (D * pc - C * pd_) / (C + D) ** 2
+    n = x.sum(axis=(1, 2))
+    keep = n > 0
+    sx = (x * psi).sum(axis=(1, 2))
+    sigma2 = (x * psi**2).sum() - (sx[keep] ** 2 / n[keep]).sum()
+    return (C - D) / (C + D), float(np.sqrt(max(sigma2, 0.0)))
+
+
+def partial_gk_gamma_batch(tables):
+    """Partial gamma (as partial_gk_gamma, without the standard error) for a batch of stratified tables,
+    shape (batch, strata, rows, columns); NaN where no pair is concordant or discordant.
+    """
+    x = np.asarray(tables, float)
+
+    def below_left(a):
+        c = a.cumsum(2).cumsum(3)
+        out = np.zeros_like(a)
+        out[:, :, 1:, 1:] = c[:, :, :-1, :-1]
+        return out
+
+    C = (below_left(x) * x).sum(axis=(1, 2, 3))  # each concordant pair counted once
+    D = (below_left(x[:, :, :, ::-1]) * x[:, :, :, ::-1]).sum(axis=(1, 2, 3))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.where(C + D > 0, (C - D) / (C + D), np.nan)
+
+
+def stratified_kendall_s(tables):
+    """
+    For stratified tables (strata, rows, columns; ordered rows and columns): S = C - D, the concordant
+    minus discordant pairs of persons within strata summed over strata, and its exact variance under
+    random permutation of the row variable within each stratum (Kendall's variance of S with ties in
+    both variables, summed over the independent strata). Returns (C, D, variance).
+    """
+    x = np.asarray(tables, float)
+    if x.ndim == 2:
+        x = x[None]
+
+    def below_left(a):
+        c = a.cumsum(1).cumsum(2)
+        out = np.zeros_like(a)
+        out[:, 1:, 1:] = c[:, :-1, :-1]
+        return out
+
+    C = float((below_left(x) * x).sum())
+    D = float((below_left(x[:, :, ::-1]) * x[:, :, ::-1]).sum())
+    n, t, u = x.sum(axis=(1, 2)), x.sum(axis=2), x.sum(axis=1)
+
+    def f(m):
+        return m * (m - 1) * (2 * m + 5)
+
+    v = (f(n) - f(t).sum(1) - f(u).sum(1)) / 18
+    with np.errstate(invalid="ignore", divide="ignore"):
+        v += np.where(
+            n > 2,
+            (t * (t - 1) * (t - 2)).sum(1)
+            * (u * (u - 1) * (u - 2)).sum(1)
+            / (9 * n * (n - 1) * (n - 2)),
+            0.0,
+        )
+        v += np.where(
+            n > 1, (t * (t - 1)).sum(1) * (u * (u - 1)).sum(1) / (2 * n * (n - 1)), 0.0
+        )
+    return C, D, float(np.where(n > 1, v, 0.0).sum())
 
 
 def person_pattern_pvalues(X, thresholds, samples=1000, rng=None, prepared=None):

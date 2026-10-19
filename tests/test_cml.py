@@ -711,3 +711,29 @@ def test_icc_cond_obs(name):
     assert [t.get_text() for t in fig.axes[0].get_legend().get_texts()][:2] == ["a", "b"]
     two = m.icc(list(m.item_names[:2]), obs=True, cond_obs=True, obs_groups=groups)  # groups ignored
     assert "a" not in [t.get_text() for t in two.axes[0].get_legend().get_texts()]
+
+
+def test_local_dependence_gamma():
+    from raschpy.simulation import SLM_Sim
+
+    s = SLM_Sim(no_of_items=8, no_of_persons=800, seed=3)
+    r = s.responses.copy()
+    c = np.random.default_rng(0).random(800) < 0.35
+    r.loc[c, "Item_5"] = r.loc[c, "Item_4"]
+    m = SLM(r)
+    tab = m.local_dependence_gamma()
+    assert len(tab) == 8 * 7 and m.local_dependence_gamma_info["p_method"] == "permutation"
+    top = tab.iloc[:2]
+    assert set(top["Item"]) == {"Item_4", "Item_5"} and top["Flagged"].all()
+    # only the planted pair is flagged positive (a strong pair can push one of its items negative
+    # against others: its rest score includes the copy)
+    assert not (tab.iloc[2:]["Flagged"] & (tab.iloc[2:]["Gamma"] > 0)).any()
+    mc1 = m.local_dependence_gamma(p_method="monte-carlo", samples=50, seed=4)
+    mc2 = m.local_dependence_gamma(p_method="monte-carlo", samples=50, seed=4)
+    pd.testing.assert_frame_equal(mc1, mc2)
+    assert mc1["p"].min() == pytest.approx(1 / 51)
+    asy = m.local_dependence_gamma(p_method="asymptotic")
+    np.testing.assert_allclose(asy.set_index(["Item", "Paired item"])["Gamma"].sort_index(),
+                               tab.set_index(["Item", "Paired item"])["Gamma"].sort_index())
+    with pytest.raises(ValueError, match="p_method must be"):
+        m.local_dependence_gamma(p_method="exact")

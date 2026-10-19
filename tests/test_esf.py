@@ -261,3 +261,39 @@ def test_westfall_young_step_down():
 def test_hdi():
     lo, hi = _esf.hdi([5, 1, 2, 3, 4, 100], width=0.8)  # shortest interval holding 5 of 6 values
     assert (lo, hi) == (1, 5)
+
+
+def test_partial_gamma_and_stratified_kendall():
+    rng = np.random.default_rng(0)
+    T = rng.integers(0, 20, (4, 3))
+    np.testing.assert_allclose(_esf.partial_gk_gamma(T), _esf.gk_gamma(T))
+    # partial gamma = brute-force pair counts within strata
+    S = rng.integers(0, 5, (3, 3, 4)).astype(float)
+    C = D = 0
+    for s in S:
+        cells = [(i, j) for i in range(3) for j in range(4) for _ in range(int(s[i, j]))]
+        for a in range(len(cells)):
+            for b in range(a + 1, len(cells)):
+                di, dj = cells[a][0] - cells[b][0], cells[a][1] - cells[b][1]
+                C += di * dj > 0
+                D += di * dj < 0
+    assert _esf.partial_gk_gamma(S)[0] == pytest.approx((C - D) / (C + D), rel=1e-12)
+    assert _esf.partial_gk_gamma_batch(S[None])[0] == pytest.approx((C - D) / (C + D), rel=1e-12)
+    c, d, var = _esf.stratified_kendall_s(S)
+    assert (c, d) == (C, D)
+    # exact permutation variance of S = C - D against all within-stratum permutations (small strata)
+    x = np.array([0, 1, 1, 2, 0, 2, 1]); y = np.array([0, 0, 1, 1, 2, 1, 0]); st = np.array([0, 0, 0, 0, 1, 1, 1])
+    vals = []
+    for p0 in itertools.permutations(range(4)):
+        for p1 in itertools.permutations(range(3)):
+            xx = x.copy()
+            xx[:4] = x[:4][list(p0)]
+            xx[4:] = x[4:][list(p1)]
+            Tt = np.zeros((2, 3, 3))
+            np.add.at(Tt, (st, xx, y), 1)
+            cc, dd, _ = _esf.stratified_kendall_s(Tt)
+            vals.append(cc - dd)
+    Tt = np.zeros((2, 3, 3))
+    np.add.at(Tt, (st, x, y), 1)
+    assert _esf.stratified_kendall_s(Tt)[2] == pytest.approx(np.var(vals), rel=1e-12)
+    assert np.mean(vals) == pytest.approx(0, abs=1e-12)

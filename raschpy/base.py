@@ -2827,6 +2827,147 @@ class Rasch:
         self._q1_group_names = list(uniques)
         return np.where(contributes, codes, -1)
 
+    def local_dependence_gamma(
+        self, alpha=0.05, p_method="permutation", samples=1000, seed=None
+    ):
+        """
+        Partial gamma tests of local dependence for every ordered item pair (Kreiner & Christensen, 2004):
+        Goodman and Kruskal's gamma between the scores on items i and j, counting concordant and
+        discordant pairs of persons only within strata of i's rest score (the person's total over the other
+        items they responded to, and which items those were), pooled over the strata (partial gamma).
+
+        Under the Rasch model the other items carry information about a person's location only through
+        their total, so given i's rest score item i is independent of every other item, whatever the
+        distribution of person locations: the partial gamma is zero in expectation. The test needs no
+        parameter estimates. A clearly positive gamma means i and j are more alike than the rest score
+        explains (local dependence: response dependence, redundancy, a shared secondary dimension). Each
+        pair is tested in both directions (conditioning on i's rest score, then on j's). A strongly
+        dependent pair can also give one of its items negative gammas with other items (its rest score
+        contains the dependent partner), so read positive flags first and recheck after resolving the
+        strongest pair.
+
+        Parameters
+        ----------
+        alpha : float, default 0.05
+            Significance level for the Flagged column (on the BH-adjusted p-values).
+        p_method : {'permutation', 'monte-carlo', 'asymptotic'}, default 'permutation'
+            Within each stratum, item i's responses are exchangeable under the model, so the test
+            refers gamma's numerator S = C - D (concordant minus discordant pairs) to its distribution
+            under permutation of item i's responses within strata. 'permutation': z = S divided by the
+            exact standard deviation of S under that permutation (Kendall's variance with ties, summed
+            over strata), normal p-value; no simulation, so p-values are not limited by a number of
+            samples. 'monte-carlo': p = (1 + #{|simulated gamma| >= |observed|}) / (1 + samples) from
+            samples within-stratum permutations (its smallest p-value, 1 / (1 + samples), limits the
+            BH-adjusted p-values when many pairs are tested). 'asymptotic': z = gamma / SE with the
+            asymptotic standard error of the partial gamma (Davis, 1967). In null simulations (10
+            items; SLM, PCM, RSM; N = 300 and 1,000; complete, two-booklet and 20% missing completely
+            at random; 300 datasets per cell) the per-pair rejection rate at 0.05 was 0.046-0.052 for
+            'permutation' (SD of z 0.99-1.01); 'asymptotic' gave 0.055-0.094 without scattered missing
+            responses (liberal at N = 300) and up to 0.32 with them (thin strata), so use it only with
+            large samples and few missingness patterns.
+        samples : int, default 1000
+            Permutations (p_method='monte-carlo').
+        seed : int or None, default None
+            Seed for the permutations (p_method='monte-carlo'); None draws fresh entropy.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Also stored as local_dependence_gamma_table: one row per ordered pair -- Item (the item
+            whose rest score is conditioned on), Paired item, Gamma, z (from p_method; for
+            'monte-carlo', the 'permutation' z), p, p (BH) (Benjamini-Hochberg over all ordered pairs),
+            Flagged -- sorted by Gamma, largest first. local_dependence_gamma_info records p_method,
+            samples and seed.
+        """
+        from raschpy import _esf
+
+        if p_method not in ("permutation", "monte-carlo", "asymptotic"):
+            raise ValueError(
+                "p_method must be 'permutation', 'monte-carlo' or 'asymptotic'."
+            )
+        rng = np.random.default_rng(seed)
+        names = list(self.item_names)
+        X = np.array(self.responses.loc[:, names], dtype=np.float64)
+        obs = ~np.isnan(X)
+        Xi = np.where(obs, X, 0).astype(int)
+        Ks = [int(k) for k in self._cml_max_scores(names)]
+        rows = []
+        chunk = 100
+        for i in range(len(names)):
+            others = np.arange(len(names)) != i
+            rest = Xi[:, others].sum(axis=1)
+            _, pattern = np.unique(obs[:, others], axis=0, return_inverse=True)
+            _, stratum = np.unique(
+                np.column_stack([pattern.ravel(), rest]), axis=0, return_inverse=True
+            )
+            stratum = stratum.ravel()
+            hit = np.flatnonzero(obs[:, i])
+            perms = None
+            if p_method == "monte-carlo":
+                # within-stratum permutations of item i's responses (rows: samples, over hit persons)
+                srt = np.argsort(stratum[hit], kind="stable")
+                perms = np.empty((samples, len(hit)), int)
+                for b in range(samples):
+                    order = np.lexsort((rng.random(len(hit)), stratum[hit][srt]))
+                    perms[b, srt] = srt[order]
+            pos = np.full(len(X), -1)
+            pos[hit] = np.arange(len(hit))
+            for j in range(len(names)):
+                if j == i:
+                    continue
+                who = np.flatnonzero(obs[:, i] & obs[:, j])
+                if not len(who):
+                    continue
+                _, s_idx = np.unique(stratum[who], return_inverse=True)
+                S = s_idx.max() + 1
+                T = np.zeros((S, Ks[i] + 1, Ks[j] + 1))
+                np.add.at(T, (s_idx, Xi[who, i], Xi[who, j]), 1.0)
+                g, se = _esf.partial_gk_gamma(T)
+                if p_method == "asymptotic":
+                    z = g / se if se and se > 0 else np.nan
+                else:
+                    C, D, var = _esf.stratified_kendall_s(T)
+                    z = (C - D) / np.sqrt(var) if var > 0 else np.nan
+                if p_method != "monte-carlo" or not np.isfinite(g):
+                    p = 2 * norm.sf(abs(z)) if np.isfinite(z) else np.nan
+                else:
+                    xi_hit = Xi[hit, i]
+                    exceed = 0
+                    for c0 in range(0, samples, chunk):
+                        pb = perms[c0 : c0 + chunk][
+                            :, pos[who]
+                        ]  # permuted source positions
+                        nb = pb.shape[0]
+                        Tb = np.zeros((nb, S, Ks[i] + 1, Ks[j] + 1))
+                        bb = np.repeat(np.arange(nb), len(who))
+                        np.add.at(
+                            Tb,
+                            (
+                                bb,
+                                np.tile(s_idx, nb),
+                                xi_hit[pb].ravel(),
+                                np.tile(Xi[who, j], nb),
+                            ),
+                            1.0,
+                        )
+                        gb = np.nan_to_num(_esf.partial_gk_gamma_batch(Tb), nan=0.0)
+                        exceed += int((np.abs(gb) >= abs(g) - 1e-12).sum())
+                    p = (1 + exceed) / (1 + samples)
+                rows.append((names[i], names[j], g, z, p))
+        tab = pd.DataFrame(rows, columns=["Item", "Paired item", "Gamma", "z", "p"])
+        tab["p (BH)"] = self._bh_correction(tab["p"].fillna(1.0)).where(
+            tab["p"].notna()
+        )
+        tab["Flagged"] = tab["p (BH)"] < alpha
+        tab = tab.sort_values("Gamma", ascending=False, ignore_index=True)
+        self.local_dependence_gamma_table = tab
+        self.local_dependence_gamma_info = dict(
+            p_method=p_method,
+            samples=samples if p_method == "monte-carlo" else None,
+            seed=seed,
+        )
+        return tab
+
     def _icc_obs_groups(self, obs_groups):
         """icc(obs_groups=): a column of self.exogenous (str), a Series indexed by person, or labels in
         responses order -> a Series of labels indexed by person."""
