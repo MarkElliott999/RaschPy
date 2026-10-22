@@ -4,6 +4,7 @@ import copy
 import warnings
 from contextlib import contextmanager
 import numpy as np
+
 import pandas as pd
 from collections import deque
 from matplotlib import pyplot as plt
@@ -24,6 +25,14 @@ except ImportError:
     PCA = None
 
 from sklearn.linear_model import HuberRegressor
+
+
+def _esf_lcw(b):
+    """_esf.log_category_weights (imported when first needed)."""
+    from raschpy import _esf
+
+    return _esf.log_category_weights(b)
+
 
 # Apply base style once at module load rather than on every plot call.
 # Individual methods can override via plt.rc_context() if needed.
@@ -183,6 +192,7 @@ def _save_table(table, filename, file_format="csv"):
         raise ValueError(f"file_format must be 'csv' or 'xlsx', not {file_format!r}.")
 
 
+COND_VAR_ZERO = 1e-10  # conditional variances below this are 0 (responses fixed by the total)
 MARTIN_LOF_SPARSE = 0.25  # share of score cells with < 5 persons above which the chi-square p is conservative
 
 
@@ -2363,6 +2373,7 @@ class Rasch:
             )[2]
         cov_b = A @ np.linalg.solve(-(A.T @ H @ A), A.T)
         items, thresholds, L = decode(fit["b"])
+        cov_b = np.nan_to_num(cov_b)  # markers (unused_categories='keep') are fixed: no variance
         se = np.sqrt(np.clip(np.einsum("ip,pq,iq->i", L, cov_b, L), 0, None))
         se[items.index.isin(fixed)] = 0.0
         self.anchor_items = items
@@ -2583,6 +2594,56 @@ class Rasch:
         result[order] = adjusted
         return pd.Series(result, index=pvalues.index)
 
+    def _cml_design(self, n_thresholds):
+        """The design A of the CML thresholds b = A @ theta (+ the unused-category markers): the fit's own
+        after unused_categories='keep', else the model's basis (RSM's, or a zero-sum basis)."""
+        from raschpy import _rcl
+
+        if getattr(self, "_cml_marked", None) is not None:
+            return self._cml_A
+        if hasattr(self, "_cml_basis"):
+            return self._cml_basis()[0]
+        return _rcl.zero_sum_basis(n_thresholds)
+
+    def _person_score_bounds(self, df):
+        """Each person's lowest and highest possible total over the items they responded to in df (from
+        _score_bounds: 0 and each item's maximum score, or after calibrate(unused_categories='keep') its
+        lowest and highest used category). Persons at either bound have extreme scores."""
+        lo, hi = self._score_bounds(list(df.columns))
+        obs = df.notna().astype(float)
+        return obs.mul(lo, axis=1).sum(axis=1), obs.mul(hi, axis=1).sum(axis=1)
+
+    def _score_bounds(self, items):
+        """(lowest, highest) possible score of each item (pandas series): 0 and its maximum score, or
+        after calibrate(unused_categories='keep') its lowest and highest used category."""
+        hi = self._cml_max_scores(list(items))
+        lo = np.zeros(len(hi))
+        used = (
+            getattr(self, "_cml_used", None)
+            if getattr(self, "_cml_marked", None) is not None
+            else None
+        )
+        if used:
+            for j, n in enumerate(items):
+                u = used.get(n)
+                if u is not None:
+                    lo[j] = float(np.argmax(u))
+                    hi[j] = float(len(u) - 1 - np.argmax(u[::-1]))
+        return pd.Series(lo, index=list(items)), pd.Series(hi, index=list(items))
+
+    @staticmethod
+    def _check_unused_categories(unused_categories, estimation):
+        """calibrate(unused_categories=...) (PCM, RSM): 'drop' or 'keep', 'keep' with CML only."""
+        if unused_categories not in ("drop", "keep"):
+            raise ValueError(
+                f"unused_categories must be 'drop' or 'keep', got {unused_categories!r}."
+            )
+        if unused_categories == "keep" and estimation != "cml":
+            raise ValueError(
+                "unused_categories='keep' applies to estimation='cml' only (the other "
+                "estimators keep every item, their smoothing giving finite estimates)."
+            )
+
     def _calibration_kw(self, **passed):
         """
         calibrate() arguments for refits of the object's data (bootstrap
@@ -2664,7 +2725,8 @@ class Rasch:
         pos = self.responses.index.get_indexer(idx)
         frame = lambda a: pd.DataFrame(a[pos], index=idx, columns=names)  # noqa: E731
         E, V, M4 = frame(mom["E"]), frame(mom["V"]), frame(mom["M4"])
-        V = V.where(V > 0)
+        # a response determined by the total has variance 0; rounding can leave ~1e-29
+        V = V.where(V > COND_VAR_ZERO)
         resid = self.responses.loc[idx, names] - E
         resid = resid.where(V.notna())
         std = resid / V**0.5
@@ -2811,7 +2873,10 @@ class Rasch:
         the person estimates by default (q1_groups=None or an int G), else the supplied labels (a Series
         indexed by person, or an array in responses order). Persons without any response with a
         conditional variance (extreme totals, single responses) are left out."""
-        contributes = (np.isfinite(V) & (V > 0)).any(axis=1)
+        contributes = (np.isfinite(V) & (V > COND_VAR_ZERO)).any(axis=1)
+        lo, hi = self._person_score_bounds(self.responses.loc[:, list(self.item_names)])
+        tot = self.responses.loc[:, list(self.item_names)].sum(axis=1)
+        contributes &= ((tot > lo) & (tot < hi)).to_numpy()  # extreme: no variance given the total
         if q1_groups is None or np.isscalar(q1_groups):
             loc = self.persons.reindex(self.responses.index).to_numpy(float)
             loc = np.where(contributes, loc, np.nan)
@@ -3052,17 +3117,19 @@ class Rasch:
             name="Targeting",
         )
         est = pp["estimates"]
+        est = np.where(np.isfinite(lg_full), est, np.nan)  # totals that cannot occur: no estimate
         th = np.arange(grid[0], grid[1] + grid[2] / 2, grid[2])
         P = _esf.score_distribution(lg_full, th)
         _, info, _ = _esf.score_moments(lg_full, th)
-        mean_est = P @ est
+        est_c = np.nan_to_num(est)  # probability 0 where NaN
+        mean_est = P @ est_c
         self.targeting_curves = pd.DataFrame(
             {
                 "Information": info,
                 "Asymptotic SE": 1 / np.sqrt(info),
                 "Bias": mean_est - th,
-                "SEM": np.sqrt(np.maximum(P @ est**2 - mean_est**2, 0)),
-                "RMSE": np.sqrt((P * (est[None, :] - th[:, None]) ** 2).sum(1)),
+                "SEM": np.sqrt(np.maximum(P @ est_c**2 - mean_est**2, 0)),
+                "RMSE": np.sqrt((P * (est_c[None, :] - th[:, None]) ** 2).sum(1)),
                 "Population density": _norm.pdf(th, mu, sigma),
             },
             index=pd.Index(np.round(th, 10), name="Location"),
@@ -3655,11 +3722,7 @@ class Rasch:
         thr = self._cml_threshold_list(names)
         Ks = [len(t) for t in thr]
         b = np.concatenate(thr).astype(float)
-        A = (
-            self._cml_basis()[0]
-            if hasattr(self, "_cml_basis")
-            else _rcl.zero_sum_basis(len(b))
-        )
+        A = self._cml_design(len(b))
         cml = getattr(self, "estimation", None) == "cml"
         if not cml:
             b = _esf.one_step_loglik(X, A, b, Ks)[1]
@@ -3929,20 +3992,27 @@ class Rasch:
             self._cml_hessian = H
         return H
 
-    def _cml_drop_items(self, Ks, per_item_categories=True):
+    def _cml_drop_items(self, Ks, per_item_categories=True, keep_unused=False):
         """
         Before a CML fit (SLM, PCM, RSM): remove the items whose CML estimates
         do not exist (_esf.screen_items), with one UserWarning. They go to
         self.cml_dropped_responses; persons left with no responses are added
         to self.null_persons. Returns {item: reason} for the dropped items
         (empty if none); a subclass also subsets its own per-item attributes.
+        With keep_unused=True (unused_categories='keep'), items are not dropped for an unused category;
+        self._cml_used is set to {item: boolean array over its categories, used among the persons who
+        contribute}.
         """
         from raschpy import _esf
 
         names = list(self.item_names)
         X = np.array(self.responses.loc[:, names], dtype=np.float64)
-        keep, reasons = _esf.screen_items(
-            X, Ks, per_item_categories=per_item_categories
+        out = _esf.screen_items(
+            X, Ks, per_item_categories=per_item_categories, keep_unused=keep_unused
+        )
+        keep, reasons = out[0], out[1]
+        self._cml_used = (
+            {names[i]: u for i, u in out[2].items()} if keep_unused else None
         )
         dropped = {names[i]: reasons[i] for i in sorted(reasons)}
         self.cml_dropped_responses = self.responses.loc[:, list(dropped)]
@@ -3975,8 +4045,9 @@ class Rasch:
             f"for the thresholds next to it, and an item that is not connected is never compared "
             f"with the others in both directions. They were left out of the CML calibration and "
             f"removed from responses (see convergence['dropped_items'] and "
-            f"cml_dropped_responses). To keep them, collapse unused categories, or use the "
-            f"default estimation, whose smoothing constant gives finite estimates.",
+            f"cml_dropped_responses). To keep them, use unused_categories='keep' (PCM, RSM), "
+            f"collapse unused categories, or use the default estimation, whose smoothing "
+            f"constant gives finite estimates.",
             UserWarning,
             stacklevel=4,
         )
@@ -4034,11 +4105,7 @@ class Rasch:
         names = list(pooled.item_names)
         Ks = [int(k) for k in pooled._cml_max_scores(names)]
         b0 = np.concatenate(pooled._cml_threshold_list(names)).astype(float)
-        A0 = (
-            pooled._cml_basis()[0]
-            if hasattr(pooled, "_cml_basis")
-            else _rcl.zero_sum_basis(len(b0))
-        )
+        A0 = pooled._cml_design(len(b0))
         X = np.array(pooled.responses.loc[:, names], dtype=np.float64)
         foc = pooled.responses.index.isin(focal_idx)
         common = [names.index(c) for c in common_items if c in names]
@@ -5433,7 +5500,17 @@ class Rasch:
             )
         return self.global_fit_summary
 
-    def _andersen_lr(self, split, covariate, seed, split_prop, alpha):
+    def _andersen_lr(
+        self,
+        split,
+        covariate,
+        seed,
+        split_prop,
+        alpha,
+        p_method="chi2",
+        no_of_samples=500,
+        mc_exceedances=None,
+    ):
         """
         global_fit(method='andersen-lr'): Andersen's conditional likelihood
         ratio test, LR = 2 (sum_g ll_g - ll_pooled), each conditional
@@ -5460,8 +5537,9 @@ class Rasch:
                     reason = str(e).split(": ", 1)[-1].split(". ")[0]
                     raise ValueError(
                         f"method='andersen-lr': CML estimates do not exist in one group "
-                        f"({reason}). Use method='wald', which leaves out the parameters "
-                        f"not estimable in both groups."
+                        f"({reason}). Use unused_categories='keep', which keeps items with a "
+                        f"category unused in a group, or method='wald', which leaves out the "
+                        f"parameters not estimable in both groups."
                     ) from None
                 raise
             kept = [c for c in common if all(c in fitted[n].item_names for n in names)]
@@ -5479,8 +5557,17 @@ class Rasch:
         ll_groups = {n: fitted[n].convergence["log_likelihood"] for n in names}
         ll0 = pooled.convergence["log_likelihood"]
         LR = max(2.0 * (sum(ll_groups.values()) - ll0), 0.0)
-        df = (len(names) - 1) * pooled._cml_free_parameters()
-        p = float(chi2_dist.sf(LR, df))
+        df = (
+            sum(fitted[n]._cml_free_parameters() for n in names)
+            - pooled._cml_free_parameters()
+        )
+        p_chi2 = float(chi2_dist.sf(LR, df))
+        p, used, skipped, stopped = p_chi2, None, None, None
+        if p_method == "monte-carlo":
+            p, used, skipped, stopped = self._andersen_monte_carlo(
+                LR, groups, names, common, both, fitted, pooled,
+                no_of_samples, seed, mc_exceedances,
+            )
         excluded = [c for c in self.item_names if c not in common]
         self.global_fit_table = None
         self.global_fit_excluded = excluded
@@ -5493,7 +5580,12 @@ class Rasch:
         summary.update(
             {
                 "log-likelihoods": {**ll_groups, "pooled": ll0},
+                "p_method": p_method,
                 "p-value": p,
+                "p-value (chi-square)": p_chi2,
+                "Monte Carlo samples": used,
+                "Monte Carlo samples skipped": skipped,
+                "Monte Carlo stopped early": stopped,
                 "reject": bool(p < alpha),
                 "group sizes": {n: len(groups[n]) for n in names},
                 "items excluded": len(excluded),
@@ -5512,6 +5604,19 @@ class Rasch:
                 UserWarning,
                 stacklevel=3,
             )
+        if p_method == "chi2" and any(
+            getattr(m, "_cml_marked", None) is not None
+            for m in list(fitted.values()) + [pooled]
+        ):
+            warnings.warn(
+                "unused_categories='keep' kept categories unused in a group, so their "
+                "thresholds were left out of that group's fit; the chi-square p-value is then "
+                "liberal (in null simulations of PCM with sparse categories it rejected 7-25% "
+                "of the time at alpha = 0.05). For a calibrated test, re-run with "
+                "p_method='monte-carlo'.",
+                UserWarning,
+                stacklevel=3,
+            )
         if excluded:
             warnings.warn(
                 f"{len(excluded)} item(s) left out of the likelihood ratio test because "
@@ -5523,6 +5628,58 @@ class Rasch:
                 stacklevel=3,
             )
         return self.global_fit_summary
+
+    def _andersen_monte_carlo(
+        self, LR, groups, names, items, both, fitted, pooled, no_of_samples, seed, mc_exceedances
+    ):
+        """
+        global_fit(method='andersen-lr', p_method='monte-carlo'): datasets simulated from the pooled CML
+        fit given each person's total and the items they responded to (the conditional distribution does
+        not involve the persons), each refitted by group and pooled with the same settings; p = (1 + the
+        number of simulated LRs at least the observed) / (1 + samples used). The groups are those of the
+        observed data (a score split's groups are unchanged, the totals being fixed). A sample is skipped
+        if a fit leaves out an item. Returns (p, used, skipped, stopped early).
+        """
+        from raschpy import _esf
+
+        rng = np.random.default_rng(seed)
+        resp = self.responses.loc[both, items]
+        thr = pooled._cml_threshold_list(items)
+        clone = copy.copy(self)
+        hess = {n: getattr(fitted[n], "_cml_hessian", None) for n in names}
+        h0 = getattr(pooled, "_cml_hessian", None)
+        exceed, used, skipped, stopped = 0, 0, 0, False
+        for _ in range(no_of_samples):
+            sim = _esf.sample_given_totals(resp.to_numpy(dtype=float), thr, rng)
+            clone.responses = pd.DataFrame(sim, index=resp.index, columns=resp.columns)
+            try:
+                fits = [
+                    clone._global_fit_subset(groups[n], items=items, cml_hessian=hess[n])
+                    for n in names
+                ]
+                f0 = clone._global_fit_subset(both, items=items, cml_hessian=h0)
+            except ValueError:
+                skipped += 1
+                continue
+            if any(len(m.item_names) < len(items) for m in fits + [f0]):
+                skipped += 1  # an item without CML estimates: not comparable
+                continue
+            lr = 2.0 * (
+                sum(m.convergence["log_likelihood"] for m in fits)
+                - f0.convergence["log_likelihood"]
+            )
+            exceed += lr >= LR - 1e-9 * max(1.0, abs(LR))
+            used += 1
+            if mc_exceedances is not None and exceed >= mc_exceedances:
+                stopped = True  # Besag-Clifford sequential stopping
+                break
+        if not used:
+            raise ValueError(
+                "method='andersen-lr': no Monte Carlo sample had CML estimates for every item; "
+                "try unused_categories='keep'."
+            )
+        p = exceed / used if stopped else (1 + exceed) / (1 + used)
+        return p, used, skipped, stopped
 
     def _andersen_item_tables(self, fitted, pooled, groups, names):
         """
@@ -5566,11 +5723,15 @@ class Rasch:
         se = {}
         for n in names:
             m = fitted[n]
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                m.std_errors()
+            if getattr(m, "_cml_marked", None) is not None:  # unused_categories='keep'
+                item_se = m._cml_location_se()
+            else:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    m.std_errors()
+                item_se = m.item_se
             tab[f"Location ({n})"] = m.items.reindex(items).values
-            se[n] = m.item_se.reindex(items).values
+            se[n] = item_se.reindex(items).values
         if len(names) == 2:
             a, b = names
             tab["Difference"] = tab[f"Location ({b})"] - tab[f"Location ({a})"]
@@ -5648,6 +5809,7 @@ class Rasch:
         no_of_samples=500,
         p_method="chi2",
         mc_exceedances=None,
+        unused_categories=None,
     ):
         """
         Global test of parameter invariance across two groups of persons.
@@ -5784,24 +5946,45 @@ class Rasch:
             when the object was calibrated with method='cos', 'ls' or 'evm'
             (SLM, PCM; RSM with estimation='pair-cpat'): the sandwich is the
             covariance of method='log-lik' only. se_correction does not
-            apply then. 'martin-lof' with p_method='monte-carlo': the number
-            of simulated datasets.
+            apply then. 'martin-lof' and 'andersen-lr' with
+            p_method='monte-carlo': the number of simulated datasets.
         p_method : {'chi2', 'monte-carlo'}, default 'chi2'
-            'martin-lof' only: the p-value from the chi-square reference, or
-            from no_of_samples datasets simulated from the joint CML fit given
-            each person's total and observed items (each refitted and its
-            statistic recomputed; seed= for reproducibility). Each refit
+            'martin-lof' and 'andersen-lr': the p-value from the chi-square
+            reference, or from no_of_samples datasets simulated from the joint
+            (Andersen: pooled) CML fit given each person's total and observed
+            items (each refitted and its statistic recomputed, Andersen's with
+            the observed groups; seed= for reproducibility). Each refit
             starts from the PAIR (RSM: cp-full-rcl) estimates and uses the
             observed fit's Hessian as a fixed Newton matrix (the chord
             method), converging to the same maximum with gradient evaluations
             only. Simulated datasets in which an item has no CML estimates are
             left out and counted.
         mc_exceedances : int or None, default None
-            'martin-lof' with p_method='monte-carlo': stop sampling once this
+            'martin-lof' or 'andersen-lr' with p_method='monte-carlo': stop sampling once this
             many simulated statistics reach the observed one (Besag and
             Clifford's sequential p-value, h / samples drawn), so a clearly
             non-significant result needs only a few dozen samples; None draws
             all no_of_samples. E.g. 10.
+        unused_categories : {None, 'drop', 'keep'}, default None
+            'andersen-lr' (PCM and RSM; None follows the object's
+            calibrate(unused_categories=...)): a score category that no person with a
+            non-extreme total used, in one group or the pooled data. 'drop'
+            leaves out an item with such a category (PCM; for RSM, a category
+            unused by every item raises a ValueError). 'keep' keeps the item
+            with that category's probability zero, the scores unchanged
+            (Wilson and Masters, 1993; psychotools' pcmodel(nullcats='keep')):
+            the data identify only the sum of the two thresholds either side
+            of it, so that fit has one parameter fewer for each such category,
+            and df = (the groups' free parameters) - (the pooled fit's).
+            The chi-square p-value is then liberal with sparse categories: in
+            null simulations (PCM, 10 items scored 0-4, persons centred 1.5
+            logits below the items, N = 300 and 1,000, score-group and random
+            splits, 300 datasets each) it rejected 7-25% of the time at
+            alpha = 0.05 (with a UserWarning); p_method='monte-carlo' (199
+            samples) rejected 3.3-3.7% in three of the four designs and 8.0% in
+            the fourth (N = 300, random split). For RSM on the same design both
+            p-values held 4.7-7.0%. On iarm's DESC-II data the log-likelihoods
+            and parameter counts match psychotools' pcmodel and rsmodel exactly.
 
         Each group is calibrated with the object's last calibrate()
         settings. In null simulations under method='cos', 'ls' or 'evm'
@@ -5842,9 +6025,14 @@ class Rasch:
             no_of_samples=no_of_samples,
             p_method=p_method,
             mc_exceedances=mc_exceedances,
+            unused_categories=unused_categories,
         )
         if split is None:
-            split = "median" if method == "martin-lof" else "score"
+            split = (
+                "median"
+                if method == "martin-lof"
+                else ("exogenous" if covariate is not None else "score")
+            )
         split_label = (
             "items " + ", ".join(map(str, split))
             if isinstance(split, (list, tuple))
@@ -5853,8 +6041,10 @@ class Rasch:
         details = [f"split={split_label}"]
         if covariate is not None:
             details.append(f"covariate={covariate}")
-        if method == "martin-lof":
+        if method == "martin-lof" or (method == "andersen-lr" and p_method != "chi2"):
             details.append(f"p_method={p_method}")
+        if method == "andersen-lr" and unused_categories == "keep":
+            details.append("unused_categories=keep")
         if not hasattr(self, "global_fit_results"):
             self.global_fit_results = {}
         self.global_fit_results[(method, "; ".join(details))] = (
@@ -5875,12 +6065,19 @@ class Rasch:
         no_of_samples=500,
         p_method="chi2",
         mc_exceedances=None,
+        unused_categories=None,
     ):
         """global_fit() itself (see its docstring); global_fit() records each result."""
         if method not in self._GLOBAL_FIT_METHODS:
             raise ValueError(
                 f"method must be one of {self._GLOBAL_FIT_METHODS}, got {method!r}."
             )
+        if unused_categories not in (None, "drop", "keep"):
+            raise ValueError(
+                f"unused_categories must be None, 'drop' or 'keep', got {unused_categories!r}."
+            )
+        if unused_categories == "keep" and method != "andersen-lr":
+            raise ValueError("unused_categories='keep' applies to method='andersen-lr' only.")
         if covariate is not None:
             if method == "martin-lof":
                 raise ValueError(
@@ -5943,7 +6140,28 @@ class Rasch:
                 )
             if not 0 < split_prop <= 0.5:
                 raise ValueError(f"split_prop must be in (0, 0.5], got {split_prop!r}.")
-            return self._andersen_lr(split, covariate, seed, split_prop, alpha)
+            if p_method not in ("chi2", "monte-carlo"):
+                raise ValueError(
+                    f"p_method must be 'chi2' or 'monte-carlo', got {p_method!r}."
+                )
+            if mc_exceedances is not None and int(mc_exceedances) < 1:
+                raise ValueError(
+                    f"mc_exceedances must be a positive integer or None, got {mc_exceedances!r}."
+                )
+            self._cml_unused_fit = unused_categories
+            try:
+                return self._andersen_lr(
+                    split,
+                    covariate,
+                    seed,
+                    split_prop,
+                    alpha,
+                    p_method=p_method,
+                    no_of_samples=no_of_samples,
+                    mc_exceedances=mc_exceedances,
+                )
+            finally:
+                self._cml_unused_fit = None
 
         if se_correction not in ("kauermann-carroll", None):
             raise ValueError(
@@ -6832,7 +7050,7 @@ class Rasch:
 
                     def cat_prob_fn(theta, item_location, category, thresh):
                         cats = np.arange(len(thresh) + 1, dtype=float)
-                        cumsum = np.concatenate([[0.0], np.cumsum(thresh)])
+                        cumsum = -_esf_lcw(thresh)
                         log_nums = cats * (theta - item_location) - cumsum
                         log_nums -= log_nums.max()
                         nums = np.exp(log_nums)
@@ -6840,7 +7058,7 @@ class Rasch:
 
                     def exp_score_fn(theta, item_location, thresh):
                         cats = np.arange(len(thresh) + 1, dtype=float)
-                        cumsum = np.concatenate([[0.0], np.cumsum(thresh)])
+                        cumsum = -_esf_lcw(thresh)
                         log_nums = cats * (theta - item_location) - cumsum
                         log_nums -= log_nums.max()
                         nums = np.exp(log_nums)
@@ -6927,7 +7145,7 @@ class Rasch:
                 # entirely, rather than drawn as a spurious sliver.
                 def _most_probable_category_segments(thresholds_natural):
                     m = len(thresholds_natural)
-                    T = np.concatenate([[0.0], np.cumsum(thresholds_natural)])
+                    T = -_esf_lcw(thresholds_natural)
                     hull = []
 
                     def redundant(l1, l2, l3):

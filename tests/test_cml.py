@@ -6,6 +6,7 @@ made by cml_fit_psychotools.R), so no R is needed at run time. The stored fits s
 optimiser tolerance (gradient ~1e-4), hence the tolerances below.
 """
 
+import functools
 import itertools
 import os
 import warnings
@@ -302,6 +303,184 @@ def test_score_groups_split():
     tot = m.responses.sum(axis=1)
     low, high = (tot[m._global_fit_groups("score_groups", None, None)[k]] for k in ("low", "high"))
     assert low.max() < high.min() and r["df"] > 0
+
+
+def _unused_category_data():
+    from raschpy.simulation import PCM_Sim
+
+    X = PCM_Sim(no_of_items=6, no_of_persons=400, max_score_vector=[3] * 6, offset=-1.0, seed=31).responses
+    g = pd.Series(np.where(np.arange(len(X)) < 200, "a", "b"), index=X.index)
+    X.loc[g == "a", X.columns[0]] = X.loc[g == "a", X.columns[0]].replace(3, 2)  # category 3 unused in a
+    X.loc[g == "a", X.columns[1]] = X.loc[g == "a", X.columns[1]].replace(1, 2)  # category 1 unused in a
+    return X, g
+
+
+def test_andersen_lr_unused_categories_keep():
+    X, g = _unused_category_data()
+    m = PCM(X, exogenous=pd.DataFrame({"G": g}))
+    m.calibrate(estimation="cml")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        drop = m.global_fit(method="andersen-lr", covariate="G")
+        assert set(m.global_fit_excluded) == set(X.columns[:2])
+        keep = m.global_fit(method="andersen-lr", covariate="G", unused_categories="keep")
+    assert m.global_fit_excluded == []
+    a, b = m.global_fit_groups["a"], m.global_fit_groups["b"]
+    assert a.cml_unused_categories == {X.columns[0]: [3], X.columns[1]: [1]}
+    assert a._cml_free_parameters() == 6 * 3 - 1 - 2 and b._cml_free_parameters() == 17
+    ll = keep["log-likelihoods"]
+    assert keep["statistic"] == pytest.approx(2 * (ll["a"] + ll["b"] - ll["pooled"]), abs=1e-9)
+    assert keep["df"] == 17 + 15 - 17 and drop["df"] == 4 * 3 - 1
+    # markers: an unused category's threshold is inf, the next one holds the sum either side of it
+    t1, t0 = a.thresholds_uncentred.loc[X.columns[1]], a.thresholds_uncentred.loc[X.columns[0]]
+    assert t1[1] == np.inf and np.isfinite(t1[[2, 3]]).all() and t0[3] == np.inf
+    with pytest.raises(ValueError, match="method='andersen-lr' only"):
+        m.global_fit(method="wald", covariate="G", unused_categories="keep")
+
+
+def test_rsm_keep_interior_unused_category_matches_direct_cml():
+    """RSM with a category unused by every item: 'keep' maximises the conditional likelihood of the
+    rating scale model with that category's probability zero (checked by a direct fit)."""
+    from scipy.optimize import minimize
+    from raschpy.simulation import RSM_Sim
+
+    X = RSM_Sim(no_of_items=5, no_of_persons=300, max_score=3, seed=32).responses.replace(2, 1)
+    m = RSM(X, max_score=3)
+    m.calibrate(estimation="cml", unused_categories="keep")
+    cats, Xi = [0, 1, 3], X.to_numpy(int)
+    I, tot = Xi.shape[1], Xi.sum(1)
+
+    def nll(p):
+        d = np.r_[p[: I - 1], -p[: I - 1].sum()]
+        cum = dict(zip(cats, np.r_[0.0, p[I - 1 :]]))
+        lw = np.array([[-(x * d[i] + cum[x]) for x in cats] for i in range(I)])
+        G = np.zeros(3 * I + 1)
+        G[0] = 1
+        for i in range(I):
+            new = np.zeros_like(G)
+            for j, x in enumerate(cats):
+                new[x:] += G[: len(G) - x] * np.exp(lw[i, j])
+            G = new
+        own = lw[np.arange(I)[None, :], np.searchsorted(cats, Xi)].sum(1)
+        return -(own - np.log(G[tot])).sum()
+
+    direct = -minimize(nll, np.zeros(I - 1 + 2), method="BFGS", options=dict(gtol=1e-10)).fun
+    assert m.convergence["log_likelihood"] == pytest.approx(direct, abs=1e-6)
+    assert m._cml_free_parameters() == I - 1 + 1
+    assert m.thresholds[2] == np.inf and np.isfinite(m.thresholds[[1, 3]]).all()
+
+
+def test_andersen_lr_monte_carlo():
+    X, g = _unused_category_data()
+    m = PCM(X, exogenous=pd.DataFrame({"G": g}))
+    m.calibrate(estimation="cml")
+    kw = dict(method="andersen-lr", covariate="G", unused_categories="keep")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        chi = m.global_fit(**kw).copy()
+        mc = m.global_fit(**kw, p_method="monte-carlo", no_of_samples=30, seed=5).copy()
+        again = m.global_fit(**kw, p_method="monte-carlo", no_of_samples=30, seed=5)
+        early = m.global_fit(**kw, p_method="monte-carlo", no_of_samples=30, seed=5, mc_exceedances=2)
+    assert chi["p_method"] == "chi2" and chi["p-value"] == chi["p-value (chi-square)"]
+    assert mc["statistic"] == chi["statistic"] and mc["p-value (chi-square)"] == chi["p-value"]
+    assert mc["Monte Carlo samples"] + mc["Monte Carlo samples skipped"] == 30
+    assert 1 / 31 <= mc["p-value"] <= 1 and again["p-value"] == mc["p-value"]
+    assert early["Monte Carlo samples"] <= 30
+    with pytest.raises(ValueError, match="p_method must be"):
+        m.global_fit(method="andersen-lr", covariate="G", p_method="permutation")
+
+
+def _keep_pcm_data():
+    from raschpy.simulation import PCM_Sim
+
+    X = PCM_Sim(no_of_items=6, no_of_persons=500, max_score_vector=[3] * 6, seed=41).responses
+    X[X.columns[0]] = X[X.columns[0]].replace(3, 2)  # top category unused
+    X[X.columns[1]] = X[X.columns[1]].replace(0, 1)  # bottom category unused
+    return X
+
+
+def _keep_outputs(m):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m.std_errors(se_method="hessian")
+        m.person_estimates()
+        m.fit_statistics(conditional=True)
+    return dict(
+        ll=m.convergence["log_likelihood"],
+        items=(m.items - m.items.mean()).values,
+        se=m.item_se.values,
+        persons=(m.persons - m.items.mean()).values,
+        infit=m.item_infit_ms.values,
+        outfit=m.item_outfit_ms.values,
+        r1c=m.item_q1_r1c.loc["item scores", "Statistic"],
+    )
+
+
+def test_calibrate_keep_end_categories_equal_narrowed_range():
+    """An unused top (bottom) category kept with probability zero gives the same model as the item with
+    its score range narrowed (shifted down): every output agrees."""
+    X = _keep_pcm_data()
+    k = PCM(X, max_score_vector=[3] * 6)
+    k.calibrate(estimation="cml", unused_categories="keep")
+    a, b = X.columns[0], X.columns[1]
+    assert k.cml_unused_categories == {a: [3], b: [0]} and k._cml_free_parameters() == 6 * 3 - 1 - 2
+    assert k.thresholds_uncentred.loc[a, 3] == np.inf and k.thresholds_uncentred.loc[b, 1] == -np.inf
+    Y = X.copy()
+    Y[b] = Y[b] - 1
+    o = PCM(Y, max_score_vector=[2, 2, 3, 3, 3, 3])
+    o.calibrate(estimation="cml")
+    ka, oa = _keep_outputs(k), _keep_outputs(o)
+    for key in ka:
+        np.testing.assert_allclose(ka[key], oa[key], atol=1e-6, err_msg=key)
+    lt = k.score_lookup_table()
+    assert lt.index[0] == 1 and lt.index[-1] == 17  # possible totals only
+
+
+def test_calibrate_keep_rsm_top_category_equals_lower_max_score():
+    from raschpy.simulation import RSM_Sim
+
+    X = RSM_Sim(no_of_items=6, no_of_persons=400, max_score=3, seed=42).responses.replace(3, 2)
+    k = RSM(X, max_score=3)
+    k.calibrate(estimation="cml", unused_categories="keep")
+    o = RSM(X, max_score=2)
+    o.calibrate(estimation="cml")
+    ka, oa = _keep_outputs(k), _keep_outputs(o)
+    for key in ka:
+        np.testing.assert_allclose(ka[key], oa[key], atol=1e-6, err_msg=key)
+
+
+def test_calibrate_keep_interior_conditional_fit_direct():
+    """Interior unused category: conditional infit/outfit equal a direct computation of the conditional
+    distribution of each response given the total (the unused category with probability zero)."""
+    X = _keep_pcm_data()
+    X[X.columns[2]] = X[X.columns[2]].replace(2, 1)
+    m = PCM(X, max_score_vector=[3] * 6)
+    m.calibrate(estimation="cml", unused_categories="keep")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m.person_estimates()
+        m.fit_statistics(conditional=True)
+    W = [np.exp(_esf.log_category_weights(t)) for t in m._cml_threshold_list(list(X.columns))]
+    Xa, I = X.to_numpy(int), X.shape[1]
+    poly = lambda items: functools.reduce(np.convolve, [W[i] for i in items], np.array([1.0]))  # noqa: E731
+    E, V = np.zeros(Xa.shape), np.zeros(Xa.shape)
+    for i in range(I):
+        Gm = poly([j for j in range(I) if j != i])
+        for v, r in enumerate(Xa.sum(axis=1)):
+            p = np.array([W[i][x] * (Gm[r - x] if 0 <= r - x < len(Gm) else 0) for x in range(4)])
+            p /= p.sum()
+            E[v, i] = p @ np.arange(4)
+            V[v, i] = p @ (np.arange(4) - E[v, i]) ** 2
+    pos = m.responses.index.get_indexer(m.residual_df.index)
+    R, Vv = Xa[pos] - E[pos], np.where(V[pos] > 1e-10, V[pos], np.nan)
+    np.testing.assert_allclose(np.nanmean(R**2 / Vv, axis=0), m.item_outfit_ms.values, atol=1e-10)
+    infit = np.nansum(np.where(np.isnan(Vv), np.nan, R**2), axis=0) / np.nansum(Vv, axis=0)
+    np.testing.assert_allclose(infit, m.item_infit_ms.values, atol=1e-10)
+
+
+def test_calibrate_keep_needs_cml():
+    with pytest.raises(ValueError, match="estimation='cml' only"):
+        PCM(_keep_pcm_data(), max_score_vector=[3] * 6).calibrate(unused_categories="keep")
 
 # ---------------------------------------------------------------- Martin-Lof (global_fit)
 

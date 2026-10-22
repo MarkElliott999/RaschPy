@@ -91,6 +91,52 @@ def _as_threshold_list(thresholds):
     return [np.atleast_1d(np.asarray(x, float)) for x in thresholds]
 
 
+def log_category_weights(b):
+    """
+    Log category weights of an item, 0 and -(b_1 + ... + b_x) for x = 1..K, from its thresholds b (as
+    cond_loglik takes them). A category with zero probability (unused, unused_categories='keep') is marked
+    by an infinite threshold: b_x = +inf for an unused category x >= 1, the next finite threshold then
+    being the sum of the thresholds either side of it (the only combination the data identify); a run of
+    leading b_1..b_m = -inf for unused categories 0..m-1, category m then being the reference (weight 0).
+    Unused categories get weight -inf. Finite thresholds give the plain cumulative sum.
+    """
+    b = np.asarray(b, float)
+    if np.all(np.isfinite(b)):
+        return np.concatenate([[0.0], -np.cumsum(b)])
+    out = np.empty(len(b) + 1)
+    lead = 0
+    while lead < len(b) and b[lead] == -np.inf:
+        lead += 1
+    out[:lead] = NEG
+    out[lead] = 0.0
+    s = 0.0
+    for x in range(lead + 1, len(b) + 1):
+        v = b[x - 1]
+        if v == np.inf:
+            out[x] = NEG
+        else:
+            s += v
+            out[x] = -s
+    return out
+
+
+def unused_category_offset(K, used):
+    """
+    Threshold markers for an item with categories 0..K of which `used` (a boolean array of length K + 1, at
+    least two True) occur: an offset of length K with -inf for the thresholds below the lowest used
+    category, +inf for the threshold of each unused category above it, and 0 elsewhere (the free
+    thresholds; log_category_weights reads the markers). The item has used.sum() - 1 free thresholds.
+    """
+    used = np.asarray(used, bool)
+    lo = int(np.argmax(used))
+    off = np.zeros(K)
+    off[:lo] = -np.inf
+    for x in range(lo + 1, K + 1):
+        if not used[x]:
+            off[x - 1] = np.inf
+    return off
+
+
 def prepare(X, Ks, budget=BUDGET):
     """
     The parts of cond_loglik that depend only on the data (responses X and each item's number of
@@ -251,7 +297,7 @@ def cond_loglik(X, thresholds, hessian=False, budget=BUDGET, prepared=None):
         return 0.0, np.zeros(p), (np.zeros((p, p)) if hessian else None)
     LE = np.full((I, K1), NEG)
     for i, x in enumerate(b_list):
-        LE[i, : Ks[i] + 1] = np.concatenate([[0.0], -np.cumsum(x)])
+        LE[i, : Ks[i] + 1] = log_category_weights(x)
     ll = LE[prep.pc, prep.xv].sum()
     gle = prep.gle_obs.copy()
 
@@ -468,7 +514,10 @@ def fit_cml(
         )
 
     c = np.zeros(A.shape[0]) if offset is None else np.asarray(offset, float)
-    theta = np.linalg.lstsq(A, np.asarray(b0, float) - c, rcond=None)[0]
+    fin = np.isfinite(c)  # infinite offsets mark unused categories, fixed
+    theta = np.linalg.lstsq(
+        A[fin], np.asarray(b0, float)[fin] - c[fin], rcond=None
+    )[0]
     q = A.shape[1]
     prep = prepare(X, Ks)  # the data-only structure, once per fit
     hessians = 0
@@ -638,7 +687,7 @@ def cml_covariance(X, A, b, Ks, hessian=None, sandwich=False):
     return A @ np.linalg.solve(info, A.T)
 
 
-def screen_items(X, Ks, per_item_categories=True):
+def screen_items(X, Ks, per_item_categories=True, keep_unused=False):
     """
     Items whose CML estimates exist, from responses X (n_persons, n_items; NaN = no response) with K_i
     thresholds each. Repeated until nothing changes (dropping an item changes which persons contribute):
@@ -652,8 +701,15 @@ def screen_items(X, Ks, per_item_categories=True):
     per_item_categories=False skips the first rule (RSM: the thresholds are shared, so an item may leave a
     category unused).
 
+    keep_unused=True (unused_categories='keep'): unused categories are kept with zero probability instead
+    of the item being dropped, and the second rule uses each item's lowest and highest used categories
+    (i can give a point if x_i is above its lowest used category, j can take one if x_j is below its
+    highest); an item with fewer than two used categories is dropped ('one category used').
+
     Returns (keep, reasons): keep a boolean mask over items, reasons a dict {item index: reason} for the
-    dropped items ('unused category k' or 'not connected').
+    dropped items ('unused category k', 'one category used' or 'not connected'). With keep_unused=True,
+    returns (keep, reasons, used): used a dict {item index: boolean array over categories 0..K_i} for the
+    kept items, among the persons who contribute.
     """
     from scipy.sparse import csr_matrix
     from scipy.sparse.csgraph import connected_components
@@ -670,7 +726,16 @@ def screen_items(X, Ks, per_item_categories=True):
         tot, mx = Xi.sum(1), (obs * Ks[idx][None, :]).sum(1)
         contrib = (obs.sum(1) >= 2) & (tot > 0) & (tot < mx)
         changed = False
-        for j, i in enumerate(idx if per_item_categories else []):
+        used = {}
+        if keep_unused:
+            for j, i in enumerate(idx):
+                col = Xi[contrib & obs[:, j], j]
+                used[int(i)] = np.bincount(col, minlength=Ks[i] + 1) > 0
+                if used[int(i)].sum() < 2:
+                    keep[i] = False
+                    reasons[int(i)] = "one category used"
+                    changed = True
+        for j, i in enumerate(idx if per_item_categories and not keep_unused else []):
             col = Xi[contrib & obs[:, j], j]
             counts = np.bincount(col, minlength=Ks[i] + 1)
             if np.any(counts == 0):
@@ -681,8 +746,14 @@ def screen_items(X, Ks, per_item_categories=True):
                 changed = True
         if changed:
             continue
-        up = csr_matrix((obs & (Xi >= 1)).astype(np.float64))
-        down = csr_matrix((obs & (Xi <= Ks[idx][None, :] - 1)).astype(np.float64))
+        if keep_unused:
+            lo = np.array([np.argmax(used[int(i)]) for i in idx])
+            hi = np.array([len(used[int(i)]) - 1 - np.argmax(used[int(i)][::-1]) for i in idx])
+            up = csr_matrix((obs & (Xi > lo[None, :])).astype(np.float64))
+            down = csr_matrix((obs & (Xi < hi[None, :])).astype(np.float64))
+        else:
+            up = csr_matrix((obs & (Xi >= 1)).astype(np.float64))
+            down = csr_matrix((obs & (Xi <= Ks[idx][None, :] - 1)).astype(np.float64))
         beats = (up.T @ down).tocsr()
         beats.setdiag(0)
         beats.eliminate_zeros()
@@ -694,6 +765,8 @@ def screen_items(X, Ks, per_item_categories=True):
                     keep[i] = False
                     reasons[int(i)] = "not connected"
             continue
+        if keep_unused:
+            return keep, reasons, used
         return keep, reasons
 
 
@@ -711,7 +784,7 @@ def sample_given_totals(X, thresholds, rng):
     Kmax = int(Ks.max())
     LE = np.full((len(b_list), Kmax + 1), NEG)
     for i, x in enumerate(b_list):
-        LE[i, : Ks[i] + 1] = np.concatenate([[0.0], -np.cumsum(x)])
+        LE[i, : Ks[i] + 1] = log_category_weights(x)
     obs = ~np.isnan(X)
     out = np.full(X.shape, np.nan)
     keys, inv = _patterns(obs)
@@ -791,7 +864,7 @@ def conditional_moments(X, thresholds, prepared=None, tables=False, probs=False)
     I, Kmax, K1 = prep.I, prep.Kmax, prep.K1
     LE = np.full((I, K1), NEG)
     for i, x in enumerate(b_list):
-        LE[i, : Ks[i] + 1] = np.concatenate([[0.0], -np.cumsum(x)])
+        LE[i, : Ks[i] + 1] = log_category_weights(x)
     out = {k: np.full(X.shape, np.nan) for k in ("E", "V", "M4")}
     if tables:
         smax = int(np.where(np.isnan(X), 0, Ks[None, :]).sum(1).max())
@@ -991,7 +1064,7 @@ def log_gamma(thresholds):
     proportional to exp(r theta + log gamma_r)."""
     g = np.zeros(1)
     for b in _as_threshold_list(thresholds):
-        g = _logconv_small(g, np.concatenate([[0.0], -np.cumsum(b)]))
+        g = _logconv_small(g, log_category_weights(b))
     return g
 
 
@@ -1013,7 +1086,8 @@ def score_moments(lg, theta):
 
 def score_wle(lg):
     """Weighted likelihood estimates of theta for every total r = 0..m (Warm): the root of
-    r - E(R | theta) + mu3(theta) / (2 V(R | theta)) = 0, finite for the extreme totals too.
+    r - E(R | theta) + mu3(theta) / (2 V(R | theta)) = 0, finite for the extreme totals too (the lowest and
+    highest possible ones). NaN for a total that cannot occur (log gamma -inf, unused_categories='keep').
     """
     from scipy.optimize import brentq
 
@@ -1023,6 +1097,9 @@ def score_wle(lg):
 
     out = []
     for r in range(len(lg)):
+        if not np.isfinite(lg[r]):
+            out.append(np.nan)
+            continue
         lo, hi = -5.0, 5.0
         while f(lo, r) < 0:
             lo -= 5.0
@@ -1079,6 +1156,8 @@ def population_properties(lg, mu, sigma, estimates=None, grid=2000):
 
     m = len(lg) - 1
     est = score_wle(lg) if estimates is None else np.asarray(estimates, float)
+    possible = np.flatnonzero(np.isfinite(lg))  # totals that can occur
+    est = np.where(np.isfinite(est), est, 0.0)  # impossible totals have probability 0
     th = mu + sigma * _norm.ppf(
         (np.arange(grid) + 0.5) / grid
     )  # equal weights 1 / grid
@@ -1091,7 +1170,8 @@ def population_properties(lg, mu, sigma, estimates=None, grid=2000):
         options=dict(xatol=1e-10),
     ).x
     info_max = float(score_moments(lg, [tgt])[1][0])
-    diff = brentq(lambda t: score_moments(lg, [t])[0][0] - m / 2, -30, 30, xtol=1e-12)
+    half = (possible[0] + possible[-1]) / 2  # m / 2 unless the lowest or highest total cannot occur
+    diff = brentq(lambda t: score_moments(lg, [t])[0][0] - half, -30, 30, xtol=1e-12)
     mean_est = P @ est
     bias = mean_est - th
     sem = np.sqrt(np.maximum(P @ est**2 - mean_est**2, 0))
@@ -1151,7 +1231,7 @@ def person_pattern_pvalues(X, thresholds, samples=1000, rng=None, prepared=None)
     I, K1 = prep.I, prep.K1
     LE = np.full((I, K1), NEG)
     for i, x in enumerate(b_list):
-        LE[i, : Ks[i] + 1] = np.concatenate([[0.0], -np.cumsum(x)])
+        LE[i, : Ks[i] + 1] = log_category_weights(x)
     who = np.nonzero(prep.keep)[0]
     Xk = np.where(np.isnan(X[who]), 0, X[who]).astype(np.int64)
     kk = np.arange(K1)

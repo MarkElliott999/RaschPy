@@ -182,7 +182,7 @@ class RSM(Rasch):
         else:
             scores = valid.sum(axis=1)
             # notna() mask is cleaner than (df == df) for detecting valid cells
-            max_scores = valid.notna().sum(axis=1) * self.max_score
+            min_scores, max_scores = self._person_score_bounds(valid)
             extreme_mask = (scores == 0) | (scores == max_scores)
             self.extreme_persons = valid[extreme_mask]
             self.responses = valid[~extreme_mask]
@@ -262,7 +262,7 @@ class RSM(Rasch):
             Probability of the specified category, in [0, 1].
         """
         cats = np.arange(len(thresholds) + 1, dtype=float)
-        cumsum = np.concatenate([[0.0], np.cumsum(thresholds)])
+        cumsum = -_esf.log_category_weights(thresholds)
         log_nums = cats * (person_location - item_location) - cumsum
         log_nums -= log_nums.max()
         nums = np.exp(log_nums)
@@ -290,7 +290,7 @@ class RSM(Rasch):
             Expected score in [0, max_score].
         """
         cats = np.arange(len(thresholds) + 1, dtype=float)
-        cumsum = np.concatenate([[0.0], np.cumsum(thresholds)])
+        cumsum = -_esf.log_category_weights(thresholds)
         log_nums = cats * (person_location - item_location) - cumsum
         log_nums -= log_nums.max()
         nums = np.exp(log_nums)
@@ -319,7 +319,7 @@ class RSM(Rasch):
             Item variance / Fisher information. Always non-negative.
         """
         cats = np.arange(len(thresholds) + 1, dtype=float)
-        cumsum = np.concatenate([[0.0], np.cumsum(thresholds)])
+        cumsum = -_esf.log_category_weights(thresholds)
         log_nums = cats * (person_location - item_location) - cumsum
         log_nums -= log_nums.max()
         nums = np.exp(log_nums)
@@ -350,7 +350,7 @@ class RSM(Rasch):
             Fourth central moment of the response distribution.
         """
         cats = np.arange(len(thresholds) + 1, dtype=float)
-        cumsum = np.concatenate([[0.0], np.cumsum(thresholds)])
+        cumsum = -_esf.log_category_weights(thresholds)
         log_nums = cats * (person_location - item_location) - cumsum
         log_nums -= log_nums.max()
         nums = np.exp(log_nums)
@@ -381,7 +381,7 @@ class RSM(Rasch):
         """
         cats_arr = np.arange(len(thresholds) + 1, dtype=float)  # (K+1,)
         thr_arr = np.asarray(thresholds, dtype=float)
-        cumsum = np.concatenate([[0.0], np.cumsum(thr_arr)])  # (K+1,)
+        cumsum = -_esf.log_category_weights(thr_arr)  # (K+1,)
         ab = np.asarray(person_locations, dtype=float)  # (N,)
         diff = np.asarray(item_locations, dtype=float)  # (I,)
 
@@ -825,6 +825,7 @@ class RSM(Rasch):
         no_info="mean",
         estimation=None,
         solver=None,
+        unused_categories="drop",
     ):
         """
         Calibrate item locations and the shared Rasch-Andrich thresholds.
@@ -943,6 +944,17 @@ class RSM(Rasch):
             the exact gradient (the Hessian for standard errors is computed
             by std_errors()). 'lbfgs': quasi-Newton with the exact gradient.
             None: 'chord'.
+        unused_categories : {'drop', 'keep'}, default 'drop'
+            estimation='cml' only: a score category that no person with a
+            non-extreme total used, for any item. 'drop' raises a ValueError (the
+            thresholds have no finite CML estimates). 'keep' keeps it, with
+            that category's probability zero and the scores unchanged (Wilson
+            and Masters, 1993): the data identify only the sum of the two
+            thresholds either side of it, so the model has one parameter fewer
+            for each such category. Such a threshold is stored in thresholds as inf, and the
+            next threshold holds the sum; beyond the lowest (highest) used
+            category the thresholds are -inf (inf); cml_unused_categories
+            lists the unused categories.
 
         Attributes set
         --------------
@@ -1003,7 +1015,9 @@ class RSM(Rasch):
             raise ValueError(
                 f"estimation must be 'cp-full-rcl', 'cpat-rcl', 'pair-cpat', 'cml' or None, got {estimation!r}."
             )
+        self._check_unused_categories(unused_categories, estimation)
         self.estimation = estimation
+        self._cml_unused = unused_categories
         # arguments as passed (estimation resolved), for refits (see
         # _calibration_kw); the 'pair-cpat'-only ones only with 'pair-cpat'
         self._calibrate_args = dict(
@@ -1012,6 +1026,7 @@ class RSM(Rasch):
             no_info=no_info,
             estimation=estimation,
             solver=solver,
+            unused_categories=unused_categories,
         )
         self._cml_solver = self._check_cml_solver(solver, estimation)
         if estimation == "pair-cpat":
@@ -1139,6 +1154,7 @@ class RSM(Rasch):
         category unused by every person with a non-extreme total raises a ValueError (no item can be
         dropped to give it a finite estimate)."""
         K = self.max_score
+        keep_unused = getattr(self, "_cml_unused", "drop") == "keep"
         dropped = self._cml_drop_items(
             [K] * self.no_of_items, per_item_categories=False
         )
@@ -1151,12 +1167,17 @@ class RSM(Rasch):
         unused = [
             k for k in range(K + 1) if not (obs[contrib] & (Xi[contrib] == k)).any()
         ]
+        self._cml_marked = None
+        self.cml_unused_categories = {}
+        if unused and keep_unused and K + 1 - len(unused) >= 2:
+            return self._calibrate_cml_keep(X, names, K, unused, dropped)
         if unused:
             raise ValueError(
                 f"CML estimates do not exist for these data: category {unused[0]} is unused by every "
                 f"person with a non-extreme total, so the thresholds next to it have no finite "
-                f"estimates. Collapse the category (rescore), or use estimation='cp-full-rcl', whose "
-                f"smoothing gives finite estimates."
+                f"estimates. Use calibrate(estimation='cml', unused_categories='keep') to keep it with "
+                f"probability zero, collapse the category (rescore), or use "
+                f"estimation='cp-full-rcl', whose smoothing gives finite estimates."
             )
         A, _ = self._cml_basis()
         b0 = (
@@ -1193,6 +1214,128 @@ class RSM(Rasch):
                 stacklevel=3,
             )
 
+    def _calibrate_cml_keep(self, X, names, K, unused, dropped):
+        """
+        unused_categories='keep' with categories unused by every contributing person: the shared thresholds
+        get the unused-category markers (_esf.unused_category_offset), so those categories have zero
+        probability and the model has one parameter fewer for each: in self.thresholds an unused
+        category's threshold is inf and the next finite threshold holds the sum of the thresholds either
+        side of it; beyond the lowest (highest) used category they are -inf (inf). The thresholds per item
+        (location included) are kept in self._cml_marked.
+        """
+        I = len(names)
+        used = np.ones(K + 1, bool)
+        used[unused] = False
+        marks = _esf.unused_category_offset(K, used)
+        free = marks == 0
+        Zi = _rcl.zero_sum_basis(I)
+        Tf = np.zeros((K, int(free.sum()) - 1))
+        Tf[free] = _rcl.zero_sum_basis(int(free.sum()))
+        # a threshold carrying the sum across a run of r unused categories holds r + 1 thresholds, so
+        # r + 1 times the item location
+        mult = np.zeros(K)
+        run = 0
+        for h in range(K):
+            if marks[h] == np.inf:
+                run += 1
+            elif free[h]:
+                mult[h], run = 1 + run, 0
+        A = np.hstack([np.kron(Zi, mult[:, None]), np.kron(np.ones((I, 1)), Tf)])
+        offset = np.tile(np.where(free, 0.0, marks), I)
+        tau0 = self.thresholds.values.astype(float)
+        start = (self.items.reindex(names).values[:, None] + tau0[None, :]).ravel()
+        start = np.where(np.isfinite(offset) & (offset == 0), start, offset)
+        fit = _esf.fit_cml(
+            X,
+            A,
+            start,
+            [K] * I,
+            fixed_hessian=getattr(self, "_cml_fixed_hessian", None),
+            solver=getattr(self, "_cml_solver", None),
+            offset=offset,
+        )
+        theta = fit["theta"]
+        delta = Zi @ theta[: I - 1]
+        tau = np.where(free, 0.0, marks)
+        tau[free] = _rcl.zero_sum_basis(int(free.sum())) @ theta[I - 1 :]
+        self._cml_marked, self._cml_A, self._cml_tau_marked = fit["b"], A, tau
+        self._cml_used = {n: used for n in names}  # shared: the same categories for every item
+        self.items = pd.Series(delta - delta.mean(), index=names)
+        # markers as _esf.log_category_weights reads them: an unused category's threshold inf and the
+        # next finite one the sum of the thresholds either side of it; -inf (inf) beyond the lowest
+        # (highest) used category
+        self.thresholds = pd.Series(tau, index=range(1, K + 1))
+        self.cml_unused_categories = {"all items": [int(k) for k in unused]}
+        self._cml_hessian = fit["hessian"]
+        self.convergence = dict(
+            iterations=fit["iterations"],
+            converged=fit["converged"],
+            solver=fit["solver"],
+            log_likelihood=fit["ll"],
+            dropped_items=dropped,
+            hessians=fit["hessians"],
+        )
+        if not fit["converged"]:
+            warnings.warn(
+                f"CML calibration did not converge in {fit['iterations']} iterations "
+                f"(solver {fit['solver']!r}, largest gradient {fit['max_gradient']:.2g}); the "
+                f"estimates may be unreliable.",
+                UserWarning,
+                stacklevel=3,
+            )
+
+    def _cml_location_se(self):
+        """unused_categories='keep': standard errors of the item locations from the CML covariance
+        (se_method)."""
+        names = list(self.item_names)
+        I, K = len(names), self.max_score
+        X = np.array(self.responses.loc[:, names], dtype=np.float64)
+        A, b = self._cml_A, self._cml_marked
+        H = getattr(self, "_cml_hessian", None)
+        if H is None:
+            H = _esf.cond_loglik(X, list(b.reshape(I, K)), hessian=True)[2]
+        if getattr(self, "se_method", None) != "hessian":
+            info, meat = _esf.cml_sandwich(X, A, b, [K] * I, hessian=H)
+            Binv = np.linalg.inv(info)
+            Vt = Binv @ meat @ Binv
+        else:
+            Vt = np.linalg.inv(-(A.T @ H @ A))
+        Zi = _rcl.zero_sum_basis(I)
+        Vd = Zi @ Vt[: I - 1, : I - 1] @ Zi.T
+        return pd.Series(np.sqrt(np.clip(np.diag(Vd), 0, None)), index=names)
+
+    def _cml_keep_map(self):
+        """unused_categories='keep': M with (item locations, category widths) = M @ theta for the keep
+        design (_calibrate_cml_keep); the rows of widths the data do not identify (touching an unused
+        category or a threshold that holds a sum) are NaN."""
+        I, K = self.no_of_items, self.max_score
+        tau = self._cml_tau_marked
+        free = np.isfinite(tau) & (self._location_multiplicity_shared() == 1)
+        nfree = int(np.isfinite(tau).sum())
+        Tf = np.zeros((K, nfree - 1))
+        Tf[np.isfinite(tau)] = _rcl.zero_sum_basis(nfree)
+        M = np.zeros((I + K - 1, I - 1 + nfree - 1))
+        M[:I, : I - 1] = _rcl.zero_sum_basis(I)
+        for h in range(K - 1):
+            if free[h] and free[h + 1]:
+                M[I + h, I - 1 :] = Tf[h + 1] - Tf[h]
+            else:
+                M[I + h] = np.nan
+        return M
+
+    def _location_multiplicity_shared(self):
+        """How many thresholds each shared threshold stands for (unused_categories='keep'; 0 for the
+        markers)."""
+        tau = self._cml_tau_marked
+        mult = np.zeros(len(tau))
+        run = 0
+        for h, v in enumerate(tau):
+            if v == np.inf:
+                run += 1
+            elif np.isfinite(v):
+                mult[h], run = 1 + run, 0
+        return mult
+
     def _cml_covariance(self, full=False, sandwich=None):
         """Covariance of (item locations, category widths) for CML estimates, from the Hessian of the
         conditional log-likelihood or the sandwich (sandwich=True; None follows se_method), in
@@ -1202,10 +1345,14 @@ class RSM(Rasch):
         names = list(self.item_names)
         K = self.max_score
         X = np.array(self.responses.loc[:, names], dtype=np.float64)
-        A, M = self._cml_basis()
-        b = (
-            self.items.reindex(names).values[:, None] + self.thresholds.values[None, :]
-        ).ravel()
+        if getattr(self, "_cml_marked", None) is not None:
+            A, M = self._cml_A, self._cml_keep_map()
+            b = self._cml_marked
+        else:
+            A, M = self._cml_basis()
+            b = (
+                self.items.reindex(names).values[:, None] + self.thresholds.values[None, :]
+            ).ravel()
         H = getattr(self, "_cml_hessian", None)
         if H is None:
             H = _esf.cond_loglik(X, list(b.reshape(len(names), K)), hessian=True)[2]
@@ -1317,23 +1464,34 @@ class RSM(Rasch):
         is_fixed = np.isin(names, fixed.index)
         delta = np.zeros(I)
         delta[is_fixed] = fixed.reindex(np.array(names)[is_fixed]).values
-        c = np.repeat(delta, K)
+        tau0 = self.thresholds.values.astype(float)
+        if getattr(self, "_cml_marked", None) is not None:  # unused_categories='keep'
+            mult = self._location_multiplicity_shared()
+            fin = mult > 0
+            Tb = np.zeros((K, int(fin.sum()) - 1))
+            Tb[fin] = _rcl.zero_sum_basis(int(fin.sum()))
+        else:
+            mult, fin, Tb = np.ones(K), np.ones(K, bool), _rcl.threshold_basis(K)
+        marks = np.where(fin, 0.0, tau0)
+        c = (delta[:, None] * mult[None, :] + marks[None, :]).ravel()
         A = np.hstack(
             [
-                np.kron(np.eye(I)[:, ~is_fixed], np.ones((K, 1))),
-                np.kron(np.ones((I, 1)), _rcl.threshold_basis(K)),
+                np.kron(np.eye(I)[:, ~is_fixed], mult[:, None]),
+                np.kron(np.ones((I, 1)), Tb),
             ]
         )
-        b0 = (
-            self.anchor_items.reindex(names).values[:, None]
-            + self.thresholds.values[None, :]
+        b0 = np.where(
+            fin[None, :],
+            self.anchor_items.reindex(names).values[:, None] * mult[None, :]
+            + np.where(fin, tau0, 0.0)[None, :],
+            marks[None, :],
         ).ravel()
-        L = np.kron(np.eye(I), np.full((1, K), 1.0 / K))
+        L = np.kron(np.eye(I), (mult / mult.sum())[None, :])
 
         def decode(b):
             B = b.reshape(I, K)
-            loc = B.mean(axis=1)
-            tau = B[0] - loc[0]
+            loc = np.where(fin[None, :], B, 0.0).sum(axis=1) / mult.sum()
+            tau = np.where(fin, B[0] - mult * loc[0], B[0])
             return pd.Series(loc, index=names), pd.Series(tau, index=range(1, K + 1)), L
 
         return X, A, c, b0, [K] * I, decode
@@ -2355,17 +2513,21 @@ class RSM(Rasch):
         person_filter = person_data.notna().astype(float)
 
         scores = person_data.sum(axis=1).astype(float)
-        ext_scores = person_filter.sum(axis=1) * self.max_score
+        low_scores, ext_scores = self._person_score_bounds(person_data)
 
         # Adjust extreme scores to keep log() finite
-        scores[scores == 0] = ext_score_adjustment
+        scores[scores == low_scores] = (low_scores + ext_score_adjustment)[
+            scores == low_scores
+        ]
         scores[scores == ext_scores] -= ext_score_adjustment
 
         mean_item_location = item_locations.mean()
 
         try:
             estimates = (
-                np.log(scores) - np.log(ext_scores - scores) + mean_item_location
+                np.log(scores - low_scores)
+                - np.log(ext_scores - scores)
+                + mean_item_location
             )
 
             # Per-person convergence mask — freeze persons once change < tolerance.
@@ -2531,16 +2693,23 @@ class RSM(Rasch):
             items = [items]
 
         item_locations = self.items.loc[items]
-        ext_score = len(items) * self.max_score
+        lo_i, hi_i = self._score_bounds(items)
+        low_score, ext_score = lo_i.sum(), hi_i.sum()
         mean_item_location = item_locations.mean()
 
         used_score = float(score)
-        if used_score == 0:
-            used_score = ext_score_adjustment
+        if not low_score <= used_score <= ext_score:
+            raise ValueError(
+                f"score must be between {low_score:g} and {ext_score:g} for these items, got {score!r}."
+            )
+        if used_score == low_score:
+            used_score += ext_score_adjustment
         elif used_score == ext_score:
             used_score -= ext_score_adjustment
 
-        estimate = log(used_score) - log(ext_score - used_score) + mean_item_location
+        estimate = (
+            log(used_score - low_score) - log(ext_score - used_score) + mean_item_location
+        )
         change, iters = 1.0, 0
 
         while abs(change) > tolerance and iters <= max_iters:
@@ -2635,20 +2804,23 @@ class RSM(Rasch):
 
         no_of_items = len(items)
         item_locations = self.items.loc[items]
-        total_max = no_of_items * self.max_score
+        lo_i, hi_i = self._score_bounds(items)
+        total_min, total_max = int(lo_i.sum()), int(hi_i.sum())
 
         if ext_scores:
-            scores = np.arange(total_max + 1)
+            scores = np.arange(total_min, total_max + 1)
             used_scores = scores.astype(float)
             used_scores[0] += ext_score_adjustment
             used_scores[-1] -= ext_score_adjustment
         else:
-            scores = np.arange(1, total_max)
+            scores = np.arange(total_min + 1, total_max)
             used_scores = scores.astype(float)
 
         mean_item_location = item_locations.mean()
         estimates = pd.Series(
-            np.log(used_scores) - np.log(total_max - used_scores) + mean_item_location,
+            np.log(used_scores - total_min)
+            - np.log(total_max - used_scores)
+            + mean_item_location,
             index=scores,
         )
 
@@ -2961,8 +3133,8 @@ class RSM(Rasch):
         if persons is None:
             persons = self.persons
         scores = responses.sum(axis=1)
-        max_scores = responses.notna().sum(axis=1) * self.max_score
-        non_extreme = responses.index[(scores > 0) & (scores < max_scores)]
+        min_scores, max_scores = self._person_score_bounds(responses)
+        non_extreme = responses.index[(scores > min_scores) & (scores < max_scores)]
         persons = persons.reindex(non_extreme).dropna()
         persons = persons[persons.abs() <= 20]
         obs_arr = responses.loc[persons.index].values
@@ -3202,8 +3374,8 @@ class RSM(Rasch):
 
         df = self.responses.copy()
         scores = df.sum(axis=1)
-        max_scores = df.notna().sum(axis=1) * self.max_score
-        df = df[(scores > 0) & (scores < max_scores)]
+        min_scores, max_scores = self._person_score_bounds(df)
+        df = df[(scores > min_scores) & (scores < max_scores)]
         missing_mask = df.notna().astype(float)
         person_locations = self.persons.loc[df.index]
 
@@ -3259,7 +3431,7 @@ class RSM(Rasch):
 
         self.log_likelihood = self._log_likelihood()
 
-        n_persons = int(((scores > 0) & (scores < max_scores)).sum())
+        n_persons = int(((scores > min_scores) & (scores < max_scores)).sum())
         k = (self.no_of_items - 1) + (self.max_score - 1)
         self.aic = 2 * k - 2 * self.log_likelihood
         self.bic = k * np.log(n_persons) - 2 * self.log_likelihood
@@ -3589,12 +3761,19 @@ class RSM(Rasch):
         return np.full(len(items), float(self.max_score))
 
     def _cml_threshold_list(self, items):
-        """Fitted thresholds per item (item location + shared thresholds), as cond_loglik takes them."""
+        """Fitted thresholds per item (item location + shared thresholds), as cond_loglik takes them (with
+        the unused-category markers after unused_categories='keep')."""
+        if getattr(self, "_cml_marked", None) is not None:
+            rows = dict(zip(self.item_names, self._cml_marked.reshape(-1, self.max_score)))
+            return [rows[n] for n in items]
         tau = self.thresholds.values.astype(float)
         return [self.items[n] + tau for n in items]
 
     def _cml_free_parameters(self):
-        """Free parameters of the CML fit (item locations and category widths)."""
+        """Free parameters of the CML fit (item locations and category widths; after
+        unused_categories='keep', one fewer for each unused category)."""
+        if getattr(self, "_cml_marked", None) is not None:
+            return int(self._cml_A.shape[1])
         return self.no_of_items - 1 + self.max_score - 1
 
     def _global_fit_subset(self, idx, items=None, cml_hessian=None):
@@ -3612,7 +3791,11 @@ class RSM(Rasch):
             m._cml_fixed_hessian = (
                 cml_hessian  # chord method for CML (Monte Carlo replicates)
             )
-            m.calibrate(**self._calibration_kw())
+            m.calibrate(
+                **self._calibration_kw(
+                    unused_categories=getattr(self, "_cml_unused_fit", None)
+                )
+            )
         m.se_method = getattr(
             self, "se_method", None
         )  # CML: Hessian or sandwich, as the object
@@ -3783,8 +3966,8 @@ class RSM(Rasch):
             )
 
         scores = self.responses.sum(axis=1)
-        max_scores = self.responses.notna().sum(axis=1) * self.max_score
-        non_extreme = self.responses.index[(scores > 0) & (scores < max_scores)]
+        min_scores, max_scores = self._person_score_bounds(self.responses)
+        non_extreme = self.responses.index[(scores > min_scores) & (scores < max_scores)]
 
         group_idx = self._resolve_andersen_groups(
             split_by, covariate, non_extreme, self.persons, scores
@@ -4221,8 +4404,8 @@ class RSM(Rasch):
 
         # Non-extreme persons, matching andersen_lr_test's convention
         scores = self.responses.sum(axis=1)
-        max_scores = self.responses.notna().sum(axis=1) * self.max_score
-        non_extreme = self.responses.index[(scores > 0) & (scores < max_scores)]
+        min_scores, max_scores = self._person_score_bounds(self.responses)
+        non_extreme = self.responses.index[(scores > min_scores) & (scores < max_scores)]
 
         cov_values, reference, focal_levels, group_sizes, n_missing = (
             self._dif_group_setup(non_extreme, covariate, reference)
@@ -4673,8 +4856,8 @@ class RSM(Rasch):
             )
 
         scores = self.responses.sum(axis=1)
-        max_scores = self.responses.notna().sum(axis=1) * self.max_score
-        non_extreme_mask = (scores > 0) & (scores < max_scores)
+        min_scores, max_scores = self._person_score_bounds(self.responses)
+        non_extreme_mask = (scores > min_scores) & (scores < max_scores)
         n_persons = int(non_extreme_mask.sum())
 
         # Fit PCM on full data (parameters used for both full and sampled LL)
@@ -5843,7 +6026,16 @@ class RSM(Rasch):
             {cg: estimates[mask_dict[cg]].mean() for cg in class_groups}
         )
         obs = pd.concat(
-            {cg: pd.Series(df[mask_dict[cg]].mean().sum()) for cg in class_groups}
+            {
+                cg: pd.Series(
+                    [
+                        pd.Series(
+                            np.atleast_1d(df[mask_dict[cg]].mean()).astype(float)
+                        ).sum(min_count=1)
+                    ]
+                )
+                for cg in class_groups
+            }
         )
         return mean_person_locations, obs
 
