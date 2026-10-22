@@ -1032,7 +1032,7 @@ def _mfrm_dif_two_panels(model, seed, raters_a, raters_b, no_of_persons=400):
 
 def test_mfrm_dif_partly_overlapping_raters_anchored_on_common():
     """With groups scored by partly overlapping facet elements and no true DIF, dif_test anchors
-    both groups on the common facet elements before comparing item locations (v1.5.0 item 0).
+    both groups on the common facet elements before comparing item locations (v2.0.0 item 0).
     Comparing each group's own averages gave max |Difference| = 0.67 logits here."""
     m = _mfrm_dif_two_panels("items", 3, slice(0, 4), slice(2, 6))
     with warnings.catch_warnings():

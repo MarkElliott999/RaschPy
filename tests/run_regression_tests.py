@@ -1024,7 +1024,7 @@ def run_bivector(generate=False, verbose=False):
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
-# ── Conditional methods (v1.5.0): CML, conditional fit, conditional tests ─────
+# ── Conditional methods (v2.0.0): CML, conditional fit, conditional tests ─────
 
 COND_ITEMS, COND_PERSONS = 8, 400
 
