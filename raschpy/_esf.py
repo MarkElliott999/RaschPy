@@ -1070,7 +1070,7 @@ def population_properties(lg, mu, sigma, estimates=None, grid=2000):
     the test difficulty (theta with expected score m / 2), the exact bias, SEM and RMSE of the person
     estimates by total (estimates; default the WLEs) and their population expectations E|Bias|, E(SEM),
     E(RMSE), the expected information E(I), and reliabilities rho1 = V(T) / V(R), rho2 = corr(R1, R2),
-    rho3 = V(theta) / V(theta-hat), rho4 = corr(theta-hat1, theta-hat2), rho5 = corr(theta, theta-hat)
+    rho3 = V(E(theta-hat | theta)) / V(theta-hat) (the estimate-scale analogue of rho1), rho4 = corr(theta-hat1, theta-hat2), rho5 = corr(theta, theta-hat)
     and rho6 = P(R1 < R2 | theta1 < theta2). Expectations use an equal-probability grid of normal quantiles.
     Returns a dict.
     """
@@ -1105,6 +1105,7 @@ def population_properties(lg, mu, sigma, estimates=None, grid=2000):
     var_est = pr @ est**2 - (pr @ est) ** 2
     cov_est = est @ joint @ est - (pr @ est) ** 2
     cov_th_est = np.mean(th * mean_est) - np.mean(th) * np.mean(mean_est)
+    var_true_est = np.mean(mean_est**2) - np.mean(mean_est) ** 2  # V(E(theta-hat | theta))
     F = np.cumsum(P, axis=1)  # P(R <= r | theta)
     below = np.hstack([np.zeros((grid, 1)), F[:, :-1]])  # P(R < r | theta)
     Q = below @ P.T  # Q[a, b] = P(R_a < R_b | theta_a, theta_b)
@@ -1120,7 +1121,7 @@ def population_properties(lg, mu, sigma, estimates=None, grid=2000):
         expected_rmse=float(np.mean(rmse)),
         rho1=float(var_T / var_R),
         rho2=float(cov_R / var_R),
-        rho3=float(sigma**2 / var_est),
+        rho3=float(var_true_est / var_est),
         rho4=float(cov_est / var_est),
         rho5=float(cov_th_est / (sigma * np.sqrt(var_est))),
         rho6=float(rho6),

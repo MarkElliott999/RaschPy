@@ -2998,9 +2998,10 @@ class Rasch:
             Expected |bias|, Expected SEM, Expected RMSE -- of the WLE, over the population;
             rho1 = V(T) / V(R) (true-score over total-score variance); rho2 = corr(R1, R2) (two
             independent administrations; equal to rho1 when responses are independent given the
-            location); rho3 = V(theta) / V(theta-hat); rho4 = corr(theta-hat1, theta-hat2); rho5 =
-            corr(theta, theta-hat); rho6 = P(R1 < R2 | theta1 < theta2), the probability that two
-            random persons' totals order them correctly.
+            location); rho3 = V(E(theta-hat | theta)) / V(theta-hat) (rho1 for the estimates);
+            rho4 = corr(theta-hat1, theta-hat2) (equal to rho3 likewise); rho5 = corr(theta,
+            theta-hat); rho6 = P(R1 < R2 | theta1 < theta2), the probability that two random
+            persons' totals order them correctly.
             Also set: targeting_curves (by location: test information, asymptotic SE 1 / sqrt(I),
             bias, SEM and RMSE of the WLE, population density), targeting_score_table (by total:
             WLE, model and observed proportions -- observed among persons who responded to every
@@ -3350,7 +3351,7 @@ class Rasch:
                 "Expected RMSE": "WLE, over the population",
                 "rho1": "V(T) / V(R)",
                 "rho2": "corr(R1, R2), two independent administrations",
-                "rho3": "V(theta) / V(theta-hat)",
+                "rho3": "V(E(theta-hat | theta)) / V(theta-hat)",
                 "rho4": "corr(theta-hat1, theta-hat2)",
                 "rho5": "corr(theta, theta-hat)",
                 "rho6": "P(R1 < R2 | theta1 < theta2)",
@@ -5138,11 +5139,16 @@ class Rasch:
     # ------------------------------------------------------------------
 
     _GLOBAL_FIT_METHODS = ("wald", "andersen-lr", "martin-lof")
-    _GLOBAL_FIT_SPLITS = ("score", "person_location", "random", "exogenous")
+    _GLOBAL_FIT_SPLITS = ("score", "score_groups", "person_location", "random", "exogenous")
 
-    def _global_fit_groups(self, split, covariate, seed, split_prop=0.5):
-        """Two person groups (index objects) for global_fit()."""
+    def _global_fit_groups(self, split, covariate, seed, split_prop=0.5, max_groups=2):
+        """
+        Person groups (index objects) for global_fit(): two groups, or with split='exogenous' up to
+        max_groups (one per covariate value).
+        """
         resp = self.responses
+        if split == "score_groups":
+            return self._score_group_split(resp)
         if split in ("score", "person_location"):
             if split == "score":
                 value = resp.mean(
@@ -5168,12 +5174,56 @@ class Rasch:
             )
         values = self.exogenous[covariate].reindex(resp.index)
         levels = sorted(values.dropna().unique(), key=str)
-        if len(levels) != 2:
+        if len(levels) < 2 or len(levels) > max_groups:
+            need = "exactly two values" if max_groups == 2 else "at least two values"
             raise ValueError(
-                f"split='exogenous' needs a covariate with exactly two values; "
+                f"split='exogenous' needs a covariate with {need}; "
                 f"{covariate!r} has {len(levels)}."
+                + (
+                    " method='andersen-lr' takes more than two."
+                    if max_groups == 2 and len(levels) > 2
+                    else ""
+                )
             )
         return {str(lv): resp.index[(values == lv).values] for lv in levels}
+
+    def _score_group_split(self, resp):
+        """
+        split='score_groups': two groups of whole score groups (persons with the same score are never
+        separated), cut where the persons with non-extreme scores divide most evenly, as in iarm's
+        score_groups (Mueller, 2020); on a tie between two cuts, the higher one if the lowest score is no
+        more frequent than the highest, else the lower. Persons with extreme scores join the group at
+        their end. The score is the mean observed score, which with complete data orders persons as the
+        total does.
+        """
+        X = resp.to_numpy(dtype=float)
+        obs = ~np.isnan(X)
+        maxes = np.nanmax(X, axis=0)
+        mins = np.nanmin(X, axis=0)
+        total = np.where(obs, X, 0).sum(1)
+        top = obs @ np.nan_to_num(maxes)
+        bottom = obs @ np.nan_to_num(mins)
+        answered = obs.any(1)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            value = np.where(answered, total / np.maximum(obs.sum(1), 1), np.nan)
+        extreme = (total <= bottom) | (total >= top)
+        inner = answered & ~extreme
+        levels, counts = np.unique(np.round(value[inner], 12), return_counts=True)
+        if len(levels) < 2:
+            raise ValueError(
+                "split='score_groups' needs at least two different non-extreme scores."
+            )
+        dist = np.abs(np.cumsum(counts) - counts.sum() / 2)[:-1]
+        best = np.flatnonzero(np.isclose(dist, dist.min()))
+        if len(best) == 2:
+            vals, freq = np.unique(np.round(value[answered], 12), return_counts=True)
+            best = best[1] if freq[0] <= freq[-1] else best[0]
+        else:
+            best = best[0]
+        cut = levels[best]
+        low = answered & (np.round(value, 12) <= cut)
+        high = answered & (np.round(value, 12) > cut)
+        return {"low": resp.index[low], "high": resp.index[high]}
 
     @staticmethod
     def _martin_lof_stat(resp, A, fA, fB, f):
@@ -5393,7 +5443,7 @@ class Rasch:
         which persons contribute); the pooled model is fitted to the persons
         of the two groups only.
         """
-        groups = self._global_fit_groups(split, covariate, seed, split_prop)
+        groups = self._global_fit_groups(split, covariate, seed, split_prop, max_groups=np.inf)
         names = list(groups)
         common = [
             c
@@ -5423,13 +5473,13 @@ class Rasch:
                 "method='andersen-lr': fewer than two items have CML estimates in both "
                 "groups, so there is nothing to compare."
             )
-        both = groups[names[0]].append(groups[names[1]])
+        both = groups[names[0]].append([groups[n] for n in names[1:]])
         pooled = self._global_fit_subset(both, items=common)
         self._andersen_item_tables(fitted, pooled, groups, names)
         ll_groups = {n: fitted[n].convergence["log_likelihood"] for n in names}
         ll0 = pooled.convergence["log_likelihood"]
         LR = max(2.0 * (sum(ll_groups.values()) - ll0), 0.0)
-        df = pooled._cml_free_parameters()
+        df = (len(names) - 1) * pooled._cml_free_parameters()
         p = float(chi2_dist.sf(LR, df))
         excluded = [c for c in self.item_names if c not in common]
         self.global_fit_table = None
@@ -5438,6 +5488,8 @@ class Rasch:
         summary = {"method": "andersen-lr", "split": split, "statistic": LR, "df": df}
         if split in ("score", "person_location"):
             summary["split_prop"] = split_prop
+        if split == "exogenous":
+            summary["covariate"] = covariate
         summary.update(
             {
                 "log-likelihoods": {**ll_groups, "pooled": ll0},
@@ -5519,10 +5571,11 @@ class Rasch:
                 m.std_errors()
             tab[f"Location ({n})"] = m.items.reindex(items).values
             se[n] = m.item_se.reindex(items).values
-        a, b = names[0], names[1]
-        tab["Difference"] = tab[f"Location ({b})"] - tab[f"Location ({a})"]
-        with np.errstate(invalid="ignore", divide="ignore"):
-            tab["z"] = tab["Difference"] / np.sqrt(se[a] ** 2 + se[b] ** 2)
+        if len(names) == 2:
+            a, b = names
+            tab["Difference"] = tab[f"Location ({b})"] - tab[f"Location ({a})"]
+            with np.errstate(invalid="ignore", divide="ignore"):
+                tab["z"] = tab["Difference"] / np.sqrt(se[a] ** 2 + se[b] ** 2)
         df = st["df"].astype(float)
         tab["Chi-square"] = st["q1"]
         tab["df"] = st["df"]
@@ -5632,10 +5685,11 @@ class Rasch:
 
         method='andersen-lr': Andersen's conditional likelihood ratio test
         (SLM, PCM, RSM; estimates from calibrate(estimation='cml') only),
-        LR = 2 (ll_1 + ll_2 - ll_pooled), each the conditional log-likelihood
-        at its own CML maximum, referred to chi-square with df = the model's
-        free parameters. The pooled model is fitted to the persons of the two
-        groups. Items without CML estimates in both groups (an item one group
+        LR = 2 (sum of the groups' ll - ll_pooled), each the conditional
+        log-likelihood at its own CML maximum, referred to chi-square with
+        df = (groups - 1) x the model's free parameters. The pooled model is
+        fitted to the persons of the groups. Items without CML estimates in
+        every group (an item one group
         did not respond to, an unused category, or an item not compared with
         the others in both directions) are left out of every fit, with a
         UserWarning; with PCM, the score and person-location splits often
@@ -5690,14 +5744,20 @@ class Rasch:
             calibrate(estimation='cml').
         split : str, list or None, default None
             'wald' and 'andersen-lr': how persons are split, one of 'score'
-            (the default), 'person_location', 'random' or 'exogenous': at the
-            median mean observed score (Andersen's split; the mean handles
-            missing data), at the median person location, at random, or by a
-            two-valued exogenous covariate. 'martin-lof': how items are split,
+            (the default), 'score_groups', 'person_location', 'random' or
+            'exogenous': at the median mean observed score (the mean handles
+            missing data; persons with the same score may fall in different
+            groups, so the groups are of equal size); into two groups of whole
+            score groups, cut where the persons with non-extreme scores divide
+            most evenly (as iarm's clr_tests does; split_prop is not used); at
+            the median person location; at random; or by an exogenous
+            covariate, two-valued for 'wald', any number of values for
+            'andersen-lr'. 'martin-lof': how items are split,
             'median' (the default: the items below and above the median item
             location) or a list of the items in the first subset.
         covariate : str or None, default None
-            Column of self.exogenous, for split='exogenous'.
+            Column of self.exogenous, for split='exogenous' (implied when split
+            is left out; any other split raises a ValueError).
         split_prop : float, default 0.5
             For split='score' or 'person_location': the proportion of persons
             in each of the two outer groups compared. 0.5 is the median split
@@ -5821,6 +5881,19 @@ class Rasch:
             raise ValueError(
                 f"method must be one of {self._GLOBAL_FIT_METHODS}, got {method!r}."
             )
+        if covariate is not None:
+            if method == "martin-lof":
+                raise ValueError(
+                    "covariate= is not used by method='martin-lof', which splits items, not "
+                    "persons."
+                )
+            if split is None:
+                split = "exogenous"
+            elif split != "exogenous":
+                raise ValueError(
+                    f"covariate= is only used with split='exogenous', got split={split!r}. "
+                    f"Pass split='exogenous' (or leave split out) to split by {covariate!r}."
+                )
         if method == "martin-lof":
             if getattr(self, "estimation", None) != "cml":
                 raise ValueError(

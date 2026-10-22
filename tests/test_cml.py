@@ -258,6 +258,51 @@ def test_andersen_lr_needs_cml():
         m.global_fit(method="andersen-lr")
 
 
+
+@pytest.mark.parametrize("name", ["SLM", "PCM", "RSM"])
+def test_andersen_lr_three_groups(name):
+    m = _anchor_model(name, seed=21)
+    g = pd.Series(np.arange(len(m.responses)) % 3, index=m.responses.index).map({0: "a", 1: "b", 2: "c"})
+    m.exogenous = pd.DataFrame({"G": g})
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = m.global_fit(method="andersen-lr", covariate="G")
+    groups = m._global_fit_groups("exogenous", "G", None, max_groups=np.inf)
+    items = [c for c in m.item_names if c not in m.global_fit_excluded]
+    fits = [m._global_fit_subset(groups[n], items=items) for n in groups]
+    pooled = m._global_fit_subset(m.responses.index, items=items)
+    lr = 2 * (sum(f.convergence["log_likelihood"] for f in fits) - pooled.convergence["log_likelihood"])
+    assert r["statistic"] == pytest.approx(lr, abs=1e-8)
+    assert r["df"] == 2 * pooled._cml_free_parameters() and r["covariate"] == "G"
+    assert "Difference" not in m.global_fit_item_table
+    with pytest.raises(ValueError, match="exactly two values"):
+        m.global_fit(method="wald", covariate="G")
+
+
+def test_global_fit_covariate_needs_exogenous_split():
+    m = _anchor_model("SLM", seed=22)
+    m.exogenous = pd.DataFrame({"G": np.arange(len(m.responses)) % 2}, index=m.responses.index)
+    with pytest.raises(ValueError, match="only used with split='exogenous'"):
+        m.global_fit(method="andersen-lr", split="score", covariate="G")
+    with pytest.raises(ValueError, match="not used by method='martin-lof'"):
+        m.global_fit(method="martin-lof", covariate="G")
+
+
+def test_score_groups_split():
+    # whole score groups, cut where the non-extreme persons divide most evenly (iarm's score_groups)
+    X = pd.DataFrame(
+        [[0, 0, 0]] * 3 + [[1, 0, 0]] * 4 + [[1, 1, 0]] * 5 + [[1, 1, 1]] * 2, columns=list("abc")
+    )
+    g = SLM(X)._score_group_split(X)
+    assert list(g["low"]) == list(range(7)) and list(g["high"]) == list(range(7, 14))
+    m = _anchor_model("SLM", seed=23)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = m.global_fit(method="andersen-lr", split="score_groups")
+    tot = m.responses.sum(axis=1)
+    low, high = (tot[m._global_fit_groups("score_groups", None, None)[k]] for k in ("low", "high"))
+    assert low.max() < high.min() and r["df"] > 0
+
 # ---------------------------------------------------------------- Martin-Lof (global_fit)
 
 @pytest.mark.parametrize(
@@ -748,6 +793,7 @@ def test_targeting(name):
     for k in ("rho1", "rho3", "rho4", "rho5", "rho6"):
         assert 0 < out[k] < 1
     assert out["rho2"] == pytest.approx(out["rho1"], abs=1e-9)
+    assert out["rho4"] == pytest.approx(out["rho3"], abs=1e-9)
     curves = m.targeting_curves
     assert curves["Information"].idxmax() == pytest.approx(out["Target"], abs=0.05)
     st = m.targeting_score_table
