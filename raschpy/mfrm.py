@@ -17046,7 +17046,7 @@ class MFRM(Rasch):
     # ------------------------------------------------------------------
     def icc(
         self,
-        item,
+        items=None,
         model="global",
         anchor=False,
         facet_element=None,
@@ -17073,12 +17073,13 @@ class MFRM(Rasch):
         filename=None,
         file_format="png",
         dpi=300,
+        item=None,
     ):
         """
         Item Characteristic Curve for one item and/or facet element (e.g.
         facet element (e.g. rater)), or several of either (or both) overlaid on the same axes.
 
-        item : str or list of str
+        items : str or list of str
             A single name draws one curve, as before. A list overlays one
             curve per item (in the given order), each in its own colour.
             thresh_lines/cat_highlight only make sense for one curve's
@@ -17094,6 +17095,9 @@ class MFRM(Rasch):
             isn't also a list (so each item maps to exactly one curve)
             and plain darkred otherwise (an item spans several curves
             there, with no single one to match).
+        item : str or list of str, optional
+            Deprecated name for items (a FutureWarning; it will be removed in a
+            future release).
         facet_element : str, list of str, or None
             A single name (or None, averaging across every facet
             element) draws one curve, as before. A list overlays one
@@ -17109,6 +17113,7 @@ class MFRM(Rasch):
             facet element across several items) reads far more clearly. See the
             manual for an example of each.
         """
+        item = self._items_arg(items, item, "icc")
         model = self._MODEL_ALIASES.get(model, model)
         item_locations, thresholds, facet_effects = self._get_params(model, anchor)
 
@@ -17260,37 +17265,37 @@ class MFRM(Rasch):
             file_format=file_format,
         )
 
-    def icc_global(self, item, **kw):
+    def icc_global(self, items=None, item=None, **kw):
         """Alias for icc(model='global'). See icc for full documentation."""
-        return self.icc(item, model="global", **kw)
+        return self.icc(items, model="global", item=item, **kw)
 
-    def icc_items(self, item, **kw):
+    def icc_items(self, items=None, item=None, **kw):
         """Alias for icc(model='items'). See icc for full documentation."""
-        return self.icc(item, model="items", **kw)
+        return self.icc(items, model="items", item=item, **kw)
 
-    def icc_thresholds(self, item, **kw):
+    def icc_thresholds(self, items=None, item=None, **kw):
         """Alias for icc(model='thresholds'). See icc for full documentation."""
-        return self.icc(item, model="thresholds", **kw)
+        return self.icc(items, model="thresholds", item=item, **kw)
 
-    def icc_matrix(self, item, **kw):
+    def icc_matrix(self, items=None, item=None, **kw):
         """Alias for icc(model='matrix'). See icc for full documentation."""
-        return self.icc(item, model="matrix", **kw)
+        return self.icc(items, model="matrix", item=item, **kw)
 
-    def icc_bivector(self, item, **kw):
+    def icc_bivector(self, items=None, item=None, **kw):
         """Alias for icc(model='bivector'). See icc for full documentation."""
-        return self.icc(item, model="bivector", **kw)
+        return self.icc(items, model="bivector", item=item, **kw)
 
-    def icc_centrality(self, item, **kw):
+    def icc_centrality(self, items=None, item=None, **kw):
         """Alias for icc(model='centrality'). See icc for full documentation."""
-        return self.icc(item, model="centrality", **kw)
+        return self.icc(items, model="centrality", item=item, **kw)
 
-    def icc_pseudo_halo(self, item, **kw):
+    def icc_pseudo_halo(self, items=None, item=None, **kw):
         """Alias for icc(model='pseudo_halo'). See icc for full documentation."""
-        return self.icc(item, model="pseudo_halo", **kw)
+        return self.icc(items, model="pseudo_halo", item=item, **kw)
 
-    def icc_bistretch(self, item, **kw):
+    def icc_bistretch(self, items=None, item=None, **kw):
         """Alias for icc(model='bistretch'). See icc for full documentation."""
-        return self.icc(item, model="bistretch", **kw)
+        return self.icc(items, model="bistretch", item=item, **kw)
 
     def crcs(
         self,
@@ -17651,7 +17656,7 @@ class MFRM(Rasch):
 
     def iic(
         self,
-        item,
+        items=None,
         model="global",
         anchor=False,
         facet_element=None,
@@ -17674,12 +17679,13 @@ class MFRM(Rasch):
         filename=None,
         file_format="png",
         dpi=300,
+        item=None,
     ):
         """
         Item Information Curve for one item and/or facet element (e.g.
         facet element (e.g. rater)), or several of either (or both) overlaid on the same axes.
 
-        item : str or list of str
+        items : str or list of str
             A single name draws one curve, as before. A list overlays
             one curve per item (in the given order), each in its own
             colour. thresh_lines/cat_highlight only make sense for one
@@ -17691,6 +17697,9 @@ class MFRM(Rasch):
             point_info_lines draws every curve's own information value
             at each requested location, labelled "curve: info", since
             that comparison at a shared location is the point.
+        item : str or list of str, optional
+            Deprecated name for items (a FutureWarning; it will be removed in a
+            future release).
         facet_element : str, list of str, or None
             A single name draws one curve, as before -- None (or
             'none'/'zero') isn't an average here (unlike icc/other
@@ -17703,6 +17712,7 @@ class MFRM(Rasch):
             on one plot at once and can get hard to read fast; one list
             and one fixed value reads far more clearly.
         """
+        item = self._items_arg(items, item, "iic")
         model = self._MODEL_ALIASES.get(model, model)
         item_locations, thresholds, facet_effects = self._get_params(model, anchor)
 
@@ -17801,37 +17811,37 @@ class MFRM(Rasch):
             file_format=file_format,
         )
 
-    def iic_global(self, item, **kw):
+    def iic_global(self, items=None, item=None, **kw):
         """Alias for iic(model='global'). See iic for full documentation."""
-        return self.iic(item, model="global", **kw)
+        return self.iic(items, model="global", item=item, **kw)
 
-    def iic_items(self, item, **kw):
+    def iic_items(self, items=None, item=None, **kw):
         """Alias for iic(model='items'). See iic for full documentation."""
-        return self.iic(item, model="items", **kw)
+        return self.iic(items, model="items", item=item, **kw)
 
-    def iic_thresholds(self, item, **kw):
+    def iic_thresholds(self, items=None, item=None, **kw):
         """Alias for iic(model='thresholds'). See iic for full documentation."""
-        return self.iic(item, model="thresholds", **kw)
+        return self.iic(items, model="thresholds", item=item, **kw)
 
-    def iic_matrix(self, item, **kw):
+    def iic_matrix(self, items=None, item=None, **kw):
         """Alias for iic(model='matrix'). See iic for full documentation."""
-        return self.iic(item, model="matrix", **kw)
+        return self.iic(items, model="matrix", item=item, **kw)
 
-    def iic_bivector(self, item, **kw):
+    def iic_bivector(self, items=None, item=None, **kw):
         """Alias for iic(model='bivector'). See iic for full documentation."""
-        return self.iic(item, model="bivector", **kw)
+        return self.iic(items, model="bivector", item=item, **kw)
 
-    def iic_centrality(self, item, **kw):
+    def iic_centrality(self, items=None, item=None, **kw):
         """Alias for iic(model='centrality'). See iic for full documentation."""
-        return self.iic(item, model="centrality", **kw)
+        return self.iic(items, model="centrality", item=item, **kw)
 
-    def iic_pseudo_halo(self, item, **kw):
+    def iic_pseudo_halo(self, items=None, item=None, **kw):
         """Alias for iic(model='pseudo_halo'). See iic for full documentation."""
-        return self.iic(item, model="pseudo_halo", **kw)
+        return self.iic(items, model="pseudo_halo", item=item, **kw)
 
-    def iic_bistretch(self, item, **kw):
+    def iic_bistretch(self, items=None, item=None, **kw):
         """Alias for iic(model='bistretch'). See iic for full documentation."""
-        return self.iic(item, model="bistretch", **kw)
+        return self.iic(items, model="bistretch", item=item, **kw)
 
     def tcc(
         self,

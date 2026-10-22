@@ -6997,7 +6997,7 @@ class PCM(Rasch):
 
     def icc(
         self,
-        item,
+        items=None,
         obs=False,
         no_of_classes=5,
         cond_obs=False,
@@ -7023,6 +7023,7 @@ class PCM(Rasch):
         filename=None,
         file_format="png",
         dpi=300,
+        item=None,
     ):
         """
         Plot the Item Characteristic Curve (ICC) for one item, or several
@@ -7034,7 +7035,7 @@ class PCM(Rasch):
 
         Parameters
         ----------
-        item : str or list of str
+        items : str or list of str
             Item identifier(s). A single name draws one curve, as before.
             A list overlays one curve per item (in the given order), each
             in its own colour with a legend keyed by item name.
@@ -7046,6 +7047,9 @@ class PCM(Rasch):
             so they stay distinguishable. Items can have different
             max_score_vector values; the y-axis is scaled to the largest
             among the plotted items.
+        item : str or list of str, optional
+            Deprecated name for items (a FutureWarning; it will be removed in a
+            future release).
         obs : bool, default False
             If True, overlays observed class-interval mean scores. Works
             with a list of items too -- one column of observed points
@@ -7118,6 +7122,7 @@ class PCM(Rasch):
         -------
         matplotlib.figure.Figure
         """
+        item = self._items_arg(items, item, "icc")
         multi = isinstance(item, list)
         if multi:
             # thresh_lines/cat_highlight each only make sense for a single
@@ -7507,7 +7512,7 @@ class PCM(Rasch):
 
     def iic(
         self,
-        item,
+        items=None,
         ymax=None,
         thresh_lines=False,
         central_location=False,
@@ -7527,6 +7532,7 @@ class PCM(Rasch):
         filename=None,
         file_format="png",
         dpi=300,
+        item=None,
     ):
         """
         Plot the Item Information Curve (IIC) for one item, or several
@@ -7537,7 +7543,7 @@ class PCM(Rasch):
 
         Parameters
         ----------
-        item : str or list of str
+        items : str or list of str
             Item identifier(s). A single name draws one curve, as before.
             A list overlays one curve per item (in the given order), each
             in its own colour with a legend keyed by item name.
@@ -7550,6 +7556,9 @@ class PCM(Rasch):
             value at each requested location, labelled "item: info",
             since that comparison across items at a shared location is
             the point.
+        item : str or list of str, optional
+            Deprecated name for items (a FutureWarning; it will be removed in a
+            future release).
         ymax : float or None, default None
             Upper y-axis limit. Auto-scaled if None.
         thresh_lines : bool, default False
@@ -7584,6 +7593,7 @@ class PCM(Rasch):
         -------
         matplotlib.figure.Figure
         """
+        item = self._items_arg(items, item, "iic")
         multi = isinstance(item, list)
         if multi:
             # thresh_lines/cat_highlight each only make sense for a

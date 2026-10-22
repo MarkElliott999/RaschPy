@@ -240,7 +240,7 @@ model.item_stats_df()       # → model.item_stats
 model.person_stats_df()     # → model.person_stats
 model.test_stats_df()       # → model.test_stats
 model.global_stats_df()     # → model.global_stats (whole-test results)
-model.icc(item=...)         # plots: icc, crcs, threshold_ccs, iic, tcc,
+model.icc(items=...)         # plots: icc, crcs, threshold_ccs, iic, tcc,
                              #   test_info, test_csem, std_residuals_plot,
                              #   wright_map
 ```

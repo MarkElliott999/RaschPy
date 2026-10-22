@@ -219,8 +219,8 @@ def run_slm(verbose=False):
     import matplotlib.pyplot as plt
     item = m.responses.columns[0]
     for plot_name, call in [
-        ('icc',                lambda: m.icc(item=item)),
-        ('iic',                lambda: m.iic(item=item)),
+        ('icc',                lambda: m.icc(items=item)),
+        ('iic',                lambda: m.iic(items=item)),
         ('tcc',                lambda: m.tcc()),
         ('test_info',          lambda: m.test_info()),
         ('test_csem',          lambda: m.test_csem()),
@@ -371,10 +371,10 @@ def run_pcm(verbose=False):
     import matplotlib.pyplot as plt
     item = m.responses.columns[0]
     for plot_name, call in [
-        ('icc',                lambda: m.icc(item=item)),
+        ('icc',                lambda: m.icc(items=item)),
         ('crcs',               lambda: m.crcs(item=item)),
         ('threshold_ccs',      lambda: m.threshold_ccs(item=item)),
-        ('iic',                lambda: m.iic(item=item)),
+        ('iic',                lambda: m.iic(items=item)),
         ('tcc',                lambda: m.tcc()),
         ('test_info',          lambda: m.test_info()),
         ('test_csem',          lambda: m.test_csem()),
@@ -502,10 +502,10 @@ def run_rsm(verbose=False):
     import matplotlib.pyplot as plt
     item = m.responses.columns[0]
     for plot_name, call in [
-        ('icc',                lambda: m.icc(item=item)),
+        ('icc',                lambda: m.icc(items=item)),
         ('crcs',               lambda: m.crcs(item=item)),
         ('threshold_ccs',      lambda: m.threshold_ccs(item=item)),
-        ('iic',                lambda: m.iic(item=item)),
+        ('iic',                lambda: m.iic(items=item)),
         ('tcc',                lambda: m.tcc()),
         ('test_info',          lambda: m.test_info()),
         ('test_csem',          lambda: m.test_csem()),
@@ -695,10 +695,10 @@ def run_mfrm_model(label, model_name, sim_cls, verbose=False):
     item  = m.item_names[0]
     facet_element = m.rater_names[0]
     for plot_name, call in [
-        ('icc',                lambda: m.icc(item=item, facet_element=facet_element)),
+        ('icc',                lambda: m.icc(items=item, facet_element=facet_element)),
         ('crcs',               lambda: m.crcs(item=item, facet_element=facet_element)),
         ('threshold_ccs',      lambda: m.threshold_ccs(item=item, facet_element=facet_element)),
-        ('iic',                lambda: m.iic(item=item)),
+        ('iic',                lambda: m.iic(items=item)),
         ('tcc',                lambda: m.tcc()),
         ('test_info',          lambda: m.test_info()),
         ('test_csem',          lambda: m.test_csem()),
@@ -951,10 +951,10 @@ def run_bivector(verbose=False):
     item           = m.item_names[0]
     facet_element  = m.rater_names[0]
     for plot_name, call in [
-        ('icc',          lambda: m.icc(item=item, facet_element=facet_element, model='bivector')),
+        ('icc',          lambda: m.icc(items=item, facet_element=facet_element, model='bivector')),
         ('crcs',         lambda: m.crcs(item=item, facet_element=facet_element, model='bivector')),
         ('threshold_ccs',lambda: m.threshold_ccs(item=item, facet_element=facet_element, model='bivector')),
-        ('iic',          lambda: m.iic(item=item, model='bivector')),
+        ('iic',          lambda: m.iic(items=item, model='bivector')),
         ('tcc',          lambda: m.tcc(model='bivector')),
         ('test_info',    lambda: m.test_info(model='bivector')),
         ('test_csem',    lambda: m.test_csem(model='bivector')),

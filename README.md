@@ -79,7 +79,7 @@ print(slm.person_stats)  # Estimate, CSEM, Score, Infit MS, ...
 slm.test_stats_df()
 print(slm.test_stats)    # ISI, PSI, reliability
 
-slm.icc(item='Item_1', obs=True)     # Item Characteristic Curve
+slm.icc(items='Item_1', obs=True)     # Item Characteristic Curve
 slm.tcc(obs=True)                    # Test Characteristic Curve
 slm.test_info()                      # Test Information Curve
 slm.std_residuals_plot(normal=True)  # Standardised residuals histogram
@@ -126,7 +126,7 @@ pcm.threshold_stats_df(full=True)
 print(pcm.threshold_stats_uncentred)   # Uncentred threshold estimates
 print(pcm.threshold_stats_centred)     # Centred threshold offsets
 
-pcm.icc(item='Item_1', obs=True)             # Expected score curve
+pcm.icc(items='Item_1', obs=True)             # Expected score curve
 pcm.crcs(item='Item_1', obs='all')           # Category Response Curves
 pcm.threshold_ccs(item='Item_1', obs='all')  # Threshold Characteristic Curves
 pcm.tcc(obs=True)
@@ -163,7 +163,7 @@ print(rsm.item_stats)      # Item locations
 rsm.threshold_stats_df(full=True)
 print(rsm.threshold_stats) # Shared Rasch-Andrich thresholds
 
-rsm.icc(item='Item_1', obs=True)
+rsm.icc(items='Item_1', obs=True)
 rsm.crcs(obs='all')         # Pooled across all items
 rsm.threshold_ccs(obs='all')
 rsm.tcc(obs=True)
@@ -213,7 +213,7 @@ print(mfrm.rater_stats_global)       # Rater severities and fit
 mfrm.person_stats_df(model='global')
 mfrm.test_stats_df(model='global')
 
-mfrm.icc(item='Item_1', model='global', obs=True)
+mfrm.icc(items='Item_1', model='global', obs=True)
 mfrm.crcs(item='Item_1', model='global')
 mfrm.tcc(model='global', obs=True)
 mfrm.wright_map_global(item_strip=True, facet_labels=True, distribution_markers=True)  # Person-item-rater map
@@ -262,7 +262,7 @@ mfrm.rater_stats_df(model='bivector', full=True)
 # plus overall fit statistics
 print(mfrm.rater_stats_bivector)
 
-mfrm.icc(item='Item_1', model='bivector', obs=True)
+mfrm.icc(items='Item_1', model='bivector', obs=True)
 mfrm.tcc(model='bivector', obs=True)
 mfrm.wright_map_bivector(item_strip=True, facet_labels=True)  # Person-item-rater map
 

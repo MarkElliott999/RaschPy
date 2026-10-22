@@ -4539,7 +4539,7 @@ class SLM(Rasch):
 
     def icc(
         self,
-        item,
+        items=None,
         obs=False,
         no_of_classes=5,
         cond_obs=False,
@@ -4564,6 +4564,7 @@ class SLM(Rasch):
         filename=None,
         file_format="png",
         dpi=300,
+        item=None,
     ):
         """
         Plot the Item Characteristic Curve (ICC) for one item, or several
@@ -4576,7 +4577,7 @@ class SLM(Rasch):
 
         Parameters
         ----------
-        item : str or list of str
+        items : str or list of str
             Item identifier(s) to plot. A single name draws one curve, as
             before. A list overlays one curve per item (in the given
             order), each in its own colour with a legend keyed by item
@@ -4584,6 +4585,9 @@ class SLM(Rasch):
             item's own location, so they just silently no-op with
             several plotted at once rather than erroring. obs and
             score_lines both work fine with a list.
+        item : str or list of str, optional
+            Deprecated name for items (a FutureWarning; it will be removed in a
+            future release).
         obs : bool, default False
             If True, overlays observed class-interval mean proportions
             correct as data points on the ICC curve. Works with a list
@@ -4659,6 +4663,7 @@ class SLM(Rasch):
         matplotlib.figure.Figure
             The rendered ICC plot.
         """
+        item = self._items_arg(items, item, "icc")
         multi = isinstance(item, list)
         if multi:
             # thresh_line/cat_highlight each only make sense for a single
@@ -4920,7 +4925,7 @@ class SLM(Rasch):
 
     def iic(
         self,
-        item,
+        items=None,
         thresh_line=False,
         point_info_lines=None,
         point_info_labels=False,
@@ -4939,6 +4944,7 @@ class SLM(Rasch):
         filename=None,
         file_format="png",
         dpi=300,
+        item=None,
     ):
         """
         Plot the Item Information Curve (IIC) for one item, or several
@@ -4950,7 +4956,7 @@ class SLM(Rasch):
 
         Parameters
         ----------
-        item : str or list of str
+        items : str or list of str
             Item identifier(s) to plot. A single name draws one curve, as
             before. A list overlays one curve per item (in the given
             order), each in its own colour with a legend keyed by item
@@ -4961,6 +4967,9 @@ class SLM(Rasch):
             information value at each requested location, labelled
             "item: info", since that comparison across items at a shared
             location is the point.
+        item : str or list of str, optional
+            Deprecated name for items (a FutureWarning; it will be removed in a
+            future release).
         thresh_line : bool, default False
             If True, draws a vertical dashed line at the item location.
             Single item only -- silently ignored if item is a list.
@@ -5006,6 +5015,7 @@ class SLM(Rasch):
         matplotlib.figure.Figure
             The rendered IIC plot.
         """
+        item = self._items_arg(items, item, "iic")
 
         multi = isinstance(item, list)
         if multi:

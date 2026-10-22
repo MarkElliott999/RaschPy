@@ -358,8 +358,8 @@ def build_slm():
 def slm_plot_calls(m):
     item = m.responses.columns[0]
     return [
-        ('icc',                lambda: m.icc(item=item)),
-        ('iic',                lambda: m.iic(item=item)),
+        ('icc',                lambda: m.icc(items=item)),
+        ('iic',                lambda: m.iic(items=item)),
         ('tcc',                lambda: m.tcc()),
         ('test_info',          lambda: m.test_info()),
         ('test_csem',          lambda: m.test_csem()),
@@ -447,9 +447,9 @@ def build_pcm():
 def pcm_plot_calls(m):
     item = m.responses.columns[0]
     return [
-        ('icc',                lambda: m.icc(item=item)),
+        ('icc',                lambda: m.icc(items=item)),
         ('crcs',               lambda: m.crcs(item=item)),
-        ('iic',                lambda: m.iic(item=item)),
+        ('iic',                lambda: m.iic(items=item)),
         ('tcc',                lambda: m.tcc()),
         ('test_info',          lambda: m.test_info()),
         ('test_csem',          lambda: m.test_csem()),
@@ -549,10 +549,10 @@ def build_rsm():
 def rsm_plot_calls(m):
     item = m.responses.columns[0]
     return [
-        ('icc',                lambda: m.icc(item=item)),
+        ('icc',                lambda: m.icc(items=item)),
         ('crcs',               lambda: m.crcs(item=item)),
         ('threshold_ccs',      lambda: m.threshold_ccs(item=item)),
-        ('iic',                lambda: m.iic(item=item)),
+        ('iic',                lambda: m.iic(items=item)),
         ('tcc',                lambda: m.tcc()),
         ('test_info',          lambda: m.test_info()),
         ('test_csem',          lambda: m.test_csem()),
@@ -678,10 +678,10 @@ def mfrm_plot_calls(m):
     item  = m.item_names[0]
     facet_element = m.rater_names[0]
     return [
-        ('icc',                lambda: m.icc(item=item, facet_element=facet_element)),
+        ('icc',                lambda: m.icc(items=item, facet_element=facet_element)),
         ('crcs',               lambda: m.crcs(item=item, facet_element=facet_element)),
         ('threshold_ccs',      lambda: m.threshold_ccs(item=item, facet_element=facet_element)),
-        ('iic',                lambda: m.iic(item=item)),
+        ('iic',                lambda: m.iic(items=item)),
         ('tcc',                lambda: m.tcc()),
         ('test_info',          lambda: m.test_info()),
         ('test_csem',          lambda: m.test_csem()),

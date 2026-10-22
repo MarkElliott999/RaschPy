@@ -2594,6 +2594,23 @@ class Rasch:
         result[order] = adjusted
         return pd.Series(result, index=pvalues.index)
 
+    @staticmethod
+    def _items_arg(items, item, method):
+        """The items argument of icc()/iic(), accepting the deprecated name item= with a FutureWarning."""
+        if item is not None:
+            warnings.warn(
+                f"{method}(item=...) is deprecated and will be removed in a future release; "
+                f"use {method}(items=...) (one item name or a list).",
+                FutureWarning,
+                stacklevel=3,
+            )
+            if items is not None:
+                raise TypeError(f"{method}() got both items= and the deprecated item=.")
+            items = item
+        if items is None:
+            raise TypeError(f"{method}() missing required argument: 'items'")
+        return items
+
     def _cml_design(self, n_thresholds):
         """The design A of the CML thresholds b = A @ theta (+ the unused-category markers): the fit's own
         after unused_categories='keep', else the model's basis (RSM's, or a zero-sum basis)."""

@@ -223,7 +223,7 @@ def test_icc_crcs_threshold_ccs_no_facet_element_do_not_crash():
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        m.icc(item=item0, model="global", facet_element=None, obs=True)
+        m.icc(items=item0, model="global", facet_element=None, obs=True)
         plt.close("all")
         m.crcs(item=item0, model="global", facet_element=None)
         plt.close("all")
