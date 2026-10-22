@@ -208,8 +208,8 @@ plan item 15's other two pieces) follow the same template-method pattern:
 each subclass's own method stays, but the ~150-line shared block moves onto
 `Rasch`. `_calibrate_anchor_core()`/`_snapshot_calibrate_anchor_run()`
 extract the selection/translation-constant/`overwrite_anchors`/summary/plot
-block common to `SLM`/`PCM`/`RSM` (the `robust=`/`threshold_constant=` kwarg
-split is papered over by a `std_errors_kwargs` dict the caller builds).
+block common to `SLM`/`PCM`/`RSM` (the `threshold_constant=` kwarg
+difference is papered over by a `std_errors_kwargs` dict the caller builds).
 `_dif_validate()`/`_dif_item_wald_block()`/`_dif_item_table()` extract the
 argument validation, item-location leave-one-out purification/Wald test,
 and `item_table` construction common to all four classes including `MFRM`

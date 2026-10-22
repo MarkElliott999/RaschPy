@@ -2132,7 +2132,7 @@ class Rasch:
 
         Callers must already have anchors as a pd.Series and self.items
         already calibrated (calibrate()'s own re-run trigger differs
-        slightly per subclass -- constant/robust/threshold_constant/etc.
+        slightly per subclass -- constant/threshold_constant/etc.
         -- so that step stays in each subclass's own calibrate_anchor(),
         before calling this).
 
@@ -2143,10 +2143,9 @@ class Rasch:
             seed=seed, **std_errors_kwargs) if selection_method='wald'
             needs to auto-trigger it (self.item_se not already present).
             Carries whichever calibration kwarg name this subclass's own
-            calibrate()/std_errors() uses (e.g. {'constant':..., 'robust':
-            ..., 'method':..., 'matrix_power':..., 'log_lik_tol':...} for
-            SLM/PCM, or the RSM equivalent with 'threshold_constant'
-            instead of 'robust') -- exactly what each subclass's own
+            calibrate()/std_errors() uses (e.g. {'constant':..., 'method':...,
+            'matrix_power':..., 'log_lik_tol':...} for SLM/PCM, or the RSM
+            equivalent with 'threshold_constant') -- exactly what each subclass's own
             calibrate_anchor() forwarded inline before this extraction.
 
         See any of SLM.calibrate_anchor / PCM.calibrate_anchor /

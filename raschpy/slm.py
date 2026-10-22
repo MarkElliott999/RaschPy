@@ -318,7 +318,6 @@ class SLM(Rasch):
         method="log-lik",
         matrix_power=None,
         log_lik_tol=0.000001,
-        robust=False,
         estimation="pair",
         solver=None,
     ):
@@ -370,10 +369,6 @@ class SLM(Rasch):
         log_lik_tol : float, default 0.000001
             Log-likelihood convergence tolerance passed to priority_vector()
             for methods that use iterative optimisation.
-        robust : bool, default False
-            Deprecated, and has no effect: the default ``constant=None`` is now
-            data-adaptive (see ``constant``). Passing ``robust=True`` raises a
-            FutureWarning; the argument will be removed in a future release.
         estimation : {'pair', 'cml'}, default 'pair'
             'pair': the pairwise method above. 'cml': conditional maximum
             likelihood, conditioning on each person's total score over the
@@ -441,15 +436,6 @@ class SLM(Rasch):
             )
 
         # Resolve the additive smoothing constant.
-        if robust:
-            warnings.warn(
-                "`robust` is deprecated and has no effect: the default "
-                "`constant=None` is now data-adaptive, "
-                "min(1.0, 0.548 * I ** (-0.2 * log10(N))). The argument will be "
-                "removed in a future release.",
-                FutureWarning,
-                stacklevel=2,
-            )
         if constant is None:
             no_of_persons = int(self.responses.notna().any(axis=1).sum())
             constant = self._default_constant(no_of_persons, self.responses.shape[1])
@@ -608,7 +594,6 @@ class SLM(Rasch):
         plot=True,
         plot_kwargs=None,
         constant=None,
-        robust=False,
         method="log-lik",
         matrix_power=None,
         log_lik_tol=0.000001,
@@ -787,7 +772,6 @@ class SLM(Rasch):
         if calibrate or not hasattr(self, "items"):
             self.calibrate(
                 constant=constant,
-                robust=robust,
                 method=method,
                 matrix_power=matrix_power,
                 log_lik_tol=log_lik_tol,
@@ -812,7 +796,6 @@ class SLM(Rasch):
             seed,
             std_errors_kwargs=dict(
                 constant=constant,
-                robust=robust,
                 method=method,
                 matrix_power=matrix_power,
                 log_lik_tol=log_lik_tol,
@@ -859,7 +842,6 @@ class SLM(Rasch):
         interval=None,
         no_of_samples=500,
         constant=None,
-        robust=False,
         method=None,
         matrix_power=None,
         log_lik_tol=None,
@@ -909,8 +891,6 @@ class SLM(Rasch):
             Passed to calibrate() for each bootstrap resample (and for the
             point estimates if not yet calibrated). None uses the value of
             the object's last calibrate() call, or calibrate()'s default.
-        robust : bool, default False
-            Passed to calibrate(); deprecated, no effect (see calibrate()).
         seed : int or None, default None
             Seed for the bootstrap resampling RNG. Pass an int for fully
             reproducible standard errors; None (default) draws fresh entropy.
@@ -952,7 +932,7 @@ class SLM(Rasch):
             log_lik_tol=log_lik_tol,
         )
         if not hasattr(self, "items"):
-            self.calibrate(robust=robust, **cal_kw)
+            self.calibrate(**cal_kw)
         se_method = self._resolve_se_method(se_method)
         self.se_method = se_method
         if se_method in ("sandwich", "hessian"):
@@ -999,7 +979,7 @@ class SLM(Rasch):
                     sample._cml_fixed_hessian = (
                         H_fix  # chord: reuse the observed Hessian
                     )
-                    sample.calibrate(robust=robust, **cal_kw)
+                    sample.calibrate(**cal_kw)
                 if len(sample.item_names) < len(self.item_names):
                     no_cml += (
                         1  # CML estimates do not exist for some items in this resample
@@ -1767,7 +1747,6 @@ class SLM(Rasch):
         max_iters=100,
         ext_score_adjustment=0.5,
         constant=None,
-        robust=False,
         method="log-lik",
         matrix_power=None,
         log_lik_tol=0.000001,
@@ -1812,8 +1791,6 @@ class SLM(Rasch):
             Extreme score adjustment for person location estimation.
         constant : float or None, default None
             Additive smoothing constant for calibration; None resolves to the data-adaptive default (see calibrate()).
-        robust : bool, default False
-            Passed to calibrate(); deprecated, no effect (see calibrate()).
         method : str, default 'log-lik'
             Priority vector extraction method for calibration.
         matrix_power : int or None, default None
@@ -1982,7 +1959,6 @@ class SLM(Rasch):
         if not hasattr(self, "items"):
             self.calibrate(
                 constant=constant,
-                robust=robust,
                 method=method,
                 matrix_power=matrix_power,
                 log_lik_tol=log_lik_tol,
@@ -1994,7 +1970,6 @@ class SLM(Rasch):
                     interval=interval,
                     no_of_samples=no_of_samples,
                     constant=constant,
-                    robust=robust,
                     method=method,
                     matrix_power=matrix_power,
                     log_lik_tol=log_lik_tol,
@@ -2262,7 +2237,6 @@ class SLM(Rasch):
         max_iters=100,
         ext_score_adjustment=0.5,
         constant=None,
-        robust=False,
         method="log-lik",
         matrix_power=None,
         log_lik_tol=0.000001,
@@ -2373,7 +2347,6 @@ class SLM(Rasch):
         if not hasattr(self, "items"):
             self.calibrate(
                 constant=constant,
-                robust=robust,
                 method=method,
                 matrix_power=matrix_power,
                 log_lik_tol=log_lik_tol,
@@ -2403,7 +2376,6 @@ class SLM(Rasch):
         m_full = SLM(self.responses.loc[combined_idx])
         m_full.calibrate(
             constant=constant,
-            robust=robust,
             method=method,
             matrix_power=matrix_power,
             log_lik_tol=log_lik_tol,
@@ -2422,7 +2394,6 @@ class SLM(Rasch):
             m = SLM(self.responses.loc[idx])
             m.calibrate(
                 constant=constant,
-                robust=robust,
                 method=method,
                 matrix_power=matrix_power,
                 log_lik_tol=log_lik_tol,
@@ -2484,7 +2455,6 @@ class SLM(Rasch):
         max_iters=100,
         ext_score_adjustment=0.5,
         constant=None,
-        robust=False,
         method=None,
         matrix_power=None,
         log_lik_tol=None,
@@ -2998,7 +2968,6 @@ class SLM(Rasch):
         max_iters=100,
         ext_score_adjustment=0.5,
         constant=None,
-        robust=False,
         method="log-lik",
         matrix_power=None,
         log_lik_tol=0.000001,
@@ -3029,8 +2998,6 @@ class SLM(Rasch):
             Extreme score adjustment for person location estimation.
         constant : float or None, default None
             Additive smoothing constant for calibration; None resolves to the data-adaptive default (see calibrate()).
-        robust : bool, default False
-            Passed to calibrate(); deprecated, no effect (see calibrate()).
         method : str, default 'log-lik'
             Priority vector extraction method for calibration.
         matrix_power : int or None, default None
@@ -3085,7 +3052,6 @@ class SLM(Rasch):
                 max_iters=max_iters,
                 ext_score_adjustment=ext_score_adjustment,
                 constant=constant,
-                robust=robust,
                 method=method,
                 matrix_power=matrix_power,
                 log_lik_tol=log_lik_tol,
@@ -3134,7 +3100,6 @@ class SLM(Rasch):
         ext_score_adjustment=0.5,
         method="log-lik",
         constant=None,
-        robust=False,
         matrix_power=None,
         log_lik_tol=0.000001,
         no_of_samples=500,
@@ -3184,8 +3149,6 @@ class SLM(Rasch):
             Priority vector extraction method for calibration.
         constant : float or None, default None
             Additive smoothing constant for calibration; None resolves to the data-adaptive default (see calibrate()).
-        robust : bool, default False
-            Passed to calibrate(); deprecated, no effect (see calibrate()).
         matrix_power : int or None, default None
             Matrix power for calibration.
         log_lik_tol : float, default 0.000001
@@ -3240,7 +3203,6 @@ class SLM(Rasch):
                 interval=interval,
                 no_of_samples=no_of_samples,
                 constant=constant,
-                robust=robust,
                 method=method,
                 matrix_power=matrix_power,
                 log_lik_tol=log_lik_tol,
@@ -3256,7 +3218,6 @@ class SLM(Rasch):
                 ext_score_adjustment=ext_score_adjustment,
                 method=method,
                 constant=constant,
-                robust=robust,
                 matrix_power=matrix_power,
                 log_lik_tol=log_lik_tol,
                 no_of_samples=no_of_samples,
@@ -3316,7 +3277,6 @@ class SLM(Rasch):
         ext_score_adjustment=0.5,
         method="log-lik",
         constant=None,
-        robust=False,
         filename=None,
         file_format="csv",
     ):
@@ -3354,8 +3314,6 @@ class SLM(Rasch):
             Priority vector extraction method for calibration.
         constant : float or None, default None
             Additive smoothing constant for calibration; None resolves to the data-adaptive default (see calibrate()).
-        robust : bool, default False
-            Passed to calibrate(); deprecated, no effect (see calibrate()).
         filename : str or None, default None
             If given, also saves the returned table to
             ``{filename}.{file_format}`` (path without extension, as for
@@ -3385,7 +3343,6 @@ class SLM(Rasch):
                 ext_score_adjustment=ext_score_adjustment,
                 method=method,
                 constant=constant,
-                robust=robust,
             )
 
         if full:
@@ -3430,7 +3387,6 @@ class SLM(Rasch):
         ext_score_adjustment=0.5,
         method="log-lik",
         constant=None,
-        robust=False,
         alpha=False,
         seed=None,
         filename=None,
@@ -3459,8 +3415,6 @@ class SLM(Rasch):
             Priority vector extraction method for calibration.
         constant : float or None, default None
             Additive smoothing constant for calibration; None resolves to the data-adaptive default (see calibrate()).
-        robust : bool, default False
-            Passed to calibrate(); deprecated, no effect (see calibrate()).
         alpha : bool, default False
             If True, adds a 'Cronbach alpha' row (Persons column only —
             Items is left NaN, since Cronbach's alpha is a person-side
@@ -3498,7 +3452,6 @@ class SLM(Rasch):
                 ext_score_adjustment=ext_score_adjustment,
                 method=method,
                 constant=constant,
-                robust=robust,
                 seed=seed,
             )
 
@@ -3541,7 +3494,6 @@ class SLM(Rasch):
         ext_score_adjustment=0.5,
         method="log-lik",
         constant=None,
-        robust=False,
         no_of_samples=500,
         interval=None,
     ):
@@ -3577,8 +3529,6 @@ class SLM(Rasch):
             Priority vector extraction method for calibration.
         constant : float or None, default None
             Additive smoothing constant for calibration; None resolves to the data-adaptive default (see calibrate()).
-        robust : bool, default False
-            Passed to calibrate(); deprecated, no effect (see calibrate()).
         no_of_samples : int, default 500
             Bootstrap samples for SE estimation.
         interval : float or None, default None
@@ -3598,7 +3548,6 @@ class SLM(Rasch):
                 ext_score_adjustment=ext_score_adjustment,
                 method=method,
                 constant=constant,
-                robust=robust,
                 no_of_samples=no_of_samples,
                 interval=interval,
             )
@@ -3612,7 +3561,6 @@ class SLM(Rasch):
                 ext_score_adjustment=ext_score_adjustment,
                 method=method,
                 constant=constant,
-                robust=robust,
             )
 
         if not hasattr(self, "test_stats"):
@@ -3624,7 +3572,6 @@ class SLM(Rasch):
                 ext_score_adjustment=ext_score_adjustment,
                 method=method,
                 constant=constant,
-                robust=robust,
             )
 
         if format == "xlsx":
@@ -3659,7 +3606,6 @@ class SLM(Rasch):
         ext_score_adjustment=0.5,
         method="log-lik",
         constant=None,
-        robust=False,
     ):
         """
         Export residual correlation analysis results to file.
@@ -3695,8 +3641,6 @@ class SLM(Rasch):
             Priority vector extraction method.
         constant : float or None, default None
             Additive smoothing constant; None resolves to the data-adaptive default (see calibrate()).
-        robust : bool, default False
-            Passed to calibrate(); deprecated, no effect (see calibrate()).
 
         Returns
         -------
@@ -3712,7 +3656,6 @@ class SLM(Rasch):
                 ext_score_adjustment=ext_score_adjustment,
                 method=method,
                 constant=constant,
-                robust=robust,
             )
 
         if single:

@@ -725,7 +725,6 @@ class PCM(Rasch):
         method="log-lik",
         matrix_power=None,
         log_lik_tol=0.000001,
-        robust=False,
         estimation="pair",
         solver=None,
         unused_categories="drop",
@@ -767,12 +766,6 @@ class PCM(Rasch):
             None resolves to 0 for method='log-lik' (no powering), else 5.
         log_lik_tol : float, default 0.000001
             Log-likelihood convergence tolerance for priority vector extraction.
-        robust : bool, default False
-            Deprecated and has no effect; passing ``robust=True`` raises a
-            ``FutureWarning``. The two-pass rule it selected is outperformed
-            by the data-adaptive ``constant=None`` default, including in the
-            sparse, many-category designs it was built for. It will be
-            removed in a future release.
         estimation : {'pair', 'cml'}, default 'pair'
             'pair': the pairwise method above. 'cml': conditional maximum
             likelihood, conditioning on each person's total score over the
@@ -859,15 +852,6 @@ class PCM(Rasch):
                 stacklevel=2,
             )
 
-        if robust:
-            warnings.warn(
-                "`robust` is deprecated and has no effect: the default "
-                "`constant=None` is now data-adaptive, "
-                "0.1 * N ** 0.15 * (1 - missing) ** 0.75 * K ** -1.4. The argument "
-                "will be removed in a future release.",
-                FutureWarning,
-                stacklevel=2,
-            )
 
         cell_constants = None
         if constant is None:
@@ -1256,7 +1240,6 @@ class PCM(Rasch):
         ext_score_adjustment=0.5,
         constant=None,
         method="log-lik",
-        robust=False,
         matrix_power=None,
         log_lik_tol=0.000001,
         seed=None,
@@ -1502,7 +1485,6 @@ class PCM(Rasch):
         if calibrate or not hasattr(self, "items"):
             self.calibrate(
                 constant=constant,
-                robust=robust,
                 method=method,
                 matrix_power=matrix_power,
                 log_lik_tol=log_lik_tol,
@@ -1527,7 +1509,6 @@ class PCM(Rasch):
             seed,
             std_errors_kwargs=dict(
                 constant=constant,
-                robust=robust,
                 method=method,
                 matrix_power=matrix_power,
                 log_lik_tol=log_lik_tol,
@@ -1819,7 +1800,6 @@ class PCM(Rasch):
         interval=None,
         constant=None,
         method=None,
-        robust=False,
         matrix_power=None,
         log_lik_tol=None,
         no_of_samples=500,
@@ -1907,7 +1887,7 @@ class PCM(Rasch):
             log_lik_tol=log_lik_tol,
         )
         if not hasattr(self, "thresholds_uncentred"):
-            self.calibrate(robust=robust, **cal_kw)
+            self.calibrate(**cal_kw)
         if (
             se_method is not None
             or (self._calibrate_args.get("method") or "log-lik") != "log-lik"
@@ -1965,7 +1945,7 @@ class PCM(Rasch):
                     sample._cml_fixed_hessian = (
                         H_fix  # chord: reuse the observed Hessian
                     )
-                    sample.calibrate(robust=robust, **cal_kw)
+                    sample.calibrate(**cal_kw)
                 if len(sample.item_names) < len(self.item_names):
                     no_cml += (
                         1  # CML estimates do not exist for some items in this resample
@@ -2948,7 +2928,6 @@ class PCM(Rasch):
         ext_score_adjustment=0.5,
         constant=None,
         method="log-lik",
-        robust=False,
         matrix_power=None,
         log_lik_tol=0.000001,
         no_of_samples=500,
@@ -3168,13 +3147,12 @@ class PCM(Rasch):
         """
 
         if not hasattr(self, "thresholds_uncentred"):
-            self.calibrate(constant=constant, method=method, robust=robust)
+            self.calibrate(constant=constant, method=method)
         if se and not hasattr(self, "threshold_se"):
             self.std_errors(
                 interval=interval,
                 no_of_samples=no_of_samples,
                 constant=constant,
-                robust=robust,
                 method=method,
                 seed=seed,
             )
@@ -3735,7 +3713,6 @@ class PCM(Rasch):
         ext_score_adjustment=0.5,
         constant=None,
         method="log-lik",
-        robust=False,
         log_lik_tol=0.000001,
     ):
         """
@@ -3845,7 +3822,7 @@ class PCM(Rasch):
 
         if not hasattr(self, "thresholds_uncentred"):
             self.calibrate(
-                constant=constant, method=method, robust=robust, log_lik_tol=log_lik_tol
+                constant=constant, method=method, log_lik_tol=log_lik_tol
             )
         if not hasattr(self, "persons"):
             self.person_estimates(
@@ -3871,7 +3848,7 @@ class PCM(Rasch):
         # Re-estimate full model on combined subset so the LR comparison is fair
         m_full = PCM(self.responses.loc[combined_idx], self.max_score_vector)
         m_full.calibrate(
-            constant=constant, method=method, robust=robust, log_lik_tol=log_lik_tol
+            constant=constant, method=method, log_lik_tol=log_lik_tol
         )
         m_full.person_estimates(
             warm_corr=warm_corr,
@@ -3886,7 +3863,7 @@ class PCM(Rasch):
         for name, idx in group_idx.items():
             m = PCM(self.responses.loc[idx], self.max_score_vector)
             m.calibrate(
-                constant=constant, method=method, robust=robust, log_lik_tol=log_lik_tol
+                constant=constant, method=method, log_lik_tol=log_lik_tol
             )
             m.person_estimates(
                 warm_corr=warm_corr,
@@ -3948,7 +3925,6 @@ class PCM(Rasch):
         ext_score_adjustment=0.5,
         constant=None,
         method=None,
-        robust=False,
         matrix_power=None,
         log_lik_tol=None,
         seed=None,
@@ -4757,7 +4733,6 @@ class PCM(Rasch):
         ext_score_adjustment=0.5,
         constant=None,
         method="log-lik",
-        robust=False,
         log_lik_tol=0.000001,
         seed=None,
     ):
@@ -4859,7 +4834,7 @@ class PCM(Rasch):
 
         if not hasattr(self, "thresholds_uncentred"):
             self.calibrate(
-                constant=constant, method=method, robust=robust, log_lik_tol=log_lik_tol
+                constant=constant, method=method, log_lik_tol=log_lik_tol
             )
         if likelihood == "joint" and not hasattr(self, "persons"):
             self.person_estimates(
@@ -5007,7 +4982,6 @@ class PCM(Rasch):
         ext_score_adjustment=0.5,
         constant=None,
         method="log-lik",
-        robust=False,
         matrix_power=None,
         log_lik_tol=0.000001,
         no_of_samples=500,
@@ -5082,7 +5056,6 @@ class PCM(Rasch):
                 max_iters=max_iters,
                 ext_score_adjustment=ext_score_adjustment,
                 constant=constant,
-                robust=robust,
                 method=method,
                 matrix_power=matrix_power,
                 log_lik_tol=log_lik_tol,
@@ -5134,7 +5107,6 @@ class PCM(Rasch):
         ext_score_adjustment=0.5,
         method="log-lik",
         constant=None,
-        robust=False,
         matrix_power=None,
         log_lik_tol=0.000001,
         no_of_samples=500,
@@ -5235,7 +5207,6 @@ class PCM(Rasch):
                 interval=interval,
                 no_of_samples=no_of_samples,
                 constant=constant,
-                robust=robust,
                 method=method,
                 matrix_power=matrix_power,
                 log_lik_tol=log_lik_tol,
@@ -5293,7 +5264,6 @@ class PCM(Rasch):
         ext_score_adjustment=0.5,
         method="log-lik",
         constant=None,
-        robust=False,
         no_of_samples=500,
         interval=None,
         filename=None,
@@ -5460,7 +5430,6 @@ class PCM(Rasch):
         dp=3,
         constant=None,
         method="log-lik",
-        robust=False,
         matrix_power=None,
         log_lik_tol=0.000001,
         no_of_samples=500,
@@ -5553,7 +5522,7 @@ class PCM(Rasch):
         """
         if not hasattr(self, "thresholds"):
             self.calibrate(
-                constant=constant, method=method, robust=robust, log_lik_tol=log_lik_tol
+                constant=constant, method=method, log_lik_tol=log_lik_tol
             )
         if not hasattr(self, "cat_width_se"):
             self.std_errors(
@@ -5638,7 +5607,6 @@ class PCM(Rasch):
         ext_score_adjustment=0.5,
         method="log-lik",
         constant=None,
-        robust=False,
         filename=None,
         file_format="csv",
     ):
@@ -5748,7 +5716,6 @@ class PCM(Rasch):
         ext_score_adjustment=0.5,
         method="log-lik",
         constant=None,
-        robust=False,
         alpha=False,
         seed=None,
         filename=None,
@@ -5865,7 +5832,6 @@ class PCM(Rasch):
         ext_score_adjustment=0.5,
         method="log-lik",
         constant=None,
-        robust=False,
         no_of_samples=500,
         interval=None,
     ):
@@ -5991,7 +5957,6 @@ class PCM(Rasch):
         ext_score_adjustment=0.5,
         method="log-lik",
         constant=None,
-        robust=False,
     ):
         """
         Export residual correlation analysis results to file.
