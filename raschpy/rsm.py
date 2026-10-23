@@ -944,10 +944,10 @@ class RSM(Rasch):
             the exact gradient (the Hessian for standard errors is computed
             by std_errors()). 'lbfgs': quasi-Newton with the exact gradient.
             None: 'chord'.
-        unused_categories : {'drop', 'keep'}, default 'drop'
+        unused_categories : {'drop', 'null'}, default 'drop'
             estimation='cml' only: a score category that no person with a
             non-extreme total used, for any item. 'drop' raises a ValueError (the
-            thresholds have no finite CML estimates). 'keep' keeps it, with
+            thresholds have no finite CML estimates). 'null' keeps it, with
             that category's probability zero and the scores unchanged (Wilson
             and Masters, 1993): the data identify only the sum of the two
             thresholds either side of it, so the model has one parameter fewer
@@ -1154,7 +1154,7 @@ class RSM(Rasch):
         category unused by every person with a non-extreme total raises a ValueError (no item can be
         dropped to give it a finite estimate)."""
         K = self.max_score
-        keep_unused = getattr(self, "_cml_unused", "drop") == "keep"
+        keep_unused = getattr(self, "_cml_unused", "drop") == "null"
         dropped = self._cml_drop_items(
             [K] * self.no_of_items, per_item_categories=False
         )
@@ -1175,7 +1175,7 @@ class RSM(Rasch):
             raise ValueError(
                 f"CML estimates do not exist for these data: category {unused[0]} is unused by every "
                 f"person with a non-extreme total, so the thresholds next to it have no finite "
-                f"estimates. Use calibrate(estimation='cml', unused_categories='keep') to keep it with "
+                f"estimates. Use calibrate(estimation='cml', unused_categories='null') to keep it with "
                 f"probability zero, collapse the category (rescore), or use "
                 f"estimation='cp-full-rcl', whose smoothing gives finite estimates."
             )
@@ -1216,7 +1216,7 @@ class RSM(Rasch):
 
     def _calibrate_cml_keep(self, X, names, K, unused, dropped):
         """
-        unused_categories='keep' with categories unused by every contributing person: the shared thresholds
+        unused_categories='null' with categories unused by every contributing person: the shared thresholds
         get the unused-category markers (_esf.unused_category_offset), so those categories have zero
         probability and the model has one parameter fewer for each: in self.thresholds an unused
         category's threshold is inf and the next finite threshold holds the sum of the thresholds either
@@ -1285,7 +1285,7 @@ class RSM(Rasch):
             )
 
     def _cml_location_se(self):
-        """unused_categories='keep': standard errors of the item locations from the CML covariance
+        """unused_categories='null': standard errors of the item locations from the CML covariance
         (se_method)."""
         names = list(self.item_names)
         I, K = len(names), self.max_score
@@ -1305,7 +1305,7 @@ class RSM(Rasch):
         return pd.Series(np.sqrt(np.clip(np.diag(Vd), 0, None)), index=names)
 
     def _cml_keep_map(self):
-        """unused_categories='keep': M with (item locations, category widths) = M @ theta for the keep
+        """unused_categories='null': M with (item locations, category widths) = M @ theta for the keep
         design (_calibrate_cml_keep); the rows of widths the data do not identify (touching an unused
         category or a threshold that holds a sum) are NaN."""
         I, K = self.no_of_items, self.max_score
@@ -1324,7 +1324,7 @@ class RSM(Rasch):
         return M
 
     def _location_multiplicity_shared(self):
-        """How many thresholds each shared threshold stands for (unused_categories='keep'; 0 for the
+        """How many thresholds each shared threshold stands for (unused_categories='null'; 0 for the
         markers)."""
         tau = self._cml_tau_marked
         mult = np.zeros(len(tau))
@@ -1465,7 +1465,7 @@ class RSM(Rasch):
         delta = np.zeros(I)
         delta[is_fixed] = fixed.reindex(np.array(names)[is_fixed]).values
         tau0 = self.thresholds.values.astype(float)
-        if getattr(self, "_cml_marked", None) is not None:  # unused_categories='keep'
+        if getattr(self, "_cml_marked", None) is not None:  # unused_categories='null'
             mult = self._location_multiplicity_shared()
             fin = mult > 0
             Tb = np.zeros((K, int(fin.sum()) - 1))
@@ -3762,7 +3762,7 @@ class RSM(Rasch):
 
     def _cml_threshold_list(self, items):
         """Fitted thresholds per item (item location + shared thresholds), as cond_loglik takes them (with
-        the unused-category markers after unused_categories='keep')."""
+        the unused-category markers after unused_categories='null')."""
         if getattr(self, "_cml_marked", None) is not None:
             rows = dict(zip(self.item_names, self._cml_marked.reshape(-1, self.max_score)))
             return [rows[n] for n in items]
@@ -3771,7 +3771,7 @@ class RSM(Rasch):
 
     def _cml_free_parameters(self):
         """Free parameters of the CML fit (item locations and category widths; after
-        unused_categories='keep', one fewer for each unused category)."""
+        unused_categories='null', one fewer for each unused category)."""
         if getattr(self, "_cml_marked", None) is not None:
             return int(self._cml_A.shape[1])
         return self.no_of_items - 1 + self.max_score - 1

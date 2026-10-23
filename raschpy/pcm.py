@@ -205,7 +205,7 @@ class PCM(Rasch):
             warnings.warn(
                 f"Unused score categories ({shown}). The thresholds next to these categories are not "
                 f"identified by the data, so their estimates are determined by the "
-                f"smoothing constant rather than the responses. Consider collapsing "
+                f"smoothing constant (PAIR) or the ridge (CML) rather than the responses. Consider collapsing "
                 f"unused categories (e.g. reducing that item's max_score_vector entry if "
                 f"its top or bottom category is unused) or collecting more data.",
                 UserWarning,
@@ -727,7 +727,8 @@ class PCM(Rasch):
         log_lik_tol=0.000001,
         estimation="pair",
         solver=None,
-        unused_categories="drop",
+        unused_categories=None,
+        ridge="minimise_bias",
     ):
         """
         Estimate item thresholds using the PAIR (Pairwise) algorithm, or by
@@ -785,17 +786,39 @@ class PCM(Rasch):
             the exact gradient (the Hessian for standard errors is computed
             by std_errors()). 'lbfgs': quasi-Newton with the exact gradient.
             None: 'chord'.
-        unused_categories : {'drop', 'keep'}, default 'drop'
+        unused_categories : {None, 'ridge', 'null', 'drop'}, default None
             estimation='cml' only: an item with a score category that no person
-            with a non-extreme total used. 'drop' removes the item (it has no
-            finite CML estimates), with a UserWarning. 'keep' keeps it, with
-            that category's probability zero and the scores unchanged (Wilson
-            and Masters, 1993): the data identify only the sum of the two
-            thresholds either side of it, so the item has one parameter fewer
-            for each such category. Such a threshold is stored as inf, and the
-            next threshold holds the sum; beyond the lowest (highest) used
-            category the thresholds are -inf (inf); cml_unused_categories
-            lists the unused categories.
+            with a non-extreme total used. 'ridge' keeps it and estimates that
+            category's thresholds, which are finite because of the ridge
+            (needs ridge > 0). 'null' keeps it, with that category's
+            probability zero and the scores unchanged (Wilson and Masters,
+            1993): the data identify only the sum of the two thresholds either
+            side of it, so the item has one parameter fewer for each such
+            category. Such a threshold is stored as inf, and the next
+            threshold holds the sum; beyond the lowest (highest) used category
+            the thresholds are -inf (inf); cml_unused_categories lists the
+            unused categories. 'drop' removes the item (without the ridge it
+            has no finite CML estimates), with a UserWarning. None: 'ridge'
+            when ridge > 0, else 'drop'.
+        ridge : 'minimise_bias' or float, default 'minimise_bias'
+            estimation='cml' only: a penalty on each item's centred thresholds
+            (its threshold pattern), pulling them towards the mean pattern of
+            the items with the same maximum score, with weight ridge; plus a
+            weak penalty (weight 0.3) pulling each such group's mean category
+            widths towards the mean width over all groups, which keeps the
+            estimates finite when a category is unused by every item in a
+            group. It gives finite estimates where plain CML has none (e.g.
+            an unused category) and lowers their error with few persons per
+            category. 'minimise_bias' (or 'minimize_bias'): ridge =
+            2.418 * S ** -0.607 * K ** -0.385, S the mean over items of the
+            highest minus the lowest PAIR threshold, K the mean maximum score,
+            chosen so that the item locations are neither pulled in nor spread
+            out on average. A float sets it directly; 0 gives plain CML. A
+            lower ridge spreads the item and threshold estimates out and
+            increases their error; a higher one, up to about twice the
+            default, lowers the error of the item locations slightly while
+            pulling the estimates towards the common pattern; beyond that the
+            error increases. The value used is in self.ridge.
 
         Attributes set
         --------------
@@ -825,10 +848,23 @@ class PCM(Rasch):
             ``constant=None``; ``None`` when an explicit constant is given.
         null_persons : pandas.Index
             Persons dropped prior to calibration due to entirely missing data.
+        ridge : float
+            estimation='cml': the ridge weight used (0 for plain CML); also in
+            convergence, with the weak group-width penalty's weight.
         """
         if estimation not in ("pair", "cml"):
             raise ValueError(f"estimation must be 'pair' or 'cml', got {estimation!r}.")
-        self._check_unused_categories(unused_categories, estimation)
+        ridge_setting = self._check_ridge(ridge, estimation)
+        unused_passed = unused_categories
+        if unused_categories is None:
+            unused_categories = "ridge" if estimation == "cml" and ridge_setting != 0 else "drop"
+        self._check_unused_categories(
+            unused_categories, estimation, allowed=("drop", "null", "ridge")
+        )
+        if unused_categories == "ridge" and ridge_setting == 0:
+            raise ValueError(
+                "unused_categories='ridge' needs ridge > 0; with ridge=0 use 'drop' or 'null'."
+            )
         # arguments as passed, for refits (see _calibration_kw)
         self._calibrate_args = dict(
             constant=constant,
@@ -837,10 +873,13 @@ class PCM(Rasch):
             log_lik_tol=log_lik_tol,
             estimation=estimation,
             solver=solver,
-            unused_categories=unused_categories,
+            unused_categories=unused_passed,
+            ridge=ridge,
         )
         self.estimation = estimation
         self._cml_unused = unused_categories
+        self._ridge_setting = ridge_setting
+        self.ridge, self._cml_Pb, self._cml_penalty = None, None, None
         self._cml_solver = self._check_cml_solver(solver, estimation)
         self.convergence = None
 
@@ -937,7 +976,8 @@ class PCM(Rasch):
         self.convergence; the Hessian at the estimates is kept for std_errors() when Newton-Raphson computed
         it. Items whose CML estimates do not exist are removed first, with a UserWarning.
         """
-        keep_unused = getattr(self, "_cml_unused", "drop") == "keep"
+        mode = getattr(self, "_cml_unused", "drop")
+        keep_unused = mode in ("null", "ridge")
         dropped = self._cml_drop_items(
             self.max_score_vector.reindex(self.item_names).to_numpy(),
             keep_unused=keep_unused,
@@ -954,7 +994,7 @@ class PCM(Rasch):
             ]
         )
         marks = None
-        if keep_unused:
+        if mode == "null":
             marks = np.concatenate(
                 [_esf.unused_category_offset(K, self._cml_used[n]) for n, K in zip(names, Ks)]
             )
@@ -968,6 +1008,9 @@ class PCM(Rasch):
             A[free] = _rcl.zero_sum_basis(int(free.sum()))
             offset = np.where(free, 0.0, marks)
             start = np.where(free, b0 - b0[free].mean(), marks)
+        self.ridge = self._resolve_ridge(getattr(self, "_ridge_setting", 0.0), b0, Ks)
+        self._cml_Pb = self._ridge_penalty(Ks, self.ridge, marks) if self.ridge > 0 else None
+        self._cml_penalty = None if self._cml_Pb is None else A.T @ self._cml_Pb @ A
         fit = _esf.fit_cml(
             X,
             A,
@@ -976,6 +1019,7 @@ class PCM(Rasch):
             fixed_hessian=getattr(self, "_cml_fixed_hessian", None),
             solver=getattr(self, "_cml_solver", None),
             offset=offset,
+            penalty=self._cml_penalty,
         )
         self.threshold_list = pd.Series(
             fit["b"],
@@ -996,6 +1040,9 @@ class PCM(Rasch):
             log_likelihood=fit["ll"],
             dropped_items=dropped,
             hessians=fit["hessians"],
+            ridge=self.ridge,
+            ridge_group_widths=self.RIDGE_GROUP_WIDTHS if self.ridge > 0 else 0.0,
+            penalised_log_likelihood=fit["objective"],
         )
         if not fit["converged"]:
             warnings.warn(
@@ -1006,9 +1053,98 @@ class PCM(Rasch):
                 stacklevel=3,
             )
 
+    # ridge='minimise_bias': log ridge = c0 + c1 log S + c2 log K (S the mean PAIR threshold range, K the
+    # mean maximum score), clipped to RIDGE_RANGE; the weak group-width penalty's weight
+    RIDGE_RULE = (0.8828262743192832, -0.6070506707789616, -0.38519426149693436)
+    RIDGE_RANGE = (0.003, 4.0)
+    RIDGE_GROUP_WIDTHS = 0.3
+
+    def _fixed_ridge(self):
+        """For the group and subset refits of tests (global_fit(), dif_test()): the ridge weight of these
+        CML estimates, fixed (the rule is not re-applied to each group); None otherwise."""
+        if getattr(self, "estimation", None) == "cml" and getattr(self, "ridge", None) is not None:
+            return float(self.ridge)
+        return None
+
+    @staticmethod
+    def _check_ridge(ridge, estimation):
+        """calibrate(ridge=): 'minimise_bias' (or 'minimize_bias') or a float >= 0; applies to
+        estimation='cml' only (an explicit value is ignored otherwise, with a warning)."""
+        if isinstance(ridge, str):
+            if ridge not in ("minimise_bias", "minimize_bias"):
+                raise ValueError(
+                    f"ridge must be 'minimise_bias' or a number >= 0, got {ridge!r}."
+                )
+            ridge = "minimise_bias"
+        elif isinstance(ridge, bool) or not isinstance(ridge, (int, float, np.number)) or not ridge >= 0:
+            raise ValueError(f"ridge must be 'minimise_bias' or a number >= 0, got {ridge!r}.")
+        else:
+            ridge = float(ridge)
+        if estimation != "cml" and ridge != "minimise_bias":
+            warnings.warn(
+                f"ridge={ridge!r} applies to estimation='cml' only and is ignored with "
+                f"estimation={estimation!r}.",
+                UserWarning,
+                stacklevel=3,
+            )
+        return ridge
+
+    def _resolve_ridge(self, setting, b0, Ks):
+        """The ridge weight for this fit: setting as a number, or the 'minimise_bias' rule from the PAIR
+        thresholds b0 (stacked) and the maximum scores Ks."""
+        if setting != "minimise_bias":
+            return float(setting)
+        off = np.concatenate([[0], np.cumsum(Ks)])
+        S = float(np.mean([np.ptp(b0[off[i] : off[i + 1]]) for i in range(len(Ks))]))
+        c0, c1, c2 = self.RIDGE_RULE
+        log_k = c0 + c1 * np.log(max(S, 1e-3)) + c2 * np.log(float(np.mean(Ks)))
+        return float(np.exp(np.clip(log_k, *np.log(self.RIDGE_RANGE))))
+
+    @classmethod
+    def _ridge_penalty(cls, Ks, ridge, marks=None):
+        """
+        Penalty matrix Pb (p, p) on the stacked uncentred thresholds b, penalty = b' Pb b / 2: ridge times
+        the sum of squares of each item's centred thresholds minus the mean centred thresholds of the items
+        with the same maximum score, plus RIDGE_GROUP_WIDTHS times the sum of squares of each such group's
+        mean category widths minus the mean of those widths over all groups. Both are unchanged by adding
+        a constant to an item's thresholds. With unused-category markers (marks, unused_categories='null'),
+        the items with a marker are left out of both.
+        """
+        p = int(sum(Ks))
+        off = np.concatenate([[0], np.cumsum(Ks)]).astype(int)
+        clean = [
+            marks is None or np.all(marks[off[i] : off[i + 1]] == 0) for i in range(len(Ks))
+        ]
+        rows, W = [], []
+        for K in sorted(set(int(k) for k in Ks)):
+            idx = [i for i, k in enumerate(Ks) if int(k) == K and clean[i]]
+            if not idx:
+                continue
+            M = np.zeros((K, p))
+            for i in idx:
+                M[:, off[i] : off[i + 1]] += np.eye(K) / len(idx)
+            if K > 1:
+                W.append(np.diff(M, axis=0))
+            if len(idx) < 2:
+                continue
+            Ci = np.eye(K) - 1.0 / K
+            for i in idx:
+                R = -(Ci @ M)
+                R[:, off[i] : off[i + 1]] += Ci
+                rows.append(R)
+        Pb = np.zeros((p, p))
+        if rows:
+            G = np.vstack(rows)
+            Pb += ridge * G.T @ G
+        if W:
+            Wm = np.vstack(W)
+            Wm = Wm - Wm.mean(axis=0)
+            Pb += cls.RIDGE_GROUP_WIDTHS * Wm.T @ Wm
+        return Pb
+
     @classmethod
     def _category_widths(cls, thr):
-        """Consecutive differences of an item's thresholds (array); after unused_categories='keep', NaN for
+        """Consecutive differences of an item's thresholds (array); after unused_categories='null', NaN for
         a width touching an unused category's threshold or one that holds a sum (not identified)."""
         thr = np.asarray(thr, float)
         single = cls._location_multiplicity(thr) == 1
@@ -1018,7 +1154,7 @@ class PCM(Rasch):
 
     @staticmethod
     def _location_multiplicity(b):
-        """For an item's marked thresholds b (unused_categories='keep'): how many thresholds each finite one
+        """For an item's marked thresholds b (unused_categories='null'): how many thresholds each finite one
         stands for (1, or 1 + the run of unused categories just below it, whose thresholds it sums), 0 for
         the markers."""
         mult = np.zeros(len(b))
@@ -1032,7 +1168,7 @@ class PCM(Rasch):
 
     def _store_marked_thresholds(self, b, names, Ks, A):
         """
-        unused_categories='keep': store the CML thresholds b with the unused-category markers that
+        unused_categories='null': store the CML thresholds b with the unused-category markers that
         _esf.log_category_weights reads: an unused category's threshold is inf and the next finite threshold
         holds the sum of the thresholds either side of it (the only combination the data identify); the
         thresholds below the lowest used category are -inf, and those above the highest used one inf. Each
@@ -1065,7 +1201,7 @@ class PCM(Rasch):
         self.thresholds.columns = range(1, width + 1)
 
     def _cml_location_se(self):
-        """unused_categories='keep': standard errors of the item locations (as _store_marked_thresholds
+        """unused_categories='null': standard errors of the item locations (as _store_marked_thresholds
         defines them) from the CML covariance (se_method)."""
         names = list(self.item_names)
         V, owner = self._cml_covariance()
@@ -1104,6 +1240,7 @@ class PCM(Rasch):
             list(Ks),
             hessian=getattr(self, "_cml_hessian", None),
             sandwich=sandwich,
+            penalty=getattr(self, "_cml_penalty", None),
         )
         return V, np.repeat(np.arange(len(names)), Ks)
 
@@ -1179,7 +1316,7 @@ class PCM(Rasch):
         mults = []
         for i, (n, K) in enumerate(zip(names, Ks)):
             thr = self.thresholds_uncentred.loc[n].dropna().values.astype(float)
-            mult = self._location_multiplicity(thr)  # all 1 unless unused_categories='keep'
+            mult = self._location_multiplicity(thr)  # all 1 unless unused_categories='null'
             mults.append(mult)
             free = np.flatnonzero(mult > 0)
             rows = off[i] + free
@@ -1754,7 +1891,7 @@ class PCM(Rasch):
             K = len(idx)
             thr = self.thresholds_uncentred.loc[item].dropna().values.astype(float)
             thr_se = np.sqrt(np.clip(np.diag(Vi), 0, None))
-            mult = self._location_multiplicity(thr)  # all 1 unless unused_categories='keep'
+            mult = self._location_multiplicity(thr)  # all 1 unless unused_categories='null'
             a = np.where(mult > 0, 1.0 / mult.sum(), 0.0)  # central location = mean threshold
             c_se = float(np.sqrt(max(a @ Vi @ a, 0.0)))
             if K > 1:
@@ -1852,7 +1989,11 @@ class PCM(Rasch):
             'sandwich' is the sandwich of the conditional likelihood (that
             inverse, times the sum over persons of the outer products of
             their conditional scores, times that inverse), which stays valid
-            when the model does not hold. With 'sandwich'
+            when the model does not hold. With the CML ridge, the information
+            is that of the conditional likelihood plus the penalty in both:
+            'sandwich' is then the sampling variability of the ridge
+            estimates, and 'hessian' is larger where the data say little (it
+            is the spread the penalty allows, as for a prior). With 'sandwich'
             or 'hessian', confidence intervals are estimate +/- z * SE, and
             the bootstrap attributes are None.
 
@@ -3638,7 +3779,7 @@ class PCM(Rasch):
 
     def _cml_threshold_list(self, items):
         """Fitted uncentred thresholds per item, as cond_loglik takes them (with the unused-category
-        markers after unused_categories='keep')."""
+        markers after unused_categories='null')."""
         if getattr(self, "_cml_marked", None) is not None:
             names = list(self.item_names)
             off = np.concatenate([[0], np.cumsum(self.max_score_vector.reindex(names))]).astype(int)
@@ -3650,7 +3791,7 @@ class PCM(Rasch):
         ]
 
     def _cml_free_parameters(self):
-        """Free parameters of the CML fit (uncentred thresholds, centred; after unused_categories='keep',
+        """Free parameters of the CML fit (uncentred thresholds, centred; after unused_categories='null',
         one fewer for each unused category)."""
         if getattr(self, "_cml_marked", None) is not None:
             return int(self._cml_A.shape[1])
@@ -3674,7 +3815,8 @@ class PCM(Rasch):
             )
             m.calibrate(
                 **self._calibration_kw(
-                    unused_categories=getattr(self, "_cml_unused_fit", None)
+                    unused_categories=getattr(self, "_cml_unused_fit", None),
+                    ridge=self._fixed_ridge(),
                 )
             )
         m.se_method = getattr(
@@ -4341,6 +4483,7 @@ class PCM(Rasch):
             method=method,
             matrix_power=matrix_power,
             log_lik_tol=log_lik_tol,
+            ridge=self._fixed_ridge(),
         )
         ref_idx = cov_values.index[cov_values == reference]
         ref_resp = self._answered_items(self.responses.loc[ref_idx])

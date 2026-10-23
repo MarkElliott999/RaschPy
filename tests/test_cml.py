@@ -21,6 +21,12 @@ from raschpy import PCM, RSM, SLM, _esf
 DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "external_data")
 
 
+def _plain_cml(cls):
+    """calibrate() arguments for plain (unpenalised) CML, which the external references fit: PCM's
+    default CML ridge off."""
+    return dict(estimation="cml", ridge=0) if cls is PCM else dict(estimation="cml")
+
+
 def _slm_cml(name):
     X = pd.read_csv(os.path.join(DATA, f"cml_{name}.csv"))
     ref = pd.read_csv(os.path.join(DATA, f"cml_{name}_psychotools.csv"))
@@ -97,7 +103,7 @@ def test_slm_cml_refits_use_cml():
 def _pcm_cml(name):
     X = pd.read_csv(os.path.join(DATA, f"cml_{name}.csv"))
     m = PCM(X)
-    m.calibrate(estimation="cml")
+    m.calibrate(estimation="cml", ridge=0)
     return m
 
 
@@ -149,7 +155,7 @@ def test_pcm_cml_drops_item_with_unused_category():
     X.loc[X["I1"] == 2, "I1"] = 3  # category 2 of I1 unused
     m = PCM(X, validate=False)
     with pytest.warns(UserWarning, match="CML estimates do not exist for 1 item"):
-        m.calibrate(estimation="cml")
+        m.calibrate(estimation="cml", ridge=0)
     assert m.convergence["dropped_items"] == {"I1": "unused category 2"}
     assert "I1" not in m.items.index and "I1" not in m.max_score_vector.index
     m.std_errors()
@@ -318,12 +324,12 @@ def _unused_category_data():
 def test_andersen_lr_unused_categories_keep():
     X, g = _unused_category_data()
     m = PCM(X, exogenous=pd.DataFrame({"G": g}))
-    m.calibrate(estimation="cml")
+    m.calibrate(estimation="cml", ridge=0)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         drop = m.global_fit(method="andersen-lr", covariate="G")
         assert set(m.global_fit_excluded) == set(X.columns[:2])
-        keep = m.global_fit(method="andersen-lr", covariate="G", unused_categories="keep")
+        keep = m.global_fit(method="andersen-lr", covariate="G", unused_categories="null")
     assert m.global_fit_excluded == []
     a, b = m.global_fit_groups["a"], m.global_fit_groups["b"]
     assert a.cml_unused_categories == {X.columns[0]: [3], X.columns[1]: [1]}
@@ -335,18 +341,18 @@ def test_andersen_lr_unused_categories_keep():
     t1, t0 = a.thresholds_uncentred.loc[X.columns[1]], a.thresholds_uncentred.loc[X.columns[0]]
     assert t1[1] == np.inf and np.isfinite(t1[[2, 3]]).all() and t0[3] == np.inf
     with pytest.raises(ValueError, match="method='andersen-lr' only"):
-        m.global_fit(method="wald", covariate="G", unused_categories="keep")
+        m.global_fit(method="wald", covariate="G", unused_categories="null")
 
 
 def test_rsm_keep_interior_unused_category_matches_direct_cml():
-    """RSM with a category unused by every item: 'keep' maximises the conditional likelihood of the
+    """RSM with a category unused by every item: 'null' maximises the conditional likelihood of the
     rating scale model with that category's probability zero (checked by a direct fit)."""
     from scipy.optimize import minimize
     from raschpy.simulation import RSM_Sim
 
     X = RSM_Sim(no_of_items=5, no_of_persons=300, max_score=3, seed=32).responses.replace(2, 1)
     m = RSM(X, max_score=3)
-    m.calibrate(estimation="cml", unused_categories="keep")
+    m.calibrate(estimation="cml", unused_categories="null")
     cats, Xi = [0, 1, 3], X.to_numpy(int)
     I, tot = Xi.shape[1], Xi.sum(1)
 
@@ -374,7 +380,7 @@ def test_andersen_lr_monte_carlo():
     X, g = _unused_category_data()
     m = PCM(X, exogenous=pd.DataFrame({"G": g}))
     m.calibrate(estimation="cml")
-    kw = dict(method="andersen-lr", covariate="G", unused_categories="keep")
+    kw = dict(method="andersen-lr", covariate="G", unused_categories="null")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         chi = m.global_fit(**kw).copy()
@@ -421,14 +427,14 @@ def test_calibrate_keep_end_categories_equal_narrowed_range():
     its score range narrowed (shifted down): every output agrees."""
     X = _keep_pcm_data()
     k = PCM(X, max_score_vector=[3] * 6)
-    k.calibrate(estimation="cml", unused_categories="keep")
+    k.calibrate(estimation="cml", unused_categories="null", ridge=0)
     a, b = X.columns[0], X.columns[1]
     assert k.cml_unused_categories == {a: [3], b: [0]} and k._cml_free_parameters() == 6 * 3 - 1 - 2
     assert k.thresholds_uncentred.loc[a, 3] == np.inf and k.thresholds_uncentred.loc[b, 1] == -np.inf
     Y = X.copy()
     Y[b] = Y[b] - 1
     o = PCM(Y, max_score_vector=[2, 2, 3, 3, 3, 3])
-    o.calibrate(estimation="cml")
+    o.calibrate(estimation="cml", ridge=0)
     ka, oa = _keep_outputs(k), _keep_outputs(o)
     for key in ka:
         np.testing.assert_allclose(ka[key], oa[key], atol=1e-6, err_msg=key)
@@ -441,7 +447,7 @@ def test_calibrate_keep_rsm_top_category_equals_lower_max_score():
 
     X = RSM_Sim(no_of_items=6, no_of_persons=400, max_score=3, seed=42).responses.replace(3, 2)
     k = RSM(X, max_score=3)
-    k.calibrate(estimation="cml", unused_categories="keep")
+    k.calibrate(estimation="cml", unused_categories="null")
     o = RSM(X, max_score=2)
     o.calibrate(estimation="cml")
     ka, oa = _keep_outputs(k), _keep_outputs(o)
@@ -455,7 +461,7 @@ def test_calibrate_keep_interior_conditional_fit_direct():
     X = _keep_pcm_data()
     X[X.columns[2]] = X[X.columns[2]].replace(2, 1)
     m = PCM(X, max_score_vector=[3] * 6)
-    m.calibrate(estimation="cml", unused_categories="keep")
+    m.calibrate(estimation="cml", unused_categories="null")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         m.person_estimates()
@@ -480,7 +486,7 @@ def test_calibrate_keep_interior_conditional_fit_direct():
 
 def test_calibrate_keep_needs_cml():
     with pytest.raises(ValueError, match="estimation='cml' only"):
-        PCM(_keep_pcm_data(), max_score_vector=[3] * 6).calibrate(unused_categories="keep")
+        PCM(_keep_pcm_data(), max_score_vector=[3] * 6).calibrate(unused_categories="null")
 
 # ---------------------------------------------------------------- Martin-Lof (global_fit)
 
@@ -495,7 +501,7 @@ def test_calibrate_keep_needs_cml():
 def test_martin_lof_matches_erm(cls, name, lr, df):
     X = pd.read_csv(os.path.join(DATA, f"cml_{name}.csv"))
     m = cls(X)
-    m.calibrate(estimation="cml")
+    m.calibrate(**_plain_cml(cls))
     r = m.global_fit(method="martin-lof", split=list(X.columns[: X.shape[1] // 2]))
     assert r["statistic"] == pytest.approx(lr, abs=1e-3) and r["df"] == df
 
@@ -550,7 +556,7 @@ def test_solver_rules():
 def test_conditional_fit_matches_iarm(cls, name):
     X = pd.read_csv(os.path.join(DATA, f"cml_{name}.csv"))
     m = cls(X)
-    m.calibrate(estimation="cml")
+    m.calibrate(**_plain_cml(cls))
     m.fit_statistics(conditional=True, se=False, conditional_samples=20, seed=1)
     fit = pd.read_csv(os.path.join(DATA, f"cml_{name}_iarm_fit.csv")).set_index("item")
     rest = pd.read_csv(os.path.join(DATA, f"cml_{name}_iarm_rest.csv")).set_index("item")
@@ -750,7 +756,7 @@ def test_conditional_model_selection_rsm_pcm():
         warnings.simplefilter("ignore")
         r, p = RSM(resp), PCM(resp)
         r.calibrate(estimation="cml")
-        p.calibrate(estimation="cml")
+        p.calibrate(estimation="cml", ridge=0)
         # at CML estimates the one step is null: the conditional maxima
         ll_r, ll_p = RSM._conditional_ll_rsm_pcm(r, p)
         assert ll_r == pytest.approx(r.convergence["log_likelihood"], abs=1e-8)
@@ -1061,3 +1067,134 @@ def test_stats_tables_conditional_columns(name):
         m.item_stats_df()
         m.person_stats_df()
     assert list(m.item_stats.columns) == base and "Conditional p" not in m.person_stats.columns
+
+
+# ---------------------------------------------------------------------------
+# PCM CML ridge (calibrate(ridge=...))
+# ---------------------------------------------------------------------------
+
+
+def _ridge_pcm_data(Ks, n=150, seed=5):
+    from raschpy.simulation import PCM_Sim
+
+    return PCM_Sim(no_of_items=len(Ks), no_of_persons=n, max_score_vector=Ks, seed=seed).responses
+
+
+def _direct_ridge_penalty(Ks, ridge, group_widths=0.3):
+    """The ridge penalty built directly, item by item: each item's centred thresholds minus its max-score
+    group's mean centred thresholds (weight ridge), each group's mean widths minus their overall mean (weight
+    group_widths); as b' Pb b / 2."""
+    p = sum(Ks)
+    off = np.concatenate([[0], np.cumsum(Ks)])
+    G, W = [], []
+    for K in sorted(set(Ks)):
+        idx = [i for i, k in enumerate(Ks) if k == K]
+        C = np.eye(K) - 1.0 / K
+        mean = np.zeros((K, p))
+        for j in idx:
+            mean[:, off[j] : off[j + 1]] = np.eye(K) / len(idx)
+        W.append(np.diff(mean, axis=0))
+        if len(idx) > 1:
+            for i in idx:
+                own = np.zeros((K, p))
+                own[:, off[i] : off[i + 1]] = np.eye(K)
+                G.append(C @ (own - mean))
+    W = np.vstack(W)
+    W = W - W.mean(axis=0)
+    return ridge * np.vstack(G).T @ np.vstack(G) + group_widths * W.T @ W
+
+
+@pytest.mark.parametrize("Ks", [[4] * 10, [2, 3, 4, 5] * 3])
+def test_pcm_ridge_cml_maximises_penalised_likelihood(Ks):
+    """The ridge estimates maximise the conditional log-likelihood minus the penalty built directly; the
+    weight is the 'minimise_bias' rule applied to the PAIR thresholds; items with unused categories are kept."""
+    from raschpy import _rcl
+
+    X = _ridge_pcm_data(Ks)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m = PCM(X, max_score_vector=Ks)
+        m.calibrate(estimation="cml")
+        p = PCM(X, max_score_vector=Ks)
+        p.calibrate()
+    names = list(X.columns)
+    assert m.convergence["converged"] and not m.convergence["dropped_items"]
+    b0 = np.concatenate([p.thresholds_uncentred.loc[n].dropna().values for n in names])
+    off = np.concatenate([[0], np.cumsum(Ks)])
+    S = np.mean([np.ptp(b0[off[i] : off[i + 1]]) for i in range(len(Ks))])
+    c0, c1, c2 = PCM.RIDGE_RULE
+    assert m.ridge == pytest.approx(np.exp(c0 + c1 * np.log(S) + c2 * np.log(np.mean(Ks))), rel=1e-12)
+    A = _rcl.zero_sum_basis(sum(Ks))
+    Q = A.T @ _direct_ridge_penalty(Ks, m.ridge) @ A
+    fit = _esf.fit_cml(X.to_numpy(float), A, b0 - b0.mean(), Ks, solver="newton", penalty=Q)
+    b = np.concatenate([m.thresholds_uncentred.loc[n].dropna().values for n in names])
+    np.testing.assert_allclose(b, fit["b"], atol=1e-7)
+    assert m.convergence["penalised_log_likelihood"] == pytest.approx(fit["objective"], abs=1e-7)
+
+
+def test_pcm_ridge_zero_is_plain_cml():
+    X = _ridge_pcm_data([3] * 8, n=400, seed=11)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m = PCM(X, max_score_vector=[3] * 8)
+        m.calibrate(estimation="cml", ridge=0)
+    from raschpy import _rcl
+
+    names = list(m.item_names)
+    Ks = [3] * len(names)
+    b = np.concatenate([m.thresholds_uncentred.loc[n].dropna().values for n in names])
+    fit = _esf.fit_cml(np.array(m.responses.loc[:, names], float), _rcl.zero_sum_basis(len(b)), b, Ks)
+    assert m.ridge == 0.0 and m._cml_penalty is None
+    assert m.convergence["log_likelihood"] == pytest.approx(fit["ll"], abs=1e-8)
+    assert fit["iterations"] <= 2
+
+
+def test_pcm_ridge_unused_categories_options():
+    """With the ridge, an item with an unused category is kept ('ridge', the default); ridge=0 drops it by
+    default; 'ridge' needs ridge > 0; 'null' works with the ridge."""
+    X = _keep_pcm_data()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = PCM(X, max_score_vector=[3] * 6)
+        r.calibrate(estimation="cml")
+        z = PCM(X, max_score_vector=[3] * 6)
+        z.calibrate(estimation="cml", ridge=0)
+        n = PCM(X, max_score_vector=[3] * 6)
+        n.calibrate(estimation="cml", unused_categories="null")
+    assert r._cml_unused == "ridge" and not r.convergence["dropped_items"]
+    assert np.isfinite(r.thresholds_uncentred.to_numpy(float)).all()
+    assert set(z.convergence["dropped_items"]) == set(X.columns[:2])
+    assert n.convergence["converged"] and n.cml_unused_categories and n.ridge > 0
+    with pytest.raises(ValueError, match="needs ridge > 0"):
+        PCM(X, max_score_vector=[3] * 6).calibrate(estimation="cml", ridge=0, unused_categories="ridge")
+    with pytest.raises(ValueError, match="estimation='cml' only"):
+        PCM(X, max_score_vector=[3] * 6).calibrate(unused_categories="ridge")
+
+
+def test_pcm_ridge_argument_checks():
+    X = _ridge_pcm_data([3] * 6, n=200)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        a = PCM(X, max_score_vector=[3] * 6)
+        a.calibrate(estimation="cml", ridge="minimize_bias")
+        b = PCM(X, max_score_vector=[3] * 6)
+        b.calibrate(estimation="cml")
+        c = PCM(X, max_score_vector=[3] * 6)
+        c.calibrate(estimation="cml", ridge=0.7)
+    assert a.ridge == b.ridge and c.ridge == 0.7
+    for bad in ("minimise_error", -0.1, True, None):
+        with pytest.raises(ValueError, match="ridge must be"):
+            PCM(X, max_score_vector=[3] * 6).calibrate(estimation="cml", ridge=bad)
+    with pytest.warns(UserWarning, match="applies to estimation='cml' only"):
+        PCM(X, max_score_vector=[3] * 6).calibrate(ridge=0.5)
+
+
+def test_pcm_ridge_test_refits_use_fixed_weight():
+    """global_fit()'s group refits use the full-data fit's ridge weight, not the rule re-applied per group."""
+    X = _ridge_pcm_data([3] * 8, n=300, seed=2)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m = PCM(X, max_score_vector=[3] * 8)
+        m.calibrate(estimation="cml")
+        sub = m._global_fit_subset(X.index[:120])
+    assert sub.ridge == m.ridge and sub._ridge_setting == m.ridge

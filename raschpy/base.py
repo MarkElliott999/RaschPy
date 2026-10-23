@@ -2359,8 +2359,11 @@ class Rasch:
         if not len(fixed):
             return
         X, A, c, b0, Ks, decode = self._cml_anchor_design(anchors.loc[fixed])
+        # PCM's CML ridge: the same penalty (unchanged by the fixed item locations, constants per item)
+        Pb = getattr(self, "_cml_Pb", None)
+        Q = None if Pb is None else A.T @ Pb @ A
         fit = _esf.fit_cml(
-            X, A, b0, Ks, offset=c, solver=getattr(self, "_cml_solver", None)
+            X, A, b0, Ks, offset=c, solver=getattr(self, "_cml_solver", None), penalty=Q
         )
         off = np.concatenate([[0], np.cumsum(Ks)])
         H = fit["hessian"]
@@ -2370,9 +2373,9 @@ class Rasch:
                 [fit["b"][off[i] : off[i + 1]] for i in range(len(Ks))],
                 hessian=True,
             )[2]
-        cov_b = A @ np.linalg.solve(-(A.T @ H @ A), A.T)
+        cov_b = A @ np.linalg.solve(-(A.T @ H @ A) + (0 if Q is None else Q), A.T)
         items, thresholds, L = decode(fit["b"])
-        cov_b = np.nan_to_num(cov_b)  # markers (unused_categories='keep') are fixed: no variance
+        cov_b = np.nan_to_num(cov_b)  # markers (unused_categories='null') are fixed: no variance
         se = np.sqrt(np.clip(np.einsum("ip,pq,iq->i", L, cov_b, L), 0, None))
         se[items.index.isin(fixed)] = 0.0
         self.anchor_items = items
@@ -2612,7 +2615,7 @@ class Rasch:
 
     def _cml_design(self, n_thresholds):
         """The design A of the CML thresholds b = A @ theta (+ the unused-category markers): the fit's own
-        after unused_categories='keep', else the model's basis (RSM's, or a zero-sum basis)."""
+        after unused_categories='null', else the model's basis (RSM's, or a zero-sum basis)."""
         from raschpy import _rcl
 
         if getattr(self, "_cml_marked", None) is not None:
@@ -2623,7 +2626,7 @@ class Rasch:
 
     def _person_score_bounds(self, df):
         """Each person's lowest and highest possible total over the items they responded to in df (from
-        _score_bounds: 0 and each item's maximum score, or after calibrate(unused_categories='keep') its
+        _score_bounds: 0 and each item's maximum score, or after calibrate(unused_categories='null') its
         lowest and highest used category). Persons at either bound have extreme scores."""
         lo, hi = self._score_bounds(list(df.columns))
         obs = df.notna().astype(float)
@@ -2631,7 +2634,7 @@ class Rasch:
 
     def _score_bounds(self, items):
         """(lowest, highest) possible score of each item (pandas series): 0 and its maximum score, or
-        after calibrate(unused_categories='keep') its lowest and highest used category."""
+        after calibrate(unused_categories='null') its lowest and highest used category."""
         hi = self._cml_max_scores(list(items))
         lo = np.zeros(len(hi))
         used = (
@@ -2648,15 +2651,17 @@ class Rasch:
         return pd.Series(lo, index=list(items)), pd.Series(hi, index=list(items))
 
     @staticmethod
-    def _check_unused_categories(unused_categories, estimation):
-        """calibrate(unused_categories=...) (PCM, RSM): 'drop' or 'keep', 'keep' with CML only."""
-        if unused_categories not in ("drop", "keep"):
+    def _check_unused_categories(unused_categories, estimation, allowed=("drop", "null")):
+        """calibrate(unused_categories=...) (PCM, RSM): one of allowed ('drop', 'null', and for PCM
+        'ridge'); all but 'drop' with CML only."""
+        if unused_categories not in allowed:
+            names = ", ".join(repr(a) for a in allowed)
             raise ValueError(
-                f"unused_categories must be 'drop' or 'keep', got {unused_categories!r}."
+                f"unused_categories must be one of {names}, got {unused_categories!r}."
             )
-        if unused_categories == "keep" and estimation != "cml":
+        if unused_categories != "drop" and estimation != "cml":
             raise ValueError(
-                "unused_categories='keep' applies to estimation='cml' only (the other "
+                f"unused_categories={unused_categories!r} applies to estimation='cml' only (the other "
                 "estimators keep every item, their smoothing giving finite estimates)."
             )
 
@@ -4015,7 +4020,7 @@ class Rasch:
         self.cml_dropped_responses; persons left with no responses are added
         to self.null_persons. Returns {item: reason} for the dropped items
         (empty if none); a subclass also subsets its own per-item attributes.
-        With keep_unused=True (unused_categories='keep'), items are not dropped for an unused category;
+        With keep_unused=True (unused_categories='null'), items are not dropped for an unused category;
         self._cml_used is set to {item: boolean array over its categories, used among the persons who
         contribute}.
         """
@@ -4061,7 +4066,8 @@ class Rasch:
             f"for the thresholds next to it, and an item that is not connected is never compared "
             f"with the others in both directions. They were left out of the CML calibration and "
             f"removed from responses (see convergence['dropped_items'] and "
-            f"cml_dropped_responses). To keep them, use unused_categories='keep' (PCM, RSM), "
+            f"cml_dropped_responses). To keep them, use unused_categories='null' (PCM, RSM) or "
+            f"the CML ridge (PCM's default), "
             f"collapse unused categories, or use the default estimation, whose smoothing "
             f"constant gives finite estimates.",
             UserWarning,
@@ -4147,8 +4153,15 @@ class Rasch:
             start += Ks[c]
         A1 = np.hstack([A0a, S @ _rcl.zero_sum_basis(S.shape[1])])
         solver = getattr(pooled, "_cml_solver", None)
-        f0 = _esf.fit_cml(Xa, A0a, b0a, Ka, solver=solver)
-        f1 = _esf.fit_cml(Xa, A1, b0a, Ka, solver=solver)
+        # PCM's CML ridge: the pooled fit's penalty on the shared parameters; the focal shifts unpenalised
+        Pb = getattr(pooled, "_cml_Pb", None)
+        Q0 = None if Pb is None else A0.T @ Pb @ A0
+        Q1 = None
+        if Q0 is not None:
+            Q1 = np.zeros((A1.shape[1], A1.shape[1]))
+            Q1[: Q0.shape[0], : Q0.shape[0]] = Q0
+        f0 = _esf.fit_cml(Xa, A0a, b0a, Ka, solver=solver, penalty=Q0)
+        f1 = _esf.fit_cml(Xa, A1, b0a, Ka, solver=solver, penalty=Q1)
         LR = max(0.0, 2.0 * (f1["ll"] - f0["ll"]))
         return LR, S.shape[1] - 1, bool(f0["converged"] and f1["converged"])
 
@@ -5553,7 +5566,7 @@ class Rasch:
                     reason = str(e).split(": ", 1)[-1].split(". ")[0]
                     raise ValueError(
                         f"method='andersen-lr': CML estimates do not exist in one group "
-                        f"({reason}). Use unused_categories='keep', which keeps items with a "
+                        f"({reason}). Use unused_categories='null', which keeps items with a "
                         f"category unused in a group, or method='wald', which leaves out the "
                         f"parameters not estimable in both groups."
                     ) from None
@@ -5625,7 +5638,7 @@ class Rasch:
             for m in list(fitted.values()) + [pooled]
         ):
             warnings.warn(
-                "unused_categories='keep' kept categories unused in a group, so their "
+                "unused_categories='null' kept categories unused in a group, so their "
                 "thresholds were left out of that group's fit; the chi-square p-value is then "
                 "liberal (in null simulations of PCM with sparse categories it rejected 7-25% "
                 "of the time at alpha = 0.05). For a calibrated test, re-run with "
@@ -5692,7 +5705,7 @@ class Rasch:
         if not used:
             raise ValueError(
                 "method='andersen-lr': no Monte Carlo sample had CML estimates for every item; "
-                "try unused_categories='keep'."
+                "try unused_categories='null'."
             )
         p = exceed / used if stopped else (1 + exceed) / (1 + used)
         return p, used, skipped, stopped
@@ -5739,7 +5752,7 @@ class Rasch:
         se = {}
         for n in names:
             m = fitted[n]
-            if getattr(m, "_cml_marked", None) is not None:  # unused_categories='keep'
+            if getattr(m, "_cml_marked", None) is not None:  # unused_categories='null'
                 item_se = m._cml_location_se()
             else:
                 with warnings.catch_warnings():
@@ -5981,12 +5994,12 @@ class Rasch:
             Clifford's sequential p-value, h / samples drawn), so a clearly
             non-significant result needs only a few dozen samples; None draws
             all no_of_samples. E.g. 10.
-        unused_categories : {None, 'drop', 'keep'}, default None
+        unused_categories : {None, 'drop', 'null'}, default None
             'andersen-lr' (PCM and RSM; None follows the object's
             calibrate(unused_categories=...)): a score category that no person with a
             non-extreme total used, in one group or the pooled data. 'drop'
             leaves out an item with such a category (PCM; for RSM, a category
-            unused by every item raises a ValueError). 'keep' keeps the item
+            unused by every item raises a ValueError). 'null' keeps the item
             with that category's probability zero, the scores unchanged
             (Wilson and Masters, 1993; psychotools' pcmodel(nullcats='keep')):
             the data identify only the sum of the two thresholds either side
@@ -6059,8 +6072,8 @@ class Rasch:
             details.append(f"covariate={covariate}")
         if method == "martin-lof" or (method == "andersen-lr" and p_method != "chi2"):
             details.append(f"p_method={p_method}")
-        if method == "andersen-lr" and unused_categories == "keep":
-            details.append("unused_categories=keep")
+        if method == "andersen-lr" and unused_categories == "null":
+            details.append("unused_categories=null")
         if not hasattr(self, "global_fit_results"):
             self.global_fit_results = {}
         self.global_fit_results[(method, "; ".join(details))] = (
@@ -6088,12 +6101,12 @@ class Rasch:
             raise ValueError(
                 f"method must be one of {self._GLOBAL_FIT_METHODS}, got {method!r}."
             )
-        if unused_categories not in (None, "drop", "keep"):
+        if unused_categories not in (None, "drop", "null"):
             raise ValueError(
-                f"unused_categories must be None, 'drop' or 'keep', got {unused_categories!r}."
+                f"unused_categories must be None, 'drop' or 'null', got {unused_categories!r}."
             )
-        if unused_categories == "keep" and method != "andersen-lr":
-            raise ValueError("unused_categories='keep' applies to method='andersen-lr' only.")
+        if unused_categories == "null" and method != "andersen-lr":
+            raise ValueError("unused_categories='null' applies to method='andersen-lr' only.")
         if covariate is not None:
             if method == "martin-lof":
                 raise ValueError(

@@ -494,7 +494,7 @@ print(mfrm.category_stats_global)
 `SLM`, `PCM` and `RSM` support conditional maximum likelihood estimation and the conditional analyses built on it (Christensen, Kreiner & Mesbah 2013):
 
 ```python
-pcm.calibrate(estimation='cml')      # CML estimates; std_errors() default: sandwich ('hessian' also available)
+pcm.calibrate(estimation='cml')      # CML estimates (PCM: with a ridge, ridge=0 for plain CML); std_errors() default: sandwich
 pcm.fit_statistics(conditional=True, bootstrap_samples=1000, seed=1)
 print(pcm.item_stats)                # conditional infit/outfit, restscore and Q1 BH p-values, Westfall-Young p-values
 print(pcm.item_restscore_table)      # item-restscore gamma (Kreiner 2011)
@@ -510,7 +510,7 @@ pcm.icc('Item_1', obs=True, cond_obs=True) # observed vs conditional expected it
 pcm.global_stats_df(run_all_tests=True)    # whole-test summary table
 ```
 
-With CML estimates, `calibrate_anchor()` holds the anchor items at their supplied values in a CML fit (`fix_anchors=False` gives the translation) and `dif_test()`'s omnibus test is a conditional likelihood ratio. Conditional fit (`fit_statistics(conditional=True)`) also works with the other estimation methods, and for `MFRM` (`fit_statistics(model=..., conditional=True)`, treating each rater × item as an item).
+For `PCM`, CML has a ridge by default (`ridge='minimise_bias'`): a penalty pulling each item's threshold pattern towards the mean pattern of the items with the same maximum score, with its weight set from the data so that the item locations are neither pulled in nor spread out on average. It gives estimates where plain CML has none (e.g. a category nobody used) and lowers their error when there are few persons per category; `pcm.ridge` reports the weight used, a number sets it, and `ridge=0` gives plain CML. With CML estimates, `calibrate_anchor()` holds the anchor items at their supplied values in a CML fit (`fix_anchors=False` gives the translation) and `dif_test()`'s omnibus test is a conditional likelihood ratio. Conditional fit (`fit_statistics(conditional=True)`) also works with the other estimation methods, and for `MFRM` (`fit_statistics(model=..., conditional=True)`, treating each rater × item as an item).
 
 ---
 

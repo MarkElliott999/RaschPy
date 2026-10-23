@@ -144,7 +144,12 @@ gradient and Hessian in log space with no subtractions, grouping persons by
 missingness pattern; `_esf.prepare` caches the data-only structure once per
 fit. `fit_cml` maximises it over `b = offset + A @ theta` (A carries the
 identification), by default with the chord method (one Hessian, then fixed
-Newton steps). Items without CML estimates are removed first
+Newton steps); `penalty=Q` maximises the log-likelihood minus
+theta' Q theta / 2 instead. PCM's CML ridge (`calibrate(ridge=)`,
+`PCM._ridge_penalty`) builds Q = A' Pb A from a penalty on each item's
+centred thresholds minus its max-score group's mean, plus a weak one on the
+groups' mean widths; `_fixed_ridge()` passes the fitted weight to the test
+refits. Items without CML estimates are removed first
 (`screen_items`). Standard errors: sandwich of the conditional likelihood by
 default (`cml_sandwich`, person scores once per distinct response row), or
 the Hessian. The conditional machinery (`conditional_moments`,

@@ -94,7 +94,7 @@ def _as_threshold_list(thresholds):
 def log_category_weights(b):
     """
     Log category weights of an item, 0 and -(b_1 + ... + b_x) for x = 1..K, from its thresholds b (as
-    cond_loglik takes them). A category with zero probability (unused, unused_categories='keep') is marked
+    cond_loglik takes them). A category with zero probability (unused, unused_categories='null') is marked
     by an infinite threshold: b_x = +inf for an unused category x >= 1, the next finite threshold then
     being the sum of the thresholds either side of it (the only combination the data identify); a run of
     leading b_1..b_m = -inf for unused categories 0..m-1, category m then being the reference (weight 0).
@@ -461,10 +461,11 @@ def fit_cml(
     fixed_hessian=None,
     solver=None,
     offset=None,
+    penalty=None,
 ):
     """
     Conditional maximum likelihood: maximise cond_loglik over thresholds b = offset + A @ theta (offset 0 by default), starting
-    from b0.
+    from b0; with penalty Q (q, q), maximise cond_loglik - theta' Q theta / 2 instead (a ridge on theta).
 
     A (p, q) maps the free parameters theta to the stacked thresholds (it carries the identification, e.g. a
     zero-sum basis). Every solver stops when the largest change in b is below tol, so all reach the same
@@ -486,9 +487,10 @@ def fit_cml(
     The chord method stops at tol / 100 (its convergence is linear) for a final gradient comparable to
     Newton-Raphson's.
 
-    Returns a dict: b, theta, ll, iterations, converged, solver (the one that finished), max_gradient
-    (largest |A' grad| at the end), hessian ((p, p) at b for 'newton', else None), hessians (the number of
-    Hessians computed).
+    Returns a dict: b, theta, ll (the conditional log-likelihood, without the penalty), objective (ll minus
+    the penalty), iterations, converged, solver (the one that finished), max_gradient (largest |gradient of
+    the objective in theta| at the end), hessian ((p, p) Hessian of cond_loglik at b for 'newton', else None;
+    the penalty is not included), hessians (the number of Hessians computed).
     """
     from scipy.linalg import cho_factor, cho_solve, LinAlgError
     from scipy.optimize import minimize
@@ -500,15 +502,21 @@ def fit_cml(
         off = np.concatenate([[0], np.cumsum(Ks)])
         return [b[off[i] : off[i + 1]] for i in range(len(Ks))]
 
+    Q = np.zeros((A.shape[1], A.shape[1])) if penalty is None else np.asarray(penalty, float)
+
+    def pen(theta):
+        return 0.5 * theta @ Q @ theta
+
     def result(theta, ll, g, it, converged, name, H, hessians):
         return dict(
             b=c + A @ theta,
             theta=theta,
             ll=ll,
+            objective=ll - pen(theta),
             iterations=it,
             converged=converged,
             solver=name,
-            max_gradient=float(np.max(np.abs(A.T @ g))) if A.shape[1] else 0.0,
+            max_gradient=float(np.max(np.abs(A.T @ g - Q @ theta))) if A.shape[1] else 0.0,
             hessian=H,
             hessians=hessians,
         )
@@ -529,20 +537,22 @@ def fit_cml(
         hessians += 1
     if H0 is not None:
         try:
-            cf = cho_factor(-(A.T @ H0 @ A))
+            cf = cho_factor(-(A.T @ H0 @ A) + Q)
         except LinAlgError:
             cf = None
         if cf is not None:
             ll, g, _ = cond_loglik(X, unstack(c + A @ theta), prepared=prep)
             for it in range(1, max_iter + 1):
-                step = cho_solve(cf, A.T @ g)
+                step = cho_solve(cf, A.T @ g - Q @ theta)
                 s = 1.0
+                f = ll - pen(theta)
                 while True:
                     th_new = theta + s * step
                     ll_new, g_new, _ = cond_loglik(
                         X, unstack(c + A @ th_new), prepared=prep
                     )
-                    if ll_new >= ll - 1e-12 * abs(ll) or s < 1e-6:
+                    f_new = ll_new - pen(th_new)
+                    if f_new >= f - 1e-12 * abs(f) or s < 1e-6:
                         break
                     s /= 2
                 change = np.max(np.abs(A @ (th_new - theta)))
@@ -556,19 +566,21 @@ def fit_cml(
         hessians += 1
         converged, it = False, 0
         while it < max_iter:
-            gt, Ht = A.T @ g, A.T @ H @ A
+            gt, Ht = A.T @ g - Q @ theta, A.T @ H @ A - Q
             try:
                 step = cho_solve(cho_factor(-Ht), gt)
             except LinAlgError:
                 break  # not negative definite: the data do not identify every parameter
             s = 1.0
+            f = ll - pen(theta)
             while True:
                 th_new = theta + s * step
                 ll_new, g_new, H_new = cond_loglik(
                     X, unstack(c + A @ th_new), hessian=True, prepared=prep
                 )
                 hessians += 1
-                if ll_new >= ll - 1e-12 * abs(ll) or s < 1e-6:
+                f_new = ll_new - pen(th_new)
+                if f_new >= f - 1e-12 * abs(f) or s < 1e-6:
                     break
                 s /= 2
             it += 1
@@ -581,7 +593,7 @@ def fit_cml(
 
     def neg(th):
         ll, g, _ = cond_loglik(X, unstack(c + A @ th), prepared=prep)
-        return -ll, -(A.T @ g)
+        return -(ll - pen(th)), -(A.T @ g - Q @ th)
 
     res = minimize(
         neg,
@@ -619,13 +631,14 @@ def person_scores(X, thresholds, prepared=None):
     return out
 
 
-def cml_sandwich(X, A, b, Ks, hessian=None, prepared=None):
+def cml_sandwich(X, A, b, Ks, hessian=None, prepared=None, penalty=None):
     """
     Bread and meat of the sandwich covariance of CML estimates b = A @ theta, in theta's coordinates:
     (info, meat) with info = -A' H A (H the Hessian of cond_loglik at b, computed if not given) and meat =
     A' S' S A, S the persons' scores (person_scores, computed once per distinct response row). The covariance of theta is
     info^{-1} meat info^{-1}; under the model it agrees with info^{-1} (the Hessian covariance) in large
-    samples, and it stays valid when the model does not hold for the persons' response patterns.
+    samples, and it stays valid when the model does not hold for the persons' response patterns. With
+    penalty Q (the ridge of fit_cml), info is -A' H A + Q (the meat is unchanged).
     """
     off = np.concatenate([[0], np.cumsum(Ks)])
     thr = [np.asarray(b[off[i] : off[i + 1]], float) for i in range(len(Ks))]
@@ -636,7 +649,10 @@ def cml_sandwich(X, A, b, Ks, hessian=None, prepared=None):
     # persons with the same responses have the same scores: compute them once per distinct row
     rows, counts = np.unique(np.where(np.isnan(X), -1.0, X), axis=0, return_counts=True)
     U = person_scores(np.where(rows < 0, np.nan, rows), thr) @ A
-    return -(A.T @ hessian @ A), U.T @ (counts[:, None] * U)
+    info = -(A.T @ hessian @ A)
+    if penalty is not None:
+        info = info + penalty
+    return info, U.T @ (counts[:, None] * U)
 
 
 def one_step_loglik(X, A, b0, Ks, prepared=None):
@@ -670,12 +686,13 @@ def one_step_loglik(X, A, b0, Ks, prepared=None):
     return ll0, b0, ll0
 
 
-def cml_covariance(X, A, b, Ks, hessian=None, sandwich=False):
+def cml_covariance(X, A, b, Ks, hessian=None, sandwich=False, penalty=None):
     """Covariance of the CML thresholds b = A @ theta: A (-A' H A)^{-1} A', H the Hessian of cond_loglik at b
-    (computed if not given); with sandwich=True, A B^{-1} M B^{-1} A' with (B, M) from cml_sandwich().
+    (computed if not given); with sandwich=True, A B^{-1} M B^{-1} A' with (B, M) from cml_sandwich(). With
+    penalty Q (the ridge of fit_cml), -A' H A + Q replaces -A' H A in both.
     """
     if sandwich:
-        info, meat = cml_sandwich(X, A, b, Ks, hessian=hessian)
+        info, meat = cml_sandwich(X, A, b, Ks, hessian=hessian, penalty=penalty)
         Binv = np.linalg.inv(info)
         return A @ Binv @ meat @ Binv @ A.T
     if hessian is None:
@@ -684,6 +701,8 @@ def cml_covariance(X, A, b, Ks, hessian=None, sandwich=False):
             X, [b[off[i] : off[i + 1]] for i in range(len(Ks))], hessian=True
         )
     info = -(A.T @ hessian @ A)
+    if penalty is not None:
+        info = info + penalty
     return A @ np.linalg.solve(info, A.T)
 
 
@@ -701,7 +720,7 @@ def screen_items(X, Ks, per_item_categories=True, keep_unused=False):
     per_item_categories=False skips the first rule (RSM: the thresholds are shared, so an item may leave a
     category unused).
 
-    keep_unused=True (unused_categories='keep'): unused categories are kept with zero probability instead
+    keep_unused=True (unused_categories='null'): unused categories are kept with zero probability instead
     of the item being dropped, and the second rule uses each item's lowest and highest used categories
     (i can give a point if x_i is above its lowest used category, j can take one if x_j is below its
     highest); an item with fewer than two used categories is dropped ('one category used').
@@ -1087,7 +1106,7 @@ def score_moments(lg, theta):
 def score_wle(lg):
     """Weighted likelihood estimates of theta for every total r = 0..m (Warm): the root of
     r - E(R | theta) + mu3(theta) / (2 V(R | theta)) = 0, finite for the extreme totals too (the lowest and
-    highest possible ones). NaN for a total that cannot occur (log gamma -inf, unused_categories='keep').
+    highest possible ones). NaN for a total that cannot occur (log gamma -inf, unused_categories='null').
     """
     from scipy.optimize import brentq
 
