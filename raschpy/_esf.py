@@ -33,6 +33,7 @@ Computation (exact, in log space, no subtractions):
 The Hessian is minus the summed conditional covariance of the category indicators.
 """
 
+from raschpy import _progress
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 
@@ -450,7 +451,12 @@ NEWTON_MAX = (
 SOLVERS = (None, "newton", "chord", "lbfgs")
 
 
-def fit_cml(
+def fit_cml(*args, **kwargs):
+    with _progress.Reporter("CML fit", unit="iterations") as rep:
+        return _fit_cml(*args, rep=rep, **kwargs)
+
+
+def _fit_cml(
     X,
     A,
     b0,
@@ -462,6 +468,7 @@ def fit_cml(
     solver=None,
     offset=None,
     penalty=None,
+    rep=None,
 ):
     """
     Conditional maximum likelihood: maximise cond_loglik over thresholds b = offset + A @ theta (offset 0 by default), starting
@@ -555,16 +562,24 @@ def fit_cml(
                     if f_new >= f - 1e-12 * abs(f) or s < 1e-6:
                         break
                     s /= 2
+                if not f_new >= f - 1e-12 * abs(f):
+                    break  # no step along this direction increases the objective: not taken; fall back
                 change = np.max(np.abs(A @ (th_new - theta)))
                 theta, ll, g = th_new, ll_new, g_new
+                if rep is not None:
+                    rep.update(note=f"largest change {change:.2g}")
                 # linear convergence: stop 100x tighter than Newton for a comparable final gradient
                 if change < tol * 1e-2:
                     return result(theta, ll, g, it, True, "chord", None, hessians)
         solver = "fallback"  # chord did not converge (or the matrix was unusable)
-    if solver == "newton" or (solver == "fallback" and q <= newton_max):
+    def newton(theta, hessians):
+        """Newton-Raphson from theta: (theta, ll, g, H, iterations, converged, stalled, hessians); stalled when
+        no step along the Newton direction increases the objective, which is then not taken. This happens when
+        the likelihood is almost flat along some direction at the current values (e.g. starting thresholds so far
+        out that one score has probability near 1), so that the Newton step along it is enormous."""
         ll, g, H = cond_loglik(X, unstack(c + A @ theta), hessian=True, prepared=prep)
         hessians += 1
-        converged, it = False, 0
+        converged, it, stalled = False, 0, False
         while it < max_iter:
             gt, Ht = A.T @ g - Q @ theta, A.T @ H @ A - Q
             try:
@@ -583,13 +598,24 @@ def fit_cml(
                 if f_new >= f - 1e-12 * abs(f) or s < 1e-6:
                     break
                 s /= 2
+            if not f_new >= f - 1e-12 * abs(f):
+                stalled = True
+                break
             it += 1
             change = np.max(np.abs(A @ (th_new - theta)))
             theta, ll, g, H = th_new, ll_new, g_new, H_new
+            if rep is not None:
+                rep.update(note=f"largest change {change:.2g}")
             if change < tol:
                 converged = True
                 break
-        return result(theta, ll, g, it, converged, "newton", H, hessians)
+        return theta, ll, g, H, it, converged, stalled, hessians
+
+    stalled = False
+    if solver == "newton" or (solver == "fallback" and q <= newton_max):
+        theta, ll, g, H, it, converged, stalled, hessians = newton(theta, hessians)
+        if not stalled:
+            return result(theta, ll, g, it, converged, "newton", H, hessians)
 
     def neg(th):
         ll, g, _ = cond_loglik(X, unstack(c + A @ th), prepared=prep)
@@ -601,11 +627,39 @@ def fit_cml(
         jac=True,
         method="L-BFGS-B",
         options=dict(maxiter=50 * max_iter, maxcor=20, ftol=1e-15, gtol=1e-8),
+        callback=(lambda xk: rep.update()) if rep is not None else None,
     )
+    if stalled:
+        # Newton-Raphson could not take a step: L-BFGS has brought theta near the maximum, where Newton-Raphson finishes it
+        # (and judges convergence as usual)
+        theta, ll, g, H, it2, converged, stalled2, hessians = newton(res.x, hessians)
+        if not stalled2:
+            return result(theta, ll, g, int(res.nit) + it2, converged, "lbfgs+newton", H, hessians)
     ll, g, _ = cond_loglik(X, unstack(c + A @ res.x), prepared=prep)
     return result(
         res.x, ll, g, int(res.nit), bool(res.success), "lbfgs", None, hessians
     )
+
+
+def null_steps_flat(X, b, Ks, J, origin, tol=1e-6):
+    """
+    unused_categories='null', after a CML fit that did not converge: True if the conditional log-likelihood is flat
+    at the stacked thresholds b (markers +/-inf) along some combination of the steps between the used categories,
+    i.e. the CML estimates of those steps do not exist for these data. J (sum Ks, q) maps the q step coordinates to
+    the stacked thresholds; origin (q,) is the change that only moves the persons' origin (each step moved by the
+    number of categories it spans), left out. Flat: the smallest curvature along the rest below tol. In simulations
+    (MFRM data with two adjacent categories unused), fits that converged had a smallest curvature of 9.5 or more,
+    and those that did not had 4e-9 or less.
+    """
+    off = np.concatenate([[0], np.cumsum(Ks)])
+    b = np.asarray(b, float)
+    _, _, H = cond_loglik(X, [b[off[i] : off[i + 1]] for i in range(len(Ks))], hessian=True)
+    info = -(J.T @ np.nan_to_num(H) @ J)
+    origin = np.asarray(origin, float)
+    if J.shape[1] < 2:
+        return False
+    B = np.linalg.svd(np.eye(len(origin)) - np.outer(origin, origin) / (origin @ origin))[0][:, : len(origin) - 1]
+    return bool(np.linalg.eigvalsh(B.T @ info @ B).min() < tol)
 
 
 def person_scores(X, thresholds, prepared=None):
@@ -653,37 +707,6 @@ def cml_sandwich(X, A, b, Ks, hessian=None, prepared=None, penalty=None):
     if penalty is not None:
         info = info + penalty
     return info, U.T @ (counts[:, None] * U)
-
-
-def one_step_loglik(X, A, b0, Ks, prepared=None):
-    """
-    Conditional log-likelihood after one Newton step from b0 over thresholds b = A @ theta (theta free;
-    A carries the identification), with the exact Hessian, halving the step while the log-likelihood falls.
-    For scoring models fitted by other estimators at (close to) their conditional maximum without a full
-    CML fit; at a CML estimate the step is null. A Hessian that is singular in some direction (e.g. an
-    unused category) is pseudo-inverted, so no step is taken along it.
-
-    Returns (ll after the step, b after the step, ll at b0).
-    """
-    off = np.concatenate([[0], np.cumsum(Ks)])
-
-    def unstack(b):
-        return [b[off[i] : off[i + 1]] for i in range(len(Ks))]
-
-    b0 = np.asarray(b0, float)
-    if prepared is None:
-        prepared = prepare(X, Ks)
-    ll0, g, H = cond_loglik(X, unstack(b0), hessian=True, prepared=prepared)
-    info = -(A.T @ H @ A)
-    step = A @ (
-        np.linalg.pinv((info + info.T) / 2, rcond=1e-10, hermitian=True) @ (A.T @ g)
-    )
-    for _ in range(30):
-        ll1 = cond_loglik(X, unstack(b0 + step), prepared=prepared)[0]
-        if np.isfinite(ll1) and ll1 >= ll0:
-            return ll1, b0 + step, ll0
-        step = step / 2
-    return ll0, b0, ll0
 
 
 def cml_covariance(X, A, b, Ks, hessian=None, sandwich=False, penalty=None):
@@ -789,6 +812,10 @@ def screen_items(X, Ks, per_item_categories=True, keep_unused=False):
         return keep, reasons
 
 
+_SAMPLER_CACHE_MAX = 1e7  # floats of suffix ESFs kept between sample_given_totals calls (~80 MB)
+_sampler_cache = {}
+
+
 def sample_given_totals(X, thresholds, rng):
     """
     Simulate responses from the Rasch model given each person's total over the items they responded to:
@@ -796,42 +823,67 @@ def sample_given_totals(X, thresholds, rng):
     location, so it is sampled exactly, item by item, using the suffix ESFs of the person's items:
     P(x_j = k | items j.. sum to t) = eps[j, k] gamma^(j+1..)_{t-k} / gamma^(j..)_t (log space).
     The missingness pattern and every person's total are those of X. Returns an array like X.
+
+    The suffix ESFs of all missingness patterns are built together, a missing item entering as an item
+    whose only category is 0 (weight 1, which leaves the ESFs unchanged), and each item's score is then
+    drawn for all persons at once; patterns are taken in batches to bound memory. The ESFs depend only on
+    the thresholds and the missingness patterns, so the latest call's are kept (up to _SAMPLER_CACHE_MAX
+    floats) and reused when both are the same, as in every resample of a parametric bootstrap.
     """
     b_list = _as_threshold_list(thresholds)
     X = np.asarray(X, float)
+    I = len(b_list)
     Ks = np.array([len(x) for x in b_list])
-    Kmax = int(Ks.max())
-    LE = np.full((len(b_list), Kmax + 1), NEG)
+    K1 = int(Ks.max()) + 1
+    LE = np.full((I, K1), NEG)
     for i, x in enumerate(b_list):
         LE[i, : Ks[i] + 1] = log_category_weights(x)
     obs = ~np.isnan(X)
     out = np.full(X.shape, np.nan)
     keys, inv = _patterns(obs)
     totals = np.where(obs, X, 0).sum(1).astype(np.int64)
-    kk = np.arange(Kmax + 1)
-    for g, key in enumerate(keys):
-        rows = np.nonzero(inv == g)[0]
-        items = np.nonzero(key)[0]
-        if not len(items):
-            continue
-        le = LE[items]  # (n, K1)
-        n = len(items)
-        suf = [None] * (n + 1)
-        suf[n] = np.zeros(1)
-        for j in range(n - 1, -1, -1):
-            suf[j] = _logconv_small(suf[j + 1], le[j])
+    T1 = int(Ks.sum()) + 1
+    kk = np.arange(K1)
+    absent = np.full(K1, NEG)
+    absent[0] = 0.0
+    step = max(1, int(2e7 // ((I + 1) * T1)))
+    tag = (LE.shape, keys.shape, LE.tobytes(), np.packbits(keys).tobytes())
+    cached = _sampler_cache.get("tables") if _sampler_cache.get("tag") == tag else None
+    tables = []
+    for b, lo in enumerate(range(0, len(keys), step)):
+        key = keys[lo : lo + step]
+        G = len(key)
+        if cached is not None:
+            le, suf = cached[b]
+        else:
+            le = np.where(key[:, :, None], LE[None], absent[None, None])  # (G, I, K1)
+            suf = np.full((G, I + 1, T1), NEG)
+            suf[:, I, 0] = 0.0
+            with np.errstate(invalid="ignore"):
+                for j in range(I - 1, -1, -1):
+                    acc, nxt = suf[:, j], suf[:, j + 1]
+                    for k in range(K1):
+                        seg = acc[:, k:]
+                        np.logaddexp(seg, nxt[:, : T1 - k] + le[:, j, k : k + 1], out=seg)
+            tables.append((le, suf))
+        rows = np.nonzero((inv >= lo) & (inv < lo + G))[0]
+        g = inv[rows] - lo
         t = totals[rows].copy()
-        for j in range(n):
-            nxt = suf[j + 1]
+        for j in range(I):
             idx = t[:, None] - kk[None, :]  # remaining total after x_j = k
-            ok = (idx >= 0) & (idx < len(nxt))
-            lp = np.where(ok, le[j][None, :] + nxt[np.clip(idx, 0, len(nxt) - 1)], NEG)
+            ok = idx >= 0
+            lp = np.where(ok, le[g, j] + suf[g[:, None], j + 1, np.clip(idx, 0, T1 - 1)], NEG)
             lp = lp - _lse(lp, axis=1)[:, None]
             with np.errstate(invalid="ignore"):
                 p = np.nan_to_num(np.exp(lp))
             x = (p.cumsum(1) > rng.random((len(rows), 1))).argmax(1)
-            out[rows, items[j]] = x
+            out[rows, j] = x
             t = t - x
+    if cached is None:
+        _sampler_cache.clear()
+        if len(keys) * (I + 1) * T1 <= _SAMPLER_CACHE_MAX:
+            _sampler_cache.update(tag=tag, tables=tables)
+    out[~obs] = np.nan
     return out
 
 
@@ -1270,7 +1322,7 @@ def person_pattern_pvalues(X, thresholds, samples=1000, rng=None, prepared=None)
         s_obs = np.take_along_axis(le[lp], x_obs[:, :, None], 2)[:, :, 0].sum(1)
         tot = x_obs.sum(1)
         count = np.zeros(len(persons))
-        for _ in range(samples):
+        for _ in _progress.track(range(samples), "Person-fit Monte Carlo p-values", unit="samples"):
             t = tot.copy()
             s_sim = np.zeros(len(persons))
             for j in range(n):
@@ -1310,6 +1362,19 @@ def conditional_fit_ms(X, thresholds, prepared=None):
     return infit, outfit
 
 
+def studentise(obs, sim):
+    """Centre and scale each statistic (column) by the mean and SD of its observed and simulated values together
+    (obs (k,), sim (B, k)), so that the observed value is treated exactly as the simulated ones: with the observed
+    value left out, a simulated value contributes to its own scale and the observed one does not, and the
+    maximum over statistics in westfall_young() is then liberal. Returns (t_obs, t_sim); a statistic with no
+    spread gets NaN."""
+    sim = np.asarray(sim, float)
+    both = np.vstack([np.asarray(obs, float)[None, :], sim])
+    mu, sd = np.nanmean(both, 0), np.nanstd(both, 0, ddof=1)
+    sd = np.where(sd > 0, sd, np.nan)
+    return (obs - mu) / sd, (sim - mu) / sd
+
+
 def westfall_young(t_obs, t_sim, two_sided=True):
     """Westfall-Young step-down (max-T) familywise p-values for observed statistics t_obs (k,) against
     simulated t_sim (B, k) under the null, two-sided (absolute values) or upper one-sided, with
@@ -1345,3 +1410,6 @@ def hdi(samples, width=0.95):
     spans = x[m - 1 :] - x[: n - m + 1]
     j = int(np.argmin(spans))
     return x[j], x[j + m - 1]
+
+
+fit_cml.__doc__ = _fit_cml.__doc__

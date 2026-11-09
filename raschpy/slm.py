@@ -2,6 +2,7 @@ from math import log, log10
 import warnings
 from scipy.stats import chi2, norm
 
+from raschpy import _progress
 import numpy as np
 import pandas as pd
 
@@ -312,18 +313,22 @@ class SLM(Rasch):
         """
         return min(1.0, 0.548 * no_of_items ** (-0.2 * log10(max(no_of_persons, 1))))
 
+    @_progress.with_progress
     def calibrate(
         self,
         constant=None,
         method="log-lik",
         matrix_power=None,
         log_lik_tol=0.000001,
-        estimation="pair",
+        estimation=None,
         solver=None,
+        ridge=0.0,
     ):
         """
-        Estimate item locations using Choppin's pairwise matrix method, or by
-        conditional maximum likelihood (estimation='cml').
+        Estimate item locations by the pairwise conditional likelihood
+        (estimation='cp-full-rcl', the default; Choppin's pairwise matrix
+        method with method='log-lik'), PAIR's other methods, or conditional
+        maximum likelihood (estimation='cml').
 
         Constructs a pairwise comparison matrix from the response data and
         raises it to successive powers until all off-diagonal elements are
@@ -369,8 +374,14 @@ class SLM(Rasch):
         log_lik_tol : float, default 0.000001
             Log-likelihood convergence tolerance passed to priority_vector()
             for methods that use iterative optimisation.
-        estimation : {'pair', 'cml'}, default 'pair'
-            'pair': the pairwise method above. 'cml': conditional maximum
+        estimation : {None, 'cp-full-rcl', 'pair', 'cml'}, default None
+            None: 'cp-full-rcl', or 'pair' when method is 'cos', 'ls' or 'evm'.
+            'pair': the pairwise method above. 'cp-full-rcl': for dichotomous
+            items the pairwise conditional likelihood of PCM's, RSM's and
+            MFRM's 'cp-full-rcl' has one comparison per item pair (the
+            Bradley-Terry likelihood), which method='log-lik' maximises (with
+            the smoothing constant, and no ridge), so it is 'pair' with
+            method='log-lik' and requires that method. 'cml': conditional maximum
             likelihood, conditioning on each person's total score over the
             items they responded to, starting from the PAIR estimates (with
             the other arguments above). CML estimates exist only for a
@@ -389,6 +400,19 @@ class SLM(Rasch):
             the exact gradient (the Hessian for standard errors is computed
             by std_errors()). 'lbfgs': quasi-Newton with the exact gradient.
             None: 'chord'.
+
+        ridge : float, default 0
+            estimation='cml' only: a penalty ridge times the sum of the
+            squared centred item locations (pulling them towards 0), over 2,
+            in the conditional log-likelihood; it gives finite estimates for
+            an item answered correctly (or incorrectly) by every person with a
+            non-extreme total, and for one not compared with the others in both
+            directions, so no item is removed. 0 gives plain CML. In simulations
+            with complete data it only pulled the item locations in, hence the
+            default; with sparse data (50-90% of responses missing), plain CML
+            spread the item locations out (slope 1.03-1.05) and ridge=0.1
+            removed that (slope 0.99-1.01) with lower RMSE. The DIF omnibus test and
+            the fixed-anchor fit use plain CML.
 
         Attributes set
         --------------
@@ -411,9 +435,33 @@ class SLM(Rasch):
         null_persons : pandas.Index
             Persons dropped prior to calibration due to entirely missing
             response patterns.
+        ridge : float
+            estimation='cml': the ridge weight used.
+        no_data_parameters : dict
+            With ridge > 0: {item: reason} for the items the data do not
+            inform (answered correctly, or incorrectly, by every person with a
+            non-extreme total, or not compared with the others in both
+            directions), whose locations the ridge alone sets (see
+            std_errors(no_data_se=)); empty otherwise.
         """
-        if estimation not in ("pair", "cml"):
-            raise ValueError(f"estimation must be 'pair' or 'cml', got {estimation!r}.")
+        if isinstance(ridge, bool) or not isinstance(ridge, (int, float, np.number)) or not ridge >= 0:
+            raise ValueError(f"ridge must be a number >= 0, got {ridge!r}.")
+        if ridge > 0 and estimation != "cml":
+            raise ValueError(
+                "ridge applies to estimation='cml' for SLM (PAIR's smoothing constant plays its part for "
+                "'pair' and 'cp-full-rcl')."
+            )
+        if estimation is None:
+            estimation = "pair" if method in ("cos", "ls", "evm") else "cp-full-rcl"
+        if estimation not in ("pair", "cp-full-rcl", "cml"):
+            raise ValueError(
+                f"estimation must be 'pair', 'cp-full-rcl' or 'cml', got {estimation!r}."
+            )
+        if estimation == "cp-full-rcl":
+            if method != "log-lik":
+                raise ValueError(
+                    f"estimation='cp-full-rcl' is method='log-lik' for SLM; got method={method!r}."
+                )
         # arguments as passed, for refits (see _calibration_kw)
         self._calibrate_args = dict(
             constant=constant,
@@ -422,8 +470,14 @@ class SLM(Rasch):
             log_lik_tol=log_lik_tol,
             estimation=estimation,
             solver=solver,
+            ridge=ridge,
         )
         self.estimation = estimation
+        if estimation != "cml":  # a CML fit's notes do not describe this fit
+            for name in ("cml_dropped_responses", "cml_unused_categories"):
+                self.__dict__.pop(name, None)
+        self.ridge = float(ridge) if estimation == "cml" else None
+        self.no_data_parameters = {}
         self._cml_solver = self._check_cml_solver(solver, estimation)
         self.convergence = None
 
@@ -502,6 +556,11 @@ class SLM(Rasch):
 
         # 5. Extract Priority Vector using the corrected numerical matrix
         self.items = self.priority_vector(mat, method=method, log_lik_tol=log_lik_tol)
+        # the smoothed matrix, its power and the method behind the estimates, for their influence (_pair_influence)
+        self._pair_state = dict(
+            M=matrix, P=mat, power=mat_pow if matrix_power else 0, method=method,
+            theta=self.items.to_numpy(dtype=float),
+        )
 
         if estimation == "cml":
             self._calibrate_cml()
@@ -511,12 +570,21 @@ class SLM(Rasch):
         Hessian at the estimates is kept for std_errors() when Newton-Raphson computed it. Items outside the
         largest strongly connected set have no CML estimates and are removed, with a UserWarning.
         """
-        dropped = self._cml_drop_items([1] * len(self.item_names))
+        # with the ridge (a penalty on every item location) the estimates always exist: nothing to drop
+        dropped = {} if self.ridge else self._cml_drop_items([1] * len(self.item_names))
+        self.no_data_parameters = {}
+        if self.ridge:
+            self.cml_dropped_responses = self.responses.iloc[:, :0]
+            Xs = np.array(self.responses.loc[:, list(self.item_names)], dtype=np.float64)
+            reasons = _esf.screen_items(Xs, [1] * Xs.shape[1])[1]
+            self.no_data_parameters = {self.item_names[i]: r for i, r in sorted(reasons.items())}
         names = list(self.item_names)
         X = np.array(self.responses.loc[:, names], dtype=np.float64)
         I = len(names)
         A = _rcl.zero_sum_basis(I)
         b0 = self.items.reindex(names).values.astype(float)
+        # ridge: penalty ridge * sum of the squared (centred) item locations / 2; A is orthonormal
+        self._cml_penalty = self.ridge * (A.T @ A) if self.ridge else None
         fit = _esf.fit_cml(
             X,
             A,
@@ -524,6 +592,7 @@ class SLM(Rasch):
             [1] * I,
             fixed_hessian=getattr(self, "_cml_fixed_hessian", None),
             solver=getattr(self, "_cml_solver", None),
+            penalty=self._cml_penalty,
         )
         self.items = pd.Series(fit["b"], index=names)
         self._cml_hessian = fit["hessian"]
@@ -534,6 +603,8 @@ class SLM(Rasch):
             log_likelihood=fit["ll"],
             dropped_items=dropped,
             hessians=fit["hessians"],
+            ridge=self.ridge,
+            penalised_log_likelihood=fit["objective"],
         )
         if not fit["converged"]:
             warnings.warn(
@@ -559,6 +630,7 @@ class SLM(Rasch):
             [1] * len(names),
             hessian=getattr(self, "_cml_hessian", None),
             sandwich=sandwich,
+            penalty=getattr(self, "_cml_penalty", None),
         )
 
     def _cml_anchor_design(self, fixed):
@@ -579,6 +651,7 @@ class SLM(Rasch):
 
         return X, A, c, b0, [1] * I, decode
 
+    @_progress.with_progress
     def calibrate_anchor(
         self,
         anchors,
@@ -639,7 +712,7 @@ class SLM(Rasch):
             'wald': _wald_anchor_selection() — a genuine significance test
             per anchor item (z = (anchor - (observed + tc)) / SE(observed),
             tc precision-weighted, sequential exclusion) rather than a
-            descriptive-statistics trim. Needs bootstrap item SEs — auto-
+            descriptive-statistics trim. Needs item SEs — auto-
             triggers std_errors() if not already computed. Uses wald_alpha
             and min_anchors, not corr_tol/sd_ratio_tol.
             'none': plain mean shift over every supplied anchor, no
@@ -657,7 +730,7 @@ class SLM(Rasch):
             Significance level for each anchor item's Wald test
             (selection_method='wald' only).
         no_of_samples : int, default 500
-            Bootstrap samples for std_errors(), only used if item SEs
+            Bootstrap samples for std_errors() if it bootstraps; only if item SEs
             aren't already computed (selection_method='wald' only).
         seed : int or None, default None
             Seed passed through to the internal std_errors() call (only
@@ -837,6 +910,7 @@ class SLM(Rasch):
             )
         return Lp @ (psi.T @ psi) @ Lp
 
+    @_progress.with_progress
     def std_errors(
         self,
         interval=None,
@@ -847,6 +921,7 @@ class SLM(Rasch):
         log_lik_tol=None,
         seed=None,
         se_method=None,
+        no_data_se="posterior",
     ):
         """
         Estimate standard errors for item location estimates.
@@ -899,6 +974,17 @@ class SLM(Rasch):
             confidence intervals are estimate +/- z * SE, and the bootstrap
             attributes are None.
 
+        no_data_se : {'posterior', 'nan'}, default 'posterior'
+            CML with the ridge, for the items the data do not inform, whose
+            locations the ridge alone sets (no_data_parameters): their sandwich
+            (or bootstrap) SE would show almost no uncertainty. 'posterior':
+            the SE from the information including the ridge (as
+            se_method='hessian'), the spread the ridge allows; tests on them
+            are conservative and their estimates lean towards 0, so DIF in
+            them may be missed. 'nan': NaN, so they are left out of confidence
+            intervals and tests (DIF in them cannot be found). A UserWarning
+            names them.
+
         Attributes set
         --------------
         se_method : str
@@ -935,6 +1021,8 @@ class SLM(Rasch):
             self.calibrate(**cal_kw)
         se_method = self._resolve_se_method(se_method)
         self.se_method = se_method
+        if no_data_se not in ("posterior", "nan"):
+            raise ValueError(f"no_data_se must be 'posterior' or 'nan', got {no_data_se!r}.")
         if se_method in ("sandwich", "hessian"):
             V = (
                 self._cml_covariance()
@@ -953,8 +1041,10 @@ class SLM(Rasch):
                 )
             else:
                 self.item_low = self.item_high = None
+            self._se_interval = interval
             self.item_bootstrap = None
             self.bootstrap_sample_diffs = None
+            self._apply_no_data_se(no_data_se, interval)
             return
         self.se_covariance = None
 
@@ -966,7 +1056,8 @@ class SLM(Rasch):
         H_fix = (
             self._cml_observed_hessian() if cal_kw.get("estimation") == "cml" else None
         )
-        for _ in range(no_of_samples):
+        for _ in _progress.track(range(no_of_samples), "Bootstrap standard errors", unit="resamples",
+                                 alternative="se_method='sandwich' (where available) takes seconds; or use fewer no_of_samples."):
             with collector.resample():
                 sample = SLM(
                     self.responses.sample(frac=1, replace=True, random_state=rng),
@@ -1032,10 +1123,48 @@ class SLM(Rasch):
         else:
             self.item_low = None
             self.item_high = None
+        self._se_interval = interval
 
         self.item_bootstrap = pd.DataFrame(item_ests)
         self.item_bootstrap.columns = self.responses.columns
         self.item_bootstrap.index = [f"Sample {i + 1}" for i in range(len(samples))]
+        self._apply_no_data_se(no_data_se, interval)
+
+    def _apply_no_data_se(self, no_data_se, interval):
+        """std_errors(no_data_se=): replace the SEs (and normal confidence bounds) of the no_data_parameters items
+        with the SEs from the information including the ridge ('posterior') or NaN ('nan'), with one
+        UserWarning naming them."""
+        rd = getattr(self, "no_data_parameters", None) or {}
+        if not rd:
+            return
+        if no_data_se == "posterior":
+            V = self._cml_covariance(sandwich=False)
+            names = list(self.item_names)
+            se = pd.Series(np.sqrt(np.clip(np.diag(V), 0, None)), index=names)
+        z = norm.ppf(0.5 + interval / 2) if interval is not None else None
+        for item in rd:
+            v = se[item] if no_data_se == "posterior" else np.nan
+            self.item_se.loc[item] = v
+            if z is not None and getattr(self, "item_low", None) is not None:
+                self.item_low.loc[item] = self.items[item] - z * v
+                self.item_high.loc[item] = self.items[item] + z * v
+        shown = "; ".join(f"{it} ({r})" for it, r in list(rd.items())[:10])
+        if len(rd) > 10:
+            shown += f"; and {len(rd) - 10} more"
+        if no_data_se == "posterior":
+            what = ("Their SEs are those the ridge allows (no_data_se='posterior'), not sampling error: tests "
+                    "on them are conservative and their estimates lean towards 0, so DIF in them may be "
+                    "missed. no_data_se='nan' leaves them out instead.")
+        else:
+            what = ("Their SEs are NaN (no_data_se='nan'), so they are left out of confidence intervals and "
+                    "tests, and DIF in them cannot be found. no_data_se='posterior' keeps them, with the SEs "
+                    "the ridge allows.")
+        warnings.warn(
+            f"The data do not inform some item locations, set by the ridge alone (see no_data_parameters): "
+            f"{shown}. {what}",
+            UserWarning,
+            stacklevel=3,
+        )
 
     def person(
         self,
@@ -1737,6 +1866,7 @@ class SLM(Rasch):
         prob_obs[~valid] = np.nan
         return float(np.nansum(np.log(prob_obs)))
 
+    @_progress.with_progress
     def fit_statistics(
         self,
         warm_corr=True,
@@ -1757,6 +1887,8 @@ class SLM(Rasch):
         conditional_samples=1000,
         bootstrap_samples=None,
         q1_groups=None,
+        q1_overall_samples=99,
+        q1_overall_exceedances=10,
     ):
         """
         Compute all item, person, and test-level fit statistics.
@@ -1775,7 +1907,7 @@ class SLM(Rasch):
             If True, applies Warm's (1989) bias correction to person location
             estimates used in fit computation.
         se : bool, default True
-            If True, computes bootstrap standard errors (required for
+            If True, computes standard errors (std_errors(); required for
             test-level statistics). If False, test_stats is forced False.
         test_stats : bool, default True
             If True, computes test-level statistics (ISI, PSI, strata,
@@ -1818,6 +1950,9 @@ class SLM(Rasch):
             separation and reliability) are unchanged. Works with any
             estimation method; the theory assumes CML item estimates
             (calibrate(estimation='cml')).
+            A UserWarning names any item that every person with a non-extreme
+            total answered the same way: its estimate is set by the smoothing,
+            not the data, so its conditional statistics are not reliable.
 
         conditional_samples : int, default 1000
             conditional=True only: Monte Carlo samples for each person's
@@ -1827,8 +1962,11 @@ class SLM(Rasch):
             conditional=True only: if set (e.g. 1000; at least 400
             recommended), parametric bootstrap reference distributions for the
             conditional item infit and outfit (Johansson): this many datasets
-            simulated from the fitted model given each person's total over the
-            items they responded to, each recalibrated with the object's
+            simulated given each person's total over the items they responded
+            to, from the model fitted with estimation='cp-full-rcl' (the most
+            accurate estimate of the null distribution; the object's own fit if
+            it is 'cp-full-rcl' or 'cml'; null_fit in item_fit_bootstrap_info),
+            each recalibrated with the object's
             calibrate() settings, give each item's observed mean square a
             studentised marginal p-value, a Westfall-Young step-down p-value
             (familywise error control across items; the recommended decision
@@ -1843,23 +1981,48 @@ class SLM(Rasch):
             chi-square (van den Wollenberg's Q1), item_q1_table (Q1, df,
             p, p (BH); with bootstrap_samples, bootstrap p-values) and
             item_q1_groups (per item and group: persons, observed and
-            expected mean item score, standardised difference). Within each
+            expected mean item score, and z, the standardised difference,
+            its variance allowing for the estimation of the item parameters
+            by the calibrate() method used, to first order; the squared z
+            do not sum to Q1). Within each
             group, an item's observed score total is compared with its
             conditional expectation given each person's total and items,
             Q1 = sum over groups of (O - E)^2 / V, df = groups - 1. None:
             groups of about equal size ordered by person location (tied
             locations kept together, so with complete data these are
-            groups of adjacent total scores), about one per 60 persons
-            from 2 to 10, each of at least 30 persons; an int sets the
-            number of groups; labels per person (a Series indexed by
-            person, or an array in responses order) supply the groups.
-            The same groups give item_q1_r1c, Glas's R1c: one global test of
-            all items' deviations with their covariance corrected for the
-            estimation of the item parameters (rows 'item scores' and, for
-            polytomous items, 'thresholds', Glas's category-level form; in
-            null simulations the item-score row held 0.027-0.087 at 0.05 and
-            the threshold row was liberal, 0.08-0.14, in sparse categories,
-            so use the item-score row).
+            groups of adjacent total scores): the number of persons
+            divided by 60, rounded down, but at least 2 and at most 10
+            groups, a group of fewer than 30 persons merged into its
+            neighbour while more than 2 remain (so groups hold about 60
+            persons with 120 to 600 persons, about a tenth of them above
+            600, and fewer than 30 below 60); an int sets the number of
+            groups (merged likewise); labels per person (a Series indexed
+            by person, or an array in responses order) supply the groups.
+            With fewer than 2 groups (supplied, or every location tied),
+            Q1 and its p-values are NaN, with a UserWarning. The same
+            groups give item_q1_overall (see q1_overall_samples).
+        q1_overall_samples : int or None, default 99
+            conditional=True only: Monte Carlo samples for item_q1_overall,
+            one global test over all items of the deviations in the Q1
+            groups: row 'item scores' is van den Wollenberg's overall Q1,
+            (I - 1) / I x the sum of the items' Q1, and, for polytomous
+            items, row 'thresholds' is the same sum over each item's
+            thresholds of the group's count of responses at or above the
+            category against its conditional expectation, (O - E)^2 / V,
+            unscaled. Both are computed at the fitted estimates. Their
+            p-values come from datasets simulated as for bootstrap_samples
+            (from the 'cp-full-rcl' fit) given each person's total over the
+            items they responded to, each
+            recalibrated with the object's calibrate() settings and the
+            statistics recomputed for the same groups; there is no
+            chi-square p-value, as estimating the item parameters shrinks the
+            deviations. None leaves the test out.
+        q1_overall_exceedances : int or None, default 10
+            conditional=True only: each row of item_q1_overall stops
+            sampling once this many simulated statistics reach the observed
+            one (Besag and Clifford's sequential p-value), so a clearly
+            non-significant result takes few samples. None always uses
+            q1_overall_samples.
 
         Attributes set
         --------------
@@ -1929,7 +2092,7 @@ class SLM(Rasch):
         csem_vector : pandas.Series
             Conditional SEM for each person.
         rsem_vector : pandas.Series
-            Residual SEM for each person.
+            Realistic SEM for each person.
         person_infit_ms : pandas.Series
             Person infit mean-square statistics.
         person_outfit_ms : pandas.Series
@@ -2163,6 +2326,8 @@ class SLM(Rasch):
                 seed=seed,
                 bootstrap_samples=bootstrap_samples,
                 q1_groups=q1_groups,
+                q1_overall_samples=q1_overall_samples,
+                q1_overall_exceedances=q1_overall_exceedances,
             )
         elif bootstrap_samples:
             raise ValueError("bootstrap_samples= needs conditional=True.")
@@ -2174,6 +2339,15 @@ class SLM(Rasch):
     def _cml_max_scores(self, items):
         """Maximum score of each item (Martin-Lof score tables)."""
         return np.ones(len(items))
+
+    def _pair_terms(self, X):
+        """Each person's part of the raw pairwise matrix (_build_pairwise_matrix) for responses X, as terms
+        (U, V) whose rows' outer products u v' sum to it, and a mask (None: none)."""
+        return [((X == 1).astype(float), (X == 0).astype(float))], None
+
+    def _estimator_influence(self, X):
+        """_threshold_influence() for estimation='pair' and 'cp-full-rcl' (PAIR's estimating equations)."""
+        return self._pair_influence(X)
 
     def _cml_threshold_list(self, items):
         """Fitted thresholds per item, as cond_loglik takes them."""
@@ -2301,7 +2475,7 @@ class SLM(Rasch):
         warnings.warn(
             "andersen_lr_test() is deprecated; use global_fit() (Wald), which is "
             "calibrated for any split, including split='exogenous' with "
-            "covariate=. global_fit(method='andersen-lr') is reserved for "
+            "covariate=. global_fit(method='andersen') is reserved for "
             "conditional maximum likelihood estimates (planned).",
             FutureWarning,
             stacklevel=2,
@@ -2427,6 +2601,7 @@ class SLM(Rasch):
             name="Andersen LR test",
         )
 
+    @_progress.with_progress
     def dif_test(
         self,
         covariate,
@@ -2434,7 +2609,7 @@ class SLM(Rasch):
         selection_method="wald",
         corr_tol=0.95,
         sd_ratio_tol=1.1,
-        min_anchors=6,
+        min_anchors=2,
         wald_alpha=0.05,
         test="wald",
         omnibus=True,
@@ -2482,6 +2657,16 @@ class SLM(Rasch):
         testing — so that genuine DIF items cannot contaminate the scale
         used to test for DIF in the first place — via either
         _wald_anchor_selection() (default) or _robust_anchor_selection().
+        Each item's standard error includes the variability of choosing the
+        anchor items from the data: the selection is repeated on draws from
+        the two groups' sampling distributions (bootstrap resamples, or normal
+        draws with the estimates' covariance), shifted so that the tested item
+        and the anchors kept on the observed data have no group difference.
+        When DIF affects a large share of few common items (for example 2 of
+        6), DIF-free items are flagged more often than alpha (up to about 0.13
+        at alpha = 0.05 in simulations), as with any purification; a
+        UserWarning is given when the selection keeps fewer than half of the
+        common items.
         Item-level DIF is then tested on the purified scale for every item
         (not only the ones used to define the scale), via a per-item Wald
         test (test='wald', default), a per-item likelihood-ratio test
@@ -2491,7 +2676,7 @@ class SLM(Rasch):
         answering "is there DIF at all" before the per-item table answers
         "in which items".
 
-        The Wald test uses bootstrap standard errors from std_errors(),
+        The Wald test uses standard errors from std_errors(),
         which are computed for both groups regardless of selection_method
         (needed for the per-item Wald test either way — so
         selection_method='wald' costs nothing extra here, unlike
@@ -2537,9 +2722,13 @@ class SLM(Rasch):
         corr_tol, sd_ratio_tol : floats
             Passed to _robust_anchor_selection() (selection_method=
             'robust_z' only).
-        min_anchors : int, default 6
+        min_anchors : int, default 2
             Floor on surviving shared items — passed to whichever
-            selection method is active ('robust_z' or 'wald').
+            selection method is active ('robust_z' or 'wald'). The
+            standard errors include the variability of choosing the
+            anchors from the data, so a small anchor set widens them
+            rather than biasing the test (calibrate_anchor keeps a
+            floor of 6, for a fixed link).
         wald_alpha : float, default 0.05
             Significance level for each item's Wald test during
             purification (selection_method='wald' only) — distinct from
@@ -2660,7 +2849,7 @@ class SLM(Rasch):
             `alpha` (which governs Flagged/Flagged_LR) so overriding one
             doesn't silently change the other.
         no_of_samples : int, default 500
-            Bootstrap resamples for each group's std_errors() call.
+            Bootstrap resamples for each group's std_errors() call (bootstrap SEs only).
         seed : int or None, default None
             Seed passed through to each group's internal std_errors() call.
             None draws fresh entropy each call.
@@ -2883,7 +3072,7 @@ class SLM(Rasch):
                     "LR": lr_omni,
                     "df": df_omni,
                     "p": p_omni,
-                    "Flagged": p_omni < alpha,
+                    "Flagged": p_omni <= alpha,
                 }
 
             if test in ("lr", "both"):
@@ -3006,7 +3195,7 @@ class SLM(Rasch):
             Log-likelihood tolerance for calibration.
         se : bool, default True
             Passed through to the internal fit_statistics() call (only
-            used if not already computed). If False, skips the bootstrap
+            used if not already computed). If False, skips the SEs
             entirely — this analysis's own output (residual correlations,
             PCA) does not depend on it, so se=False is purely a speed-up
             (e.g. for repeated simulation runs) with no effect on the
@@ -3133,7 +3322,7 @@ class SLM(Rasch):
             Number of decimal places for rounding numeric output.
         se : bool, default True
             If True, computes and includes the SE column (and CI bound
-            columns, if interval is set). If False, skips the bootstrap
+            columns, if interval is set). If False, skips the SEs
             entirely — useful when only Infit/Outfit MS are needed (e.g.
             repeated simulation runs), since those do not depend on the
             bootstrap. Forces interval to None when False.
@@ -3195,10 +3384,7 @@ class SLM(Rasch):
         if not se:
             interval = None
 
-        if se and (
-            not hasattr(self, "item_se")
-            or (interval is not None and getattr(self, "item_low", None) is None)
-        ):
+        if se and (not hasattr(self, "item_se") or self._interval_stale(interval)):
             self.std_errors(
                 interval=interval,
                 no_of_samples=no_of_samples,
@@ -3293,12 +3479,12 @@ class SLM(Rasch):
         full : bool, default False
             If True, sets rsem=True. Overrides the rsem flag.
         rsem : bool, default False
-            If True, includes the Residual SEM (RSEM) column.
+            If True, includes the Realistic SEM (RSEM) column.
         dp : int, default 3
             Number of decimal places for rounding numeric output.
         se : bool, default True
             Passed through to the internal fit_statistics() call (only
-            used if not already computed). If False, skips the bootstrap
+            used if not already computed). If False, skips the SEs
             entirely — this table's own columns (CSEM, RSEM, Infit/Outfit)
             do not depend on it, so se=False is purely a speed-up (e.g.
             for repeated simulation runs) with no effect on the output.
@@ -5560,6 +5746,7 @@ class SLM(Rasch):
     # Simulation recovery diagnostics
     # ------------------------------------------------------------------
 
+    @_progress.with_progress
     def recovery_stats(
         self,
         anchor=False,

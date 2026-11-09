@@ -2,6 +2,8 @@ from math import log
 import warnings
 from scipy.stats import chi2, norm
 
+from raschpy import _progress
+from raschpy.base import _disorder_flag
 import numpy as np
 import pandas as pd
 
@@ -193,6 +195,8 @@ class PCM(Rasch):
             ]
             if missing_cats:
                 unobserved[item] = missing_cats
+        # categories named by this warning (fit_statistics(conditional=True) does not repeat them)
+        self._unused_warned = {(item, k) for item, cats in unobserved.items() for k in cats}
         if unobserved:
             cells = [
                 f"item {item}, category {k}: 0 responses"
@@ -207,7 +211,10 @@ class PCM(Rasch):
                 f"identified by the data, so their estimates are determined by the "
                 f"smoothing constant (PAIR) or the ridge (CML) rather than the responses. Consider collapsing "
                 f"unused categories (e.g. reducing that item's max_score_vector entry if "
-                f"its top or bottom category is unused) or collecting more data.",
+                f"its top or bottom category is unused) or collecting more data. For the same reason, "
+                f"the conditional fit statistics and p-values of those items "
+                f"(fit_statistics(conditional=True)) are not reliable; estimation='cml' with "
+                f"unused_categories='null' gives an unused category probability zero.",
                 UserWarning,
                 stacklevel=2,
             )
@@ -719,20 +726,23 @@ class PCM(Rasch):
         m = min(max(missing, 0.0), 0.99)
         return 0.1 * n**0.15 * (1 - m) ** 0.75 * max(mean_max_score, 1) ** -1.4
 
+    @_progress.with_progress
     def calibrate(
         self,
         constant=None,
         method="log-lik",
         matrix_power=None,
         log_lik_tol=0.000001,
-        estimation="pair",
+        estimation=None,
         solver=None,
         unused_categories=None,
         ridge="minimise_bias",
     ):
         """
-        Estimate item thresholds using the PAIR (Pairwise) algorithm, or by
-        conditional maximum likelihood (estimation='cml').
+        Estimate item thresholds by the full-pattern pairwise conditional
+        likelihood (estimation='cp-full-rcl', the default), the PAIR
+        (Pairwise) algorithm (estimation='pair'), or conditional maximum
+        likelihood (estimation='cml').
 
         Constructs a joint score-category frequency matrix across all item
         pairs and threshold combinations using vectorised operations, then
@@ -752,12 +762,13 @@ class PCM(Rasch):
             ``None`` resolves to a data-adaptive value,
             0.1 * N ** 0.15 * (1 - missing) ** 0.75 * K ** -1.4, where N is the
             number of persons with at least one response, missing is the
-            proportion of missing responses among them, and K is the mean
-            maximum score across items. With mixed maximum scores the
+            proportion of missing responses among them, and K is the
+            maximum score shared by all items. With mixed maximum scores the
             constant is applied per cell of the threshold-pair matrix:
             cell (a, b) gets 0.1 * N ** 0.15 * (1 - missing) ** 0.75 *
             (K_a * K_b) ** -0.7, which reduces to the formula above when all
-            items share one maximum score. Use 0 to disable smoothing;
+            items share one maximum score; the per-cell values are stored as
+            self.cell_constants, and self.constant is None. Use 0 to disable smoothing;
             estimation may fail if any item has all-maximum or all-minimum
             scores.
         method : str, default 'log-lik'
@@ -767,11 +778,25 @@ class PCM(Rasch):
             None resolves to 0 for method='log-lik' (no powering), else 5.
         log_lik_tol : float, default 0.000001
             Log-likelihood convergence tolerance for priority vector extraction.
-        estimation : {'pair', 'cml'}, default 'pair'
-            'pair': the pairwise method above. 'cml': conditional maximum
+        estimation : {None, 'cp-full-rcl', 'cpat-rcl', 'pair', 'cml'}, default None
+            None: 'cp-full-rcl', or 'pair' when method is 'cos', 'ls' or 'evm'.
+            'pair': the pairwise method above. 'cp-full-rcl': the pairwise
+            conditional (composite) likelihood over every item pair, from all
+            pairs of response patterns with the same pair total, (a, b) against
+            (a - 1, b + 1), each a comparison of two thresholds, with the ridge
+            below (its own 'minimise_bias' rule), maximised from the PAIR
+            estimates; a fast approximation to 'cml', in simulations as
+            unbiased and a little less precise. 'cpat-rcl': the same composite
+            likelihood (and ridge) restricted to CPAT's patterns, the pattern
+            pairs whose two thresholds have the same number or adjacent
+            numbers, (k, k - 1) against (k - 1, k) and (k, k) against
+            (k - 1, k + 1); RSM.model_selection() under 'cpat-rcl' compares
+            RSM with this fit. In simulations its thresholds were as unbiased
+            as 'cp-full-rcl''s, with RMSE 1-6% higher. 'cml': conditional maximum
             likelihood, conditioning on each person's total score over the
-            items they responded to, starting from the PAIR estimates (with
-            the other arguments above); all uncentred thresholds are centred
+            items they responded to, starting from the 'cp-full-rcl' estimates
+            (from the PAIR estimates with ridge=0 or unused_categories='null';
+            the other arguments above apply to PAIR); all uncentred thresholds are centred
             to mean 0, as for 'pair'. CML estimates do not exist for an item
             with a category unused by the persons with a non-extreme total,
             or an item not compared with the others in both directions; such
@@ -797,11 +822,12 @@ class PCM(Rasch):
             category. Such a threshold is stored as inf, and the next
             threshold holds the sum; beyond the lowest (highest) used category
             the thresholds are -inf (inf); cml_unused_categories lists the
-            unused categories. 'drop' removes the item (without the ridge it
-            has no finite CML estimates), with a UserWarning. None: 'ridge'
-            when ridge > 0, else 'drop'.
+            unused categories ('cml' only). 'drop' removes the item (without
+            the ridge it has no finite CML estimates), with a UserWarning.
+            None: 'ridge' when ridge > 0, else 'drop'. Applies to 'cml',
+            'cp-full-rcl' and 'cpat-rcl'.
         ridge : 'minimise_bias' or float, default 'minimise_bias'
-            estimation='cml' only: a penalty on each item's centred thresholds
+            estimation='cml', 'cp-full-rcl' and 'cpat-rcl': a penalty on each item's centred thresholds
             (its threshold pattern), pulling them towards the mean pattern of
             the items with the same maximum score, with weight ridge; plus a
             weak penalty (weight 0.3) pulling each such group's mean category
@@ -818,7 +844,10 @@ class PCM(Rasch):
             increases their error; a higher one, up to about twice the
             default, lowers the error of the item locations slightly while
             pulling the estimates towards the common pattern; beyond that the
-            error increases. The value used is in self.ridge.
+            error increases. The value used is in self.ridge. For
+            'cp-full-rcl' and 'cpat-rcl', whose composite likelihoods count each response in
+            many pairs, the weights are on a larger scale: 'minimise_bias' is
+            17.14 * S ** -0.808 * K ** -0.051 and the group-width weight 3.
 
         Attributes set
         --------------
@@ -839,10 +868,11 @@ class PCM(Rasch):
             {item: numpy.ndarray} of centred threshold offsets per item.
         threshold_list : numpy.ndarray
             Flat array of all uncentred thresholds concatenated.
-        constant : float
+        constant : float or None
             The additive smoothing constant actually used, after resolving
-            ``None``. With mixed maximum scores under ``constant=None``, the
-            equal-K equivalent using the mean maximum score.
+            ``None``. ``None`` with mixed maximum scores under
+            ``constant=None``, where no single constant is applied (see
+            cell_constants).
         cell_constants : numpy.ndarray or None
             Per-cell constants applied to the threshold-pair matrix when
             ``constant=None``; ``None`` when an explicit constant is given.
@@ -851,15 +881,32 @@ class PCM(Rasch):
         ridge : float
             estimation='cml': the ridge weight used (0 for plain CML); also in
             convergence, with the weak group-width penalty's weight.
+        no_data_parameters : dict
+            With the ridge and unused_categories='ridge': {item: dict(thresholds=[k, ...], widths=[k, ...],
+            location=bool)} for the parameters the data do not inform (see std_errors(no_data_se=)); empty
+            otherwise.
         """
-        if estimation not in ("pair", "cml"):
-            raise ValueError(f"estimation must be 'pair' or 'cml', got {estimation!r}.")
+        if estimation is None:
+            estimation = "pair" if method in ("cos", "ls", "evm") else "cp-full-rcl"
+        if estimation not in ("pair", "cml", "cp-full-rcl", "cpat-rcl"):
+            raise ValueError(
+                f"estimation must be 'pair', 'cml', 'cp-full-rcl' or 'cpat-rcl', got {estimation!r}."
+            )
         ridge_setting = self._check_ridge(ridge, estimation)
         unused_passed = unused_categories
         if unused_categories is None:
-            unused_categories = "ridge" if estimation == "cml" and ridge_setting != 0 else "drop"
+            unused_categories = (
+                "ridge" if estimation != "pair" and ridge_setting != 0 else "drop"
+            )
+        if unused_categories == "null" and estimation in ("cp-full-rcl", "cpat-rcl"):
+            raise ValueError(
+                f"unused_categories='null' applies to estimation='cml' only; with {estimation!r} "
+                "use 'ridge' (the default with the ridge) or 'drop'."
+            )
         self._check_unused_categories(
-            unused_categories, estimation, allowed=("drop", "null", "ridge")
+            unused_categories,
+            "cml" if estimation in ("cp-full-rcl", "cpat-rcl") else estimation,
+            allowed=("drop", "null", "ridge"),
         )
         if unused_categories == "ridge" and ridge_setting == 0:
             raise ValueError(
@@ -877,9 +924,13 @@ class PCM(Rasch):
             ridge=ridge,
         )
         self.estimation = estimation
+        if estimation != "cml":  # a CML fit's notes do not describe this fit
+            for name in ("cml_dropped_responses", "cml_unused_categories"):
+                self.__dict__.pop(name, None)
         self._cml_unused = unused_categories
         self._ridge_setting = ridge_setting
         self.ridge, self._cml_Pb, self._cml_penalty = None, None, None
+        self.no_data_parameters = {}
         self._cml_solver = self._check_cml_solver(solver, estimation)
         self.convergence = None
 
@@ -897,7 +948,7 @@ class PCM(Rasch):
             observed = self.responses[self.responses.notna().any(axis=1)]
             n_obs = len(observed)
             miss_obs = float(observed.isna().to_numpy().mean()) if n_obs else 0.0
-            # Scalar equal-K equivalent (recorded as self.constant), and the
+            # Scalar rule (self.constant when all items share one K), and the
             # per-cell constants actually applied: cell (a, b) of the
             # threshold-pair matrix gets base * (K_a * K_b) ** -0.7, which
             # reduces to the scalar rule when all items share one K.
@@ -959,17 +1010,110 @@ class PCM(Rasch):
                         mat += C
                         break
 
+        # PAIR's Bradley-Terry objective (method='log-lik' on the unpowered smoothed matrix), kept for
+        # model_selection()'s composite likelihood ratio test within it
+        self._pair_bt_matrix = mat if (method == "log-lik" and matrix_power == 0) else None
         threshold_vector = self.priority_vector(
             mat, method=method, log_lik_tol=log_lik_tol, pcm=True
         )
+        # the smoothed matrix, its power and the method behind the estimates, for their influence (_pair_influence)
+        self._pair_state = dict(
+            M=matrix, P=mat, power=mat_pow if matrix_power else 0, method=method,
+            theta=threshold_vector.to_numpy(dtype=float),
+        )
         self.threshold_list = threshold_vector
-        self.constant = resolved_constant
+        # with mixed maximum scores no single constant was applied (cell_constants were)
+        mixed = cell_constants is not None and self.max_score_vector.nunique() > 1
+        self.constant = None if mixed else resolved_constant
         self.cell_constants = cell_constants
 
         self._store_thresholds(threshold_vector)
 
         if estimation == "cml":
             self._calibrate_cml()
+        elif estimation in ("cp-full-rcl", "cpat-rcl"):
+            self._calibrate_rcl()
+
+    def _calibrate_rcl(self):
+        """'cp-full-rcl' (or 'cpat-rcl') thresholds from the PAIR estimates (_rcl.fit_pcm, with the ridge: RCL_RIDGE_RULE for
+        'minimise_bias', RCL_RIDGE_GROUP_WIDTHS), centred to mean 0, with self.convergence; items without finite
+        estimates are removed first (unused_categories='drop', or ridge=0), with a UserWarning."""
+        mode = getattr(self, "_cml_unused", "drop")
+        dropped = self._cml_drop_items(
+            self.max_score_vector.reindex(self.item_names).to_numpy(),
+            keep_unused=mode == "ridge",
+        )
+        names = list(self.item_names)
+        if dropped:
+            self.max_score_vector = self.max_score_vector.reindex(names)
+        Ks = [int(k) for k in self.max_score_vector.to_numpy()]
+        X = np.array(self.responses.loc[:, names], dtype=np.float64)
+        b0 = np.concatenate(
+            [self.thresholds_uncentred.loc[n].dropna().values.astype(float) for n in names]
+        )
+        fit = self._rcl_fit(X, Ks, b0, getattr(self, "_ridge_setting", 0.0), cpat=self.estimation == "cpat-rcl")
+        self._rcl_state = fit
+        if self.estimation == "cpat-rcl":
+            # CPAT compares threshold k of one item with thresholds k - 1, k and k + 1 of another only
+            unmatched = [f"{n} threshold {k}" for i, (n, K) in enumerate(zip(names, Ks)) for k in range(1, K + 1)
+                         if not any(k - 1 <= Kj for j, Kj in enumerate(Ks) if j != i)]
+            if unmatched:
+                warnings.warn(
+                    f"estimation='cpat-rcl': {', '.join(unmatched)} {'is' if len(unmatched) == 1 else 'are'} not "
+                    f"in any of CPAT's patterns (they compare threshold k of one item only with thresholds k - 1, k and "
+                    f"k + 1 of another, and no other item has those), so "
+                    f"{'its estimate is' if len(unmatched) == 1 else 'their estimates are'} set by the ridge alone. "
+                    f"Use estimation='cp-full-rcl', which compares every pair of thresholds.",
+                    UserWarning,
+                    stacklevel=3,
+                )
+        self.no_data_parameters = self._no_data_parameters(names, Ks) if mode == "ridge" and self.ridge > 0 else {}
+        self._cml_Pb = self._cml_penalty = None
+        self._cml_marked, self.cml_unused_categories, self._cml_hessian = None, {}, None
+        self.threshold_list = pd.Series(
+            fit["b"],
+            index=[f"{n}_{k}" for n, K in zip(names, Ks) for k in range(1, K + 1)],
+        )
+        self._store_thresholds(fit["b"])
+        self.convergence = dict(
+            iterations=fit["iterations"],
+            converged=fit["converged"],
+            solver="newton",
+            log_likelihood=fit["ll"],
+            dropped_items=dropped,
+            ridge=self.ridge,
+            ridge_group_widths=self.RCL_RIDGE_GROUP_WIDTHS if self.ridge > 0 else 0.0,
+            penalised_log_likelihood=fit["objective"],
+        )
+        if not fit["converged"]:
+            warnings.warn(
+                f"The {self.estimation} calibration did not converge in {fit['iterations']} iterations; the "
+                f"estimates may be unreliable (with ridge=0 they may not exist: use the default ridge).",
+                UserWarning,
+                stacklevel=3,
+            )
+
+    def _rcl_fit(self, X, Ks, b0, setting, cpat=False):
+        """_rcl.fit_pcm with the 'cp-full-rcl' ridge for these data (CPAT's patterns with cpat=True, 'cpat-rcl');
+        sets self.ridge."""
+        self.ridge = self._resolve_ridge(setting, b0, Ks, rcl=True)
+        Pb = (
+            self._ridge_penalty(Ks, self.ridge, group_widths=self.RCL_RIDGE_GROUP_WIDTHS,
+                                two_used=self._two_categories_used(list(self.item_names)))
+            if self.ridge > 0
+            else None
+        )
+        return _rcl.fit_pcm(X, Ks, b0, Pb, cpat=cpat)
+
+    def _rcl_covariance(self):
+        """(covariance, owner) of the 'cp-full-rcl' (or 'cpat-rcl') uncentred thresholds: the sandwich of the composite
+        likelihood (_rcl.pcm_sandwich), with the ridge in its information."""
+        names = list(self.item_names)
+        Ks = [int(k) for k in self.max_score_vector.reindex(names).to_numpy()]
+        X = np.array(self.responses.loc[:, names], dtype=np.float64)
+        st = self._rcl_state
+        V = _rcl.pcm_sandwich(X, Ks, st["b"], st["info"], st["A"], st.get("cpat", False))
+        return V, np.repeat(np.arange(len(names)), Ks)
 
     def _calibrate_cml(self):
         """CML thresholds from the PAIR estimates (all uncentred thresholds centred to mean 0, as PAIR's), with
@@ -1009,7 +1153,20 @@ class PCM(Rasch):
             offset = np.where(free, 0.0, marks)
             start = np.where(free, b0 - b0[free].mean(), marks)
         self.ridge = self._resolve_ridge(getattr(self, "_ridge_setting", 0.0), b0, Ks)
-        self._cml_Pb = self._ridge_penalty(Ks, self.ridge, marks) if self.ridge > 0 else None
+        if self.ridge > 0 and marks is None:
+            # start from the ridge 'cp-full-rcl' estimates: the same maximum, reached faster
+            rcl_start = self._rcl_fit(X, list(Ks), b0, getattr(self, "_ridge_setting", 0.0))
+            self.ridge = self._resolve_ridge(getattr(self, "_ridge_setting", 0.0), b0, Ks)
+            if rcl_start["converged"]:
+                start = rcl_start["b"] - rcl_start["b"].mean()
+        self._cml_Pb = (
+            self._ridge_penalty(Ks, self.ridge, marks, two_used=self._two_categories_used(names))
+            if self.ridge > 0
+            else None
+        )
+        self.no_data_parameters = (
+            self._no_data_parameters(names, list(Ks)) if mode == "ridge" and self.ridge > 0 else {}
+        )
         self._cml_penalty = None if self._cml_Pb is None else A.T @ self._cml_Pb @ A
         fit = _esf.fit_cml(
             X,
@@ -1044,7 +1201,17 @@ class PCM(Rasch):
             ridge_group_widths=self.RIDGE_GROUP_WIDTHS if self.ridge > 0 else 0.0,
             penalised_log_likelihood=fit["objective"],
         )
-        if not fit["converged"]:
+        if not fit["converged"] and marks is not None and self._null_steps_flat(X, fit["b"], names, Ks):
+            warnings.warn(
+                "calibrate(estimation='cml', unused_categories='null'): the CML estimates of the steps between the "
+                "used score categories do not exist for these data. Where the fit stopped, the conditional "
+                "likelihood no longer changes along some combination of the items' steps, so the thresholds next to "
+                "the unused categories, and the item locations (the means of each item's thresholds), are not "
+                "estimates. unused_categories='ridge' (the default) keeps them finite.",
+                UserWarning,
+                stacklevel=3,
+            )
+        elif not fit["converged"]:
             warnings.warn(
                 f"CML calibration did not converge in {fit['iterations']} iterations "
                 f"(solver {fit['solver']!r}, largest gradient {fit['max_gradient']:.2g}); the estimates may be "
@@ -1053,16 +1220,31 @@ class PCM(Rasch):
                 stacklevel=3,
             )
 
+    def _null_steps_flat(self, X, b, names, Ks):
+        """unused_categories='null': _esf.null_steps_flat for PCM, each item's finite thresholds its own steps; the
+        persons' origin moves every one of them by the number of categories it spans."""
+        b = np.asarray(b, float)
+        fin = np.flatnonzero(np.isfinite(b))
+        J = np.zeros((len(b), len(fin)))
+        J[fin, np.arange(len(fin))] = 1.0
+        off = np.concatenate([[0], np.cumsum(Ks)]).astype(int)
+        mult = np.concatenate([self._location_multiplicity(b[off[i] : off[i + 1]]) for i in range(len(Ks))])
+        return _esf.null_steps_flat(X, b, list(Ks), J, mult[fin])
+
     # ridge='minimise_bias': log ridge = c0 + c1 log S + c2 log K (S the mean PAIR threshold range, K the
     # mean maximum score), clipped to RIDGE_RANGE; the weak group-width penalty's weight
     RIDGE_RULE = (0.8828262743192832, -0.6070506707789616, -0.38519426149693436)
     RIDGE_RANGE = (0.003, 4.0)
     RIDGE_GROUP_WIDTHS = 0.3
+    # estimation='cp-full-rcl' (composite likelihood: weights on a larger scale)
+    RCL_RIDGE_RULE = (2.841590172909094, -0.8081532175511899, -0.05115585604246829)
+    RCL_RIDGE_RANGE = (0.03, 40.0)
+    RCL_RIDGE_GROUP_WIDTHS = 3.0
 
     def _fixed_ridge(self):
         """For the group and subset refits of tests (global_fit(), dif_test()): the ridge weight of these
         CML estimates, fixed (the rule is not re-applied to each group); None otherwise."""
-        if getattr(self, "estimation", None) == "cml" and getattr(self, "ridge", None) is not None:
+        if getattr(self, "estimation", None) in ("cml", "cp-full-rcl", "cpat-rcl") and getattr(self, "ridge", None) is not None:
             return float(self.ridge)
         return None
 
@@ -1080,42 +1262,47 @@ class PCM(Rasch):
             raise ValueError(f"ridge must be 'minimise_bias' or a number >= 0, got {ridge!r}.")
         else:
             ridge = float(ridge)
-        if estimation != "cml" and ridge != "minimise_bias":
+        if estimation == "pair" and ridge != "minimise_bias":
             warnings.warn(
-                f"ridge={ridge!r} applies to estimation='cml' only and is ignored with "
+                f"ridge={ridge!r} applies to estimation='cml', 'cp-full-rcl' and 'cpat-rcl' only and is ignored with "
                 f"estimation={estimation!r}.",
                 UserWarning,
                 stacklevel=3,
             )
         return ridge
 
-    def _resolve_ridge(self, setting, b0, Ks):
-        """The ridge weight for this fit: setting as a number, or the 'minimise_bias' rule from the PAIR
-        thresholds b0 (stacked) and the maximum scores Ks."""
+    def _resolve_ridge(self, setting, b0, Ks, rcl=False):
+        """The ridge weight for this fit: setting as a number, or the 'minimise_bias' rule (RIDGE_RULE, or
+        RCL_RIDGE_RULE for 'cp-full-rcl') from the PAIR thresholds b0 (stacked) and the maximum scores Ks."""
         if setting != "minimise_bias":
             return float(setting)
-        off = np.concatenate([[0], np.cumsum(Ks)])
+        off = np.concatenate([[0], np.cumsum(Ks)]).astype(int)
         S = float(np.mean([np.ptp(b0[off[i] : off[i + 1]]) for i in range(len(Ks))]))
-        c0, c1, c2 = self.RIDGE_RULE
+        (c0, c1, c2), rng = (
+            (self.RCL_RIDGE_RULE, self.RCL_RIDGE_RANGE) if rcl else (self.RIDGE_RULE, self.RIDGE_RANGE)
+        )
         log_k = c0 + c1 * np.log(max(S, 1e-3)) + c2 * np.log(float(np.mean(Ks)))
-        return float(np.exp(np.clip(log_k, *np.log(self.RIDGE_RANGE))))
+        return float(np.exp(np.clip(log_k, *np.log(rng))))
 
     @classmethod
-    def _ridge_penalty(cls, Ks, ridge, marks=None):
+    def _ridge_penalty(cls, Ks, ridge, marks=None, group_widths=None, two_used=None):
         """
         Penalty matrix Pb (p, p) on the stacked uncentred thresholds b, penalty = b' Pb b / 2: ridge times
         the sum of squares of each item's centred thresholds minus the mean centred thresholds of the items
         with the same maximum score, plus RIDGE_GROUP_WIDTHS times the sum of squares of each such group's
-        mean category widths minus the mean of those widths over all groups. Both are unchanged by adding
-        a constant to an item's thresholds. With unused-category markers (marks, unused_categories='null'),
-        the items with a marker are left out of both.
+        mean category widths minus the mean of those widths over all groups (group_widths, if given,
+        replaces RIDGE_GROUP_WIDTHS). Both are unchanged by adding a constant to an item's thresholds. With unused-category markers (marks, unused_categories='null'),
+        the items with a marker are left out of both. two_used (bool per item): for a group whose items all use
+        only two score categories, its mean widths are pulled towards 0 instead (the likelihood pushes them all
+        down, making the unused categories ever less likely, and pulling them towards the other widths would
+        leave their common size free).
         """
         p = int(sum(Ks))
         off = np.concatenate([[0], np.cumsum(Ks)]).astype(int)
         clean = [
             marks is None or np.all(marks[off[i] : off[i + 1]] == 0) for i in range(len(Ks))
         ]
-        rows, W = [], []
+        rows, W, W0 = [], [], []
         for K in sorted(set(int(k) for k in Ks)):
             idx = [i for i, k in enumerate(Ks) if int(k) == K and clean[i]]
             if not idx:
@@ -1124,7 +1311,7 @@ class PCM(Rasch):
             for i in idx:
                 M[:, off[i] : off[i + 1]] += np.eye(K) / len(idx)
             if K > 1:
-                W.append(np.diff(M, axis=0))
+                (W0 if two_used is not None and all(two_used[i] for i in idx) else W).append(np.diff(M, axis=0))
             if len(idx) < 2:
                 continue
             Ci = np.eye(K) - 1.0 / K
@@ -1136,11 +1323,23 @@ class PCM(Rasch):
         if rows:
             G = np.vstack(rows)
             Pb += ridge * G.T @ G
+        gw = cls.RIDGE_GROUP_WIDTHS if group_widths is None else group_widths
         if W:
             Wm = np.vstack(W)
             Wm = Wm - Wm.mean(axis=0)
-            Pb += cls.RIDGE_GROUP_WIDTHS * Wm.T @ Wm
+            Pb += gw * Wm.T @ Wm
+        if W0:
+            Wz = np.vstack(W0)
+            Pb += gw * Wz.T @ Wz
         return Pb
+
+    def _two_categories_used(self, names):
+        """For the ridge: per item (names), True if the persons with a non-extreme total used only two of its score
+        categories (self._cml_used, from the CML data check); None when that check has not run."""
+        used = getattr(self, "_cml_used", None)
+        if not used:
+            return None
+        return [bool(n in used and int(np.sum(used[n])) <= 2) for n in names]
 
     @classmethod
     def _category_widths(cls, thr):
@@ -1250,6 +1449,8 @@ class PCM(Rasch):
         """
         if getattr(self, "estimation", "pair") == "cml":
             return self._cml_covariance()
+        if getattr(self, "estimation", "pair") in ("cp-full-rcl", "cpat-rcl"):
+            return self._rcl_covariance()
         return self._sandwich_covariance(small_sample=small_sample)
 
     def _store_thresholds(self, threshold_vector):
@@ -1353,6 +1554,7 @@ class PCM(Rasch):
 
         return X, A, c, b0, list(Ks), decode
 
+    @_progress.with_progress
     def calibrate_anchor(
         self,
         anchors,
@@ -1448,7 +1650,7 @@ class PCM(Rasch):
             'wald': _wald_anchor_selection() — a genuine significance test
             per anchor item (z = (anchor - (observed + tc)) / SE(observed),
             tc precision-weighted, sequential exclusion) rather than a
-            descriptive-statistics trim. Needs bootstrap item SEs — auto-
+            descriptive-statistics trim. Needs item SEs — auto-
             triggers std_errors() if not already computed. Uses wald_alpha
             and min_anchors, not corr_tol/sd_ratio_tol.
             'none': plain mean shift over every supplied anchor, no
@@ -1466,7 +1668,7 @@ class PCM(Rasch):
             Significance level for each anchor item's Wald test
             (selection_method='wald' only).
         no_of_samples : int, default 500
-            Bootstrap samples for std_errors(), only used if item SEs
+            Bootstrap samples for std_errors() if it bootstraps; only if item SEs
             aren't already computed (selection_method='wald' only).
         seed : int or None, default None
             Seed passed through to the internal std_errors() call (only
@@ -1710,7 +1912,7 @@ class PCM(Rasch):
                 elif correction == "bonferroni":
                     table["p_corrected"] = (table["p"] * len(table)).clip(upper=1)
                 p_col = "p_corrected" if correction else "p"
-                table["Flagged"] = table[p_col] < alpha
+                table["Flagged"] = table[p_col] <= alpha
                 self.anchor_threshold_test = table
 
                 if table["Flagged"].any():
@@ -1735,7 +1937,7 @@ class PCM(Rasch):
                 )
                 lr_agg = max(0.0, 2 * (ll_estimated - ll_given_agg))
                 p_agg = float(chi2.sf(lr_agg, df_agg))
-                flagged_agg = p_agg < alpha
+                flagged_agg = p_agg <= alpha
                 self.anchor_threshold_test_aggregate = pd.Series(
                     {
                         "LL_estimated": ll_estimated,
@@ -1931,7 +2133,9 @@ class PCM(Rasch):
             self.threshold_low = self.threshold_high = None
             self.cat_width_low = self.cat_width_high = None
             self.central_low = self.central_high = None
+        self._se_interval = interval
 
+    @_progress.with_progress
     def std_errors(
         self,
         interval=None,
@@ -1942,6 +2146,7 @@ class PCM(Rasch):
         no_of_samples=500,
         seed=None,
         se_method=None,
+        no_data_se="posterior",
     ):
         """
         Estimate standard errors for thresholds, category widths and central
@@ -1996,6 +2201,21 @@ class PCM(Rasch):
             is the spread the penalty allows, as for a prior). With 'sandwich'
             or 'hessian', confidence intervals are estimate +/- z * SE, and
             the bootstrap attributes are None.
+        no_data_se : {'posterior', 'nan'}, default 'posterior'
+            CML and 'cp-full-rcl' with the ridge, for the parameters the data
+            do not inform, which the ridge alone sets (no_data_parameters): the
+            thresholds either side of a score category that no person with a
+            non-extreme total used, and the category widths touching them,
+            and with an unused lowest or highest category also the item
+            location (with only interior ones unused, the location is
+            identified). Their sandwich (or bootstrap) SE would show almost no
+            uncertainty, as the ridge fixes them. 'posterior': the SE from the
+            information including the ridge (as se_method='hessian'), the
+            spread the ridge allows; tests on them are conservative and their
+            estimates lean towards the common threshold pattern, so DIF or
+            disorder in them may be missed. 'nan': NaN, so they are left out
+            of confidence intervals and tests (DIF in them cannot be found).
+            A UserWarning names them.
 
         Attributes set
         --------------
@@ -2032,7 +2252,7 @@ class PCM(Rasch):
         if (
             se_method is not None
             or (self._calibrate_args.get("method") or "log-lik") != "log-lik"
-            or self._calibrate_args.get("estimation") == "cml"
+            or self._calibrate_args.get("estimation") in ("cml", "cp-full-rcl", "cpat-rcl")
         ):
             se_method = self._resolve_se_method(se_method)
         if se_method is None:
@@ -2060,8 +2280,11 @@ class PCM(Rasch):
                     stacklevel=2,
                 )
         self.se_method = se_method
+        if no_data_se not in ("posterior", "nan"):
+            raise ValueError(f"no_data_se must be 'posterior' or 'nan', got {no_data_se!r}.")
         if se_method in ("sandwich", "hessian"):
             self._sandwich_std_errors(interval)
+            self._apply_no_data_se(no_data_se, interval)
             return
         self.se_covariance = None
 
@@ -2073,7 +2296,8 @@ class PCM(Rasch):
         H_fix = (
             self._cml_observed_hessian() if cal_kw.get("estimation") == "cml" else None
         )
-        for _ in range(no_of_samples):
+        for _ in _progress.track(range(no_of_samples), "Bootstrap standard errors", unit="resamples",
+                                 alternative="se_method='sandwich' (where available) takes seconds; or use fewer no_of_samples."):
             with collector.resample():
                 sample = PCM(
                     self.responses.sample(frac=1, replace=True, random_state=rng),
@@ -2202,6 +2426,107 @@ class PCM(Rasch):
             self.cat_width_high = None
             self.central_low = None
             self.central_high = None
+        self._se_interval = interval
+        self._apply_no_data_se(no_data_se, interval)
+
+    def _no_data_parameters(self, names, Ks):
+        """{item: dict(thresholds, widths, location)} for the parameters no data inform after a ridge fit with
+        unused_categories='ridge' (from self._cml_used, the categories used by persons with a non-extreme
+        total): the thresholds next to an unused category (all below the lowest used category and above the
+        highest), the widths touching them, and the location when the lowest or highest category is unused."""
+        used = getattr(self, "_cml_used", None) or {}
+        out = {}
+        for n, K in zip(names, Ks):
+            u = used.get(n)
+            if u is None or u.all():
+                continue
+            lo, hi = int(np.argmax(u)), int(len(u) - 1 - np.argmax(u[::-1]))
+            thr = set(range(1, lo + 1)) | set(range(hi + 1, K + 1))
+            for c in range(lo + 1, hi):
+                if not u[c]:
+                    thr |= {c, c + 1}
+            widths = [k for k in range(1, K) if k in thr or k + 1 in thr]
+            out[n] = dict(thresholds=sorted(thr), widths=widths, location=bool(lo > 0 or hi < K))
+        return out
+
+    def _apply_no_data_se(self, no_data_se, interval):
+        """std_errors(no_data_se=): replace the SEs (and normal confidence bounds) of the no_data_parameters
+        parameters with the SEs from the information including the ridge ('posterior') or NaN ('nan'), with one
+        UserWarning naming them."""
+        rd = getattr(self, "no_data_parameters", None) or {}
+        if not rd:
+            return
+        names = list(self.item_names)
+        if no_data_se == "posterior":
+            if self.estimation == "cml":
+                Vp, owner = self._cml_covariance(sandwich=False)
+            else:
+                st = self._rcl_state
+                Vp, owner = st["A"] @ np.linalg.solve(st["info"], st["A"].T), np.repeat(
+                    np.arange(len(names)),
+                    [int(k) for k in self.max_score_vector.reindex(names)],
+                )
+        z = norm.ppf(0.5 + interval / 2) if interval is not None else None
+        for item, spec in rd.items():
+            i = names.index(item)
+            thr = self.thresholds_uncentred.loc[item].dropna().values.astype(float)
+            K = len(thr)
+            if no_data_se == "posterior":
+                idx = np.flatnonzero(owner == i)
+                Vi = Vp[np.ix_(idx, idx)]
+                t_se = np.sqrt(np.clip(np.diag(Vi), 0, None))
+                Dm = np.diff(np.eye(K), axis=0)
+                w_se = np.sqrt(np.clip(np.diag(Dm @ Vi @ Dm.T), 0, None)) if K > 1 else np.zeros(0)
+                a = np.full(K, 1.0 / K)
+                c_se = float(np.sqrt(max(a @ Vi @ a, 0.0)))
+            else:
+                t_se, w_se, c_se = np.full(K, np.nan), np.full(max(K - 1, 0), np.nan), np.nan
+            ts = np.array(self.threshold_se[item], float)
+            for k in spec["thresholds"]:
+                ts[k - 1] = t_se[k - 1]
+            self.threshold_se[item] = ts
+            ws = self.cat_width_se[item].copy()
+            for k in spec["widths"]:
+                ws.loc[k] = w_se[k - 1]
+            self.cat_width_se[item] = ws
+            if spec["location"]:
+                self.item_se.loc[item] = c_se
+            if z is not None:
+                if getattr(self, "threshold_low", None) is not None:
+                    lo_, hi_ = np.array(self.threshold_low[item], float), np.array(self.threshold_high[item], float)
+                    for k in spec["thresholds"]:
+                        lo_[k - 1], hi_[k - 1] = thr[k - 1] - z * ts[k - 1], thr[k - 1] + z * ts[k - 1]
+                    self.threshold_low[item], self.threshold_high[item] = lo_, hi_
+                if getattr(self, "cat_width_low", None) is not None and K > 1:
+                    widths = np.diff(thr)
+                    lo_, hi_ = np.array(self.cat_width_low[item], float), np.array(self.cat_width_high[item], float)
+                    for k in spec["widths"]:
+                        lo_[k - 1], hi_[k - 1] = widths[k - 1] - z * ws.loc[k], widths[k - 1] + z * ws.loc[k]
+                    self.cat_width_low[item], self.cat_width_high[item] = lo_, hi_
+                if spec["location"] and getattr(self, "central_low", None) is not None:
+                    self.central_low.loc[item] = self.items[item] - z * c_se
+                    self.central_high.loc[item] = self.items[item] + z * c_se
+        shown = "; ".join(
+            f"{it} (thresholds {', '.join(map(str, sp['thresholds']))}"
+            + (", location" if sp["location"] else "") + ")"
+            for it, sp in list(rd.items())[:10]
+        )
+        if len(rd) > 10:
+            shown += f"; and {len(rd) - 10} more"
+        if no_data_se == "posterior":
+            what = ("Their SEs are those the ridge allows (no_data_se='posterior'), not sampling error: tests "
+                    "on them are conservative and their estimates lean towards the common threshold pattern, "
+                    "so DIF or disorder in them may be missed. no_data_se='nan' leaves them out instead.")
+        else:
+            what = ("Their SEs are NaN (no_data_se='nan'), so they are left out of confidence intervals and "
+                    "tests, and DIF in them cannot be found. no_data_se='posterior' keeps them, with the SEs "
+                    "the ridge allows.")
+        warnings.warn(
+            f"The data do not inform some parameters, set by the ridge alone (score categories no person with "
+            f"a non-extreme total used; see no_data_parameters): {shown}. {what}",
+            UserWarning,
+            stacklevel=3,
+        )
 
     # ------------------------------------------------------------------
     # Person location estimation
@@ -3058,6 +3383,7 @@ class PCM(Rasch):
         prob_obs[~valid] = np.nan
         return float(np.nansum(np.log(prob_obs)))
 
+    @_progress.with_progress
     def fit_statistics(
         self,
         warm_corr=True,
@@ -3078,6 +3404,8 @@ class PCM(Rasch):
         conditional_samples=1000,
         bootstrap_samples=None,
         q1_groups=None,
+        q1_overall_samples=99,
+        q1_overall_exceedances=10,
     ):
         """
         Compute all item, threshold, person, and test-level fit statistics.
@@ -3095,7 +3423,7 @@ class PCM(Rasch):
             If True, applies Warm's (1989) bias correction to person location
             estimates used in fit computation.
         se : bool, default True
-            If True, computes bootstrap standard errors. If False,
+            If True, computes standard errors (std_errors()). If False,
             test_stats is forced False.
         test_stats : bool, default True
             If True, computes test-level statistics (ISI, PSI, strata,
@@ -3139,6 +3467,12 @@ class PCM(Rasch):
             separation and reliability) are unchanged. Works with any
             estimation method; the theory assumes CML item estimates
             (calibrate(estimation='cml')).
+            A UserWarning names any score category that no person with a
+            non-extreme total used and that the fit gives a probability
+            above zero: the thresholds next to it are set by the smoothing or
+            the ridge, not the data, so the conditional statistics of the
+            items concerned are not reliable (categories with no responses at all are
+            named once, by the constructor's unused-category warning).
 
         conditional_samples : int, default 1000
             conditional=True only: Monte Carlo samples for each person's
@@ -3148,8 +3482,11 @@ class PCM(Rasch):
             conditional=True only: if set (e.g. 1000; at least 400
             recommended), parametric bootstrap reference distributions for the
             conditional item infit and outfit (Johansson): this many datasets
-            simulated from the fitted model given each person's total over the
-            items they responded to, each recalibrated with the object's
+            simulated given each person's total over the items they responded
+            to, from the model fitted with estimation='cp-full-rcl' (the most
+            accurate estimate of the null distribution; the object's own fit if
+            it is 'cp-full-rcl' or 'cml'; null_fit in item_fit_bootstrap_info),
+            each recalibrated with the object's
             calibrate() settings, give each item's observed mean square a
             studentised marginal p-value, a Westfall-Young step-down p-value
             (familywise error control across items; the recommended decision
@@ -3164,23 +3501,48 @@ class PCM(Rasch):
             chi-square (van den Wollenberg's Q1), item_q1_table (Q1, df,
             p, p (BH); with bootstrap_samples, bootstrap p-values) and
             item_q1_groups (per item and group: persons, observed and
-            expected mean item score, standardised difference). Within each
+            expected mean item score, and z, the standardised difference,
+            its variance allowing for the estimation of the item parameters
+            by the calibrate() method used, to first order; the squared z
+            do not sum to Q1). Within each
             group, an item's observed score total is compared with its
             conditional expectation given each person's total and items,
             Q1 = sum over groups of (O - E)^2 / V, df = groups - 1. None:
             groups of about equal size ordered by person location (tied
             locations kept together, so with complete data these are
-            groups of adjacent total scores), about one per 60 persons
-            from 2 to 10, each of at least 30 persons; an int sets the
-            number of groups; labels per person (a Series indexed by
-            person, or an array in responses order) supply the groups.
-            The same groups give item_q1_r1c, Glas's R1c: one global test of
-            all items' deviations with their covariance corrected for the
-            estimation of the item parameters (rows 'item scores' and, for
-            polytomous items, 'thresholds', Glas's category-level form; in
-            null simulations the item-score row held 0.027-0.087 at 0.05 and
-            the threshold row was liberal, 0.08-0.14, in sparse categories,
-            so use the item-score row).
+            groups of adjacent total scores): the number of persons
+            divided by 60, rounded down, but at least 2 and at most 10
+            groups, a group of fewer than 30 persons merged into its
+            neighbour while more than 2 remain (so groups hold about 60
+            persons with 120 to 600 persons, about a tenth of them above
+            600, and fewer than 30 below 60); an int sets the number of
+            groups (merged likewise); labels per person (a Series indexed
+            by person, or an array in responses order) supply the groups.
+            With fewer than 2 groups (supplied, or every location tied),
+            Q1 and its p-values are NaN, with a UserWarning. The same
+            groups give item_q1_overall (see q1_overall_samples).
+        q1_overall_samples : int or None, default 99
+            conditional=True only: Monte Carlo samples for item_q1_overall,
+            one global test over all items of the deviations in the Q1
+            groups: row 'item scores' is van den Wollenberg's overall Q1,
+            (I - 1) / I x the sum of the items' Q1, and, for polytomous
+            items, row 'thresholds' is the same sum over each item's
+            thresholds of the group's count of responses at or above the
+            category against its conditional expectation, (O - E)^2 / V,
+            unscaled. Both are computed at the fitted estimates. Their
+            p-values come from datasets simulated as for bootstrap_samples
+            (from the 'cp-full-rcl' fit) given each person's total over the
+            items they responded to, each
+            recalibrated with the object's calibrate() settings and the
+            statistics recomputed for the same groups; there is no
+            chi-square p-value, as estimating the item parameters shrinks the
+            deviations. None leaves the test out.
+        q1_overall_exceedances : int or None, default 10
+            conditional=True only: each row of item_q1_overall stops
+            sampling once this many simulated statistics reach the observed
+            one (Besag and Clifford's sequential p-value), so a clearly
+            non-significant result takes few samples. None always uses
+            q1_overall_samples.
             For PCM the chi-square p-values are conservative (each item's
             own thresholds absorb part of the deviations across groups);
             the bootstrap p-values (bootstrap_samples=) are not.
@@ -3258,7 +3620,7 @@ class PCM(Rasch):
         csem_vector : pandas.Series
             Conditional SEM for each person.
         rsem_vector : pandas.Series
-            Residual SEM for each person.
+            Realistic SEM for each person.
         person_infit_ms : pandas.Series
             Person infit mean-square statistics.
         person_outfit_ms : pandas.Series
@@ -3761,6 +4123,8 @@ class PCM(Rasch):
                 seed=seed,
                 bootstrap_samples=bootstrap_samples,
                 q1_groups=q1_groups,
+                q1_overall_samples=q1_overall_samples,
+                q1_overall_exceedances=q1_overall_exceedances,
             )
         elif bootstrap_samples:
             raise ValueError("bootstrap_samples= needs conditional=True.")
@@ -3776,6 +4140,32 @@ class PCM(Rasch):
     def _cml_max_scores(self, items):
         """Maximum score of each item (Martin-Lof score tables)."""
         return self.max_score_vector.reindex(items).to_numpy(dtype=float)
+
+    def _pair_terms(self, X):
+        """Each person's part of the raw pairwise matrix (_build_pairwise_matrix) for responses X, as terms
+        (U, V) whose rows' outer products u v' sum to it, and the mask of comparisons between different
+        items."""
+        Ks = [int(k) for k in self.max_score_vector.reindex(self.item_names)]
+        rows, cols = [], []
+        for i, K in enumerate(Ks):
+            onehot = np.zeros((X.shape[0], K + 1))
+            valid = ~np.isnan(X[:, i])
+            onehot[valid, X[valid, i].astype(int)] = 1.0
+            rows.append(onehot[:, 1:])
+            cols.append(onehot[:, :K])
+        owner = np.repeat(np.arange(len(Ks)), Ks)
+        return [(np.hstack(rows), np.hstack(cols))], (owner[:, None] != owner[None, :]).astype(float)
+
+    def _estimator_influence(self, X):
+        """_threshold_influence() for estimation='pair' (PAIR's estimating equations) and 'cp-full-rcl' or
+        'cpat-rcl' (the persons' composite-likelihood scores times the inverse of its penalised information)."""
+        if self.estimation in ("cp-full-rcl", "cpat-rcl"):
+            st = self._rcl_state
+            Ks = [int(k) for k in self.max_score_vector.reindex(self.item_names)]
+            S = _rcl.pcm_person_scores(X, Ks, st["b"], st.get("cpat", False))
+            A = st["A"]
+            return S @ A @ np.linalg.solve(st["info"], A.T)
+        return self._pair_influence(X)
 
     def _cml_threshold_list(self, items):
         """Fitted uncentred thresholds per item, as cond_loglik takes them (with the unused-category
@@ -3919,7 +4309,7 @@ class PCM(Rasch):
         warnings.warn(
             "andersen_lr_test() is deprecated; use global_fit() (Wald), which is "
             "calibrated for any split, including split='exogenous' with "
-            "covariate=. global_fit(method='andersen-lr') is reserved for "
+            "covariate=. global_fit(method='andersen') is reserved for "
             "conditional maximum likelihood estimates (planned).",
             FutureWarning,
             stacklevel=2,
@@ -4036,6 +4426,7 @@ class PCM(Rasch):
             name="Andersen LR test",
         )
 
+    @_progress.with_progress
     def dif_test(
         self,
         covariate,
@@ -4043,7 +4434,7 @@ class PCM(Rasch):
         selection_method="wald",
         corr_tol=0.95,
         sd_ratio_tol=1.1,
-        min_anchors=6,
+        min_anchors=2,
         wald_alpha=0.05,
         test="wald",
         omnibus=True,
@@ -4095,6 +4486,16 @@ class PCM(Rasch):
            before testing — so that genuine DIF items cannot contaminate
            the scale used to test for DIF in the first place — via either
            _wald_anchor_selection() (default) or _robust_anchor_selection().
+           Each item's standard error includes the variability of choosing the
+           anchor items from the data: the selection is repeated on draws from
+           the two groups' sampling distributions (bootstrap resamples, or
+           normal draws with the estimates' covariance), shifted so that the
+           tested item and the anchors kept on the observed data have no group
+           difference. When DIF affects a large share of few common items (for
+           example 2 of 6), DIF-free items are flagged more often than alpha
+           (up to about 0.13 at alpha = 0.05 in simulations), as with any
+           purification; a UserWarning is given when the selection keeps fewer
+           than half of the common items.
            Item-level DIF is then tested via a per-item Wald test
            (test='wald', default), a per-item likelihood-ratio test
            (test='lr'), or both (test='both'). An omnibus LR test
@@ -4154,9 +4555,13 @@ class PCM(Rasch):
         corr_tol, sd_ratio_tol : floats
             Passed to _robust_anchor_selection() (selection_method=
             'robust_z' only).
-        min_anchors : int, default 6
+        min_anchors : int, default 2
             Floor on surviving shared items — passed to whichever
-            selection method is active ('robust_z' or 'wald').
+            selection method is active ('robust_z' or 'wald'). The
+            standard errors include the variability of choosing the
+            anchors from the data, so a small anchor set widens them
+            rather than biasing the test (calibrate_anchor keeps a
+            floor of 6, for a fixed link).
         wald_alpha : float, default 0.05
             Significance level for each item's Wald test during
             purification (selection_method='wald' only) — distinct from
@@ -4354,7 +4759,7 @@ class PCM(Rasch):
             Significance level for both category tests — the ETS scheme's
             own literature-standard .05, independent of `alpha`.
         no_of_samples : int, default 500
-            Bootstrap resamples for each group's std_errors() call.
+            Bootstrap resamples for each group's std_errors() call (bootstrap SEs only).
         seed : int or None, default None
             Seed passed through to each group's internal std_errors() call.
             None draws fresh entropy each call.
@@ -4643,7 +5048,7 @@ class PCM(Rasch):
                     "LR": lr_omni,
                     "df": df_omni,
                     "p": p_omni,
-                    "Flagged": p_omni < alpha,
+                    "Flagged": p_omni <= alpha,
                 }
 
             if test in ("lr", "both"):
@@ -4828,7 +5233,7 @@ class PCM(Rasch):
                     threshold_table["p (corrected)"] = threshold_table["p"]
 
                 threshold_table["Flagged"] = (
-                    threshold_table["p (corrected)"] < alpha
+                    threshold_table["p (corrected)"] <= alpha
                 ) & (threshold_table["Difference"].abs() >= logit_threshold)
 
             threshold_table = threshold_table.set_index(["Item", "Category"])
@@ -4862,260 +5267,122 @@ class PCM(Rasch):
         self.dif_plots = plot_dict
         self.dif_group_sizes = group_sizes
 
+    @_progress.with_progress
     def model_selection(
         self,
-        test="AIC",
+        test="LR",
         aic_sig_test=True,
         alpha=0.05,
         min_effect=0,
-        sampling="auto",
-        likelihood="conditional",
-        warm_corr=True,
-        tolerance=0.00001,
-        max_iters=100,
-        ext_score_adjustment=0.5,
+        no_of_samples=199,
+        sampling=None,
+        likelihood=None,
+        warm_corr=None,
+        tolerance=None,
+        max_iters=None,
+        ext_score_adjustment=None,
         constant=None,
         method="log-lik",
         log_lik_tol=0.000001,
         seed=None,
     ):
         """
-        Compare PCM against RSM using a likelihood ratio test, AIC, or BIC.
+        Compare PCM against RSM by a likelihood ratio test, AIC or BIC, with the estimation the object was
+        calibrated with. RSM is the constrained (nested) model, fitted to the same items and responses; every item
+        must have the same maximum score.
 
-        RSM is the constrained (nested) model; PCM is unconstrained. Requires
-        uniform max scores across items.
+        The test follows the estimation:
+
+        - 'cml': RSM is fitted by CML, and the unpenalised conditional log-likelihoods of the two fits are
+          compared, PCM's at its estimates with its ridge (LR test, df = (I - 1)(K - 1), the difference in free
+          parameters; AIC and BIC count the free parameters).
+        - 'cp-full-rcl': RSM is fitted with 'cp-full-rcl', and the pairwise conditional (composite) likelihood of
+          every item pair's response patterns, (a, b) against (a - 1, b + 1), is compared at the two fits. Each
+          pair of items shares persons, so the statistic is not chi-square; its null distribution is a weighted
+          sum of chi-square(1) variables (Kent, 1982), with weights from the composite likelihood's sensitivity
+          and its variability over persons at the PCM fit, and the p-value is that sum's tail probability
+          (computed exactly: Ruben's, 1962, series, or Imhof's, 1961, inversion when the weights are very unequal).
+          AIC and BIC replace the parameter count by tr(J H^-1) (Varin and Vidoni, 2005), J the variability and H
+          the sensitivity.
+        - 'cpat-rcl': RSM is fitted with 'cpat-rcl', and the same composite test is made on CPAT's patterns only
+          (the pattern pairs whose two thresholds have the same number or adjacent numbers).
+        - 'pair' with method='log-lik': PAIR's PCM fit maximises a Bradley-Terry likelihood of the same
+          comparisons (smoothed by its constants), so the same composite test is used within PAIR: RSM is that
+          likelihood's maximum under the restriction b = delta_i + tau_h.
+        - 'pair' with method 'cos', 'ls' or 'evm': no likelihood test fits these, so the p-value comes from a
+          conditional parametric bootstrap: no_of_samples datasets simulated given each person's total under RSM's
+          'cp-full-rcl' fit (the most accurate estimate of the null distribution). The statistic compares the two
+          fitted models: each item's thresholds are taken relative to that item's central location in RSM's fit
+          and in PCM's fit, and the squared differences are summed over items and thresholds. It is computed for
+          the object's own fits and recomputed on each simulated dataset, with PCM refitted with the object's
+          settings and RSM with PAIR ('pair-cpat') and the same method. Only test='LR' is available.
+
+        In null simulations (RSM data, alpha = 0.05; 10 or 20 items, maximum score 3 or 4, complete or 20%
+        missing), the composite test rejected RSM in 0.052 / 0.044 / 0.059 of datasets at 200 / 500 / 1,000
+        persons under 'cp-full-rcl', and 0.056 / 0.045 / 0.060 under PAIR (CML's LR test without a ridge: 0.059 /
+        0.052 / 0.057), with 98% of that test's power. Under 'cpat-rcl' (the same designs, and 100 persons with 10
+        items, maximum score 3 or 5, complete or 50% missing) it rejected 0.048 / 0.044 / 0.060 / 0.054 at 100 /
+        200 / 500 / 1,000 persons, and its decisions agreed with 'cp-full-rcl''s on 0.979 of datasets. With 10 items, 100 or 300 persons, maximum score 3 or 5,
+        and complete, 50% missing or booklet designs, it rejected 0.048 of datasets (0.010-0.075 by design). The
+        CML test with PCM's default ridge rejected 0.036 / 0.041 / 0.046 at 100 / 300 / 1,000 persons, and the
+        bootstrap test 0.038-0.052 by method (10 items, maximum score 3, 100 or 300 persons). When a middle
+        category is rarely used or unused, no version of the test held its level in simulations (the composite
+        test rejected RSM too often), and a UserWarning says so.
 
         Parameters
         ----------
-        test : str, default 'LR'
-            Test to run: 'LR', 'AIC', or 'BIC'.
-        aic_sig_test : bool, default False
-            When True (requires test='AIC'), applies a significance test with
-            RSM as the null hypothesis. The p-value is the relative likelihood
-            of RSM vs PCM: p = e^(-Δ/2) where Δ = AIC_RSM - AIC_PCM. PCM is
-            preferred only if p < alpha; otherwise RSM is retained as default.
+        test : {'LR', 'AIC', 'BIC'}, default 'LR'
+            Decision rule. 'LR': PCM is preferred when the test above rejects RSM at alpha. In simulations under
+            'cp-full-rcl' (RSM data, and PCM data whose item thresholds deviate from shared ones with SD 0.2 or
+            0.4 logits; 10 or 20 items, maximum score 3 or 4, complete or 20% missing; 400 datasets of each kind
+            at each of 200, 500 and 1,000 persons), the lowest proportion of datasets for which the rule chose
+            the generating model was 0.485 / 0.885 / 0.945 for 'LR', against 0.142 / 0.585 / 0.958 for 'AIC'
+            with aic_sig_test=False and 0.020 / 0.362 / 0.895 with aic_sig_test=True. 'LR' chooses PCM for
+            about alpha of RSM datasets (0.040-0.055 here).
+        aic_sig_test : bool, default True
+            With test='AIC': PCM is preferred only if its AIC is lower and the relative likelihood of RSM,
+            p = exp(-|AIC_RSM - AIC_PCM| / 2), is at or below alpha. With a likelihood ('cml') this is a likelihood
+            ratio test of RSM within PCM at level P(chi-square(d) > 2d + 2 ln(1/alpha)), d = (I - 1)(K - 1). A
+            composite likelihood has no fixed scale, so for 'cp-full-rcl', 'cpat-rcl' and PAIR's 'log-lik' the test
+            is made at that level on the composite LR's own reference (the weighted chi-square above, d its tested
+            directions), and p is the relative likelihood that a likelihood ratio with the same chi-square(d) tail
+            probability would give (model_comparison_rsm_pcm_aic_gate holds the test).
         alpha : float, default 0.05
-            Significance level used to decide the preferred model for the
-            LR test (RSM is the null; PCM is preferred if p < alpha) and,
-            when aic_sig_test=True, for the AIC relative-likelihood test.
-            Not used by BIC, which has no formal significance test and
-            simply prefers whichever model has the lower BIC.
+            Significance level for the LR test and the AIC relative-likelihood test.
         min_effect : float, default 0
-            Minimum effect size (logits) required to prefer PCM over RSM,
-            in addition to the significance/IC test for each test type.
-            The effect is max|PCM.thresholds - RSM.thresholds| -- the
-            largest absolute deviation of any single item's own
-            (item-difficulty-centred) threshold shape from RSM's single
-            shared threshold vector. Applied as PCM preferred only if the
-            test's own condition holds AND effect >= min_effect; RSM is
-            retained otherwise. Default 0 disables (never gates).
-            min_effect is optional and a matter of taste: in simulation the
-            tests alone classify well, so the gate expresses a judgement of
-            practical importance rather than improving accuracy. If wanted,
-            0.43 and 0.64 mirror the ETS DIF category boundaries (moderate
-            and large).
-        sampling : None, 'auto', 'dynamic', or int, default 'auto'
-            Controls subsampling of non-extreme persons before computing
-            log-likelihoods (parameters are always estimated on the full
-            data; only the LL evaluation is subsampled). Not primarily
-            about speed: at very large N, LR/AIC/BIC all become biased
-            toward the more complex (PCM) model regardless of whether the
-            difference is practically meaningful, since log-likelihood
-            differences scale with N. Capping the effective N keeps the
-            comparison from being dominated by sample size. None disables
-            subsampling. 'dynamic' uses T = min(20*(I-1)*(m-1), 1500); an
-            integer fixes T directly. When n <= T, sampling is skipped.
-            Applies to all three tests. 'auto': 'dynamic' with
-            likelihood='joint', None with likelihood='conditional' (in
-            simulation, subsampling lowered the conditional comparison's
-            rate of correct choices).
-        likelihood : {'conditional', 'joint'}, default 'conditional'
-            'joint': the log-likelihood given the person estimates.
-            'conditional': the conditional log-likelihood given each
-            person's total score, which does not involve the person
-            locations, for each model after one Newton step from its
-            estimates (exactly its maximum for CML estimates; close to it
-            otherwise). Parameter counts and the LR df are the same as for
-            'joint'; BIC uses the number of persons with non-extreme totals.
-        warm_corr, tolerance, max_iters, ext_score_adjustment : floats
-            Person estimation kwargs.
-        constant, method, log_lik_tol : floats
-            Calibration kwargs.
+            Minimum effect (logits) needed to prefer PCM, in addition to the test: the largest absolute
+            difference between an item's centred PCM thresholds and RSM's shared thresholds. 0 disables.
+        no_of_samples : int, default 199
+            Simulated datasets for the bootstrap test (PAIR's 'cos', 'ls' and 'evm').
+        sampling, likelihood, warm_corr, tolerance, max_iters, ext_score_adjustment
+            Deprecated and ignored (FutureWarning): the comparison follows the object's estimation and needs no
+            person estimates.
+        constant, method, log_lik_tol
+            Calibration settings, used only if the object has not been calibrated.
         seed : int or None, default None
-            Seed for the person subsampling RNG (only used when sampling
-            triggers). Pass an int for reproducible LL evaluation; None
-            (default) draws fresh entropy.
+            Seed for the bootstrap test's simulations.
 
         Attributes set
         --------------
-        model_comparison_rsm_pcm_effect : max|PCM.thresholds - RSM.thresholds| (see min_effect).
-        model_comparison_rsm_pcm_lr, _df, _p, _lr_preferred, _lr_summary : LR test results.
-        model_comparison_rsm_pcm_aic, _aic_preferred, _aic_summary : AIC results.
-        model_comparison_rsm_pcm_aic_p : relative likelihood p-value (aic_sig_test only).
+        model_comparison_rsm_pcm_effect : the effect (see min_effect).
+        model_comparison_rsm_pcm_info : dict: the test used ('cml', 'composite' or 'bootstrap'), the estimation,
+            and, for the composite test, the range of its chi-square weights.
+        model_comparison_rsm_pcm_lr, _df, _p, _lr_preferred, _lr_summary : test results (test='LR').
+        model_comparison_rsm_pcm_aic, _aic_preferred, _aic_summary, _aic_p : AIC results.
         model_comparison_rsm_pcm_bic, _bic_preferred, _bic_summary : BIC results.
         """
-        from raschpy.rsm import RSM
-
         if test not in ("LR", "AIC", "BIC"):
             raise ValueError("test must be 'LR', 'AIC', or 'BIC'")
-        if (
-            sampling is not None
-            and sampling not in ("auto", "dynamic")
-            and not isinstance(sampling, int)
-        ):
-            raise ValueError("sampling must be None, 'auto', 'dynamic', or an integer")
-        if likelihood not in ("joint", "conditional"):
-            raise ValueError("likelihood must be 'joint' or 'conditional'")
-        if sampling == "auto":
-            sampling = "dynamic" if likelihood == "joint" else None
-
-        if not (self.max_score_vector == self.max_score_vector.iloc[0]).all():
-            raise ValueError(
-                "RSM vs PCM comparison requires uniform max scores across items."
-            )
-        max_score = int(self.max_score_vector.iloc[0])
-
-        if not hasattr(self, "thresholds_uncentred"):
-            self.calibrate(
-                constant=constant, method=method, log_lik_tol=log_lik_tol
-            )
-        if likelihood == "joint" and not hasattr(self, "persons"):
-            self.person_estimates(
-                warm_corr=warm_corr,
-                tolerance=tolerance,
-                max_iters=max_iters,
-                ext_score_adjustment=ext_score_adjustment,
-            )
-
-        scores = self.responses.sum(axis=1)
-        max_scores = self.responses.notna().sum(axis=1) * max_score
-        non_extreme_mask = (scores > 0) & (scores < max_scores)
-        n_persons = int(non_extreme_mask.sum())
-
-        # Fit RSM on full data (parameters used for both full and sampled LL)
-        rsm = RSM(self.responses)
-        rsm.calibrate(constant=constant, method=method, log_lik_tol=log_lik_tol)
-        if likelihood == "joint":
-            rsm.person_estimates(
-                warm_corr=warm_corr,
-                tolerance=tolerance,
-                max_iters=max_iters,
-                ext_score_adjustment=ext_score_adjustment,
-            )
-
-        # Determine responses for LL computation (sample from non-extreme persons)
-        ll_responses = None  # None → _log_likelihood uses self.responses
-        n_ll = n_persons
-        if sampling is not None:
-            T = (
-                min(20 * (self.no_of_items - 1) * (max_score - 1), 1500)
-                if sampling == "dynamic"
-                else int(sampling)
-            )
-            if n_persons > T:
-                rng = np.random.default_rng(seed)
-                non_extreme_idx = self.responses.index[non_extreme_mask]
-                sampled_idx = rng.choice(non_extreme_idx, size=T, replace=False)
-                ll_responses = self.responses.loc[sampled_idx]
-                n_ll = T
-
-        if likelihood == "conditional":
-            ll_rsm, ll_pcm = self._conditional_ll_rsm_pcm(rsm, self, ll_responses)
-        else:
-            ll_pcm = self._log_likelihood(responses=ll_responses)
-            ll_rsm = rsm._log_likelihood(responses=ll_responses)
-
-        k_pcm = int(self.thresholds_uncentred.notna().sum().sum()) - 1
-        k_rsm = (self.no_of_items - 1) + (max_score - 1)
-
-        effect = float(
-            self.thresholds.sub(rsm.thresholds, axis=1).abs().to_numpy().max()
+        self._warn_selection_deprecated(
+            [n for n, v in (("sampling", sampling), ("likelihood", likelihood), ("warm_corr", warm_corr),
+                            ("tolerance", tolerance), ("max_iters", max_iters),
+                            ("ext_score_adjustment", ext_score_adjustment)) if v is not None]
         )
-        self.model_comparison_rsm_pcm_effect = effect
-
-        if test == "LR":
-            lr = -2 * (ll_rsm - ll_pcm)
-            if lr < 0:
-                warnings.warn(
-                    "RSM vs PCM LR statistic is negative because the estimates are "
-                    "not maximum likelihood estimates, and has been floored at 0. "
-                    "This indicates no evidence that PCM fits better than RSM.",
-                    UserWarning,
-                )
-                lr = 0.0
-            df = (self.no_of_items - 1) * (max_score - 1)
-            p = float(chi2.sf(lr, df))
-            preferred = "PCM" if (p < alpha and effect >= min_effect) else "RSM"
-            self.model_comparison_rsm_pcm_lr = lr
-            self.model_comparison_rsm_pcm_df = df
-            self.model_comparison_rsm_pcm_p = p
-            self.model_comparison_rsm_pcm_lr_preferred = preferred
-            self.model_comparison_rsm_pcm_lr_summary = pd.Series(
-                {
-                    "LR statistic": lr,
-                    "df": df,
-                    "p-value": p,
-                    "Effect": effect,
-                    "Preferred": preferred,
-                },
-                name="RSM vs PCM LR test",
-            )
-
-        elif test == "AIC":
-            aic_pcm = 2 * k_pcm - 2 * ll_pcm
-            aic_rsm = 2 * k_rsm - 2 * ll_rsm
-            self.model_comparison_rsm_pcm_aic = {"PCM": aic_pcm, "RSM": aic_rsm}
-
-            if aic_sig_test:
-                delta = aic_rsm - aic_pcm
-                aic_p = float(np.exp(-abs(delta) / 2))
-                preferred = (
-                    "PCM"
-                    if (delta > 0 and aic_p < alpha and effect >= min_effect)
-                    else "RSM"
-                )
-                self.model_comparison_rsm_pcm_aic_p = aic_p
-                self.model_comparison_rsm_pcm_aic_preferred = preferred
-                self.model_comparison_rsm_pcm_aic_summary = pd.Series(
-                    {
-                        "PCM AIC": aic_pcm,
-                        "RSM AIC": aic_rsm,
-                        "p-value": aic_p,
-                        "Effect": effect,
-                        "Preferred": preferred,
-                    },
-                    name="RSM vs PCM AIC comparison",
-                )
-            else:
-                preferred = (
-                    "PCM" if (aic_pcm < aic_rsm and effect >= min_effect) else "RSM"
-                )
-                self.model_comparison_rsm_pcm_aic_preferred = preferred
-                self.model_comparison_rsm_pcm_aic_summary = pd.Series(
-                    {
-                        "PCM AIC": aic_pcm,
-                        "RSM AIC": aic_rsm,
-                        "Effect": effect,
-                        "Preferred": preferred,
-                    },
-                    name="RSM vs PCM AIC comparison",
-                )
-
-        elif test == "BIC":
-            bic_pcm = k_pcm * np.log(n_ll) - 2 * ll_pcm
-            bic_rsm = k_rsm * np.log(n_ll) - 2 * ll_rsm
-            preferred = "PCM" if (bic_pcm < bic_rsm and effect >= min_effect) else "RSM"
-            self.model_comparison_rsm_pcm_bic = {"PCM": bic_pcm, "RSM": bic_rsm}
-            self.model_comparison_rsm_pcm_bic_preferred = preferred
-            self.model_comparison_rsm_pcm_bic_summary = pd.Series(
-                {
-                    "PCM BIC": bic_pcm,
-                    "RSM BIC": bic_rsm,
-                    "Effect": effect,
-                    "Preferred": preferred,
-                },
-                name="RSM vs PCM BIC comparison",
-            )
+        if not (self.max_score_vector == self.max_score_vector.iloc[0]).all():
+            raise ValueError("RSM vs PCM comparison requires uniform max scores across items.")
+        if not hasattr(self, "thresholds_uncentred"):
+            self.calibrate(constant=constant, method=method, log_lik_tol=log_lik_tol)
+        self._run_rsm_pcm_selection(test, aic_sig_test, alpha, min_effect, no_of_samples, seed)
 
     def res_corr_analysis(
         self,
@@ -5168,7 +5435,7 @@ class PCM(Rasch):
             CI width. Unused if se=False.
         se : bool, default True
             Passed through to the internal fit_statistics() call (only
-            used if not already computed). If False, skips the bootstrap
+            used if not already computed). If False, skips the SEs
             entirely — this analysis's own output (residual correlations,
             PCA) does not depend on it, so se=False is purely a speed-up
             (e.g. for repeated simulation runs) with no effect on the
@@ -5281,7 +5548,7 @@ class PCM(Rasch):
             Number of decimal places for rounding numeric output.
         se : bool, default True
             If True, computes and includes the SE column (and CI bound
-            columns, if interval is set). If False, skips the bootstrap
+            columns, if interval is set). If False, skips the SEs
             entirely — useful when only Infit/Outfit MS are needed (e.g.
             repeated simulation runs), since those do not depend on the
             bootstrap. Forces interval to None when False.
@@ -5341,11 +5608,7 @@ class PCM(Rasch):
         if not se:
             interval = None
 
-        if se and (
-            not hasattr(self, "threshold_low")
-            or self.threshold_low is None
-            and interval is not None
-        ):
+        if se and (not hasattr(self, "threshold_low") or self._interval_stale(interval)):
             self.std_errors(
                 interval=interval,
                 no_of_samples=no_of_samples,
@@ -5415,7 +5678,9 @@ class PCM(Rasch):
         """
         Build and store the threshold statistics summary tables.
 
-        Auto-triggers fit_statistics() if not yet run. Produces two tables:
+        Auto-triggers fit_statistics() if not yet run, and std_errors()
+        when interval asks for confidence bounds the stored standard errors
+        do not have (none, or another width). Produces two tables:
         uncentred thresholds (absolute logit values) and centred thresholds
         (offsets from the central item location). Both always include
         estimates, SEs, and Infit/Outfit MS. Additional columns are included
@@ -5497,6 +5762,8 @@ class PCM(Rasch):
                 no_of_samples=no_of_samples,
                 interval=interval,
             )
+        if self._interval_stale(interval):
+            self.std_errors(interval=interval, no_of_samples=no_of_samples)
 
         estimate_array = np.concatenate(
             [
@@ -5625,10 +5892,9 @@ class PCM(Rasch):
             Bootstrap samples, used only if std_errors() hasn't already
             been run.
         interval : float or None, default None
-            CI width. If provided, lower/upper percentile columns are
-            included — but only if std_errors() is triggered by this call
-            or was already run with an interval; it is not retroactively
-            added to an existing SE run made without one.
+            CI width. If provided, lower/upper bound columns are included;
+            std_errors() is run again if the stored standard errors have no
+            bounds at this width.
         seed : int or None, default None
             Seed for std_errors(), used only if it hasn't already been
             run.
@@ -5649,7 +5915,10 @@ class PCM(Rasch):
             cat_width_se — differenced *within* each bootstrap resample
             before taking the std, so it already reflects
             Cov(threshold_k, threshold_{k+1})), CI bounds if interval is
-            not None, Disordered (Estimate < 0), and Prop disordered — the
+            not None, Disordered (Estimate < 0; NaN for a width next to a score category no person used,
+            kept with unused_categories='null' (the data do not identify
+            it): such a category is never the most probable, the extreme
+            case of disordered categories), and Prop disordered — the
             bootstrap proportion of resamples with a negative width,
             reasonably read as the probability that the true category is
             disordered. Useful for interpreting Disordered in both
@@ -5667,7 +5936,7 @@ class PCM(Rasch):
             self.calibrate(
                 constant=constant, method=method, log_lik_tol=log_lik_tol
             )
-        if not hasattr(self, "cat_width_se"):
+        if not hasattr(self, "cat_width_se") or self._interval_stale(interval):
             self.std_errors(
                 interval=interval,
                 no_of_samples=no_of_samples,
@@ -5702,15 +5971,15 @@ class PCM(Rasch):
             stats["SE"] = np.concatenate(
                 [self.cat_width_se[item].values for item in cat_items]
             ).round(dp)
-            if interval is not None and self.cat_width_low is not None:
+            if interval is not None:
                 stats[f"{round((1 - interval) * 50, 1)}%"] = np.concatenate(
                     [self.cat_width_low[item] for item in cat_items]
                 ).round(dp)
                 stats[f"{round((1 + interval) * 50, 1)}%"] = np.concatenate(
                     [self.cat_width_high[item] for item in cat_items]
                 ).round(dp)
-            stats["Disordered"] = (
-                np.concatenate([cat_widths[item] for item in cat_items]) < 0
+            stats["Disordered"] = _disorder_flag(
+                np.concatenate([cat_widths[item] for item in cat_items])
             )
             if getattr(self, "cat_width_bootstrap", None) is not None:
                 prop = np.concatenate(
@@ -5765,12 +6034,12 @@ class PCM(Rasch):
         full : bool, default False
             If True, sets rsem=True.
         rsem : bool, default False
-            If True, includes Residual SEM (RSEM) column.
+            If True, includes Realistic SEM (RSEM) column.
         dp : int, default 3
             Decimal places.
         se : bool, default True
             Passed through to the internal fit_statistics() call (only
-            used if not already computed). If False, skips the bootstrap
+            used if not already computed). If False, skips the SEs
             entirely — this table's own columns (CSEM, RSEM, Infit/Outfit)
             do not depend on it, so se=False is purely a speed-up (e.g.
             for repeated simulation runs) with no effect on the output.
@@ -8232,6 +8501,7 @@ class PCM(Rasch):
             filled.loc[item, valid_cols] = vals[: len(valid_cols)]
         return filled.unstack().dropna()
 
+    @_progress.with_progress
     def recovery_stats(
         self,
         anchor=False,

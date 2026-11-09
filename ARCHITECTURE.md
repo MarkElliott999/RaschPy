@@ -24,14 +24,36 @@ raschpy/
   rsm.py               RSM
   mfrm.py             MFRM  — by far the largest file; dominated by the
                        eight-way rater-parameterisation fan-out (see below)
-  _rcl.py             RCL engine shared by RSM and MFRM ('cp-full-rcl' full pattern set, 'cpat-rcl'): CPAT pattern
-                       counts, cell models (linear) and stretch models
-                       (bilinear), penalised Newton-Raphson / L-BFGS fits,
-                       sandwich covariances (see Estimation approach)
+  _rcl.py             RCL engine shared by PCM, RSM and MFRM ('cp-full-rcl' full pattern set, 'cpat-rcl'): CPAT
+                       pattern counts, cell models (linear), stretch models
+                       (bilinear) and MixedDesign (MFRM 'mixed': each rater
+                       on its own representation, anchors' cut cells as free
+                       shifts), penalised Newton-Raphson /
+                       L-BFGS fits, sandwich covariances, unused-category
+                       markers for CML (see Estimation approach)
   _esf.py             conditional (elementary symmetric function) likelihood
-                       for SLM/PCM/RSM: exact gradient and Hessian, CML
+                       for SLM/PCM/RSM (MFRM via rater x item virtual
+                       items): exact gradient and Hessian, CML
                        fits (chord/Newton/L-BFGS), conditional moments,
                        sampling given totals, score distributions
+  _progress.py        progress line for the slow methods (progress=None/True/
+                       False, added by a decorator), one long-run warning
+  _anchors.py         AnchorSet: an MFRM anchor set with cut cells (an anchor
+                       that is not an anchor at an item, a threshold or an
+                       item-threshold pair) and dropped anchors, immutable,
+                       with a log of changes; parse_cell() names cells as the
+                       tables print them
+  _anchor_check.py    AnchorCheck: check_anchor_homogeneity()'s joint-fit
+                       check of an anchor set on the anchors' responses only
+                       (overall test, pattern screen, Wald loop over cells,
+                       global effect screen, refinement; see "Anchor sets" below)
+  _selection.py       RSM-vs-PCM model_selection(): composite likelihood
+                       ratio test (exact weighted chi-square tail), AIC and
+                       BIC penalties for a composite likelihood, PAIR's
+                       Bradley-Terry fit restricted to RSM,
+                       the conditional parametric bootstrap and its statistic
+                       (PCM's minus RSM's fitted thresholds); the composite
+                       Andersen test for global_fit()
   loaders.py          CSV/Excel/JSON readers: loadup_slm, loadup_pcm,
                        loadup_rsm, loadup_mfrm_single, loadup_mfrm_xlsx_tabs,
                        loadup_mfrm_multiple, loadup_exogenous
@@ -129,15 +151,18 @@ works on pattern counts (`_rcl.pattern_counts`), never on persons. Cell models
 coordinates (`CellModel`; concave objective, Newton–Raphson, L-BFGS-B above
 `DENSE_LIMIT`); stretch models are bilinear (`StretchModel`; Newton with Fisher
 scoring fallback, two starts from the `pair-cpat` fit). Smoothing constants
-are pseudo-counts spread over the cells; ridges are `ridge` (0.3),
-`interaction_ridge` (3, matrix shrunk towards bivector) and `stretch_ridge` (1,
-on `omega - 1`). Thin widths get a ridge towards the other widths; widths next
-to an empty category are split out and set by the cpat-cml rule. RSM is the
+are pseudo-counts spread over the cells; ridges are `global_ridge` (global effect),
+`item_ridge` and `threshold_ridge` (each rater's effects, towards the next
+simpler representation), `interaction_ridge` (matrix shrunk towards bivector)
+and `stretch_ridge` (on `omega - 1`), with their own defaults for `'cml'`
+(`_RCL_RIDGE`, `_CML_RIDGE`; v1.4's single `ridge` is deprecated). Thin widths get a ridge towards the other widths; widths next
+to an empty category are split out and set by RSM's CPAT threshold estimator
+(`threshold_method='cpat-cl'`, heavily smoothed there). RSM is the
 case R = 1. `estimation='pair-cpat'` keeps the published separate stages
 (items → thresholds → raters) and reproduces v1.3.1 for RSM. Full derivation:
 `methods_writeup_v1.4.0.docx`, Part C.
 
-### SLM, PCM and RSM: CML (`estimation='cml'`)
+### CML (`estimation='cml'`; MFRM through rater x item virtual items)
 
 `_esf.cond_loglik` computes the conditional log-likelihood with its exact
 gradient and Hessian in log space with no subtractions, grouping persons by
@@ -149,15 +174,19 @@ theta' Q theta / 2 instead. PCM's CML ridge (`calibrate(ridge=)`,
 `PCM._ridge_penalty`) builds Q = A' Pb A from a penalty on each item's
 centred thresholds minus its max-score group's mean, plus a weak one on the
 groups' mean widths; `_fixed_ridge()` passes the fitted weight to the test
-refits. Items without CML estimates are removed first
+refits. PCM's `estimation='cp-full-rcl'` (`_rcl.pcm_comparisons` /
+`fit_pcm` / `pcm_sandwich`) maximises the full-pattern pairwise composite
+likelihood over item pairs with the same ridge (its own rule); ridge CML
+starts from it. Items without CML estimates are removed first
 (`screen_items`). Standard errors: sandwich of the conditional likelihood by
 default (`cml_sandwich`, person scores once per distinct response row), or
 the Hessian. The conditional machinery (`conditional_moments`,
 `sample_given_totals`, `person_scores`) also serves the estimate-free or
-estimate-plugging analyses: conditional fit, Q1/R1c, item-restscore, the
+estimate-plugging analyses: conditional fit, Q1 (per item and overall), item-restscore, the
 parametric bootstrap, Andersen/Martin-Löf, the CML DIF omnibus, fixed-anchor
-calibration, conditional model selection (one Newton step from any
-estimates; MFRM via rater × item virtual items) and `targeting`.
+calibration, model selection under CML, the simulations for
+`model_selection()`'s bootstrap test (MFRM via rater × item virtual items)
+and `targeting`.
 `local_dependence_gamma` needs no estimates (partial gamma with the exact
 within-stratum permutation variance).
 
@@ -264,11 +293,11 @@ to compare estimated vs. true values.
 
 ## MFRM's rater-parameterisation scheme
 
-MFRM is the architecturally distinctive part of this package: rater severity
+MFRM is the architecturally distinctive part of this package: rater effects
 can be represented eight different ways, not just one, reflecting how much
 structure a given rater's behaviour actually needs:
 
-| model | rater severity is... | free params/rater |
+| model | rater effect is... | free params/rater |
 |---|---|---|
 | `global` | one scalar, applied uniformly | 1 |
 | `centrality` (`threshold_stretch`) | a shift + stretch on `thresholds` | 2 |
@@ -281,21 +310,27 @@ structure a given rater's behaviour actually needs:
 
 `centrality`/`pseudo_halo` are restricted forms of `thresholds`/`items`;
 `bistretch` is a restricted form of `bivector`. `model_selection()` compares
-all eight for the whole rater pool at once; `per_rater_model_selection()`
-assigns each rater individually (via AIC/BIC directly, or an LR testing
-ladder), producing a **ninth**, derived representation: `model='mixed'`.
+all eight for the whole rater pool at once, with every candidate fitted by
+the same estimation and the test following it: the conditional likelihood
+of the rater × item virtual items for `'cml'`; the composite likelihood for
+`'cp-full-rcl'` and `'cpat-rcl'` (on their own pattern sets; `_andersen_pieces` /
+`_composite_pair`, sharing `_selection.composite_lr_core` with RSM/PCM); and for
+`'pair-cpat'` the conditional parametric bootstrap `_bootstrap_pairs`
+(simulating from the smaller model's `'cp-full-rcl'` fit, `_null_fit`).
 
-`'mixed'` is not a real calibration — it has no `calibrate(model='mixed')`
-and no `calibrate_mixed()`. Every rater's `'mixed'` values are a restriction
-of a single `'matrix'` calibration to whichever of the eight representations
-`per_rater_model_selection()` assigned that specific rater
-(`_apply_rater_models()`). This is why `'mixed'` needs special-casing
-throughout `mfrm.py` (`_sync_mixed()`, `cal_model` substitution in
-`std_errors()`/`anchor_std_errors()`) rather than being just another entry
-in the five-model dispatch — it has no calibration of its own to lazily
-trigger, and its per-rater assignment is not anchor-invariant the way
-item/person locations are (a different anchor set can give a different, still
-valid, per-rater assignment). `model_selection()` and
+`model='mixed'` is a **ninth** representation: each rater on its own
+representation (`rater_models`), in the frame of `anchors` (none: the average
+rater). With `'cp-full-rcl'`, `'cpat-rcl'` or `'cml'` it is one joint fit
+(`calibrate(model='mixed')` → `_calibrate_mixed`; `_rcl.MixedDesign` gives the
+location grid, `_mixed_fit_core` the fit, `_mixed_quantities` every reported
+quantity, `_mixed_covariance` the sandwich); with every rater on one
+representation it reproduces that representation's fit. With `'pair-cpat'`
+each rater's values are a restriction of the `'matrix'` fit
+(`_apply_rater_models()`), as in v1.4. `per_rater_model_selection()` assigns
+each rater by comparing joint mixed fits (AIC/BIC, `scheme='iterate'` or
+`'one-pass'`; `'pair-cpat'` keeps v1.4's derived candidates and LR ladder).
+The assignment is not anchor-invariant: a different anchor set can give a
+different, still valid, assignment. `model_selection()` and
 `per_rater_model_selection()` drop sub-models that the design makes identical
 (`_drop_equivalent_models`: centrality = thresholds when `max_score=2`,
 pseudo_halo = items with 2 items, and more for dichotomous data). If you're extending `'mixed'` support to a new
@@ -303,6 +338,34 @@ method, check `mfrm.py`'s existing `model in (...)` / `model ==` dispatch
 sites first — several intentionally don't support it yet (see
 `raschpy_known_issues.md`-equivalent notes / the remediation plan for the
 current list).
+
+**Anchor sets.** In a joint mixed fit, each kind of rater effect sums to zero over
+the anchors that have it. An anchor's representation can therefore only be read
+against the other anchors, so `per_rater_model_selection()` holds anchors on
+`'global'` (with `'cp-full-rcl'`, `'cpat-rcl'`, `'cml'`) and whether they agree is
+`check_anchor_homogeneity()`'s job (`_anchor_check.AnchorCheck`, the default for
+those estimations; the earlier single-representation Cochran test,
+`_check_anchor_homogeneity_single`, stays for `'pair-cpat'` and as an option). The
+check uses only the anchors' responses: an overall test (items, thresholds,
+global effect); a pattern screen (each anchor's representation chosen against the rest,
+BH across anchors), with a Wald loop cutting single cells of the worst anchor; a
+global effect screen on the adjusted set (after the pattern stage, because a one-cell
+shift also moves an anchor's global effect); and a refinement against the final anchors.
+`split_alpha=True` runs the screens at alpha/2. Its suggestions are an
+`_anchors.AnchorSet`, which `calibrate(model='mixed', anchors=)` and
+`per_rater_model_selection(anchors=)` accept: a cut cell becomes a free shift for
+that anchor in `MixedDesign` (`cuts=`, anchors on `'global'` only), with the zero
+point there at the other anchors' average (`anchor_cuts_mixed`). A joint mixed fit
+is already in its anchors' frame, so the stats tables treat `anchors=` equal to the
+fit's own as the fit itself (`_mixed_anchor_args`) and refuse other anchors.
+
+**Stretch divergence test.** `rater_stats_df(divergence_test=)` compares each stretch
+model with its free parent (`thresholds`, `items`, `bivector`). With a joint-fit
+estimation and no anchors, the SE of each free-minus-stretch difference comes from
+the stacked sandwich: `_grid_influence(model)` gives each person's influence on a
+fit's effect grid, and `_divergence_influence` differences the two fits'
+influences (`divergence_se_method` records it); otherwise the paired bootstrap
+(`_get_divergence_inputs`).
 
 ## Known structural invariants — read before touching these
 
@@ -356,7 +419,7 @@ This has been silently reverted once already by an unrelated large refactor
 and shipped broken in a released version before being caught and re-fixed —
 if you ever see a large mechanical diff touch `MFRM.__init__`, re-verify this
 line survived. `tests/test_known_issue_regressions.py` has a regression test
-for exactly this (shuffles one rater's row order and checks severity
+for exactly this (shuffles one rater's row order and checks global effect
 recovery doesn't collapse).
 
 **Anchor-run caching.** A second `calibrate_anchor()` /

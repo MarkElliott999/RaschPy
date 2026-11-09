@@ -154,7 +154,7 @@ def test_permutation_invariance_mfrm_global(
     # This is the #19/#32 bug class specifically: MFRM's response grid is
     # indexed by (rater, person) tuples, not a plain person index, so a
     # ragged/shuffled row order previously risked silently collapsing
-    # rater severity spread (see test_known_issue_regressions.py). Row
+    # rater global effect spread (see test_known_issue_regressions.py). Row
     # permutation here shuffles across BOTH levels jointly, which the
     # handwritten regression test's specific single-rater-shuffle case
     # doesn't exercise as broadly.
@@ -175,7 +175,7 @@ def test_permutation_invariance_mfrm_global(
     _assert_series_match(original.thresholds, permuted.thresholds, "MFRM thresholds")
     _assert_series_match(
         original.facet_effects_global, permuted.facet_effects_global,
-        "MFRM global rater severities",
+        "MFRM rater global effects",
     )
 
 

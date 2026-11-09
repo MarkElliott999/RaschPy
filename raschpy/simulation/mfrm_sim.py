@@ -7,6 +7,234 @@ from scipy.stats import truncnorm
 from raschpy.simulation.base_sim import Rasch_Sim
 
 
+_REPRESENTATIONS = (
+    "global", "items", "thresholds", "bivector", "matrix", "centrality", "pseudo_halo", "bistretch",
+)
+_STRETCH_KEYS = {
+    "centrality": ("lambda", "omega"),
+    "pseudo_halo": ("lambda", "omega"),
+    "bistretch": ("lambda", "omega_items", "omega_thresholds"),
+}
+
+
+def _finite(values, what):
+    """values as a float array, raising if any is NaN or infinite."""
+    arr = np.asarray(values, dtype=float)
+    if not np.all(np.isfinite(arr)):
+        raise ValueError(f"{what}: values must be finite (no NaN or infinity).")
+    return arr
+
+
+def _check_labels(keys, labels, what, kind):
+    """Raise, naming them, if keys has labels not in labels or misses some of labels."""
+    keys = list(keys)
+    unknown = [k for k in keys if k not in labels]
+    missing = [k for k in labels if k not in keys]
+    if unknown or missing:
+        raise ValueError(
+            f"{what}: "
+            + "; ".join(
+                ([f"unknown {kind} label(s) {unknown}"] if unknown else [])
+                + ([f"missing {kind} label(s) {missing}"] if missing else [])
+            )
+            + f". Expected the {kind} labels {list(labels)}."
+        )
+
+
+def _labelled_vector(v, labels, what, kind):
+    """
+    A per-item or per-threshold vector: a dict or Series is aligned by label (a missing or unknown label raises,
+    naming it); an array, list or tuple is read in the order of labels and must have exactly len(labels) values.
+    """
+    if isinstance(v, (dict, pd.Series)):
+        _check_labels(v.keys(), labels, what, kind)
+        return _finite([v[k] for k in labels], what)
+    arr = _finite(v, what)
+    if arr.shape != (len(labels),):
+        raise ValueError(
+            f"{what}: expected {len(labels)} values (one per {kind}, in order), got shape {arr.shape}."
+        )
+    return arr
+
+
+def _coerce_rater_params(model, params, rater, item_names, K, source="rater_models"):
+    """
+    One facet element's (e.g. rater's) parameters for representation model, as passed by the user, checked and
+    returned in a standard form:
+      global       float (severity)
+      items        Series over items (the facet element's effect on each item)
+      thresholds   Series over thresholds 1..K
+      bivector     {'item_effects': Series over items, 'threshold_effects': Series over thresholds, summing to 0}
+                   (a threshold part not summing to 0 is moved into the item part, which leaves every location
+                   unchanged)
+      matrix       DataFrame, items x thresholds 1..K
+      centrality / pseudo_halo   {'lambda': float, 'omega': float}
+      bistretch    {'lambda': float, 'omega_items': float, 'omega_thresholds': float}
+    Accepted input: items -- dict or Series by item name, or I values; thresholds -- dict or Series keyed 1..K, or
+    K values; matrix -- DataFrame (items x 1..K), {item: K values} or an I x K array; bivector -- a pair (item
+    values, threshold values) or {'item_effects', 'threshold_effects'}; stretch models -- a dict with the keys
+    above or the values in that order. Labelled input is aligned by label, unlabelled input is read in order and
+    must have exactly the right shape. Every value must be finite.
+    """
+    what = f"{source}[{rater!r}] ({model})"
+    thr = list(range(1, K + 1))
+    if model == "global":
+        if isinstance(params, dict):
+            if set(params) != {"lambda"}:
+                raise ValueError(f"{what}: expected a single value or {{'lambda': value}}, got keys {list(params)}.")
+            params = params["lambda"]
+        arr = _finite(params, what)
+        if arr.ndim != 0:
+            raise ValueError(f"{what}: expected a single value, got shape {arr.shape}.")
+        return float(arr)
+    if model == "items":
+        return pd.Series(_labelled_vector(params, item_names, what, "item"), index=item_names)
+    if model == "thresholds":
+        return pd.Series(_labelled_vector(params, thr, what, "threshold"), index=thr)
+    if model == "bivector":
+        if isinstance(params, dict):
+            if set(params) != {"item_effects", "threshold_effects"}:
+                raise ValueError(
+                    f"{what}: expected keys 'item_effects' and 'threshold_effects', got {list(params)}."
+                )
+            ie, te = params["item_effects"], params["threshold_effects"]
+        elif isinstance(params, (tuple, list)) and len(params) == 2:
+            ie, te = params
+        else:
+            raise ValueError(f"{what}: expected a pair (item effects, threshold effects) or a dict with those keys.")
+        a = _labelled_vector(ie, item_names, what + " item_effects", "item")
+        t = _labelled_vector(te, thr, what + " threshold_effects", "threshold")
+        a, t = a + t.mean(), t - t.mean()
+        return {"item_effects": pd.Series(a, index=item_names), "threshold_effects": pd.Series(t, index=thr)}
+    if model == "matrix":
+        if isinstance(params, pd.DataFrame):
+            _check_labels(params.index, item_names, what, "item")
+            _check_labels(params.columns, thr, what, "threshold")
+            arr = _finite(params.loc[item_names, thr].to_numpy(), what)
+        elif isinstance(params, dict):
+            _check_labels(params.keys(), item_names, what, "item")
+            arr = np.vstack(
+                [_labelled_vector(params[i], thr, f"{what} item {i!r}", "threshold") for i in item_names]
+            )
+        else:
+            arr = _finite(params, what)
+            if arr.shape != (len(item_names), K):
+                raise ValueError(
+                    f"{what}: expected an array of shape ({len(item_names)}, {K}) (items x thresholds), got {arr.shape}."
+                )
+        return pd.DataFrame(arr, index=item_names, columns=thr)
+    if model in _STRETCH_KEYS:
+        keys = _STRETCH_KEYS[model]
+        if isinstance(params, dict):
+            if set(params) != set(keys):
+                raise ValueError(f"{what}: expected keys {list(keys)}, got {list(params)}.")
+            vals = [params[k] for k in keys]
+        else:
+            vals = list(np.ravel(_finite(params, what))) if not isinstance(params, (tuple, list)) else list(params)
+            if len(vals) != len(keys):
+                raise ValueError(f"{what}: expected {len(keys)} values {list(keys)}, got {len(vals)}.")
+        out = {}
+        for k, v in zip(keys, vals):
+            arr = _finite(v, f"{what} {k}")
+            if arr.ndim != 0:
+                raise ValueError(f"{what}: {k} must be a single value, got shape {arr.shape}.")
+            out[k] = float(arr)
+        return out
+    raise ValueError(f"{what}: unknown representation {model!r}; expected one of {list(_REPRESENTATIONS)}.")
+
+
+def _rater_grid(model, p, delta, tau):
+    """A facet element's (I, K) location deviations from delta_i + tau_h, from its standard-form parameters p."""
+    I, K = len(delta), len(tau)
+    if model == "global":
+        return np.full((I, K), p)
+    if model == "items":
+        return np.repeat(p.to_numpy()[:, None], K, axis=1)
+    if model == "thresholds":
+        return np.repeat(p.to_numpy()[None, :], I, axis=0)
+    if model == "bivector":
+        return p["item_effects"].to_numpy()[:, None] + p["threshold_effects"].to_numpy()[None, :]
+    if model == "matrix":
+        return p.to_numpy().copy()
+    if model == "centrality":
+        return p["lambda"] + (p["omega"] - 1.0) * np.broadcast_to(tau[None, :], (I, K))
+    if model == "pseudo_halo":
+        return p["lambda"] + (p["omega"] - 1.0) * np.broadcast_to(delta[:, None], (I, K))
+    return (
+        p["lambda"]
+        + (p["omega_items"] - 1.0) * delta[:, None]
+        + (p["omega_thresholds"] - 1.0) * tau[None, :]
+    )
+
+
+def _neutral_params(model, item_names, K):
+    """Standard-form parameters of a facet element with no effect under representation model."""
+    thr = list(range(1, K + 1))
+    if model == "global":
+        return 0.0
+    if model == "items":
+        return pd.Series(0.0, index=item_names)
+    if model == "thresholds":
+        return pd.Series(0.0, index=thr)
+    if model == "bivector":
+        return {"item_effects": pd.Series(0.0, index=item_names), "threshold_effects": pd.Series(0.0, index=thr)}
+    if model == "matrix":
+        return pd.DataFrame(0.0, index=item_names, columns=thr)
+    return {k: (0.0 if k == "lambda" else 1.0) for k in _STRETCH_KEYS[model]}
+
+
+def _stretch_bounds(stretch_range, what="stretch_range"):
+    """(lowest, highest) from a pair, or from a single number s as (1 - s/2, 1 + s/2)."""
+    if np.ndim(stretch_range) == 0:
+        s = float(stretch_range)
+        return 1.0 - s / 2, 1.0 + s / 2
+    lo, hi = (float(x) for x in stretch_range)
+    if not (np.isfinite(lo) and np.isfinite(hi)) or lo > hi:
+        raise ValueError(f"{what} must be (lowest, highest) with lowest <= highest, got {stretch_range!r}.")
+    return lo, hi
+
+
+def _spread_factor(spread, x):
+    """spread / (max(x) - min(x)), or 0 when x has no spread (one value), so a single facet element or item gets
+    no spread instead of NaN."""
+    width = x.max() - x.min()
+    return spread / width if width > 0 else 0.0
+
+
+def _draw_multipliers(rng, R, stretch_range, centre=True):
+    """
+    R stretch multipliers. A single number s gives 1 plus a zero-mean deviation scaled so its maximum minus its
+    minimum is s (the original behaviour, so seeded results are unchanged); a pair (lowest, highest) gives each
+    multiplier its own draw between the bounds (any real numbers, lowest <= highest).
+    """
+    x = truncnorm.rvs(-1.96, 1.96, size=R, random_state=rng)
+    if np.ndim(stretch_range) == 0:
+        x *= _spread_factor(stretch_range, x)
+        if centre:
+            x -= x.mean()
+        return 1.0 + x
+    lo, hi = _stretch_bounds(stretch_range)
+    return lo + (x + 1.96) / 3.92 * (hi - lo)
+
+
+def _draw_pattern(rng, shape, spread):
+    """A zero-sum (zero-sum along both axes for a 2-D shape) truncated-normal pattern, scaled so its maximum
+    minus its minimum is spread (all zeros when it has no spread)."""
+    x = truncnorm.rvs(-1.96, 1.96, size=shape, random_state=rng)
+    if x.ndim == 1:
+        x = x - x.mean()
+    else:
+        x = x - x.mean(axis=0, keepdims=True) - x.mean(axis=1, keepdims=True) + x.mean()
+    width = x.max() - x.min()
+    return x * (spread / width) if width > 0 else np.zeros(shape)
+
+
+def _draw_between(rng, lo, hi):
+    """One value between lo and hi, from the truncated normal mapped onto [lo, hi]."""
+    z = float(truncnorm.rvs(-1.96, 1.96, random_state=rng))
+    return lo + (z + 1.96) / 3.92 * (hi - lo)
+
+
 class MFRM_Sim(Rasch_Sim):
     """
     Simulate polytomous response data for the Many-Facet Rasch Model (MFRM).
@@ -35,17 +263,24 @@ class MFRM_Sim(Rasch_Sim):
         'matrix'     — full facet_effect per (facet_element, item, threshold);
         'bivector'   — additive (item effect + threshold effect) facet_effect
                        per (facet_element, item, threshold).
+        'mixed'      — each facet element on its own representation, any of
+                       the five above or 'centrality', 'pseudo_halo',
+                       'bistretch' (see rater_models).
     item_range : float, default 2
         Total spread of item locations in logits.
     facet_range : float, default 2
         Total spread of facet_element effects in logits. Not used when
         model='bivector' — see item_facet_range/threshold_facet_range.
     item_facet_range : float, default 2
-        model='bivector' only. Total spread of per-(facet_element, item)
+        model='bivector': total spread of per-(facet_element, item)
         facet_effect effects across the full facet_element x item matrix in logits.
+        model='mixed': spread (maximum minus minimum) of each facet element's
+        own item-effect pattern (items, bivector, matrix).
     threshold_facet_range : float, default 1
-        model='bivector' only. Total spread of per-(facet_element, threshold)
+        model='bivector': total spread of per-(facet_element, threshold)
         facet_effect effects across the full facet_element x threshold matrix in logits.
+        model='mixed': spread of each facet element's own threshold-effect
+        pattern (thresholds, bivector, matrix).
     category_base : float, default 2
         Base width of each rating category. Larger values produce wider,
         more ordered categories.
@@ -70,9 +305,14 @@ class MFRM_Sim(Rasch_Sim):
     manual_raters : dict or array-like or None, default None
         Custom facet_element effect parameters. Structure must match the chosen model:
         global — array-like of length no_of_facet_elements;
-        items  — {facet_element: {item: float}};
-        thresholds — {facet_element: array of length max_score};
-        matrix — {facet_element: {item: array of length max_score}}.
+        items  — {facet_element: values}, the values a dict or Series by item
+                 name or no_of_items values in item order;
+        thresholds — {facet_element: values}, a dict or Series keyed
+                 1..max_score or max_score values in order;
+        matrix — {facet_element: values}, the values {item: max_score values},
+                 an items x thresholds DataFrame or an array.
+        Labelled values are aligned by label (a missing or unknown label
+        raises); unlabelled values are read in order.
         Not supported for model='bivector' — use manual_item_effects/
         manual_threshold_effects instead.
     manual_item_effects : dict or None, default None
@@ -112,6 +352,63 @@ class MFRM_Sim(Rasch_Sim):
         patterns differ only in the few cells nearest the cut-off; seeded
         results are reproducible either way.
 
+    rater_models : list, dict, Series or None, default None
+        model='mixed' only: each facet element's representation. A list
+        gives one representation per facet element, in order, with values
+        drawn at random. A dict or Series {facet_element: model} or
+        {facet_element: (model, params)} fixes the representation, and with
+        params its values, in the form:
+          global       a single value (severity);
+          items        a dict or Series by item name, or no_of_items values;
+          thresholds   a dict or Series keyed 1..max_score, or max_score values;
+          bivector     a pair (item values, threshold values) or
+                       {'item_effects': ..., 'threshold_effects': ...};
+          matrix       a DataFrame (items x 1..max_score), {item: values}
+                       or a no_of_items x max_score array;
+          centrality / pseudo_halo   {'lambda', 'omega'} or (lambda, omega);
+          bistretch    {'lambda', 'omega_items', 'omega_thresholds'} or a
+                       triple.
+        Labelled values are aligned by label; unlabelled values are read in
+        order and must have exactly the right shape. Facet elements left out,
+        and all of them when None, get a representation drawn from
+        candidate_models and random values. Effects are relative to the shared
+        item locations and thresholds (native_items, native_thresholds); the
+        stretch models give lambda_r + (omega_r - 1) times the thresholds,
+        item locations or both.
+    candidate_models : list or None, default None
+        model='mixed' only: the representations drawn from for facet elements
+        whose representation is not given. None means all eight.
+    proportions : list, dict, Series or None, default None
+        model='mixed' only: weights for drawing from candidate_models (in its
+        order, or keyed by representation). None means equal weights.
+    interaction_range : float, default 1
+        model='mixed' only: spread of a matrix facet element's own
+        item-by-threshold interactions (summing to 0 over items and over
+        thresholds).
+    stretch_range : float or (lowest, highest), default 1
+        model='mixed' only: bounds of the drawn stretch multipliers (any real
+        numbers, 0 and negative values included, lowest <= highest); a single
+        number s means (1 - s/2, 1 + s/2).
+    item_stretch_range, threshold_stretch_range : float, pair or None, default None
+        model='mixed' only: as stretch_range, for the item multipliers
+        (pseudo_halo, bistretch) / threshold multipliers (centrality,
+        bistretch) only.
+    anchors : list or None, default None
+        Facet element names. The reported true values are expressed in the
+        frame calibrate_anchor(model, anchors) gives the estimates: the
+        anchors' mean effect is taken into the item locations and thresholds
+        (for the stretch models, the anchors' mean shift is removed and the
+        multipliers are divided by the anchors' mean multiplier). Every
+        location is unchanged apart from a common shift, which the reported
+        person locations take up, so the data are unchanged. None reports
+        the effects centred over all facet elements, as before.
+    neutral_anchors : bool, default False
+        With anchors, the anchors are generated with no effect at all (zero
+        severity, item, threshold and interaction effects; for the stretch
+        models shift 0 and multipliers 1), unless their values are passed,
+        and the other facet elements' effects are drawn without being
+        centred. The anchored frame is then the generating frame. Does
+        nothing when anchors is None.
     Attributes set
     --------------
     responses : pandas.DataFrame
@@ -150,6 +447,31 @@ class MFRM_Sim(Rasch_Sim):
         Facet element labels.
     model : str
         Facet element parameterisation used for simulation.
+    anchors : list or None
+        The anchors the reported values are framed on.
+    rater_models : pandas.Series
+        model='mixed' only: each facet element's representation.
+    rater_params : dict
+        model='mixed' only: {facet_element: (model, params)}, each facet
+        element's parameters in the form rater_models takes, relative to
+        native_items and native_thresholds (pass it back as rater_models=,
+        with manual_items=native_items, manual_thresholds=native_thresholds
+        and manual_persons=native_persons, to simulate new data from the same
+        parameters).
+    native_items, native_thresholds, native_persons : pandas.Series
+        model='mixed' only: the generating item locations, thresholds and
+        person locations the facet elements' parameters are relative to.
+    facet_effects_mixed_{model} : pandas.Series or DataFrame
+        model='mixed' only, one per representation used: its facet elements'
+        parameters in that representation's layout (bivector as
+        facet_effects_mixed_bivector_items / _thresholds; the stretch models
+        as columns lambda, omega or omega_items, omega_thresholds).
+    facet_effects (model='mixed') : pandas.DataFrame
+        Every facet element's effects in the matrix layout ((facet_element,
+        item) x threshold), in the anchors' frame (all facet elements' when
+        anchors is None): the anchors' mean item and threshold margins are in
+        items and thresholds, their item-by-threshold remainder in the
+        effects, as calibrate_anchor gives a matrix fit.
     """
 
     def __init__(
@@ -183,6 +505,15 @@ class MFRM_Sim(Rasch_Sim):
         facet_plural=None,
         seed=None,
         missing_method="bernoulli",
+        rater_models=None,
+        candidate_models=None,
+        proportions=None,
+        interaction_range=1,
+        stretch_range=1,
+        item_stretch_range=None,
+        threshold_stretch_range=None,
+        anchors=None,
+        neutral_anchors=False,
         _params_only=False,
     ):
         """
@@ -195,9 +526,47 @@ class MFRM_Sim(Rasch_Sim):
 
         self._rng = np.random.default_rng(seed)
 
-        if model not in ("global", "items", "thresholds", "matrix", "bivector"):
+        if model not in ("global", "items", "thresholds", "matrix", "bivector", "mixed"):
             raise ValueError(
-                "model must be one of 'global', 'items', 'thresholds', 'matrix', 'bivector'."
+                "model must be one of 'global', 'items', 'thresholds', 'matrix', 'bivector', 'mixed' "
+                "(the stretch representations have their own classes: MFRM_Sim_Centrality, "
+                "MFRM_Sim_PseudoHalo, MFRM_Sim_Bistretch)."
+            )
+        if model == "mixed":
+            given = [
+                n
+                for n, v in (
+                    ("manual_raters", manual_raters),
+                    ("manual_facet_effects", manual_facet_effects),
+                    ("manual_item_effects", manual_item_effects),
+                    ("manual_threshold_effects", manual_threshold_effects),
+                )
+                if v is not None
+            ]
+            if given:
+                raise ValueError(
+                    f"model='mixed' takes each facet element's parameters through rater_models= "
+                    f"({{rater: (model, params)}}), not {', '.join(given)}."
+                )
+            if isinstance(rater_models, (dict, pd.Series)) and manual_facet_names is None:
+                keys = list(rater_models.keys())
+                n = no_of_facet_elements if no_of_facet_elements is not None else len(keys)
+                default = [f"{(facet or 'rater').capitalize()}_{r + 1}" for r in range(int(n))]
+                if not set(keys) <= set(default):
+                    if len(keys) != int(n):
+                        raise ValueError(
+                            f"rater_models names facet elements {keys} that are not the default names "
+                            f"{default}: give all {int(n)} of them, or pass manual_facet_names."
+                        )
+                    manual_facet_names = keys
+                no_of_facet_elements = n
+        elif any(
+            v is not None
+            for v in (rater_models, candidate_models, proportions, item_stretch_range, threshold_stretch_range)
+        ):
+            raise ValueError(
+                "rater_models, candidate_models, proportions, item_stretch_range and threshold_stretch_range "
+                "apply to model='mixed' only."
             )
         if model == "bivector" and manual_raters is not None:
             raise ValueError(
@@ -302,7 +671,7 @@ class MFRM_Sim(Rasch_Sim):
             items = np.array(manual_items)
         else:
             items = self._rng.uniform(0, 1, self.no_of_items)
-            items *= self.item_range / (items.max() - items.min())
+            items *= _spread_factor(self.item_range, items)
             items -= items.mean()
 
         self.items = pd.Series({item: d for item, d in zip(self.item_names, items)})
@@ -350,84 +719,93 @@ class MFRM_Sim(Rasch_Sim):
         # ------------------------------------------------------------------
         # Facet effects (model-specific)
         # ------------------------------------------------------------------
-        if manual_raters is not None:
-            if self.model == "global":
-                if hasattr(manual_raters, "items"):
-                    manual_facet_effects = pd.Series(
-                        {r: float(v) for r, v in manual_raters.items()}
-                    )
-                else:
-                    manual_facet_effects = pd.Series(
-                        np.asarray(manual_raters, dtype=float)
-                    )
-            elif self.model == "items":
-                manual_facet_effects = pd.DataFrame(
-                    {
-                        r: (
-                            np.array([v[item] for item in self.item_names], dtype=float)
-                            if isinstance(v, dict)
-                            else np.asarray(v, dtype=float)
-                        )
-                        for r, v in manual_raters.items()
-                    },
-                    index=self.item_names,
-                ).T
-            elif self.model == "thresholds":
-                manual_facet_effects = pd.DataFrame(
-                    {r: np.asarray(v) for r, v in manual_raters.items()},
-                    index=range(1, self.max_score + 1),
-                ).T
-            elif self.model == "matrix":
-                I, K = self.no_of_items, self.max_score
-                blocks = []
-                for r, v in manual_raters.items():
-                    if isinstance(v, dict):
-                        # {item_name: [threshold_vals]} → (I, K) array ordered by item_names
-                        mat = np.array(
-                            [v[item] for item in self.item_names], dtype=float
+        self.anchors = self._check_anchors(self.facet_names, anchors)
+        self.neutral_anchors = bool(neutral_anchors)
+        self._neutral = self._neutral_mask(self.facet_names, self.anchors, neutral_anchors)
+        if self.model == "mixed":
+            self._simulate_mixed(
+                rater_models,
+                candidate_models,
+                proportions,
+                interaction_range,
+                stretch_range,
+                item_stretch_range,
+                threshold_stretch_range,
+                anchors,
+                neutral_anchors,
+            )
+        else:
+            if manual_raters is not None:
+                if self.model == "global":
+                    if hasattr(manual_raters, "items"):
+                        manual_facet_effects = pd.Series(
+                            {r: float(v) for r, v in manual_raters.items()}
                         )
                     else:
-                        arr = np.asarray(v, dtype=float)
-                        if arr.ndim == 0:
-                            # scalar → global: uniform (I, K)
-                            mat = np.full((I, K), float(arr))
-                        elif arr.ndim == 1 and len(arr) == I:
-                            # (I,) → items: tile over thresholds
-                            mat = np.tile(arr[:, None], (1, K))
-                        elif arr.ndim == 1 and len(arr) == K:
-                            # (K,) → thresholds: tile over items
-                            mat = np.tile(arr[None, :], (I, 1))
-                        elif arr.ndim == 2 and arr.shape == (I, K):
-                            # (I, K) → matrix: use as-is
-                            mat = arr
-                        elif isinstance(v, (tuple, list)) and len(v) == 2:
-                            # (item_vec, thresh_vec) → bivector
-                            iv = np.asarray(v[0], dtype=float)
-                            tv = np.asarray(v[1], dtype=float)
-                            mat = iv[:, None] + tv[None, :]
-                        else:
-                            raise ValueError(
-                                f"manual_raters['{r}']: cannot infer model from shape {arr.shape}. "
-                                f"Pass a scalar, dict, (I,) array, (K,) array, (I,K) array, "
-                                f"or (item_vec, thresh_vec) tuple."
-                            )
-                    blocks.append(
-                        pd.DataFrame(
-                            mat, index=self.item_names, columns=range(1, K + 1)
+                        manual_facet_effects = pd.Series(
+                            np.asarray(manual_raters, dtype=float)
                         )
+                elif self.model in ("items", "thresholds"):
+                    # labelled values (dict / Series) are aligned by label, others read in order
+                    manual_facet_effects = pd.DataFrame(
+                        {
+                            r: _coerce_rater_params(
+                                self.model, v, r, self.item_names, self.max_score, "manual_raters"
+                            )
+                            for r, v in manual_raters.items()
+                        }
+                    ).T
+                elif self.model == "matrix":
+                    I, K = self.no_of_items, self.max_score
+                    blocks = []
+                    for r, v in manual_raters.items():
+                        if isinstance(v, (dict, pd.DataFrame)):
+                            # {item_name: K values} or an items x thresholds DataFrame, aligned by label
+                            mat = _coerce_rater_params(
+                                "matrix", v, r, self.item_names, K, "manual_raters"
+                            ).to_numpy()
+                        else:
+                            arr = np.asarray(v, dtype=float)
+                            if arr.ndim == 0:
+                                # scalar → global: uniform (I, K)
+                                mat = np.full((I, K), float(arr))
+                            elif arr.ndim == 1 and len(arr) == I:
+                                # (I,) → items: tile over thresholds
+                                mat = np.tile(arr[:, None], (1, K))
+                            elif arr.ndim == 1 and len(arr) == K:
+                                # (K,) → thresholds: tile over items
+                                mat = np.tile(arr[None, :], (I, 1))
+                            elif arr.ndim == 2 and arr.shape == (I, K):
+                                # (I, K) → matrix: use as-is
+                                mat = arr
+                            elif isinstance(v, (tuple, list)) and len(v) == 2:
+                                # (item_vec, thresh_vec) → bivector
+                                iv = np.asarray(v[0], dtype=float)
+                                tv = np.asarray(v[1], dtype=float)
+                                mat = iv[:, None] + tv[None, :]
+                            else:
+                                raise ValueError(
+                                    f"manual_raters['{r}']: cannot infer model from shape {arr.shape}. "
+                                    f"Pass a scalar, dict, (I,) array, (K,) array, (I,K) array, "
+                                    f"or (item_vec, thresh_vec) tuple."
+                                )
+                        blocks.append(
+                            pd.DataFrame(
+                                mat, index=self.item_names, columns=range(1, K + 1)
+                            )
+                        )
+                    mi = pd.MultiIndex.from_product(
+                        [list(manual_raters.keys()), self.item_names],
+                        names=["facet_element", "item"],
                     )
-                mi = pd.MultiIndex.from_product(
-                    [list(manual_raters.keys()), self.item_names],
-                    names=["facet_element", "item"],
-                )
-                manual_facet_effects = pd.DataFrame(
-                    np.vstack([b.values for b in blocks]),
-                    index=mi,
-                    columns=range(1, K + 1),
-                )
-        self.facet_effects = self._generate_facet_effects(
-            manual_facet_effects, manual_item_effects, manual_threshold_effects
-        )
+                    manual_facet_effects = pd.DataFrame(
+                        np.vstack([b.values for b in blocks]),
+                        index=mi,
+                        columns=range(1, K + 1),
+                    )
+            self.facet_effects = self._generate_facet_effects(
+                manual_facet_effects, manual_item_effects, manual_threshold_effects
+            )
         setattr(self, f"{self.facets}_effects", self.facet_effects)
 
         if _params_only:
@@ -444,6 +822,323 @@ class MFRM_Sim(Rasch_Sim):
         scores = self._draw_scores(R * self.no_of_persons, self._cat_prob_rows)
         mask = self._missing_mask(n_blocks=R, shared=shared_missing)
         self.responses = self._responses_frame(scores, mask, self._row_index)
+        if self.model != "mixed":
+            self._report_in_anchor_frame()
+
+    # ------------------------------------------------------------------
+    # Anchors: the frame of the reported true values
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _check_anchors(names, anchors):
+        """anchors as a list of facet element names (None stays None), raising on unknown or empty."""
+        if anchors is None:
+            return None
+        anchors = list(anchors)
+        unknown = [a for a in anchors if a not in list(names)]
+        if unknown or not anchors:
+            raise ValueError(
+                f"anchors must be a non-empty list of facet element names; unknown: {unknown}. "
+                f"The names are {list(names)}."
+            )
+        return anchors
+
+    @staticmethod
+    def _neutral_mask(names, anchors, neutral_anchors):
+        """Boolean mask over names: the anchors when neutral_anchors is set (no-op without anchors)."""
+        anchors = MFRM_Sim._check_anchors(names, anchors)
+        return np.array([bool(neutral_anchors) and anchors is not None and r in anchors for r in names])
+
+    def _report_in_anchor_frame(self):
+        """
+        With anchors, re-express the reported true values in the frame calibrate_anchor(model, anchors) gives the
+        estimates: global -- the anchors' mean effect is subtracted from every facet element; items / thresholds --
+        the anchors' mean effect on each item / threshold moves into that item location / threshold, which are then
+        centred; bivector -- both parts as items and thresholds; matrix -- the anchors' mean item and threshold margins
+        move into the item locations and thresholds (their item-by-threshold remainder stays in the effects). Every
+        location is unchanged apart from a common shift, which the reported person locations take up, so the data
+        are unchanged.
+        """
+        if self.anchors is None:
+            return
+        a, names, K = self.anchors, list(self.facet_names), self.max_score
+        m = self.model
+        if m == "global":
+            adj = float(self.facet_effects.loc[a].mean())
+            self.facet_effects = self.facet_effects - adj
+            shift = adj
+        elif m in ("items", "thresholds"):
+            adj = self.facet_effects.loc[a].mean(axis=0)
+            self.facet_effects = self.facet_effects - adj
+            base = (self.items if m == "items" else self.thresholds) + adj.to_numpy()
+            shift = float(base.mean())
+            base = base - shift
+            if m == "items":
+                self.items = base
+            else:
+                self.thresholds = base
+        elif m == "bivector":
+            ia = self.item_effects.loc[a].mean(axis=0)
+            ta = self.threshold_effects.loc[a].mean(axis=0)
+            self.item_effects = self.item_effects - ia
+            self.threshold_effects = self.threshold_effects - ta
+            items, thresholds = self.items + ia.to_numpy(), self.thresholds + ta.to_numpy()
+            shift = float(items.mean() + thresholds.mean())
+            self.items, self.thresholds = items - items.mean(), thresholds - thresholds.mean()
+            mi = pd.MultiIndex.from_product([names, self.item_names], names=["facet_element", "item"])
+            full = self.item_effects.to_numpy()[:, :, None] + self.threshold_effects.to_numpy()[:, None, :]
+            self.facet_effects = pd.DataFrame(full.reshape(-1, K), index=mi, columns=range(1, K + 1))
+        else:  # matrix
+            arr = self.facet_effects.to_numpy().reshape(len(names), self.no_of_items, K)
+            c = arr[[names.index(x) for x in a]].mean(axis=0)
+            da, dt = c.mean(axis=1), c.mean(axis=0)
+            arr = arr - (da[:, None] + dt[None, :] - c.mean())[None]
+            items, thresholds = self.items + da, self.thresholds + dt
+            shift = float(items.mean() + thresholds.mean() - c.mean())
+            self.items, self.thresholds = items - items.mean(), thresholds - thresholds.mean()
+            self.facet_effects = pd.DataFrame(
+                arr.reshape(-1, K), index=self.facet_effects.index, columns=self.facet_effects.columns
+            )
+        self.persons = self.persons - shift
+        setattr(self, f"{self.facets}_effects", self.facet_effects)
+
+    def _report_stretch_anchor_frame(self, anchors, neutral_anchors):
+        """
+        The stretch simulations' version of _report_in_anchor_frame, in the frame calibrate_anchor gives a
+        stretch model (estimation='cp-full-rcl' / 'cpat-rcl'): the anchors' mean shift is subtracted from every
+        lambda_r, every multiplier is divided by the anchors' mean multiplier on its axis, and the item locations /
+        thresholds are multiplied by it. Every location is unchanged apart from the anchors' mean shift, which the
+        reported person locations take up.
+        """
+        self.anchors = self._check_anchors(self.facet_names, anchors)
+        self.neutral_anchors = bool(neutral_anchors)
+        if self.anchors is None:
+            return
+        a, K = self.anchors, self.max_score
+        lam = self.lambda_
+        om_i = getattr(self, "omega_items", self.omega if self.model == "pseudo_halo" else None)
+        om_t = getattr(self, "omega_thresholds", self.omega if self.model == "centrality" else None)
+        lam_a = float(lam.loc[a].mean())
+        wi = 1.0 if om_i is None else float(om_i.loc[a].mean())
+        wt = 1.0 if om_t is None else float(om_t.loc[a].mean())
+        if wi == 0 or wt == 0:
+            raise ValueError(
+                "anchors: the anchors' mean stretch multiplier is 0, so the frame calibrate_anchor uses (each "
+                "multiplier divided by the anchors' mean) does not exist. Choose other anchors."
+            )
+        self.lambda_ = lam - lam_a
+        delta, tau = self.items * wi, self.thresholds * wt
+        self.items, self.thresholds = delta, tau
+        if om_i is not None:
+            om_i = om_i / wi
+        if om_t is not None:
+            om_t = om_t / wt
+        if self.model == "centrality":
+            self.omega = om_t
+            eff = self.lambda_.to_numpy()[:, None] + (om_t.to_numpy()[:, None] - 1.0) * tau.to_numpy()[None, :]
+            self.facet_effects = pd.DataFrame(eff, index=self.facet_names, columns=range(1, K + 1))
+        elif self.model == "pseudo_halo":
+            self.omega = om_i
+            eff = self.lambda_.to_numpy()[:, None] + (om_i.to_numpy()[:, None] - 1.0) * delta.to_numpy()[None, :]
+            self.facet_effects = pd.DataFrame(eff, index=self.facet_names, columns=self.item_names)
+        else:
+            self.omega_items, self.omega_thresholds = om_i, om_t
+            eff = (
+                self.lambda_.to_numpy()[:, None, None]
+                + (om_i.to_numpy()[:, None, None] - 1.0) * delta.to_numpy()[None, :, None]
+                + (om_t.to_numpy()[:, None, None] - 1.0) * tau.to_numpy()[None, None, :]
+            )
+            self.facet_effects = pd.DataFrame(
+                eff.reshape(-1, K), index=self.facet_effects.index, columns=range(1, K + 1)
+            )
+        self.persons = self.persons - lam_a
+        setattr(self, f"{self.facets}_effects", self.facet_effects)
+
+    # ------------------------------------------------------------------
+    # Mixed representations
+    # ------------------------------------------------------------------
+
+    def _simulate_mixed(
+        self,
+        rater_models,
+        candidate_models,
+        proportions,
+        interaction_range,
+        stretch_range,
+        item_stretch_range,
+        threshold_stretch_range,
+        anchors,
+        neutral_anchors,
+    ):
+        """
+        model='mixed': each facet element's representation and parameters (manual or drawn), its location
+        deviations from the shared item locations and thresholds, and the reported tables. The data come from the
+        native parameters (relative to native_items / native_thresholds, with native_persons); the matrix layout
+        (facet_effects) and items / thresholds / persons are that grid re-expressed with the anchors' mean item and
+        threshold margins taken into the item locations and thresholds, as calibrate_anchor does.
+        """
+        rng = self._rng
+        R, I, K = self.no_of_facet_elements, self.no_of_items, self.max_score
+        names = list(self.facet_names)
+        pool = list(_REPRESENTATIONS if candidate_models is None else candidate_models)
+        bad = [m for m in pool if m not in _REPRESENTATIONS]
+        if bad or not pool:
+            raise ValueError(
+                f"candidate_models must be a non-empty list of {list(_REPRESENTATIONS)}, got {candidate_models!r}."
+            )
+        if proportions is None:
+            weights = np.full(len(pool), 1.0 / len(pool))
+        else:
+            if isinstance(proportions, (dict, pd.Series)):
+                _check_labels(proportions.keys(), pool, "proportions", "representation")
+                weights = _finite([proportions[m] for m in pool], "proportions")
+            else:
+                weights = _finite(proportions, "proportions")
+                if weights.shape != (len(pool),):
+                    raise ValueError(
+                        f"proportions: expected {len(pool)} values, one per representation in {pool}, got "
+                        f"shape {weights.shape}."
+                    )
+            if np.any(weights < 0) or weights.sum() <= 0:
+                raise ValueError("proportions must be non-negative and not all zero.")
+            weights = weights / weights.sum()
+        anchors = self._check_anchors(names, anchors)
+        neutral = set(anchors) if (neutral_anchors and anchors is not None) else set()
+
+        # representations: given (list or dict), the rest drawn from the pool
+        spec = {}
+        if rater_models is None:
+            pass
+        elif isinstance(rater_models, (dict, pd.Series)):
+            unknown = [r for r in rater_models.keys() if r not in names]
+            if unknown:
+                raise ValueError(f"rater_models: unknown facet element(s) {unknown}; the names are {names}.")
+            for r, v in rater_models.items():
+                if isinstance(v, str):
+                    spec[r] = (v, None)
+                elif isinstance(v, (tuple, list)) and len(v) == 2 and isinstance(v[0], str):
+                    spec[r] = (v[0], v[1])
+                else:
+                    raise ValueError(
+                        f"rater_models[{r!r}]: expected a representation name or (representation, parameters), "
+                        f"got {v!r}."
+                    )
+        else:
+            given = list(rater_models)
+            if len(given) != R:
+                raise ValueError(
+                    f"rater_models has {len(given)} representations but there are {R} facet elements: give one "
+                    f"per facet element, in order."
+                )
+            spec = {r: (m, None) for r, m in zip(names, given)}
+        for r, (m, _) in spec.items():
+            if m not in _REPRESENTATIONS:
+                raise ValueError(f"rater_models[{r!r}]: unknown representation {m!r}; expected one of {list(_REPRESENTATIONS)}.")
+        drawn = rng.choice(len(pool), size=R, p=weights)  # drawn for every facet element so seeds stay aligned
+        models = {r: spec[r][0] if r in spec else pool[drawn[k]] for k, r in enumerate(names)}
+
+        # random values: severity across all facet elements (as the global simulation), the rest per facet element
+        free = [r for r in names if r not in neutral]
+        sev = dict.fromkeys(names, 0.0)
+        if len(free) > 1:
+            x = truncnorm.rvs(-1.96, 1.96, size=len(free), random_state=rng)
+            x *= _spread_factor(self.facet_range, x)
+            if not neutral:
+                x -= x.mean()
+            sev.update(zip(free, x))
+        lo_i, hi_i = _stretch_bounds(stretch_range if item_stretch_range is None else item_stretch_range,
+                                     "item_stretch_range" if item_stretch_range is not None else "stretch_range")
+        lo_t, hi_t = _stretch_bounds(stretch_range if threshold_stretch_range is None else threshold_stretch_range,
+                                     "threshold_stretch_range" if threshold_stretch_range is not None else "stretch_range")
+        thr = list(range(1, K + 1))
+        params = {}
+        for r in names:
+            m, given = spec.get(r, (models[r], None))
+            if given is not None:
+                params[r] = _coerce_rater_params(m, given, r, self.item_names, K)
+                continue
+            if r in neutral:
+                params[r] = _neutral_params(m, self.item_names, K)
+                continue
+            lam = sev[r]
+            if m == "global":
+                params[r] = float(lam)
+            elif m == "items":
+                params[r] = pd.Series(lam + _draw_pattern(rng, I, self.item_facet_range), index=self.item_names)
+            elif m == "thresholds":
+                params[r] = pd.Series(lam + _draw_pattern(rng, K, self.threshold_facet_range), index=thr)
+            elif m == "bivector":
+                params[r] = {
+                    "item_effects": pd.Series(lam + _draw_pattern(rng, I, self.item_facet_range), index=self.item_names),
+                    "threshold_effects": pd.Series(_draw_pattern(rng, K, self.threshold_facet_range), index=thr),
+                }
+            elif m == "matrix":
+                g = (
+                    lam
+                    + _draw_pattern(rng, I, self.item_facet_range)[:, None]
+                    + _draw_pattern(rng, K, self.threshold_facet_range)[None, :]
+                    + _draw_pattern(rng, (I, K), interaction_range)
+                )
+                params[r] = pd.DataFrame(g, index=self.item_names, columns=thr)
+            elif m == "centrality":
+                params[r] = {"lambda": float(lam), "omega": _draw_between(rng, lo_t, hi_t)}
+            elif m == "pseudo_halo":
+                params[r] = {"lambda": float(lam), "omega": _draw_between(rng, lo_i, hi_i)}
+            else:
+                params[r] = {
+                    "lambda": float(lam),
+                    "omega_items": _draw_between(rng, lo_i, hi_i),
+                    "omega_thresholds": _draw_between(rng, lo_t, hi_t),
+                }
+
+        delta, tau, theta = self.items.to_numpy(), self.thresholds.to_numpy(), self.persons.to_numpy()
+        grid = np.stack([_rater_grid(models[r], params[r], delta, tau) for r in names])  # (R, I, K)
+        self.native_items, self.native_thresholds, self.native_persons = (
+            self.items.copy(), self.thresholds.copy(), self.persons.copy(),
+        )
+        self._native_grid = grid
+        self.rater_models = pd.Series(models, name="Representation")[names]
+        self.rater_params = {r: (models[r], params[r]) for r in names}
+        self.anchors = anchors
+        self.neutral_anchors = bool(neutral_anchors)
+
+        # one table per representation, in its single-representation layout (only the facet elements on it)
+        self._mixed_tables = []
+        for m in _REPRESENTATIONS:
+            on = [r for r in names if models[r] == m]
+            if not on:
+                continue
+            if m == "global":
+                tabs = {"": pd.Series({r: params[r] for r in on}, name="Severity")}
+            elif m in ("items", "thresholds"):
+                tabs = {"": pd.DataFrame({r: params[r] for r in on}).T}
+            elif m == "bivector":
+                tabs = {
+                    "_items": pd.DataFrame({r: params[r]["item_effects"] for r in on}).T,
+                    "_thresholds": pd.DataFrame({r: params[r]["threshold_effects"] for r in on}).T,
+                }
+            elif m == "matrix":
+                tabs = {"": pd.concat({r: params[r] for r in on}, names=["facet_element", "item"])}
+            else:
+                tabs = {"": pd.DataFrame({r: params[r] for r in on}).T[list(_STRETCH_KEYS[m])]}
+            for suffix, tab in tabs.items():
+                name = f"facet_effects_mixed_{m}{suffix}"
+                setattr(self, name, tab)
+                self._mixed_tables.append(name)
+
+        # reported frame: the anchors' (all facet elements') mean item and threshold margins move into the item
+        # locations and thresholds; their item-by-threshold remainder stays in the facet element effects
+        ref = [names.index(a) for a in (anchors if anchors is not None else names)]
+        c = grid[ref].mean(axis=0)
+        da, dt = c.mean(axis=1), c.mean(axis=0)
+        rep = grid - (da[:, None] + dt[None, :] - c.mean())[None]
+        items, thresholds = delta + da, tau + dt
+        shift = items.mean() + thresholds.mean() - c.mean()  # common shift of every location, carried by the persons
+        self.items = pd.Series(items - items.mean(), index=self.item_names)
+        self.thresholds = pd.Series(thresholds - thresholds.mean(), index=thr)
+        self.persons = pd.Series(theta - shift, index=self.persons.index)
+        mi = pd.MultiIndex.from_product([names, self.item_names], names=["facet_element", "item"])
+        self.facet_effects = pd.DataFrame(rep.reshape(-1, K), index=mi, columns=thr)
 
     # ------------------------------------------------------------------
     # Facet effect generation
@@ -467,8 +1162,10 @@ class MFRM_Sim(Rasch_Sim):
                 sev = truncnorm.rvs(
                     -1.96, 1.96, size=self.no_of_facet_elements, random_state=self._rng
                 )
-                sev *= self.facet_range / (sev.max() - sev.min())
-                sev -= sev.mean()
+                sev *= _spread_factor(self.facet_range, sev)
+                if not self._neutral.any():
+                    sev -= sev.mean()
+                sev[self._neutral] = 0.0
             return pd.Series(
                 {facet_element: s for facet_element, s in zip(self.facet_names, sev)}
             )
@@ -488,10 +1185,12 @@ class MFRM_Sim(Rasch_Sim):
                         for _ in range(self.no_of_facet_elements)
                     ]
                 )  # (R, I)
-                sev *= self.facet_range / (sev.max() - sev.min())
+                sev *= _spread_factor(self.facet_range, sev)
                 # Centre per item (column)
-                for i in range(self.no_of_items):
-                    sev[:, i] -= sev[:, i].mean()
+                if not self._neutral.any():
+                    for i in range(self.no_of_items):
+                        sev[:, i] -= sev[:, i].mean()
+                sev[self._neutral] = 0.0
                 return pd.DataFrame(
                     sev, index=self.facet_names, columns=self.item_names
                 )
@@ -511,13 +1210,15 @@ class MFRM_Sim(Rasch_Sim):
                         for _ in range(self.no_of_facet_elements)
                     ]
                 )  # (R, K)
-                sev *= self.facet_range / (sev.max() - sev.min())
+                sev *= _spread_factor(self.facet_range, sev)
                 # Centre per threshold (column), matching _estimate_raters_thresholds'
                 # per-threshold independent zero-centring across facet_elements —
                 # otherwise a nonzero true per-column mean shows up as a constant
                 # per-threshold bias against the (correctly zero-centred) estimates.
-                for k in range(self.max_score):
-                    sev[:, k] -= sev[:, k].mean()
+                if not self._neutral.any():
+                    for k in range(self.max_score):
+                        sev[:, k] -= sev[:, k].mean()
+                sev[self._neutral] = 0.0
                 return pd.DataFrame(
                     sev, index=self.facet_names, columns=range(1, self.max_score + 1)
                 )
@@ -541,15 +1242,17 @@ class MFRM_Sim(Rasch_Sim):
                         for _ in range(self.no_of_facet_elements)
                     ]
                 )  # (R, I, K)
-                sev *= self.facet_range / (sev.max() - sev.min())
+                sev *= _spread_factor(self.facet_range, sev)
                 # Centre per (item, threshold) cell across facet_elements, matching
                 # _estimate_raters_matrix's per-cell independent zero-centring across
                 # facet_elements — otherwise a nonzero true per-cell mean shows up as a
                 # constant per-(item, threshold) bias against the (correctly
                 # zero-centred) estimates.
-                for i in range(self.no_of_items):
-                    for k in range(self.max_score):
-                        sev[:, i, k] -= sev[:, i, k].mean()
+                if not self._neutral.any():
+                    for i in range(self.no_of_items):
+                        for k in range(self.max_score):
+                            sev[:, i, k] -= sev[:, i, k].mean()
+                sev[self._neutral] = 0.0
                 mi = pd.MultiIndex.from_product(
                     [self.facet_names, self.item_names], names=["facet_element", "item"]
                 )
@@ -575,8 +1278,10 @@ class MFRM_Sim(Rasch_Sim):
                         for _ in range(self.no_of_facet_elements)
                     ]
                 )  # (R, I)
-                raw *= self.item_facet_range / (raw.max() - raw.min())
-                raw -= raw.mean(axis=0, keepdims=True)
+                raw *= _spread_factor(self.item_facet_range, raw)
+                if not self._neutral.any():
+                    raw -= raw.mean(axis=0, keepdims=True)
+                raw[self._neutral] = 0.0
                 item_effects = pd.DataFrame(
                     raw, index=self.facet_names, columns=self.item_names
                 )
@@ -598,8 +1303,10 @@ class MFRM_Sim(Rasch_Sim):
                         for _ in range(self.no_of_facet_elements)
                     ]
                 )  # (R, K)
-                raw *= self.threshold_facet_range / (raw.max() - raw.min())
-                raw -= raw.mean(axis=0, keepdims=True)
+                raw *= _spread_factor(self.threshold_facet_range, raw)
+                if not self._neutral.any():
+                    raw -= raw.mean(axis=0, keepdims=True)
+                raw[self._neutral] = 0.0
                 threshold_effects = pd.DataFrame(
                     raw, index=self.facet_names, columns=range(1, self.max_score + 1)
                 )
@@ -652,11 +1359,13 @@ class MFRM_Sim(Rasch_Sim):
     def _prepare_cat_probs(self):
         """Cache the arrays and labels behind the category probabilities."""
         R, I, K = self.no_of_facet_elements, self.no_of_items, self.max_score
-        self._theta = self.persons.to_numpy()
-        self._delta = self.items.to_numpy()
-        self._tau_sums = [self.thresholds.iloc[:cat].sum() for cat in range(K + 1)]
+        mixed = self.model == "mixed"  # the data come from the native parameters
+        self._theta = (self.native_persons if mixed else self.persons).to_numpy()
+        self._delta = (self.native_items if mixed else self.items).to_numpy()
+        thresholds = self.native_thresholds if mixed else self.thresholds
+        self._tau_sums = [thresholds.iloc[:cat].sum() for cat in range(K + 1)]
         # the stretch-model wrappers relabel self.model afterwards
-        self._prob_model = self.model
+        self._prob_model = "matrix" if mixed else self.model
 
         effects = self.facet_effects
         if self.model == "global":
@@ -668,6 +1377,8 @@ class MFRM_Sim(Rasch_Sim):
         else:
             if self.model == "thresholds":
                 arr = effects.loc[self.facet_names].to_numpy()  # (R, K)
+            elif mixed:
+                arr = self._native_grid
             else:  # matrix, bivector
                 mi = pd.MultiIndex.from_product([self.facet_names, self.item_names])
                 arr = effects.loc[mi].to_numpy().reshape(R, I, K)
@@ -798,6 +1509,20 @@ class MFRM_Sim(Rasch_Sim):
             obj = getattr(self, name, None)
             if isinstance(obj, (pd.Series, pd.DataFrame)):
                 setattr(self, name, obj.loc[keep])
+        if self.model == "mixed":
+            self.rater_models = self.rater_models.loc[keep]
+            self.rater_params = {r: v for r, v in self.rater_params.items() if r in keep}
+            self._native_grid = self._native_grid[keep_pos]
+            for name in list(self._mixed_tables):
+                tab = getattr(self, name)
+                tab = tab[tab.index.get_level_values(0).isin(keep)]
+                if len(tab):
+                    setattr(self, name, tab)
+                else:
+                    delattr(self, name)
+                    self._mixed_tables.remove(name)
+            if self.anchors is not None:
+                self.anchors = [a for a in self.anchors if a in keep] or None
         setattr(self, f"{self.facets}_effects", self.facet_effects)
         self.responses = self.responses[
             ~self.responses.index.get_level_values(0).isin(which)
@@ -1069,10 +1794,13 @@ class MFRM_Sim_Centrality(MFRM_Sim):
         when every facet element's omega_r == 1, and 'global_range' pairs
         directly with 'stretch_range' below, matching the global_/stretch
         attribute alias naming (see MFRM._PARAM_ALIASES).
-    stretch_range : float, default 1
+    stretch_range : float or (lowest, highest), default 1
         Total spread of true omega_r values around 1 (analogous to
         global_range for lambda_r). E.g. stretch_range=1 typically gives
         omega_r roughly in [0.5, 1.5].
+        A pair (lowest, highest) instead draws each facet element's
+        omega_r between the bounds, which may be any real numbers (0 and
+        negative values included), lowest <= highest.
     manual_lambda : array-like or None, default None
         Custom true lambda_r values, length no_of_facet_elements. If None,
         drawn the same way MFRM_Sim's own facet_range scales locations.
@@ -1122,6 +1850,8 @@ class MFRM_Sim_Centrality(MFRM_Sim):
                 "MFRM_Sim's own facet_range, which would otherwise silently "
                 "absorb this into the discarded preliminary simulation)."
             )
+        anchors = kw.pop("anchors", None)
+        neutral_anchors = kw.pop("neutral_anchors", False)
         prelim = MFRM_Sim(
             no_of_items,
             no_of_persons,
@@ -1135,6 +1865,7 @@ class MFRM_Sim_Centrality(MFRM_Sim):
 
         rng = np.random.default_rng(seed)
         R = prelim.no_of_facet_elements
+        neutral = MFRM_Sim._neutral_mask(prelim.facet_names, anchors, neutral_anchors)
 
         if manual_lambda is not None:
             assert (
@@ -1143,8 +1874,10 @@ class MFRM_Sim_Centrality(MFRM_Sim):
             lam = np.array(manual_lambda, dtype=float)
         else:
             lam = truncnorm.rvs(-1.96, 1.96, size=R, random_state=rng)
-            lam *= global_range / (lam.max() - lam.min())
-            lam -= lam.mean()
+            lam *= _spread_factor(global_range, lam)
+            if not neutral.any():
+                lam -= lam.mean()
+            lam[neutral] = 0.0
 
         if manual_omega is not None:
             assert (
@@ -1152,10 +1885,8 @@ class MFRM_Sim_Centrality(MFRM_Sim):
             ), "Length of manual_omega must match number of facet_elements."
             omega = np.array(manual_omega, dtype=float)
         else:
-            dev = truncnorm.rvs(-1.96, 1.96, size=R, random_state=rng)
-            dev *= stretch_range / (dev.max() - dev.min())
-            dev -= dev.mean()
-            omega = 1.0 + dev
+            omega = _draw_multipliers(rng, R, stretch_range, centre=not neutral.any())
+            omega[neutral] = 1.0
 
         tau = prelim.thresholds.values
         implied_raters = {
@@ -1195,6 +1926,7 @@ class MFRM_Sim_Centrality(MFRM_Sim):
         self.model = "centrality"
         self.lambda_ = pd.Series(lam, index=self.facet_names)
         self.omega = pd.Series(omega, index=self.facet_names)
+        self._report_stretch_anchor_frame(anchors, neutral_anchors)
 
     def __getattr__(self, name):
         """
@@ -1249,9 +1981,12 @@ class MFRM_Sim_PseudoHalo(MFRM_Sim):
         when every facet element's omega_r == 1, and 'global_range' pairs
         directly with 'stretch_range' below, matching the global_/stretch
         attribute alias naming (see MFRM._PARAM_ALIASES).
-    stretch_range : float, default 1
+    stretch_range : float or (lowest, highest), default 1
         Total spread of true omega_r values around 1 (analogous to
         global_range for lambda_r).
+        A pair (lowest, highest) instead draws each facet element's
+        omega_r between the bounds, which may be any real numbers (0 and
+        negative values included), lowest <= highest.
     manual_lambda : array-like or None, default None
         Custom true lambda_r values, length no_of_facet_elements. If None,
         drawn the same way MFRM_Sim's own facet_range scales locations.
@@ -1298,6 +2033,8 @@ class MFRM_Sim_PseudoHalo(MFRM_Sim):
                 "MFRM_Sim's own facet_range, which would otherwise silently "
                 "absorb this into the discarded preliminary simulation)."
             )
+        anchors = kw.pop("anchors", None)
+        neutral_anchors = kw.pop("neutral_anchors", False)
         prelim = MFRM_Sim(
             no_of_items,
             no_of_persons,
@@ -1311,6 +2048,7 @@ class MFRM_Sim_PseudoHalo(MFRM_Sim):
 
         rng = np.random.default_rng(seed)
         R = prelim.no_of_facet_elements
+        neutral = MFRM_Sim._neutral_mask(prelim.facet_names, anchors, neutral_anchors)
 
         if manual_lambda is not None:
             assert (
@@ -1319,8 +2057,10 @@ class MFRM_Sim_PseudoHalo(MFRM_Sim):
             lam = np.array(manual_lambda, dtype=float)
         else:
             lam = truncnorm.rvs(-1.96, 1.96, size=R, random_state=rng)
-            lam *= global_range / (lam.max() - lam.min())
-            lam -= lam.mean()
+            lam *= _spread_factor(global_range, lam)
+            if not neutral.any():
+                lam -= lam.mean()
+            lam[neutral] = 0.0
 
         if manual_omega is not None:
             assert (
@@ -1328,10 +2068,8 @@ class MFRM_Sim_PseudoHalo(MFRM_Sim):
             ), "Length of manual_omega must match number of facet_elements."
             omega = np.array(manual_omega, dtype=float)
         else:
-            dev = truncnorm.rvs(-1.96, 1.96, size=R, random_state=rng)
-            dev *= stretch_range / (dev.max() - dev.min())
-            dev -= dev.mean()
-            omega = 1.0 + dev
+            omega = _draw_multipliers(rng, R, stretch_range, centre=not neutral.any())
+            omega[neutral] = 1.0
 
         delta = prelim.items.values
         implied_raters = {
@@ -1375,6 +2113,7 @@ class MFRM_Sim_PseudoHalo(MFRM_Sim):
         self.model = "pseudo_halo"
         self.lambda_ = pd.Series(lam, index=self.facet_names)
         self.omega = pd.Series(omega, index=self.facet_names)
+        self._report_stretch_anchor_frame(anchors, neutral_anchors)
 
     def __getattr__(self, name):
         """
@@ -1436,10 +2175,15 @@ class MFRM_Sim_Bistretch(MFRM_Sim):
         'global_range' pairs directly with 'stretch_range' below,
         matching the global_/stretch_items/stretch_thresholds attribute
         alias naming (see MFRM._PARAM_ALIASES).
-    stretch_range : float, default 1
+    stretch_range : float or (lowest, highest), default 1
         Total spread of true omega_items_r and omega_thresholds_r values
         around 1 (analogous to global_range for lambda_r); used for both
-        axes unless overridden individually.
+        axes unless overridden by item_stretch_range /
+        threshold_stretch_range. A pair (lowest, highest) instead draws each
+        facet element's multipliers between the bounds, which may be any
+        real numbers (0 and negative values included), lowest <= highest.
+    item_stretch_range, threshold_stretch_range : float, pair or None, default None
+        As stretch_range, for omega_items_r / omega_thresholds_r only.
     manual_lambda : array-like or None, default None
         Custom true lambda_r values, length no_of_facet_elements. If None,
         drawn the same way MFRM_Sim's own facet_range scales locations.
@@ -1480,6 +2224,8 @@ class MFRM_Sim_Bistretch(MFRM_Sim):
         no_of_facet_elements,
         global_range=2,
         stretch_range=1,
+        item_stretch_range=None,
+        threshold_stretch_range=None,
         manual_lambda=None,
         manual_omega_items=None,
         manual_omega_thresholds=None,
@@ -1494,6 +2240,8 @@ class MFRM_Sim_Bistretch(MFRM_Sim):
                 "MFRM_Sim's own facet_range, which would otherwise silently "
                 "absorb this into the discarded preliminary simulation)."
             )
+        anchors = kw.pop("anchors", None)
+        neutral_anchors = kw.pop("neutral_anchors", False)
         prelim = MFRM_Sim(
             no_of_items,
             no_of_persons,
@@ -1507,6 +2255,7 @@ class MFRM_Sim_Bistretch(MFRM_Sim):
 
         rng = np.random.default_rng(seed)
         R = prelim.no_of_facet_elements
+        neutral = MFRM_Sim._neutral_mask(prelim.facet_names, anchors, neutral_anchors)
 
         if manual_lambda is not None:
             assert (
@@ -1515,8 +2264,10 @@ class MFRM_Sim_Bistretch(MFRM_Sim):
             lam = np.array(manual_lambda, dtype=float)
         else:
             lam = truncnorm.rvs(-1.96, 1.96, size=R, random_state=rng)
-            lam *= global_range / (lam.max() - lam.min())
-            lam -= lam.mean()
+            lam *= _spread_factor(global_range, lam)
+            if not neutral.any():
+                lam -= lam.mean()
+            lam[neutral] = 0.0
 
         if manual_omega_items is not None:
             assert (
@@ -1524,10 +2275,13 @@ class MFRM_Sim_Bistretch(MFRM_Sim):
             ), "Length of manual_omega_items must match number of facet_elements."
             omega_items = np.array(manual_omega_items, dtype=float)
         else:
-            dev = truncnorm.rvs(-1.96, 1.96, size=R, random_state=rng)
-            dev *= stretch_range / (dev.max() - dev.min())
-            dev -= dev.mean()
-            omega_items = 1.0 + dev
+            omega_items = _draw_multipliers(
+                rng,
+                R,
+                stretch_range if item_stretch_range is None else item_stretch_range,
+                centre=not neutral.any(),
+            )
+            omega_items[neutral] = 1.0
 
         if manual_omega_thresholds is not None:
             assert (
@@ -1535,10 +2289,13 @@ class MFRM_Sim_Bistretch(MFRM_Sim):
             ), "Length of manual_omega_thresholds must match number of facet_elements."
             omega_thresholds = np.array(manual_omega_thresholds, dtype=float)
         else:
-            dev = truncnorm.rvs(-1.96, 1.96, size=R, random_state=rng)
-            dev *= stretch_range / (dev.max() - dev.min())
-            dev -= dev.mean()
-            omega_thresholds = 1.0 + dev
+            omega_thresholds = _draw_multipliers(
+                rng,
+                R,
+                stretch_range if threshold_stretch_range is None else threshold_stretch_range,
+                centre=not neutral.any(),
+            )
+            omega_thresholds[neutral] = 1.0
 
         delta = prelim.items.values
         tau = prelim.thresholds.values
@@ -1590,6 +2347,7 @@ class MFRM_Sim_Bistretch(MFRM_Sim):
         self.lambda_ = pd.Series(lam, index=self.facet_names)
         self.omega_items = pd.Series(omega_items, index=self.facet_names)
         self.omega_thresholds = pd.Series(omega_thresholds, index=self.facet_names)
+        self._report_stretch_anchor_frame(anchors, neutral_anchors)
 
     def __getattr__(self, name):
         """

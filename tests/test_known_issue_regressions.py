@@ -27,6 +27,7 @@ has no effect on *_Sim output, only each sim's own seed= argument does.
 
 import warnings
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -51,7 +52,7 @@ def _make_mfrm(no_of_items=6, no_of_persons=250, no_of_raters=6,
 # #19 / #32 -- MFRM row-order corruption
 # ---------------------------------------------------------------------------
 
-def test_shuffled_rater_block_does_not_collapse_severity_spread():
+def test_shuffled_rater_block_does_not_collapse_global_effect_spread():
     """
     Guards known-issues #19/#32.
 
@@ -62,7 +63,7 @@ def test_shuffled_rater_block_does_not_collapse_severity_spread():
     (reindex each facet_element's block to self.person_names) since
     nothing else guarantees it; a caller handing in a boolean-filtered,
     resampled, or otherwise reordered subset would otherwise silently
-    collapse estimated rater severities toward zero while item estimates
+    collapse estimated rater global effects toward zero while item estimates
     stayed fine (item_diffs never needs cross-block alignment, so it was
     accidentally immune -- which is exactly why this bug went unnoticed
     for as long as it did).
@@ -94,7 +95,7 @@ def test_shuffled_rater_block_does_not_collapse_severity_spread():
     # ~1-2 logits collapsed to an estimated ~0.1-0.2 logits. Recovery
     # need not be exact -- just nowhere near that collapse.
     assert est_spread > 0.5 * true_spread, (
-        f"rater severity spread collapsed under a reordered rater block: "
+        f"rater global effect spread collapsed under a reordered rater block: "
         f"true={true_spread:.3f}, estimated={est_spread:.3f} -- this is "
         f"the #19/#32 row-order corruption symptom"
     )
@@ -119,7 +120,7 @@ def test_check_anchor_homogeneity_runs_without_nameerror():
     anchors = sim.rater_names[:3]
 
     m.check_anchor_homogeneity(
-        model="global", anchors=anchors, no_of_samples=50, seed=1,
+        model="global", anchors=anchors, rater_homogeneity_test="cochran", no_of_samples=50, seed=1,
     )
 
     # anchor_homogeneity_test is the single Cochran's Q summary (Q, df, p,
@@ -146,7 +147,7 @@ def test_per_rater_model_selection_lr_runs_without_nameerror():
     """
     sim, m = _make_mfrm(no_of_raters=5, seed=12)
 
-    m.per_rater_model_selection(test="LR")
+    m.per_rater_model_selection(test="LR", estimation="pair-cpat")  # the LR ladder is the derived (pair-cpat) path
 
     assert m.rater_models is not None
     assert set(m.rater_models.index) == set(sim.rater_names)
@@ -188,11 +189,11 @@ def test_mean_facet_effects_averages_across_real_raters():
     Guards known-issues #11.
 
     Investigated as a suspected regression (curves drawn against a
-    dummy zero-severity rater instead of the mean of real raters) and
+    dummy rater with global effect zero instead of the mean of real raters) and
     found NOT to be one: icc/crcs/threshold_ccs's facet_element=None
     case draws the theoretical curve via _mean_facet_effects(), which
     sets the requested key to the mean across every other real rater --
-    never a dummy zero severity. This test pins that mechanism down
+    never a dummy zero global effect. This test pins that mechanism down
     directly so a *real* future regression here is actually caught,
     unlike the first (false-alarm) investigation.
     """
@@ -345,22 +346,26 @@ def _rsm_sim(**kw):
 
 def test_rsm_threshold_method_options():
     """
-    RSM threshold_method (added 2026-10-02, estimation='pair-cpat'): 'cpat-cml' is the default,
-    'cpat-info-weighted' reproduces the pre-v1.4.0 estimator, anything else
-    raises, and both recover well-informed thresholds closely.
+    RSM threshold_method (added 2026-10-02, estimation='pair-cpat'): 'cpat-cl' is the default (named
+    'cpat-cml' before v2.0.0: still accepted, with a FutureWarning, and gives the same estimates),
+    'cpat-info-weighted' reproduces the pre-v1.4.0 estimator, anything else raises, and both recover
+    well-informed thresholds closely.
     """
     import numpy as np
     sim = _rsm_sim(no_of_items=10, no_of_persons=1500, max_score=4, seed=31)
     true = np.array(sim.thresholds, dtype=float); true -= true.mean()
     m = rp.RSM(sim.responses, max_score=4)
     m.calibrate(estimation="pair-cpat")
-    assert m.threshold_method == "cpat-cml"
-    cml = m.thresholds.values.copy()
+    assert m.threshold_method == "cpat-cl"
+    cl = m.thresholds.values.copy()
+    with pytest.warns(FutureWarning, match="renamed 'cpat-cl'"):
+        m.calibrate(threshold_method="cpat-cml")
+    assert m.threshold_method == "cpat-cl" and np.array_equal(m.thresholds.values, cl)
     m.calibrate(threshold_method="cpat-info-weighted")
     info = m.thresholds.values.copy()
-    for est in (cml, info):
+    for est in (cl, info):
         assert np.sqrt(np.mean((est - true) ** 2)) < 0.3
-    assert not np.allclose(cml, info)
+    assert not np.allclose(cl, info)
     with pytest.raises(ValueError):
         m.calibrate(threshold_method="cml")
 
@@ -484,9 +489,9 @@ def test_slm_pcm_sandwich_standard_errors():
 
     p = PCM_Sim(no_of_items=8, no_of_persons=1500, max_score_vector=[3] * 8,
                 manual_items=list(np.linspace(-1, 1, 8)), manual_thresholds=[[-1.0, 0.0, 1.0]] * 8, seed=13)
-    q = rp.PCM(p.responses, max_score_vector=[3] * 8); q.calibrate(); q.std_errors(interval=0.95)
+    q = rp.PCM(p.responses, max_score_vector=[3] * 8); q.calibrate(estimation="pair"); q.std_errors(interval=0.95)
     assert q.se_method == "sandwich" and q.central_bootstrap is None
-    qb = rp.PCM(p.responses, max_score_vector=[3] * 8); qb.calibrate(); qb.std_errors(se_method="bootstrap", no_of_samples=300, seed=1)
+    qb = rp.PCM(p.responses, max_score_vector=[3] * 8); qb.calibrate(estimation="pair"); qb.std_errors(se_method="bootstrap", no_of_samples=300, seed=1)
     ratio = np.concatenate([qb.threshold_se[it] / q.threshold_se[it] for it in q.item_names])
     assert 0.8 < np.median(ratio) < 1.25
     q.category_stats_df()   # disorder probability without bootstrap draws
@@ -495,7 +500,7 @@ def test_slm_pcm_sandwich_standard_errors():
     e = rp.PCM(d, max_score_vector=[3] * 8, validate=False)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        e.calibrate()
+        e.calibrate(estimation="pair")
     with pytest.warns(UserWarning, match="bootstrap rather than analytically"):
         e.std_errors(no_of_samples=30, seed=1)
     assert e.se_method == "bootstrap"
@@ -506,7 +511,7 @@ def test_global_fit_wald():
     for SLM, RSM and PCM. Under the null it should mostly not reject; with
     large DIF between exogenous groups it should reject; parameters next to a
     category unused in one group are excluded and reported; andersen_lr_test
-    is deprecated, and method='andersen-lr' needs CML estimates."""
+    is deprecated, and method='andersen' needs CML or 'cp-full-rcl' estimates."""
     import numpy as np
     from raschpy.simulation import SLM_Sim, RSM_Sim, PCM_Sim
     I = 12; items = np.linspace(-1.5, 1.5, I); shifted = items.copy(); shifted[[2, 8]] += 1.0
@@ -534,8 +539,11 @@ def test_global_fit_wald():
             r0 = m.global_fit(split="random", seed=3, se_correction=None)
         assert r0["df"] == r["df"]
         assert 1.0 <= r0["statistic"] / r["statistic"] < 1.2
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m.calibrate(estimation="pair")
     with pytest.raises(ValueError, match="estimation='cml'"):
-        m.global_fit(method="andersen-lr", split="exogenous", covariate="G")
+        m.global_fit(method="andersen", split="exogenous", covariate="G")
     with pytest.raises(ValueError):
         m.global_fit(se_correction="hc1")
     with pytest.warns(FutureWarning):
@@ -779,7 +787,9 @@ def test_mfrm_unlinked_facet_groups_and_isolation_warnings():
     m = rp.MFRM(resp, max_score=3, validate=False)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        m.calibrate(model="centrality")
+        # global_ridge=0: the groups' relative global effect is then not identified at all (the default ridge pins
+        # it towards no difference)
+        m.calibrate(model="centrality", global_ridge=0)
     with pytest.warns(UserWarning, match="computed by bootstrap rather than analytically"):
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message=".*bootstrap resamples raised")
@@ -812,7 +822,7 @@ def test_mfrm_model_selection_drops_equivalent_models():
         with pytest.warns(UserWarning, match="'centrality' is the same model as 'thresholds'"):
             m.per_rater_model_selection(seed=1)
         with pytest.raises(ValueError, match="at least 2 distinct models"):
-            m.model_selection(models=["centrality", "thresholds"])
+            m.model_selection(candidate_models=["centrality", "thresholds"])
     sim1 = MFRM_Sim_Global(no_of_items=4, no_of_persons=300, no_of_facet_elements=4, max_score=1, seed=1)
     m1 = rp.MFRM(sim1.responses, max_score=1, validate=False)
     with warnings.catch_warnings():
@@ -825,9 +835,11 @@ def test_mfrm_model_selection_drops_equivalent_models():
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         for test in ("AIC", "LR"):
-            m1.per_rater_model_selection(test=test, seed=1)
+            m1.per_rater_model_selection(test=test, seed=1, estimation="pair-cpat")
             sel = m1.per_rater_model_selection_table["selected_model"]
             assert set(sel) <= {"global", "items", "pseudo_halo"}
+        m1.per_rater_model_selection(test="AIC")  # on fitted candidates (cp-full-rcl)
+        assert set(m1.per_rater_model_selection_table["Representation"]) <= {"global", "items", "pseudo_halo"}
 
 
 def test_mfrm_anchored_per_rater_selection_uses_anchored_frame():
@@ -848,8 +860,13 @@ def test_mfrm_anchored_per_rater_selection_uses_anchored_frame():
     m = rp.MFRM(sim.responses, max_score=K, validate=False)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        m.per_rater_model_selection(anchors=names[:4], seed=1)
-    sel = m.anchor_per_rater_model_selection_table["selected_model"]
+        m.per_rater_model_selection(anchors=names[:4], seed=1, estimation="pair-cpat")
+        sel = m.anchor_per_rater_model_selection_table["selected_model"]
+        assert list(sel[["Rater_5", "Rater_6"]]) == ["global", "global"]
+        assert (sel[names[6:]] == "bistretch").all()
+        # on fitted candidates, in the same frame
+        m.per_rater_model_selection(anchors=names[:4])
+    sel = m.per_rater_model_selection_table["Representation"]
     assert list(sel[["Rater_5", "Rater_6"]]) == ["global", "global"]
     assert (sel[names[6:]] == "bistretch").all()
 
@@ -929,11 +946,18 @@ def test_rcl_sandwich_after_quasi_newton_fit(monkeypatch):
     assert c.se_method_bivector == "bootstrap"
 
 
-def test_mfrm_global_fit_not_available():
-    """MFRM inherits global_fit() but has no per-group machinery for it: it
-    must raise a clear NotImplementedError, not an AttributeError."""
+def test_mfrm_global_fit_errors():
+    """MFRM's global_fit() offers Andersen's test only, on a 'cp-full-rcl' fit of the sub-model: other
+    methods, an uncalibrated sub-model and other estimation methods raise clear ValueErrors."""
     m = rp.MFRM(MFRM_Sim_Global(no_of_items=5, no_of_persons=100, no_of_facet_elements=3, max_score=3, seed=1))
-    with pytest.raises(NotImplementedError, match="not yet for MFRM"):
+    with pytest.raises(ValueError, match="Calibrate model='global' first"):
+        m.global_fit()
+    with pytest.raises(ValueError, match="method must be 'andersen'"):
+        m.global_fit(method="wald")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m.calibrate(estimation="pair-cpat")
+    with pytest.raises(ValueError, match="estimation='pair-cpat'"):
         m.global_fit()
 
 
@@ -1119,9 +1143,10 @@ def test_mfrm_dif_drf_groups_took_different_items():
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         m.dif_test("g", model="items", reference="a", no_of_samples=30, seed=1, omnibus=False)
-        m.drf_test("g", model="items", reference="a", no_of_samples=30, seed=1)
+        m.drf_test("g", model="items", reference="a")
     assert sorted(m.dif_table.index.unique()) == ["Item_3", "Item_4", "Item_5", "Item_6"]
-    assert sorted(m.drf_table["Item"].unique()) == ["Item_3", "Item_4", "Item_5", "Item_6"]
+    assert sorted(c[len("Difference "):] for c in m.drf_item_table if c.startswith("Difference ")) == [
+        "Item_3", "Item_4", "Item_5", "Item_6"]
     r = _split_items(sim.responses, gl, range(0, 4), range(4, 8))
     m = rp.MFRM(r, max_score=3, exogenous=pd.DataFrame({"g": g}), validate=False)
     with warnings.catch_warnings():
@@ -1129,7 +1154,7 @@ def test_mfrm_dif_drf_groups_took_different_items():
         with pytest.raises(ValueError, match="no shared items"):
             m.dif_test("g", model="items", reference="a", no_of_samples=20, seed=1, omnibus=False)
         with pytest.raises(ValueError, match="no shared items"):
-            m.drf_test("g", model="items", reference="a", no_of_samples=20, seed=1)
+            m.drf_test("g", model="items", reference="a")
 
 
 def test_dif_focal_group_linked_only_through_another_group():
@@ -1189,27 +1214,6 @@ def test_se_method_and_refits_follow_calibration_method():
             m.calibrate()
             m.std_errors()
             assert m.se_method == "sandwich", cls.__name__
-
-
-def test_drf_stretch_values_rereferenced():
-    """drf_test's re-referenced stretch parameters: mean shift 0 and mean stretch 1 over the
-    tested facet elements, with item locations centred over the common items."""
-    import numpy as np
-    from raschpy.simulation.mfrm_sim import MFRM_Sim_Bistretch
-    sim = MFRM_Sim_Bistretch(8, 300, 3, 6, seed=2)
-    m = rp.MFRM(sim.responses, max_score=3, validate=False)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        m.calibrate(model="bistretch")
-    eligible = pd.Index(list(m.facet_names[:4]))
-    v = m._drf_stretch_values("bistretch", m, eligible, ["Item_1", "Item_2", "Item_3"])
-    assert abs(v["omega_items"].mean() - 1) < 1e-12
-    assert abs(v["omega_thresholds"].mean() - 1) < 1e-12
-    lam, om_i, _ = m._stretch_params("bistretch")
-    wi = om_i.loc[eligible].mean()
-    c = (m._items_for("bistretch") * wi).loc[["Item_1", "Item_2", "Item_3"]].mean()
-    expected = lam.loc[eligible] - lam.loc[eligible].mean() + (om_i.loc[eligible] / wi - 1) * c
-    assert np.allclose(v["lambda"].values, expected.values)
 
 
 def test_mfrm_dif_liberal_design_warnings():
@@ -1303,3 +1307,178 @@ def test_mfrm_sandwich_unused_extreme_category_and_extreme_facet_element_se():
         se = getattr(m, f"rater_se_{model}")
         assert np.all(np.isnan(np.asarray(se.loc[name], float)))
         assert np.isfinite(np.asarray(se.drop(name), float)).all()
+
+
+# ---------------------------------------------------------------------------
+# Confidence bounds in the statistics tables
+# ---------------------------------------------------------------------------
+
+def _interval_models():
+    from raschpy.simulation import PCM_Sim, RSM_Sim, SLM_Sim
+    slm = SLM_Sim(no_of_items=8, no_of_persons=300, seed=1).responses
+    pcm = PCM_Sim(no_of_items=6, no_of_persons=300, max_score_vector=[3] * 6, seed=1).responses
+    rsm = RSM_Sim(no_of_items=6, no_of_persons=300, max_score=3, seed=1).responses
+    mfrm = MFRM_Sim_Global(no_of_items=6, no_of_persons=300, no_of_facet_elements=4,
+                           max_score=3, seed=1).responses
+    return {
+        "SLM": (lambda: rp.SLM(slm), ["item_stats_df"]),
+        "PCM": (lambda: rp.PCM(pcm), ["item_stats_df", "threshold_stats_df", "category_stats_df"]),
+        "RSM": (lambda: rp.RSM(rsm, max_score=3),
+                ["item_stats_df", "threshold_stats_df", "category_stats_df"]),
+        "MFRM": (lambda: rp.MFRM(mfrm, max_score=3),
+                 ["item_stats_df", "threshold_stats_df", "category_stats_df", "rater_stats_df"]),
+    }
+
+
+def _bounds(table):
+    return table[[c for c in table.columns if str(c).endswith("%")]]
+
+
+@pytest.mark.parametrize("cls", ["SLM", "PCM", "RSM", "MFRM"])
+def test_tables_recompute_bounds_for_a_new_interval(cls):
+    """A table asking for confidence bounds once the standard errors are stored without them
+    (PCM/RSM threshold_stats_df raised; category_stats_df left the columns out), or at another
+    width (every table relabelled the old bounds), gets bounds at the width asked for: the same
+    as from a fresh fit asked for that width directly."""
+    make, tables = _interval_models()[cls]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        for name in tables:
+            m = make(); m.calibrate()
+            m.std_errors(no_of_samples=30, seed=1)
+            assert not _bounds(getattr(m, name)(interval=0.9, no_of_samples=30)).empty, name
+
+            m = make(); m.calibrate()
+            getattr(m, name)(interval=0.95, no_of_samples=30)
+            changed = _bounds(getattr(m, name)(interval=0.5, no_of_samples=30))
+            f = make(); f.calibrate()
+            direct = _bounds(getattr(f, name)(interval=0.5, no_of_samples=30))
+            assert list(changed.columns) == ["25.0%", "75.0%"], name
+            pd.testing.assert_frame_equal(changed, direct, obj=name)
+
+
+def test_mfrm_anchored_tables_recompute_bounds_for_a_new_interval():
+    """As above, for MFRM's anchored standard errors (stored separately from the unanchored)."""
+    sim, m = _make_mfrm(no_of_raters=4, seed=1)
+    _, f = _make_mfrm(no_of_raters=4, seed=1)
+    anchors = list(sim.responses.index.get_level_values(0).unique()[:2])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        for x in (m, f):
+            x.calibrate(model="global")
+            x.calibrate_anchor("global", anchors=anchors)
+        m.item_stats_df(model="global", anchors=anchors, interval=0.95)
+        changed = _bounds(m.item_stats_df(model="global", anchors=anchors, interval=0.5))
+        direct = _bounds(f.item_stats_df(model="global", anchors=anchors, interval=0.5))
+    pd.testing.assert_frame_equal(changed, direct)
+
+
+@pytest.mark.parametrize("stretch, parent, attrs", [
+    ("centrality", "thresholds", ["facet_effects_thresholds"]),
+    ("pseudo_halo", "items", ["facet_effects_items"]),
+    ("bistretch", "bivector", ["facet_effects_bivector", "facet_effects_bivector_items",
+                               "facet_effects_bivector_thresholds", "facet_effects_matrix"]),
+])
+def test_pair_cpat_stretch_keeps_parent_results(stretch, parent, attrs):
+    """A pair-cpat stretch model re-estimates its parent with the stretch model's settings. That re-estimate used to
+    replace the parent's own stored results (unanchored and anchored), so model_selection's bootstrap compared
+    the parent's refits with a grid the parent's own settings never produce. The parent's results must be those of
+    a fresh object, and the stretch model's results those of a fresh object fitted the stretch model only."""
+    sim, m = _make_mfrm(no_of_raters=5, seed=3)
+    anchors = list(sim.responses.index.get_level_values(0).unique()[:2])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        _, p = _make_mfrm(no_of_raters=5, seed=3)
+        p.calibrate(model=parent, estimation="pair-cpat"); p.calibrate_anchor(parent, anchors)
+        _, s = _make_mfrm(no_of_raters=5, seed=3)
+        s.calibrate(model=stretch, estimation="pair-cpat"); s.calibrate_anchor(stretch, anchors)
+        m.calibrate(model=parent, estimation="pair-cpat"); m.calibrate_anchor(parent, anchors)
+        m.calibrate(model=stretch, estimation="pair-cpat"); m.calibrate_anchor(stretch, anchors)
+    for a in attrs + [f"anchor_{a}" for a in attrs if a != "facet_effects_matrix"]:
+        pd.testing.assert_frame_equal(getattr(m, a), getattr(p, a), obj=a)
+    for a in (f"facet_effects_{stretch}", f"anchor_facet_effects_{stretch}"):
+        pd.testing.assert_frame_equal(getattr(m, a), getattr(s, a), obj=a)
+
+
+def test_mfrm_pickles():
+    """MFRM's facet-named method aliases ({facet}_stats_df_{model}, {facet}_res_corr_analysis_{model}) were lambdas
+    defined in __init__, so no MFRM object could be pickled (or sent to a multiprocessing worker)."""
+    import pickle
+    _, m = _make_mfrm(no_of_raters=3, seed=1)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m.calibrate(model="global")
+        r = pickle.loads(pickle.dumps(m))
+        pd.testing.assert_series_equal(r.facet_effects_global, m.facet_effects_global)
+        assert r.rater_stats_df_global.func.__self__ is r
+
+
+def test_kc_scores_corrects_low_rank_person_contributions():
+    """Rasch._kc_scores eigendecomposed the non-symmetric I - B_n B^+, whose eigenvector matrix is singular when a
+    person's bread contribution B_n has low rank (e.g. RSM with each person answering 3 of 10 items), so the
+    Kauermann-Carroll correction was silently left out for whole chunks of persons. Every person must get
+    (I - B_n B^+)^(-1/2) u_n."""
+    from scipy.linalg import fractional_matrix_power
+    from raschpy.base import Rasch
+    rng = np.random.default_rng(1)
+    N, p = 200, 6
+    G = rng.normal(size=(N, p, 1)) / np.sqrt(N)
+    Bn = G @ G.transpose(0, 2, 1)
+    A = np.linalg.pinv(Bn.sum(0))
+    U = rng.normal(size=(N, p)) / np.sqrt(N)
+    out = Rasch._kc_scores(U, lambda sl: Bn[sl], A)
+    exact = np.array([np.real(fractional_matrix_power(np.eye(p) - b @ A, -0.5)) @ u for u, b in zip(U, Bn)])
+    np.testing.assert_allclose(out, exact, atol=1e-12)
+
+
+@pytest.mark.parametrize("model", ["items", "bistretch", "mixed"])
+def test_mfrm_refit_does_not_keep_the_previous_fit_results(model):
+    """Methods compute derived results (fit matrices, fit statistics, CSEM, stats tables, SE tables) when they are
+    missing and reuse them when present, so after a refit fit_statistics() and the stats tables kept reporting the
+    previous fit, and a 'mixed' refit on other representations made recovery_stats() fail on a missing SE table.
+    A refitted object must give what a fresh object fitted the same way gives."""
+    from raschpy.simulation import MFRM_Sim
+    sim = MFRM_Sim(5, 200, 4, 3, model="mixed", rater_models=["global", "items", "bivector", "bistretch"], seed=2)
+    if model == "mixed":
+        first = dict(model="mixed", rater_models=["global"] * 4)
+        second = dict(model="mixed", rater_models=["items", "thresholds", "centrality", "bistretch"])
+    else:
+        first, second = dict(model=model, estimation="cml"), dict(model=model, estimation="cp-full-rcl")
+
+    def pipeline(m):
+        m.std_errors(model=model)
+        m.person_estimates(model=model)
+        m.fit_statistics(model=model)
+        m.rater_stats_df(model=model)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        a = rp.MFRM(sim, max_score=3, validate=False)
+        a.calibrate(**first)
+        pipeline(a)
+        a.calibrate(**second)
+        pipeline(a)
+        b = rp.MFRM(sim, max_score=3, validate=False)
+        b.calibrate(**second)
+        pipeline(b)
+        for name in (f"item_infit_ms_{model}", f"rater_outfit_ms_{model}", f"csem_vector_{model}",
+                     f"person_reliability_{model}"):
+            np.testing.assert_allclose(np.asarray(getattr(a, name), float), np.asarray(getattr(b, name), float),
+                                       atol=1e-10)
+        if model == "mixed":
+            a.recovery_stats(model="mixed", plot=False)
+        assert a.no_of_items == 5 and callable(a.rater_stats_df_items)
+
+
+def test_non_cml_refit_drops_the_cml_notes():
+    """A CML fit's notes (cml_dropped_responses, cml_unused_categories) stayed after a refit with another
+    estimation, describing a fit that no longer existed."""
+    from raschpy.simulation import RSM_Sim
+    sim = RSM_Sim(6, 200, 3, seed=1)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m = rp.RSM(sim)
+        m.calibrate(estimation="cml")
+        assert hasattr(m, "cml_unused_categories")
+        m.calibrate(estimation="pair-cpat")
+        assert not hasattr(m, "cml_unused_categories") and not hasattr(m, "cml_dropped_responses")

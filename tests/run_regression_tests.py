@@ -1108,7 +1108,7 @@ def _cond_build(model):
             ('q3_bootstrap', m.q3_bootstrap),
             ('residual_contrast_bootstrap', m.residual_contrast_bootstrap),
             ('item_q1_table', m.item_q1_table), ('item_q1_groups', m.item_q1_groups),
-            ('item_q1_r1c', m.item_q1_r1c)]
+            ('item_q1_overall', m.item_q1_overall)]
     m.res_corr_analysis()
     out.append(('q3_star_max', m.q3_star_max))
     out.append(('local_dependence_gamma', m.local_dependence_gamma().set_index(['Item', 'Paired item']).sort_index()))
@@ -1118,7 +1118,7 @@ def _cond_build(model):
     m.item_stats_df(full=True)
     m.person_stats_df()
     out += [('item_stats_full', m.item_stats), ('person_stats', m.person_stats)]
-    m.global_fit(method='andersen-lr', split='exogenous', covariate='G')
+    m.global_fit(method='andersen', split='exogenous', covariate='G', seed=SIM_SEED)  # PCM: Monte Carlo p
     out.append(('andersen_lr', [m.global_fit_summary['statistic'], m.global_fit_summary['df'],
                                 m.global_fit_summary['p-value']]))
     out += [('andersen_item_table', m.global_fit_item_table), ('andersen_obsexp', m.global_fit_obsexp)]
@@ -1135,7 +1135,7 @@ def _cond_build(model):
     m.calibrate_anchor(anchors, selection_method='none', plot=False)
     out += [('anchor_items_fixed', m.anchor_items), ('anchor_item_se_fixed', m.anchor_cml.item_se)]
     if model == 'RSM':  # the RSM-vs-PCM comparison (PCM's mixed maximum scores rule it out there)
-        m.model_selection(seed=SIM_SEED)
+        m.model_selection(test='AIC', seed=SIM_SEED)
         out.append(('model_selection_aic', m.model_comparison_rsm_pcm_aic_summary))
         m.model_selection(test='LR', seed=SIM_SEED)
         out.append(('model_selection_lr', m.model_comparison_rsm_pcm_lr_summary))

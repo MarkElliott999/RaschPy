@@ -328,3 +328,74 @@ def test_targeting_core_reproduces_kreiner_christensen_example():
     np.testing.assert_allclose(_esf.log_gamma([np.array([0.2]), np.array([-0.5, 0.4])]),
                                np.log([1, np.exp(-0.2) + np.exp(0.5), np.exp(-0.2 + 0.5) + np.exp(0.1),
                                        np.exp(-0.2 + 0.1)]))
+
+
+def _enumerated(thr, row):
+    """Exact conditional distribution of a person's responses given their total: (observed items, patterns, probs)."""
+    import itertools
+    obs = [i for i in range(len(thr)) if not np.isnan(row[i])]
+    r = int(np.nansum(row))
+    pats, w = [], []
+    for x in itertools.product(*[range(len(thr[i]) + 1) for i in obs]):
+        if sum(x) == r:
+            lw = sum(_esf.log_category_weights(thr[i])[k] for i, k in zip(obs, x))
+            if np.isfinite(lw):
+                pats.append(x); w.append(np.exp(lw))
+    return obs, pats, np.array(w) / sum(w)
+
+
+def test_sample_given_totals_matches_the_exact_conditional_distribution():
+    """Mixed maximum scores, missing responses, an unused category (b = inf): frequencies over 20,000 draws per
+    person match the enumerated conditional distribution; totals and missing cells are kept."""
+    thr = [np.array([-0.8, 0.4]), np.array([0.3]), np.array([-0.2, 0.5, 1.1]), np.array([0.6, np.inf, 0.9])]
+    people = np.array([[1, 0, 2, 1], [np.nan, 1, 1, np.nan], [0, np.nan, 3, 1], [np.nan] * 4], float)
+    R = 20000
+    X = np.repeat(people, R, axis=0)
+    Z = _esf.sample_given_totals(X, thr, np.random.default_rng(1))
+    assert np.array_equal(np.isnan(Z), np.isnan(X))
+    assert np.array_equal(np.nansum(Z, 1), np.nansum(X, 1))
+    for p, row in enumerate(people[:3]):
+        obs, pats, pr = _enumerated(thr, row)
+        Zp = Z[p * R:(p + 1) * R][:, obs].astype(int)
+        freq = np.array([np.all(Zp == np.array(x), 1).mean() for x in pats])
+        assert np.abs(freq - pr).max() < 0.015
+
+
+def test_sample_given_totals_reuses_its_tables_exactly():
+    """The suffix ESFs kept from the previous call (same thresholds and missingness patterns) give the same draws
+    as building them afresh."""
+    rng = np.random.default_rng(3)
+    X = rng.integers(0, 4, (300, 8)).astype(float)
+    X[rng.random(X.shape) < 0.3] = np.nan
+    thr = [np.sort(rng.normal(0, 1, 3)) for _ in range(8)]
+    _esf._sampler_cache.clear()
+    a = _esf.sample_given_totals(X, thr, np.random.default_rng(5))
+    assert _esf._sampler_cache  # kept
+    b = _esf.sample_given_totals(X, thr, np.random.default_rng(5))
+    _esf._sampler_cache.clear()
+    c = _esf.sample_given_totals(X, thr, np.random.default_rng(5))
+    assert np.array_equal(a, b, equal_nan=True) and np.array_equal(a, c, equal_nan=True)
+    thr2 = [t + 0.1 for t in thr]  # other thresholds: tables rebuilt
+    d = _esf.sample_given_totals(X, thr2, np.random.default_rng(5))
+    _esf._sampler_cache.clear()
+    assert np.array_equal(d, _esf.sample_given_totals(X, thr2, np.random.default_rng(5)), equal_nan=True)
+
+
+def test_studentise_treats_the_observed_value_like_the_simulated_ones():
+    """Swapping the observed statistics with one simulated row only permutes the studentised values, and on
+    exchangeable data the Westfall-Young familywise rate is nominal (studentising by the simulated values alone
+    gave 0.068 at 0.05 in this setting)."""
+    rng = np.random.default_rng(0)
+    k, B = 6, 49
+    Z = rng.standard_normal((B + 1, k)) * np.arange(1, k + 1)
+    t_o, t_s = _esf.studentise(Z[0], Z[1:])
+    Zs = Z[[3] + [i for i in range(B + 1) if i != 3]]
+    u_o, u_s = _esf.studentise(Zs[0], Zs[1:])
+    assert np.allclose(u_o, t_s[2]) and np.allclose(u_s[0], t_o)
+    L = rng.normal(size=(10, 10)) * 0.3 + np.eye(10)
+    hits = 0
+    for _ in range(3000):
+        Z = rng.standard_normal((100, 10)) @ L.T
+        a, b = _esf.studentise(Z[0], Z[1:])
+        hits += (_esf.westfall_young(a, b) <= 0.05).any()
+    assert abs(hits / 3000 - 0.05) < 0.013

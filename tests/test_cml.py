@@ -236,7 +236,32 @@ def test_rsm_cml_raises_when_a_category_is_unused_everywhere():
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         with pytest.raises(ValueError, match="category 2 is unused"):
-            m.calibrate(estimation="cml")
+            m.calibrate(estimation="cml", unused_categories="drop")
+
+
+def test_rsm_cml_width_ridge_for_an_unused_category():
+    """unused_categories='ridge' (the CML default): finite estimates, the penalty only on the widths next to
+    the unused category, those parameters listed in no_data_parameters with posterior SEs ('nan' leaves
+    them out), and no penalty when every category is used."""
+    X = pd.read_csv(os.path.join(DATA, "cml_rsm_complete.csv"))
+    m0 = RSM(X, validate=False)
+    m0.calibrate(estimation="cml")
+    assert m0._cml_penalty is None and m0.no_data_parameters == {}
+    K = int(np.nanmax(X.to_numpy()))
+    Xe = X.where(X != K, K - 1)  # top category unused on every item
+    m = RSM(Xe, max_score=K, validate=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m.calibrate(estimation="cml")
+    assert np.all(np.isfinite(m.thresholds)) and m.convergence["converged"]
+    assert m.cml_unused_categories == {"all items": [K]}
+    assert m.no_data_parameters == {"widths": {K - 1: "ridge"}, "thresholds": {K: "ridge"}}
+    with pytest.warns(UserWarning, match="set by the width ridge"):
+        m.std_errors()
+    assert np.isfinite(m.cat_width_se[K - 1]) and np.isfinite(m.threshold_se[K - 1])
+    with pytest.warns(UserWarning, match="no_data_se='nan'"):
+        m.std_errors(no_data_se="nan")
+    assert np.isnan(m.cat_width_se[K - 1]) and np.isnan(m.threshold_se[K - 1])
 
 
 # ---------------------------------------------------------------- Andersen LR (global_fit)
@@ -248,7 +273,7 @@ def test_andersen_lr_is_the_conditional_likelihood_ratio(cls, name):
     m.calibrate(estimation="cml")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        r = m.global_fit(method="andersen-lr", split="random", seed=3)
+        r = m.global_fit(method="andersen", split="random", seed=3)
     groups = m._global_fit_groups("random", None, 3)
     items = [c for c in m.item_names if c not in m.global_fit_excluded]
     fits = [m._global_fit_subset(groups[n], items=items) for n in groups]
@@ -259,10 +284,11 @@ def test_andersen_lr_is_the_conditional_likelihood_ratio(cls, name):
 
 
 def test_andersen_lr_needs_cml():
+    """PAIR estimates do not maximise the likelihood the statistic evaluates (CML and 'cp-full-rcl' do)."""
     m = SLM(pd.read_csv(os.path.join(DATA, "cml_slm_complete.csv")))
-    m.calibrate()
+    m.calibrate(estimation="pair")
     with pytest.raises(ValueError, match="calibrate\\(estimation='cml'\\)"):
-        m.global_fit(method="andersen-lr")
+        m.global_fit(method="andersen")
 
 
 
@@ -273,7 +299,7 @@ def test_andersen_lr_three_groups(name):
     m.exogenous = pd.DataFrame({"G": g})
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        r = m.global_fit(method="andersen-lr", covariate="G")
+        r = m.global_fit(method="andersen", covariate="G")
     groups = m._global_fit_groups("exogenous", "G", None, max_groups=np.inf)
     items = [c for c in m.item_names if c not in m.global_fit_excluded]
     fits = [m._global_fit_subset(groups[n], items=items) for n in groups]
@@ -290,7 +316,7 @@ def test_global_fit_covariate_needs_exogenous_split():
     m = _anchor_model("SLM", seed=22)
     m.exogenous = pd.DataFrame({"G": np.arange(len(m.responses)) % 2}, index=m.responses.index)
     with pytest.raises(ValueError, match="only used with split='exogenous'"):
-        m.global_fit(method="andersen-lr", split="score", covariate="G")
+        m.global_fit(method="andersen", split="score", covariate="G")
     with pytest.raises(ValueError, match="not used by method='martin-lof'"):
         m.global_fit(method="martin-lof", covariate="G")
 
@@ -305,7 +331,7 @@ def test_score_groups_split():
     m = _anchor_model("SLM", seed=23)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        r = m.global_fit(method="andersen-lr", split="score_groups")
+        r = m.global_fit(method="andersen", split="score_groups")
     tot = m.responses.sum(axis=1)
     low, high = (tot[m._global_fit_groups("score_groups", None, None)[k]] for k in ("low", "high"))
     assert low.max() < high.min() and r["df"] > 0
@@ -327,9 +353,9 @@ def test_andersen_lr_unused_categories_keep():
     m.calibrate(estimation="cml", ridge=0)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        drop = m.global_fit(method="andersen-lr", covariate="G")
+        drop = m.global_fit(method="andersen", covariate="G")
         assert set(m.global_fit_excluded) == set(X.columns[:2])
-        keep = m.global_fit(method="andersen-lr", covariate="G", unused_categories="null")
+        keep = m.global_fit(method="andersen", covariate="G", unused_categories="null")
     assert m.global_fit_excluded == []
     a, b = m.global_fit_groups["a"], m.global_fit_groups["b"]
     assert a.cml_unused_categories == {X.columns[0]: [3], X.columns[1]: [1]}
@@ -340,7 +366,7 @@ def test_andersen_lr_unused_categories_keep():
     # markers: an unused category's threshold is inf, the next one holds the sum either side of it
     t1, t0 = a.thresholds_uncentred.loc[X.columns[1]], a.thresholds_uncentred.loc[X.columns[0]]
     assert t1[1] == np.inf and np.isfinite(t1[[2, 3]]).all() and t0[3] == np.inf
-    with pytest.raises(ValueError, match="method='andersen-lr' only"):
+    with pytest.raises(ValueError, match="method='andersen' only"):
         m.global_fit(method="wald", covariate="G", unused_categories="null")
 
 
@@ -379,8 +405,8 @@ def test_rsm_keep_interior_unused_category_matches_direct_cml():
 def test_andersen_lr_monte_carlo():
     X, g = _unused_category_data()
     m = PCM(X, exogenous=pd.DataFrame({"G": g}))
-    m.calibrate(estimation="cml")
-    kw = dict(method="andersen-lr", covariate="G", unused_categories="null")
+    m.calibrate(estimation="cml", ridge=0)
+    kw = dict(method="andersen", covariate="G", unused_categories="null")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         chi = m.global_fit(**kw).copy()
@@ -393,7 +419,7 @@ def test_andersen_lr_monte_carlo():
     assert 1 / 31 <= mc["p-value"] <= 1 and again["p-value"] == mc["p-value"]
     assert early["Monte Carlo samples"] <= 30
     with pytest.raises(ValueError, match="p_method must be"):
-        m.global_fit(method="andersen-lr", covariate="G", p_method="permutation")
+        m.global_fit(method="andersen", covariate="G", p_method="permutation")
 
 
 def _keep_pcm_data():
@@ -418,7 +444,7 @@ def _keep_outputs(m):
         persons=(m.persons - m.items.mean()).values,
         infit=m.item_infit_ms.values,
         outfit=m.item_outfit_ms.values,
-        r1c=m.item_q1_r1c.loc["item scores", "Statistic"],
+        q1_overall=m.item_q1_overall.loc["item scores", "Statistic"],
     )
 
 
@@ -603,7 +629,7 @@ def test_conditional_fit_bootstrap():
     m.calibrate(estimation="cml")
     m.fit_statistics(se=False, conditional=True, conditional_samples=20, bootstrap_samples=60, seed=7)
     b1 = m.item_fit_bootstrap.copy()
-    assert m.item_fit_bootstrap_info == dict(samples=60, skipped=0, seed=7)
+    assert m.item_fit_bootstrap_info == dict(samples=60, skipped=0, seed=7, null_fit="own")
     np.testing.assert_allclose(b1["Infit MS"].values, m.item_infit_ms.reindex(b1.index).values, atol=1e-12)
     assert (b1["Infit p (Westfall-Young)"] >= b1["Infit p"] - 1e-12).all()
     assert ((b1["Infit 95% low"] <= b1["Infit 95% high"])).all()
@@ -748,56 +774,27 @@ def test_fixed_anchor_needs_cml():
     assert m.anchor_cml is None and "Anchors fixed (CML)" not in m.anchor_summary
 
 
-def test_conditional_model_selection_rsm_pcm():
-    from raschpy.simulation import PCM_Sim
-
-    resp = PCM_Sim(no_of_items=6, no_of_persons=500, max_score_vector=[3] * 6, seed=5).responses
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        r, p = RSM(resp), PCM(resp)
-        r.calibrate(estimation="cml")
-        p.calibrate(estimation="cml", ridge=0)
-        # at CML estimates the one step is null: the conditional maxima
-        ll_r, ll_p = RSM._conditional_ll_rsm_pcm(r, p)
-        assert ll_r == pytest.approx(r.convergence["log_likelihood"], abs=1e-8)
-        assert ll_p == pytest.approx(p.convergence["log_likelihood"], abs=1e-8)
-        # from the default estimates: close to the maxima, never above
-        r0, p0 = RSM(resp), PCM(resp)
-        r0.calibrate()
-        p0.calibrate()
-        l0r, l0p = RSM._conditional_ll_rsm_pcm(r0, p0)
-        assert ll_r - 0.05 < l0r <= ll_r + 1e-8 and ll_p - 0.05 < l0p <= ll_p + 1e-8
-        # both entry points agree; PCM-generated data
-        a, b = PCM(resp), RSM(resp)
-        a.model_selection(likelihood="conditional")
-        b.model_selection(likelihood="conditional")
-    assert a.model_comparison_rsm_pcm_aic == pytest.approx(b.model_comparison_rsm_pcm_aic)
-    assert a.model_comparison_rsm_pcm_aic_preferred == "PCM"
-    with pytest.raises(ValueError, match="likelihood must be"):
-        a.model_selection(likelihood="marginal")
-
-
 def test_conditional_model_selection_mfrm():
-    from raschpy import MFRM, _rcl
+    from raschpy import MFRM
     from raschpy.simulation import MFRM_Sim
 
     R, I, K = 4, 5, 3
-    m = MFRM(MFRM_Sim(no_of_items=I, no_of_persons=300, no_of_facet_elements=R, max_score=K, model="bivector", seed=3).responses)
+    resp = MFRM_Sim(no_of_items=I, no_of_persons=300, no_of_facet_elements=R, max_score=K, model="bivector", seed=3).responses
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
+        m = MFRM(resp)
+        m.model_selection()  # cp-full-rcl candidates: the composite route
+        assert m.model_comparison_mfrm_info["route"] == "composite"
+        assert m.model_comparison_mfrm_aic_preferred == "bivector"
+        mc = MFRM(resp)
+        mc.calibrate(model="global", estimation="cml")
+        mc.model_selection()  # CML candidates: scored at their estimates
+        assert mc.model_comparison_mfrm_info["route"] == "cml"
         for mod in ("bivector", "bistretch"):
-            m.calibrate(model=mod)
-            Xv, thr, _ = m._virtual_items(mod)
-            prep = _esf.prepare(Xv, [K] * (R * I))
-            b0 = np.concatenate(thr)
-            plug = _esf.cond_loglik(Xv, list(b0.reshape(-1, K)), prepared=prep)[0]
-            one = m._conditional_ll_mfrm(mod, Xv, prep)
-            assert one >= plug
-            if mod == "bivector":
-                top = _esf.fit_cml(Xv, _rcl.CellModel(mod, R, I, K).jacobian(), b0, [K] * (R * I), solver="newton")["ll"]
-                assert top - 0.01 < one <= top + 1e-8
-        m.model_selection(likelihood="conditional")
-    assert m.model_comparison_mfrm_aic_preferred == "bivector"
+            Xv, thr, _ = mc._virtual_items(mod)
+            ll = _esf.cond_loglik(Xv, thr)[0]
+            assert np.isclose(mc.model_comparison_mfrm_aic_summary.loc[mod, "LL"], ll)
+    assert mc.model_comparison_mfrm_aic_preferred == "bivector"
 
 
 def test_cml_dif_omnibus_is_conditional_lr():
@@ -812,7 +809,7 @@ def test_cml_dif_omnibus_is_conditional_lr():
         m.dif_test("G", reference="A", seed=1)
         omni = m.dif_omnibus_table.iloc[0]
         # SLM, every item common: H1 is the two groups' own CML fits, so the LR is Andersen's
-        m.global_fit(method="andersen-lr", split="exogenous", covariate="G")
+        m.global_fit(method="andersen", split="exogenous", covariate="G")
     assert float(omni["LR"]) == pytest.approx(m.global_fit_summary["statistic"], rel=1e-6)
     assert int(omni["df"]) == m.global_fit_summary["df"] == 7
     # PCM with partly overlapping item sets: df = common items - 1 ('item'), thresholds - 1 ('full')
@@ -885,6 +882,80 @@ def test_conditional_q1(name):
     assert set(m.item_q1_groups.index.get_level_values("Group")) == {"even", "odd"}
 
 
+_INFLUENCE_CASES = [
+    ("SLM", {}),
+    ("SLM", dict(method="cos")),
+    ("SLM", dict(method="ls")),
+    ("SLM", dict(method="evm")),
+    ("SLM", dict(estimation="pair", matrix_power=2)),
+    ("SLM", dict(estimation="cml", ridge=0.5)),
+    ("PCM", dict(method="cos")),
+    ("PCM", dict(estimation="pair")),
+    ("PCM", dict(ridge=0.3)),
+    ("PCM", dict(estimation="cml", ridge=0.3)),
+    ("RSM", dict(estimation="pair-cpat")),
+    ("RSM", dict(estimation="pair-cpat", method="cos", threshold_method="cpat-info-weighted")),
+    ("RSM", dict(estimation="cpat-rcl")),
+    ("RSM", {}),
+    ("RSM", dict(estimation="cml")),
+]
+
+
+@pytest.mark.parametrize("name,kw", _INFLUENCE_CASES)
+def test_threshold_influence(name, kw):
+    """Each person's influence on the fitted thresholds equals half the change between the fits with the
+    person added twice and left out (a central difference), to second order."""
+    from raschpy.simulation import PCM_Sim, RSM_Sim, SLM_Sim
+
+    Sim, Cls, skw = dict(
+        SLM=(SLM_Sim, SLM, {}), PCM=(PCM_Sim, PCM, dict(max_score_vector=[2, 3] * 3)),
+        RSM=(RSM_Sim, RSM, dict(max_score=3)),
+    )[name]
+    r = Sim(no_of_items=6, no_of_persons=300, seed=5, **skw).responses
+    ckw = dict(kw)
+    if not ckw.get("estimation") == "cml":
+        ckw.setdefault("constant", 0.1)
+        if name == "RSM":
+            ckw.setdefault("threshold_constant", 0.03)
+
+    def fit(df, **extra):
+        m = Cls(df, validate=False, **({"max_score": 3} if name == "RSM" else {}))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            m.calibrate(**{**ckw, **extra})
+        b = np.concatenate(m._cml_threshold_list(list(m.item_names)))
+        return m, b - b.mean()
+
+    m, b0 = fit(r)
+    extra = {"ridge": float(m.ridge)} if name == "PCM" and getattr(m, "ridge", None) else {}
+    X = np.array(m.responses.loc[:, list(m.item_names)], float)
+    Phi = m._threshold_influence(X, list(m.item_names))[0]
+    Phi = Phi - Phi.mean(1, keepdims=True)
+    tot = np.nansum(X, 1)
+    for n in [int(q) for q in np.flatnonzero((tot > 0) & (tot < np.nanmax(tot)))[:3]]:
+        twice = pd.concat([r, r.iloc[[n]].rename(index=lambda i: f"copy {i}")])
+        up, down = fit(twice, **extra)[1], fit(r.drop(r.index[n]), **extra)[1]
+        np.testing.assert_allclose(Phi[n], (up - down) / 2, atol=5e-3 * np.abs(up - down).max())
+
+
+@pytest.mark.parametrize("name", ["SLM", "PCM", "RSM"])
+def test_q1_groups_z_allows_for_estimation(name):
+    """Under CML with two groups, an item's deviations are opposite in the two groups; allowing for the
+    estimation of its own parameter alone would give each the variance V_A V_B / (V_A + V_B) and z^2 = Q1,
+    and allowing for the other items' too gives a smaller variance, so z^2 is at least Q1 (close to it for
+    SLM and RSM, whose items have one location each; PCM's items have one parameter per threshold)."""
+    m = _anchor_model(name)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m.fit_statistics(conditional=True, conditional_samples=10, q1_groups=2, q1_overall_samples=None)
+    z = m.item_q1_groups["z"].unstack("Group")
+    np.testing.assert_allclose(z[1].values, -z[2].values, rtol=1e-6)
+    q1 = m.item_q1_table.loc[z.index, "Q1"].values
+    assert np.all(z[1].values ** 2 >= q1 * (1 - 1e-9))
+    if name != "PCM":
+        assert np.all(z[1].values ** 2 <= 1.1 * q1)
+
+
 def test_andersen_item_tables():
     from raschpy.simulation import SLM_Sim
 
@@ -898,16 +969,18 @@ def test_andersen_item_tables():
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         m.calibrate(estimation="cml")
-        m.global_fit(method="andersen-lr", split="exogenous", covariate="G")
+        m.global_fit(method="andersen", split="exogenous", covariate="G")
     tab, oe = m.global_fit_item_table, m.global_fit_obsexp
     assert tab["p (BH)"].idxmin() == r.columns[2] and tab.loc[r.columns[2], "p (BH)"] < 0.001
     assert (tab["df"] == 1).all()
     # pooled CML: observed - expected sums to zero over the two groups for every item
     dev = ((oe["Observed mean"] - oe["Expected mean"]) * oe["Persons"]).groupby(level="Item").sum()
     np.testing.assert_allclose(dev.values, 0, atol=1e-6)
-    # with two groups and opposite deviations, the item chi-square is the square of either z
-    np.testing.assert_allclose(oe["z"].groupby(level="Item").apply(lambda z: (z**2).sum()).values,
-                               tab["Chi-square"].values, rtol=1e-10)
+    # with two groups the deviations are opposite and so is z, whose variance allows for the estimation
+    # of the item parameters (Glas's correction under CML), so z^2 exceeds the uncorrected chi-square's half
+    z = oe["z"].unstack("Group")
+    np.testing.assert_allclose(z["A"].values, -z["B"].values, rtol=1e-8)
+    assert (z["A"].values ** 2 >= tab.loc[z.index, "Chi-square"].values / 2 - 1e-10).all()
 
 
 @pytest.mark.parametrize("name", ["SLM", "PCM", "RSM"])
@@ -987,29 +1060,46 @@ def test_targeting(name):
 
 
 @pytest.mark.parametrize("name", ["SLM", "PCM", "RSM"])
-def test_r1c(name):
+def test_q1_overall(name):
     m = _anchor_model(name, seed=14)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        m.fit_statistics(conditional=True, conditional_samples=10, q1_groups=4)
-    t = m.item_q1_r1c
-    I, G = len(m.item_names), 4
-    assert t.loc["item scores", "Groups"] == G and t.loc["item scores", "Estimates"] == "CML"
-    # item scores: each group's deviations sum to zero over items (its totals are fixed), and the
-    # estimated item parameters use I - 1 more: df = (G - 1)(I - 1)
-    assert t.loc["item scores", "df"] == (G - 1) * (I - 1)
-    assert 0 <= t.loc["item scores", "p"] <= 1
-    assert ("thresholds" in t.index) == (name != "SLM")
-    # with the default estimates, one Newton step reaches (nearly) the CML statistic
+        m.fit_statistics(conditional=True, conditional_samples=10, q1_groups=4, seed=3)
+    t = m.item_q1_overall
+    I = len(m.item_names)
+    assert (t["Groups"] == 4).all() and ("thresholds" in t.index) == (name != "SLM")
+    # item scores: van den Wollenberg's overall Q1, (I - 1) / I x the sum of the items' Q1 (same groups)
+    assert t.loc["item scores", "Statistic"] == pytest.approx((I - 1) / I * m.item_q1_table["Q1"].sum())
+    assert ((t["p"] > 0) & (t["p"] <= 1)).all() and (t["Samples"] <= 99).all()
+    # reproducible with seed=; q1_overall_samples=None leaves it out
     m2 = _anchor_model(name, seed=14)
-    m2.calibrate(estimation="cp-full-rcl" if name == "RSM" else "pair")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        m2.fit_statistics(conditional=True, conditional_samples=10, q1_groups=4)
-    assert m2.item_q1_r1c.loc["item scores", "Estimates"] != "CML"
-    assert m2.item_q1_r1c.loc["item scores", "Statistic"] == pytest.approx(
-        t.loc["item scores", "Statistic"], rel=0.05
-    )
+        m2.fit_statistics(conditional=True, conditional_samples=10, q1_groups=4, seed=3)
+    pd.testing.assert_frame_equal(t, m2.item_q1_overall)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m2.fit_statistics(conditional=True, conditional_samples=10, q1_groups=4, q1_overall_samples=None)
+    assert m2.item_q1_overall is None
+
+
+@pytest.mark.parametrize("name", ["SLM", "PCM", "RSM"])
+def test_q1_overall_at_the_fit(name):
+    """With estimates other than CML the statistic is computed at those estimates, not at a CML step."""
+    from raschpy import _esf
+
+    m = _anchor_model(name, seed=14)
+    m.calibrate(estimation="cp-full-rcl")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m.person_estimates()
+        m.fit_statistics(conditional=True, conditional_samples=10, q1_groups=4, q1_overall_samples=19)
+    names = list(m.item_names)
+    X = m.responses.loc[:, names].to_numpy(float)
+    thr = m._cml_threshold_list(names)
+    st = m._q1_overall_statistics(X, thr, m._q1_labels, _esf.prepare(X, [len(t) for t in thr]))
+    for level, value in st.items():
+        assert m.item_q1_overall.loc[level, "Statistic"] == pytest.approx(value)
 
 
 def test_global_stats_df():
@@ -1026,21 +1116,23 @@ def test_global_stats_df():
         tab = m.global_stats_df()
         assert set(vars(m)) - before == {"global_stats"}
         assert tab["Details"].str.startswith(("not run", "needs")).all()
-        # run_all_tests without CML estimates: the CML-only tests are left out
+        # run_all_tests with 'cp-full-rcl' estimates: Andersen's composite test runs, Martin-Lof's (CML only) not
         m.global_stats_df(run_all_tests=True)
         t = m.global_stats
-        assert t.loc["Andersen LR", "Details"] == "needs calibrate(estimation='cml')"
-        assert np.isfinite(t.loc["R1c (item scores)", "Value"]) and np.isfinite(t.loc["rho1", "Value"])
+        assert "p_method=monte-carlo" in t.loc["Andersen LR", "Details"]
+        assert t.loc["Martin-Lof", "Details"] == "needs calibrate(estimation='cml')"
+        assert np.isfinite(t.loc["Overall Q1 (item scores)", "Value"]) and np.isfinite(t.loc["rho1", "Value"])
+        assert np.isfinite(t.loc["Overall Q1 (item scores)", "p"])
         # CML: a test already run is kept, not rerun with the defaults; options passed through
         c = SLM(s.responses, exogenous=pd.DataFrame({"G": g}))
         c.calibrate(estimation="cml")
-        c.global_fit(method="andersen-lr", split="exogenous", covariate="G")
+        c.global_fit(method="andersen", split="exogenous", covariate="G")
         c.global_stats_df(run_all_tests=True, test_kwargs={"martin-lof": {"p_method": "monte-carlo", "no_of_samples": 20, "seed": 1}})
     t = c.global_stats
     andersen = t.loc[["Andersen LR"]]
     assert len(andersen) == 1 and andersen["Details"].iloc[0].startswith("split=exogenous; covariate=G")
     assert "p_method=monte-carlo" in t.loc["Martin-Lof", "Details"]
-    assert set(c.global_fit_results) == {("andersen-lr", "split=exogenous; covariate=G"),
+    assert set(c.global_fit_results) == {("andersen", "split=exogenous; covariate=G"),
                                          ("martin-lof", "split=median; p_method=monte-carlo")}
 
 
@@ -1116,7 +1208,7 @@ def test_pcm_ridge_cml_maximises_penalised_likelihood(Ks):
         m = PCM(X, max_score_vector=Ks)
         m.calibrate(estimation="cml")
         p = PCM(X, max_score_vector=Ks)
-        p.calibrate()
+        p.calibrate(estimation="pair")
     names = list(X.columns)
     assert m.convergence["converged"] and not m.convergence["dropped_items"]
     b0 = np.concatenate([p.thresholds_uncentred.loc[n].dropna().values for n in names])
@@ -1168,7 +1260,7 @@ def test_pcm_ridge_unused_categories_options():
     with pytest.raises(ValueError, match="needs ridge > 0"):
         PCM(X, max_score_vector=[3] * 6).calibrate(estimation="cml", ridge=0, unused_categories="ridge")
     with pytest.raises(ValueError, match="estimation='cml' only"):
-        PCM(X, max_score_vector=[3] * 6).calibrate(unused_categories="ridge")
+        PCM(X, max_score_vector=[3] * 6).calibrate(estimation="pair", unused_categories="ridge")
 
 
 def test_pcm_ridge_argument_checks():
@@ -1185,8 +1277,8 @@ def test_pcm_ridge_argument_checks():
     for bad in ("minimise_error", -0.1, True, None):
         with pytest.raises(ValueError, match="ridge must be"):
             PCM(X, max_score_vector=[3] * 6).calibrate(estimation="cml", ridge=bad)
-    with pytest.warns(UserWarning, match="applies to estimation='cml' only"):
-        PCM(X, max_score_vector=[3] * 6).calibrate(ridge=0.5)
+    with pytest.warns(UserWarning, match="applies to estimation='cml', 'cp-full-rcl' and 'cpat-rcl' only"):
+        PCM(X, max_score_vector=[3] * 6).calibrate(estimation="pair", ridge=0.5)
 
 
 def test_pcm_ridge_test_refits_use_fixed_weight():
@@ -1198,3 +1290,381 @@ def test_pcm_ridge_test_refits_use_fixed_weight():
         m.calibrate(estimation="cml")
         sub = m._global_fit_subset(X.index[:120])
     assert sub.ridge == m.ridge and sub._ridge_setting == m.ridge
+
+
+def test_andersen_lr_too_few_common_items_message():
+    """Plain CML where dropping items in the groups leaves fewer than two in common: a clear ValueError, not
+    a failure inside the group refit."""
+    import zlib
+    from raschpy.simulation import PCM_Sim
+
+    seed = zlib.crc32(b"nullA-3-100-13") % 2**31
+    X = PCM_Sim(no_of_items=10, no_of_persons=100, max_score_vector=[3] * 10, person_sd=1.5, seed=seed).responses
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m = PCM(X, max_score_vector=[3] * 10)
+        m.calibrate(estimation="cml", ridge=0)
+        with pytest.raises(ValueError, match="fewer than two items have CML estimates in both groups"):
+            m.global_fit(method="andersen", split="score", seed=13)
+
+
+def test_andersen_default_p_method_follows_ridge():
+    """global_fit(method='andersen') defaults to Monte Carlo p-values (stopping after 10 exceedances)
+    with PCM's CML ridge, chi-square with ridge=0; martin-lof stays chi-square."""
+    X = _ridge_pcm_data([3] * 6, n=200, seed=3)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = PCM(X, max_score_vector=[3] * 6)
+        r.calibrate(estimation="cml")
+        z = PCM(X, max_score_vector=[3] * 6)
+        z.calibrate(estimation="cml", ridge=0, unused_categories="null")
+        a = r.global_fit(method="andersen", seed=1, no_of_samples=50)
+        b = z.global_fit(method="andersen")
+        c = r.global_fit(method="andersen", p_method="chi2")
+        d = r.global_fit(method="martin-lof")
+    assert a["p_method"] == "monte-carlo" and a["Monte Carlo samples"] <= 50
+    assert b["p_method"] == c["p_method"] == d["p_method"] == "chi2"
+
+
+# ---------------------------------------------------------------------------
+# PCM estimation='cp-full-rcl' (full-pattern pairwise conditional likelihood with the ridge)
+# ---------------------------------------------------------------------------
+
+
+def _brute_pcm_rcl_loglik(X, Ks, b):
+    """The composite log-likelihood summed directly over item pairs and patterns (a, b) vs (a - 1, b + 1)."""
+    off = np.concatenate([[0], np.cumsum(Ks)])
+    ll = 0.0
+    for i in range(X.shape[1]):
+        for j in range(i + 1, X.shape[1]):
+            for a in range(1, Ks[i] + 1):
+                for c in range(Ks[j]):
+                    t = np.sum((X[:, i] == a) & (X[:, j] == c))
+                    u = np.sum((X[:, i] == a - 1) & (X[:, j] == c + 1))
+                    eta = b[off[j] + c] - b[off[i] + a - 1]
+                    ll += -t * np.logaddexp(0, -eta) - u * np.logaddexp(0, eta)
+    return ll
+
+
+def test_pcm_rcl_maximises_penalised_composite_likelihood():
+    """cp-full-rcl's estimates maximise the directly summed composite log-likelihood minus the ridge (the
+    'cp-full-rcl' rule and group-width weight), with missing responses and mixed maximum scores; the person
+    scores sum to its gradient."""
+    from raschpy import _rcl
+    from raschpy.simulation import PCM_Sim
+
+    Ks = [2, 3, 4, 3, 2, 5]
+    X = PCM_Sim(no_of_items=6, no_of_persons=250, max_score_vector=Ks, missing=0.1, seed=1).responses
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m = PCM(X, max_score_vector=Ks)
+        m.calibrate(estimation="cp-full-rcl")
+        p = PCM(X, max_score_vector=Ks)
+        p.calibrate(estimation="pair")
+    names = list(X.columns)
+    b0 = np.concatenate([p.thresholds_uncentred.loc[n].dropna().values for n in names])
+    off = np.concatenate([[0], np.cumsum(Ks)])
+    S = np.mean([np.ptp(b0[off[i] : off[i + 1]]) for i in range(len(Ks))])
+    c0, c1, c2 = PCM.RCL_RIDGE_RULE
+    assert m.ridge == pytest.approx(np.exp(c0 + c1 * np.log(S) + c2 * np.log(np.mean(Ks))), rel=1e-12)
+    b = np.concatenate([m.thresholds_uncentred.loc[n].dropna().values for n in names])
+    Xa = X.to_numpy(float)
+    Pb = PCM._ridge_penalty(Ks, m.ridge, group_widths=PCM.RCL_RIDGE_GROUP_WIDTHS)
+    A = _rcl.zero_sum_basis(len(b))
+
+    def obj(th):
+        bb = A @ th
+        return _brute_pcm_rcl_loglik(Xa, Ks, bb) - 0.5 * bb @ Pb @ bb
+
+    th = A.T @ b
+    e = 1e-5
+    grad = [(obj(th + e * v) - obj(th - e * v)) / (2 * e) for v in np.eye(len(th))]
+    assert np.max(np.abs(grad)) < 1e-4
+    assert m.convergence["log_likelihood"] == pytest.approx(_brute_pcm_rcl_loglik(Xa, Ks, b), abs=1e-8)
+    D, t, u = _rcl.pcm_comparisons(Xa, Ks)
+    S_p = _rcl.pcm_person_scores(Xa, Ks, b)
+    np.testing.assert_allclose(S_p.sum(axis=0), D.T @ (t - (t + u) / (1 + np.exp(-(D @ b)))), atol=1e-9)
+
+
+def test_pcm_rcl_options_and_standard_errors():
+    X = _keep_pcm_data()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m = PCM(X, max_score_vector=[3] * 6)
+        m.calibrate(estimation="cp-full-rcl")
+        m.std_errors()
+    assert m._cml_unused == "ridge" and not m.convergence["dropped_items"] and m.se_method == "sandwich"
+    assert np.isfinite(m.item_se.to_numpy()).all()
+    with pytest.raises(ValueError, match="'null' applies to estimation='cml' only"):
+        PCM(X, max_score_vector=[3] * 6).calibrate(estimation="cp-full-rcl", unused_categories="null")
+    with pytest.raises(ValueError, match="se_method='hessian'"):
+        m.std_errors(se_method="hessian")
+
+
+def test_pcm_cml_start_from_rcl_same_estimates():
+    """Ridge CML starts from the cp-full-rcl estimates: the same maximum as starting from PAIR."""
+    from raschpy import _rcl
+
+    Ks = [2, 3, 4, 5] * 3
+    X = _ridge_pcm_data(Ks, n=200, seed=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m = PCM(X, max_score_vector=Ks)
+        m.calibrate(estimation="cml")
+        p = PCM(X, max_score_vector=Ks)
+        p.calibrate(estimation="pair")
+    names = list(X.columns)
+    b0 = np.concatenate([p.thresholds_uncentred.loc[n].dropna().values for n in names])
+    A = _rcl.zero_sum_basis(len(b0))
+    Q = A.T @ PCM._ridge_penalty(Ks, m.ridge) @ A
+    ref = _esf.fit_cml(X.to_numpy(float), A, b0 - b0.mean(), Ks, solver="newton", penalty=Q)
+    b = np.concatenate([m.thresholds_uncentred.loc[n].dropna().values for n in names])
+    np.testing.assert_allclose(b, ref["b"], atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# std_errors(no_data_se=): parameters the data do not inform (no_data_parameters)
+# ---------------------------------------------------------------------------
+
+
+def _no_data_pcm():
+    from raschpy.simulation import PCM_Sim
+
+    X = PCM_Sim(no_of_items=6, no_of_persons=500, max_score_vector=[3] * 6, seed=41).responses
+    X[X.columns[0]] = X[X.columns[0]].replace(3, 2)  # top category unused: location not identified
+    X[X.columns[1]] = X[X.columns[1]].replace(2, 1)  # interior category unused: location identified
+    return X
+
+
+@pytest.mark.parametrize("estimation", ["cml", "cp-full-rcl"])
+def test_pcm_no_data_se(estimation):
+    X = _no_data_pcm()
+    a, b = X.columns[0], X.columns[1]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m = PCM(X, max_score_vector=[3] * 6)
+        m.calibrate(estimation=estimation)
+        m.std_errors(se_method="sandwich", no_data_se="nan")
+        sand = (m.item_se.copy(), {k: np.array(v) for k, v in m.threshold_se.items()})
+    assert m.no_data_parameters == {
+        a: dict(thresholds=[3], widths=[2], location=True),
+        b: dict(thresholds=[2, 3], widths=[1, 2], location=False),
+    }
+    assert np.isnan(m.item_se[a]) and np.isfinite(m.item_se[b])
+    assert np.isnan(m.threshold_se[b][1:]).all() and np.isfinite(m.threshold_se[b][0])
+    with pytest.warns(UserWarning, match="no_data_se='posterior'"):
+        m.std_errors(no_data_se="posterior", interval=0.95)
+    assert np.isfinite(m.item_se[a]) and m.item_se[b] == pytest.approx(sand[0][b])
+    # the other parameters keep their sandwich SEs
+    others = [c for c in X.columns if c not in (a, b)]
+    np.testing.assert_allclose(m.item_se[others].values, sand[0][others].values)
+    lo = m.threshold_low[a][2]
+    assert lo == pytest.approx(m.thresholds_uncentred.loc[a, 3] - 1.959964 * m.threshold_se[a][2], abs=1e-5)
+    with pytest.raises(ValueError, match="no_data_se must be"):
+        m.std_errors(no_data_se="zero")
+
+
+def test_slm_no_data_se():
+    from raschpy.simulation import SLM_Sim
+
+    X = SLM_Sim(no_of_items=8, no_of_persons=80, seed=3).responses
+    X[X.columns[0]] = 1.0  # everyone correct
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m = SLM(X)
+        m.calibrate(estimation="cml", ridge=0.3)
+        m.std_errors(no_data_se="nan")
+        nan_se = m.item_se.copy()
+        m.std_errors(no_data_se="posterior")
+        p = SLM(X)
+        p.calibrate(estimation="cml")
+    assert list(m.no_data_parameters) == [X.columns[0]] and not m.convergence["dropped_items"]
+    assert np.isnan(nan_se.iloc[0]) and np.isfinite(m.item_se.iloc[0])
+    np.testing.assert_allclose(m.item_se.iloc[1:].values, nan_se.iloc[1:].values)
+    assert X.columns[0] in p.convergence["dropped_items"]  # ridge=0: dropped as before
+
+
+def test_rsm_no_data_se():
+    """RSM: an empty category's thresholds and widths are rule-set (NaN under either option); a width with no
+    comparison patterns under cp-full-rcl is set by the width ridge ('posterior' finite, 'nan' NaN)."""
+    from raschpy.simulation import RSM_Sim
+
+    X = RSM_Sim(no_of_items=8, no_of_persons=300, max_score=4, seed=2).responses.replace(2, 1)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m = RSM(X, max_score=4)
+        m.calibrate()
+        m.std_errors(se_method="sandwich", no_data_se="posterior")
+    assert m.no_data_parameters == {"widths": {1: "rule", 2: "rule", 3: "rule"}, "thresholds": {2: "rule", 3: "rule"}}
+    assert np.isnan(m.cat_width_se.values).all() and np.isnan(m.threshold_se[1:3]).all()
+    rng = np.random.default_rng(0)
+    rows = []
+    while len(rows) < 600:  # each person answers two items, never in the patterns informing width 2
+        r = np.full(5, np.nan)
+        i, j = rng.choice(5, 2, replace=False)
+        a, b = rng.integers(0, 5, 2)
+        if (a == 2 and b == 2) or sorted((a, b)) == [1, 3]:
+            continue
+        r[i], r[j] = a, b
+        rows.append(r)
+    Y = pd.DataFrame(rows, columns=[f"I{k}" for k in range(5)])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        n = RSM(Y, max_score=4)
+        n.calibrate()
+        n.std_errors(se_method="sandwich", no_data_se="posterior")
+        post = n.cat_width_se.copy()
+        n.std_errors(se_method="sandwich", no_data_se="nan")
+    assert n.no_data_parameters == {"widths": {2: "ridge"}, "thresholds": {}}
+    assert np.isfinite(post[2]) and np.isnan(n.cat_width_se[2])
+    np.testing.assert_allclose(post[[1, 3]].values, n.cat_width_se[[1, 3]].values)
+
+
+def test_mfrm_no_data_se():
+    """MFRM: a facet element x item cell with no responses (set by the ridge) gets the posterior SE or NaN,
+    not the sandwich's near-zero; the other cells keep theirs."""
+    from raschpy import MFRM
+    from raschpy.simulation import MFRM_Sim
+
+    X = MFRM_Sim(no_of_items=5, no_of_persons=300, no_of_facet_elements=4, max_score=3, model="items", seed=3).responses
+    r0 = X.index.get_level_values(0).unique()[0]
+    X.loc[r0, X.columns[0]] = np.nan
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m = MFRM(X, max_score=3)
+        m.calibrate(model="items")
+        m.std_errors(model="items", no_data_se="posterior")
+        post = m.rater_se_items.copy()
+        m.std_errors(model="items", no_data_se="nan")
+    cell = (post.index[0], post.columns[0])
+    assert m.no_data_parameters["items"]["cells"] == [cell] and m.no_data_parameters["items"]["kind"] == "ridge"
+    assert post.loc[cell] > 0.5 and np.isnan(m.rater_se_items.loc[cell])
+    others = m.rater_se_items.drop(index=cell[0])
+    np.testing.assert_allclose(others.values, post.drop(index=cell[0]).values)
+
+
+@pytest.mark.parametrize(
+    "model", ["global", "items", "thresholds", "matrix", "bivector", "centrality", "pseudo_halo", "bistretch"]
+)
+def test_mfrm_no_data_se_empty_category(model):
+    """A score category no response used: the shared thresholds and widths set by the empty-category rule get NaN
+    SEs under either option, sandwich or bootstrap, in every sub-model; a partly affected threshold set keeps the
+    SEs of the thresholds away from the empty category."""
+    from raschpy import MFRM
+    from raschpy.simulation import MFRM_Sim
+
+    X = MFRM_Sim(no_of_items=5, no_of_persons=300, no_of_facet_elements=4, max_score=4, model="bivector",
+                 seed=3).responses
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m = MFRM(X.replace(2, 1), max_score=4)  # category 2 empty: every width rule-set (K = 4)
+        m.calibrate(model=model)
+        m.std_errors(model=model, se_method="sandwich")
+    assert m.no_data_parameters[model]["shared"] == dict(widths=[1, 2, 3], thresholds=[1, 2, 3, 4])
+    assert np.isnan(getattr(m, f"threshold_se_{model}")).all()
+    assert np.isnan(list(getattr(m, f"cat_width_se_{model}").values())).all()
+    if model == "global":
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            n = MFRM(MFRM_Sim(no_of_items=5, no_of_persons=300, no_of_facet_elements=4, max_score=6,
+                              model="global", seed=3).responses.replace(1, 0), max_score=6)
+            n.calibrate(model=model)
+            n.std_errors(model=model, se_method="bootstrap", no_of_samples=20, seed=1, no_data_se="posterior")
+        sh = n.no_data_parameters[model]["shared"]
+        assert sh == dict(widths=[1, 2], thresholds=[1, 2])
+        se = n.threshold_se_global
+        assert np.isnan(se[:2]).all() and np.isfinite(se[2:]).all()
+
+
+def test_category_stats_disordered_nan_for_unused_category():
+    """category_stats_df: Disordered is True / False for the identified widths and NaN for those next to a
+    category kept with unused_categories='null' (not identified; the extreme case of disorder)."""
+    from raschpy.simulation import RSM_Sim
+    X = RSM_Sim(no_of_items=6, no_of_persons=300, max_score=4, seed=4).responses
+    X = X.where(X != 2, 1)
+    m = RSM(X, max_score=4, validate=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m.calibrate(estimation="cml", unused_categories="null")
+        m.std_errors()
+    d = m.category_stats_df()["Disordered"].tolist()
+    assert pd.isna(d[0]) and pd.isna(d[1]) and d[2] is False
+
+
+def test_rsm_andersen_monte_carlo_when_a_group_needs_the_width_ridge():
+    """global_fit(method='andersen') with RSM's CML and p_method=None: Monte Carlo when a group's (or the
+    pooled) fit needed the unused-category width ridge, chi-square otherwise."""
+    import zlib
+    from raschpy.simulation import RSM_Sim
+    out = {}
+    for rep in (0, 3):  # (score groups use every category, the low group leaves the top one unused)
+        seed = zlib.crc32(f"andersen-wr|150|{rep}".encode())
+        persons = np.random.default_rng(seed).normal(-1.5, 1.0, 150)
+        sim = RSM_Sim(no_of_items=8, no_of_persons=150, max_score=4, manual_thresholds=[-1.5, -1.0, 0.0, 2.5],
+                      manual_persons=persons, seed=seed)
+        m = RSM(sim.responses, max_score=4, validate=False)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            m.calibrate(estimation="cml")
+            m.global_fit(method="andersen", no_of_samples=30, seed=1, progress=False)
+        used = any(g._cml_penalty is not None for g in m.global_fit_groups.values())
+        out[rep] = (used, m.global_fit_summary["p_method"])
+    assert out[0] == (False, "chi2") and out[3] == (True, "monte-carlo")
+
+
+def test_q1_small_samples_keep_two_groups():
+    """Fewer than 2 * Q1_MIN_GROUP persons still give 2 groups (merging stops at 2), so Q1 is computed; a
+    single group (supplied, or every location tied) gives no Q1 statistics, NaN overall and a warning."""
+    from raschpy.base import Rasch
+    from raschpy.simulation import SLM_Sim
+
+    loc = np.random.default_rng(1).normal(size=40).round(1)
+    assert len(np.unique(Rasch._ability_groups(loc)[0])) == 2
+    assert len(np.unique(Rasch._ability_groups(np.zeros(50))[0])) == 1
+    m = SLM(SLM_Sim(no_of_items=10, no_of_persons=40, seed=3).responses, validate=False)
+    m.calibrate(estimation="cml")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m.fit_statistics(conditional=True, q1_overall_samples=20)
+    assert (m.item_q1_table["df"] == 1).all() and m.item_q1_table["p"].notna().all()
+    assert m.item_q1_overall.loc["item scores", "Groups"] == 2
+    assert np.isfinite(m.item_q1_overall.loc["item scores", "p"])
+    one = pd.Series(0, index=m.responses.index)
+    with pytest.warns(UserWarning, match="form 1 group"):
+        m.fit_statistics(conditional=True, q1_groups=one, q1_overall_samples=20)
+    assert m.item_q1_table["Q1"].isna().all() and m.item_q1_table["p"].isna().all()
+    assert np.isnan(m.item_q1_overall.loc["item scores", "p"])
+
+
+def test_pcm_constant_none_with_mixed_maximum_scores():
+    """calibrate(constant=None): self.constant is None with mixed maximum scores (only the per-cell
+    constants are applied) and the applied constant with one maximum score."""
+    import numpy as np
+    import pandas as pd
+    from raschpy import PCM
+
+    rng = np.random.default_rng(3)
+    theta = rng.normal(size=300)
+    maxes = [2, 2, 3, 3, 4]
+    cols = {}
+    for i, k in enumerate(maxes):
+        tau = np.linspace(-1, 1, k) + 0.3 * i - 0.6
+        logits = np.cumsum(np.c_[np.zeros(300), theta[:, None] - tau[None, :]], axis=1)
+        p = np.exp(logits - logits.max(axis=1, keepdims=True))
+        p /= p.sum(axis=1, keepdims=True)
+        cols[f"I{i}"] = [rng.choice(k + 1, p=row) for row in p]
+    df = pd.DataFrame(cols)
+
+    mixed = PCM(df, max_score_vector=maxes)
+    mixed.calibrate(estimation="pair")
+    assert mixed.constant is None
+    assert mixed.cell_constants is not None and np.all(mixed.cell_constants > 0)
+
+    same = PCM(df[["I2", "I3"]], max_score_vector=[3, 3])
+    same.calibrate(estimation="pair")
+    assert same.constant is not None and same.constant > 0
+    assert np.allclose(same.cell_constants, same.constant)
+
+    given = PCM(df, max_score_vector=maxes)
+    given.calibrate(estimation="pair", constant=0.2)
+    assert given.constant == 0.2 and given.cell_constants is None
