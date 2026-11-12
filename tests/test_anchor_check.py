@@ -197,6 +197,44 @@ def test_two_anchors_that_disagree_cannot_be_told_apart():
     assert check.suggestions.empty
 
 
+def test_an_anchor_alone_at_a_cell_is_not_screened_there():
+    """Every other anchor cut at a cell: the remaining one alone defines the zero point there, so it is not screened
+    (it used to fail with an undefined zero point)."""
+    m = _sim(TWO_CELLS)
+    cell = (ITEMS[4], "Threshold 2")
+    w = AnchorSet(ANCHORS[:3]).cut("Rater_1", cell, ITEMS, K).cut("Rater_2", cell, ITEMS, K)
+    check = m.check_anchor_homogeneity(anchors=w)
+    assert any("Rater_3: the only anchor not cut" in n for n in check.notes)
+
+
+def test_cuts_leave_two_other_anchors_at_each_cell():
+    """Three of five anchors shifted at the same cell: each cut leaves at least two other anchors uncut there, so
+    every later screen keeps a zero point; the rest are dropped instead of cut."""
+    shift = {f"Rater_{r}": ("matrix", 1.5 * np.outer(np.eye(I)[2], np.eye(K)[1])) for r in (1, 2, 3)}
+    m = _sim(shift, n=600)
+    check = m.check_anchor_homogeneity(anchors=ANCHORS)
+    s = check.suggested
+    held = np.zeros((I, K), int)
+    for a in s.anchors:
+        free = np.ones((I, K), bool)
+        for kind, lab in s.cuts.get(a, []):
+            free[check._cells(kind, lab)] = False
+        held += free
+    assert held.min() >= 1
+
+
+def test_anchors_with_no_agreeing_core_get_no_suggestions():
+    """Every anchor on its own threshold pattern: every anchor is flagged, so the check says the set has no agreeing
+    core instead of dropping anchors until min_anchors stops it."""
+    rng = np.random.default_rng(5)
+    pats = {a: ("thresholds", 1.2 * (lambda v: v - v.mean())(rng.standard_normal(K))) for a in ANCHORS}
+    m = _sim(pats)
+    check = m.check_anchor_homogeneity(anchors=ANCHORS)
+    assert any("no majority core" in n for n in check.notes)
+    assert check.suggestions.empty
+    assert check.suggested.anchors == ANCHORS
+
+
 def test_cochran_test_stays_available():
     m = _sim()
     assert m.check_anchor_homogeneity(model="global", anchors=ANCHORS[:3], rater_homogeneity_test="cochran",
@@ -204,6 +242,33 @@ def test_cochran_test_stays_available():
     assert m.anchor_homogeneity_test is not None
     with pytest.raises(TypeError, match="'cochran' test"):
         m.check_anchor_homogeneity(anchors=ANCHORS, no_of_samples=30)
+
+
+def test_cochran_test_argument_checks():
+    """Cochran: model= is required, an unknown argument is a TypeError, and screen-only arguments warn."""
+    m = _sim()
+    with pytest.raises(ValueError, match="needs model="):
+        m.check_anchor_homogeneity(anchors=ANCHORS[:3], rater_homogeneity_test="cochran")
+    for test in ("cochran", None):
+        with pytest.raises(TypeError, match="unexpected keyword argument"):
+            m.check_anchor_homogeneity(model="global", anchors=ANCHORS[:3], rater_homogeneity_test=test,
+                                       candidate_models=["global"])
+    with pytest.warns(UserWarning, match=r"ignores \['min_effect', 'max_share'\]"):
+        m.check_anchor_homogeneity(model="global", anchors=ANCHORS[:3], rater_homogeneity_test="cochran",
+                                   min_effect=1.5, max_share=0.4, no_of_samples=30, seed=1)
+
+
+def test_rater_stats_mixed_with_anchors_after_another_model():
+    """rater_stats_df(model='mixed', anchors=) after a different model's calibrate(): the selection's joint fit is
+    used (it used to look for the 'pair-cpat' anchored attribute)."""
+    m = _sim(n=300)
+    m.calibrate(model="bivector", estimation="cp-full-rcl")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m.rater_stats_df(model="mixed", anchors=ANCHORS)
+    assert m.anchors_mixed == ANCHORS
+    assert all(m.rater_models[a] == "global" for a in ANCHORS)
+    assert list(m.rater_stats_mixed.index) == list(m.facet_names)
 
 
 # ---- global effect --------------------------------------------------------------------------------------------

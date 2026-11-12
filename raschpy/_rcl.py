@@ -113,7 +113,7 @@ def category_counts(X, K):
 def empty_widths(cat_counts, K):
     """Width indices (0..K-2) whose patterns involve an empty middle category: an empty category j identifies only
     the intersection of the category response curves of j-1 and j+1, so widths j-2, j-1, j are not identified by
-    their own patterns."""
+    their patterns."""
     empty = {j for j in range(1, K) if cat_counts[j] == 0}
     return sorted(b for b in range(K - 1) if empty & {b, b + 1, b + 2})
 
@@ -229,7 +229,7 @@ def _full_patterns(K, drop_widths=(), empty=()):
     """(a, b, d) for the full pattern set: a = 1..K, b = 0..K-1, d = |b - (a-1)|. The log-odds of pattern (a, b)
     contain tau_{b+1} - tau_a (one-based), the sum of the widths between those thresholds; a pattern is dropped if
     any of them is a split-out width (drop_widths, zero-based), so that no jointly fitted width is tied to a
-    split-out one -- for d = 1 this is CPAT's own rule -- or if it involves an empty category (one side would be
+    split-out one -- for d = 1 this is CPAT's rule -- or if it involves an empty category (one side would be
     structurally zero)."""
     drop_widths, empty = set(drop_widths), set(empty)
     out = []
@@ -1217,7 +1217,7 @@ def person_grid_bread(b, X, K, sl, drop_widths=()):
 
 def full_person_grid_scores(b, X, K, drop_widths=(), empty=()):
     """person_grid_scores() for the full pattern set (full_comparisons()): each person's score with respect to the
-    location grid b (R, I, K) from their own patterns. X (R, P, I). Returns (P, R, I, K).
+    location grid b (R, I, K) from their patterns. X (R, P, I). Returns (P, R, I, K).
     """
     R, P, I = X.shape
     ind = [np.nan_to_num(X == c).astype(np.float64) for c in range(K + 1)]

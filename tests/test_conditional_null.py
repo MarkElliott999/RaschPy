@@ -96,7 +96,7 @@ def test_fallback_to_own_fit(monkeypatch):
     monkeypatch.setattr(rp.PCM, "_global_fit_subset", fail)
     msgs = _conditional(m, bootstrap_samples=None, q1_overall_samples=None)
     assert m.conditional_null_fit is None and not msgs  # nothing simulated, no null fit made
-    with pytest.warns(UserWarning, match="simulated from the object's own fit"):
+    with pytest.warns(UserWarning, match="simulated from the object's fit"):
         assert m._conditional_null(list(m.item_names))[1] == "own"
 
 

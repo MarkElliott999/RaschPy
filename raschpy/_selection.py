@@ -208,7 +208,7 @@ def bt_restricted_fit(mat, A, tol=1e-10, max_iter=200):
     """
     Maximise PAIR's Bradley-Terry likelihood of its smoothed threshold-pair matrix, sum_{a != b} mat[a, b]
     log sigma(b_b - b_a) (cell a's strength is minus its uncentred threshold), over b = A th: the RSM fit
-    within PAIR's own objective. Returns the stacked uncentred thresholds.
+    within PAIR's objective. Returns the stacked uncentred thresholds.
     """
     n = np.array(mat, float)
     np.fill_diagonal(n, 0.0)
@@ -255,9 +255,9 @@ def threshold_difference(b_rsm, b_pcm, I, K):
 def bootstrap_p(X, K, b_rsm_null, statistic, samples, rng, track=None, observed=None):
     """
     Conditional parametric bootstrap p-value: datasets simulated given each person's total and observed items
-    under RSM with uncentred thresholds b_rsm_null (stacked), statistic(X') recomputed on each (the route's own
+    under RSM with uncentred thresholds b_rsm_null (stacked), statistic(X') recomputed on each (the route's
     fits), p = (1 + #{T* >= T}) / (B + 1) with B the resamples whose statistic could be computed. observed is
-    the statistic of X when already computed (from the object's own fits); None computes statistic(X).
+    the statistic of X when already computed (from the object's fits); None computes statistic(X).
     """
     import pandas as pd
 
@@ -291,7 +291,7 @@ def composite_andersen(Xs, Ks, b_groups, b0, Bm):
     (p: its exact tail, weighted_chi2_sf). The adjusted LR (Pace, Salvan and Sartori, 2011) is LR x robust Wald / naive Wald on the
     group differences psi = (phi_g - phi_1, g >= 2), with df the rank of psi's sandwich covariance. H and J are
     evaluated at the group fits. Returns a dict: lr, adjusted, df, scale, df_satterthwaite, p (weighted chi-square tail),
-    weight_min, weight_max, cl (per group at its own fit) and cl_pooled (per group at b0).
+    weight_min, weight_max, cl (per group at its fit) and cl_pooled (per group at b0).
     """
     Ks = [int(k) for k in Ks]
     Hs, Js, phis, cl, cl0 = [], [], [], [], []

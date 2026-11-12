@@ -109,7 +109,7 @@ class MFRM(Rasch):
 
     # Alternate spellings for the two raw stretch-model parameters --
     # 'global' for 'lambda' (the additive shift; == 1 stretch collapses
-    # the model to 'global', and it matches 'global's own single-subscript
+    # the model to 'global', and it matches 'global's single-subscript
     # lambda_r notation), 'stretch' for 'omega' (the multiplicative
     # stretch coefficient, on whichever axis/axes the model has -- e.g.
     # self.stretch_centrality, or self.stretch_items_bistretch /
@@ -125,15 +125,15 @@ class MFRM(Rasch):
     # left generic, since a bare "Stretch" column wouldn't say which axis
     # it stretches once bistretch has two of them in the same table.
     #
-    # NOTE for future closed-form raw-parameter models (e.g. a possible
+    # NOTE for future raw-parameter models (e.g. a possible
     # Jin & Eckes-style addition): a new entry here is NOT automatic --
     # rater_stats_df's alias=True branch only fires for models listed in
-    # its own `elif model in ("centrality", "pseudo_halo", "bistretch")`
+    # its `elif model in ("centrality", "pseudo_halo", "bistretch")`
     # check, so adding a model to _MODELS/_estimate_raters_* etc. does not
     # by itself give it alias support. Decide and add both: (1) this
     # dict's entry (raw param name -> display label) and (2) the new
     # model's name in that elif condition, or alias=True will silently do
-    # nothing for it (no error, just no relabelling). save_stats' own
+    # nothing for it (no error, just no relabelling). save_stats'
     # alias=False passthrough needs no separate change -- it forwards
     # unconditionally to rater_stats_df for every model, so it inherits
     # whatever rater_stats_df itself supports automatically.
@@ -434,7 +434,7 @@ class MFRM(Rasch):
         Post-hoc min_effect walk-back for model_selection's AIC/BIC branches,
         restricted to the original five-model ladder (matrix -> bivector ->
         {items, thresholds} -> global) -- mirrors per_rater_model_selection's
-        own AIC/BIC walk-back exactly, but only downgrades between two
+        AIC/BIC walk-back exactly, but only downgrades between two
         models that are both in active_set (models= may have excluded one
         side). centrality/pseudo_halo/bistretch selections are left
         untouched, matching per_rater_model_selection's documented scope.
@@ -1433,7 +1433,7 @@ class MFRM(Rasch):
         exp = (cats * probs).sum()
         return ((cats - exp) ** 4 * probs).sum()
 
-    # Backwards-compatible aliases for the four parameterisations
+    # Per-model aliases
     def cat_prob_global(
         self,
         person_location,
@@ -1611,10 +1611,10 @@ class MFRM(Rasch):
     @staticmethod
     def _stretch_value(lambda_r, scale_r, reference_value):
         """
-        Shared closed-form stretch substitution: lambda_r + (scale_r - 1) *
+        Shared stretch substitution: lambda_r + (scale_r - 1) *
         reference_value -- the same formula _derive_stretch_model uses to
         reconstruct centrality/pseudo_halo/bistretch's full location vector
-        from their own raw (lambda_r, omega_r) parameters. Factored out here
+        from their raw (lambda_r, omega_r) parameters. Factored out here
         so the cat_prob_X/exp_score_X/variance_X/kurtosis_X convenience
         methods for these three models build the same reconstruction from a
         single canonical formula, rather than encoding it a second time.
@@ -1622,7 +1622,7 @@ class MFRM(Rasch):
         return lambda_r + (scale_r - 1.0) * reference_value
 
     def _centrality_severity(self, facet_element, lambda_r, omega_r, thresholds):
-        """centrality's thresholds-shaped location vector, reconstructed from its own (lambda_r, omega_r), ready for cat_prob(model='centrality')."""
+        """centrality's thresholds-shaped location vector, reconstructed from its (lambda_r, omega_r), ready for cat_prob(model='centrality')."""
         lam_rt = self._stretch_value(
             lambda_r, omega_r, np.asarray(thresholds, dtype=float)
         )
@@ -1631,7 +1631,7 @@ class MFRM(Rasch):
     def _pseudo_halo_severity(
         self, facet_element, item, lambda_r, omega_r, item_locations
     ):
-        """pseudo_halo's items-shaped location value, reconstructed from its own (lambda_r, omega_r), ready for cat_prob(model='pseudo_halo')."""
+        """pseudo_halo's items-shaped location value, reconstructed from its (lambda_r, omega_r), ready for cat_prob(model='pseudo_halo')."""
         mu_ri = self._stretch_value(lambda_r, omega_r, item_locations.loc[item])
         return pd.DataFrame({item: [mu_ri]}, index=[facet_element])
 
@@ -1645,7 +1645,7 @@ class MFRM(Rasch):
         item_locations,
         thresholds,
     ):
-        """bistretch's matrix-shaped location vector for one (facet element (e.g. rater), item), reconstructed from its own (lambda_r, omega_items_r, omega_thresholds_r), ready for cat_prob(model='bistretch')."""
+        """bistretch's matrix-shaped location vector for one (facet element (e.g. rater), item), reconstructed from its (lambda_r, omega_items_r, omega_thresholds_r), ready for cat_prob(model='bistretch')."""
         item_component = self._stretch_value(
             lambda_r, omega_items_r, item_locations.loc[item]
         )
@@ -1668,8 +1668,8 @@ class MFRM(Rasch):
         thresholds,
     ):
         """
-        Category probability for the closed-form 'centrality' restriction,
-        taking the facet element's (e.g. rater's) own raw parameters (location shift lambda_r,
+        Category probability for the 'centrality' restriction,
+        taking the facet element's (e.g. rater's) raw parameters (location shift lambda_r,
         threshold-stretch omega_r) directly, rather than the reconstructed
         'thresholds'-shaped vector cat_prob(model='centrality') itself
         expects. See cat_prob for the underlying formula.
@@ -1700,8 +1700,8 @@ class MFRM(Rasch):
         thresholds,
     ):
         """
-        Category probability for the closed-form 'pseudo_halo' restriction,
-        taking the facet element's (e.g. rater's) own raw parameters (location shift lambda_r,
+        Category probability for the 'pseudo_halo' restriction,
+        taking the facet element's (e.g. rater's) raw parameters (location shift lambda_r,
         item-difficulty-stretch omega_r) directly, rather than the
         reconstructed 'items'-shaped vector cat_prob(model='pseudo_halo')
         itself expects. See cat_prob for the underlying formula.
@@ -1733,8 +1733,8 @@ class MFRM(Rasch):
         thresholds,
     ):
         """
-        Category probability for the closed-form 'bistretch' restriction,
-        taking the facet element's (e.g. rater's) own raw parameters (location shift lambda_r,
+        Category probability for the 'bistretch' restriction,
+        taking the facet element's (e.g. rater's) raw parameters (location shift lambda_r,
         item-difficulty-stretch omega_items_r, threshold-stretch
         omega_thresholds_r) directly, rather than the reconstructed
         'matrix'/'bivector'-shaped vector cat_prob(model='bistretch') itself
@@ -1758,6 +1758,28 @@ class MFRM(Rasch):
             category,
             thresholds,
             "bistretch",
+        )
+
+    def cat_prob_mixed(
+        self,
+        person_location,
+        item,
+        item_locations,
+        facet_element,
+        facet_effects,
+        category,
+        thresholds,
+    ):
+        """Alias for cat_prob(..., model='mixed'). See cat_prob for full documentation."""
+        return self.cat_prob(
+            person_location,
+            item,
+            item_locations,
+            facet_element,
+            facet_effects,
+            category,
+            thresholds,
+            "mixed",
         )
 
     def exp_score_global(
@@ -1956,6 +1978,26 @@ class MFRM(Rasch):
             "bistretch",
         )
 
+    def exp_score_mixed(
+        self,
+        person_location,
+        item,
+        item_locations,
+        facet_element,
+        facet_effects,
+        thresholds,
+    ):
+        """Alias for exp_score(..., model='mixed'). See exp_score for full documentation."""
+        return self.exp_score(
+            person_location,
+            item,
+            item_locations,
+            facet_element,
+            facet_effects,
+            thresholds,
+            "mixed",
+        )
+
     def variance_global(
         self,
         person_location,
@@ -2151,6 +2193,26 @@ class MFRM(Rasch):
             facet_effects,
             thresholds,
             "bistretch",
+        )
+
+    def variance_mixed(
+        self,
+        person_location,
+        item,
+        item_locations,
+        facet_element,
+        facet_effects,
+        thresholds,
+    ):
+        """Alias for variance(..., model='mixed'). See variance for full documentation."""
+        return self.variance(
+            person_location,
+            item,
+            item_locations,
+            facet_element,
+            facet_effects,
+            thresholds,
+            "mixed",
         )
 
     def kurtosis_global(
@@ -2353,6 +2415,26 @@ class MFRM(Rasch):
             "bistretch",
         )
 
+    def kurtosis_mixed(
+        self,
+        person_location,
+        item,
+        item_locations,
+        facet_element,
+        facet_effects,
+        thresholds,
+    ):
+        """Alias for kurtosis(..., model='mixed'). See kurtosis for full documentation."""
+        return self.kurtosis(
+            person_location,
+            item,
+            item_locations,
+            facet_element,
+            facet_effects,
+            thresholds,
+            "mixed",
+        )
+
     def _cat_probs_mfrm(
         self,
         person_locations,
@@ -2376,13 +2458,13 @@ class MFRM(Rasch):
           matrix:     k*(θ_n − δ_i) − Σ(τ_k + λ_{r,i,k})
 
         item_locations : pandas.Series or None, default None
-            Item-difficulty values to use instead of the sub-model's own
+            Item-difficulty values to use instead of the sub-model's
             (_items_for(model)) -- lets a
             caller evaluate this facet_element's/model's category
             probabilities against an EXTERNALLY supplied item scale (e.g.
-            a pooled/combined-group model's own items), the same pattern
+            a pooled/combined-group model's items), the same pattern
             `facet_effects` already supports by being passed in explicitly
-            rather than read from self. Used by _log_likelihood's own
+            rather than read from self. Used by _log_likelihood's
             items= override (see there for why -- axis-isolated DIF/DRF
             omnibus tests).
         """
@@ -2677,13 +2759,13 @@ class MFRM(Rasch):
 
     def _threshold_total_weights(self, constant=0.1):
         """
-        CPAT's own total_weight (the harmonic-mean information weight
+        CPAT's total_weight (the harmonic-mean information weight
         _threshold_distance() sums over item pairs), for every threshold
         1..max_score-1 -- the MFRM analogue of RSM's
         _threshold_total_weights (MFRM shares RSM's single shared-vector
         threshold formulation), used as the effective sample size for
         dif_test's DCF dynamic SE cap (dcf_cap). Mirrors
-        _threshold_distance's own weight computation exactly (not the
+        _threshold_distance's weight computation exactly (not the
         distance/diff_matrix term), including its facet_element-aware
         reshape (weight is summed across facet_elements AND persons, same
         as the distance itself), so this is cheap relative to a full
@@ -2694,7 +2776,7 @@ class MFRM(Rasch):
         MFRM's total_weight additionally pools across facet_elements, so
         its scale relative to RSM's at matched person N is not yet known.
         Treat dcf_cap as a reasonable starting point for MFRM, not a
-        validated one, pending its own dynamic-N calibration study (see
+        validated one, pending its dynamic-N calibration study (see
         raschpy_dynamic_n_calibration project notes).
 
         Parameters
@@ -3025,7 +3107,7 @@ class MFRM(Rasch):
 
     def _derive_stretch_model(self, deviation_df, reference_values, regression="huber"):
         """
-        Shared closed-form 2-parameter (shift lambda_r + stretch scale_r)
+        Shared 2-parameter (shift lambda_r + stretch scale_r)
         reduction of a fully free per-facet-element deviation table (the K-length
         'thresholds' or I-length 'items' facet_effects), recovered directly
         from an already-calibrated fit rather than via new iterative
@@ -3050,7 +3132,7 @@ class MFRM(Rasch):
         differenced OLS or differenced WLS across every tested condition
         (varying facet_element counts, item counts, category counts), at
         negligible per-facet_element cost (microseconds to low
-        milliseconds) -- WLS's own bootstrap-derived weights were both far
+        milliseconds) -- WLS's bootstrap-derived weights were both far
         more expensive AND not reliably more accurate, so were dropped
         entirely rather than offered as a third option.
 
@@ -3232,7 +3314,7 @@ class MFRM(Rasch):
         consistent set, but a genuinely misspecified stretch model
         typically fails fairly UNIFORMLY across elements, which robust z
         cannot detect (nothing looks unusual relative to its equally-bad
-        peers). Wald/t, testing each element against its own paired
+        peers). Wald/t, testing each element against its paired
         uncertainty independent of the others, does not have this blind
         spot.
 
@@ -3258,7 +3340,7 @@ class MFRM(Rasch):
             for anyone who deliberately drops no_of_samples for speed
             (at no_of_samples=100, the same z=3.5 case differs by ~50%).
             A fully rigorous studentized/"bootstrap-t" correction (nested
-            bootstrap, re-estimating each resample's own SE) was
+            bootstrap, re-estimating each resample's SE) was
             considered and rejected: it multiplies the bootstrap cost by
             the inner sample size (50-200x), for a benefit expected to be
             modest here, since free_est/stretch_est are themselves built
@@ -3267,7 +3349,7 @@ class MFRM(Rasch):
             given this plain 't' correction is already free to keep.
         correction : {None, 'bh'}
             If 'bh', Benjamini-Hochberg FDR correction is applied WITHIN
-            each facet element's own family of tests (that facet element's items, or that
+            each facet element's family of tests (that facet element's items, or that
             facet element's thresholds) -- not pooled across facet elements. If None
             (default), raw p-values are compared against alpha directly.
         alpha : float
@@ -3329,7 +3411,7 @@ class MFRM(Rasch):
         Anchored: the parent is anchor-calibrated on the stretch model's
         anchors, with the full-data anchor adjustment fixed across resamples.
         The data issues these refits would warn about were already reported
-        by the stretch model's own calibration and bootstrap, so they are not
+        by the stretch model's calibration and bootstrap, so they are not
         repeated.
         """
         import copy
@@ -3404,13 +3486,13 @@ class MFRM(Rasch):
     def _get_divergence_inputs(self, model, anc):
         """
         Return {axis: (free_est, stretch_est, se_diff)} for the given
-        stretch model, comparing against its own parent/vector model:
+        stretch model, comparing against its parent/vector model:
         'thresholds' for centrality, 'items' for pseudo_halo, 'bivector'
         (both axes) for bistretch.
 
         se_diff comes from a SINGLE, PAIRED bootstrap, not two
         independent ones: every resample used to bootstrap the stretch
-        model's own SE already calibrates its free/vector parent as a
+        model's SE already calibrates its free/vector parent as a
         byproduct (_estimate_raters_centrality calls
         _estimate_raters_thresholds first, _estimate_raters_pseudo_halo
         calls _estimate_raters_items first, _estimate_raters_bistretch
@@ -3644,11 +3726,11 @@ class MFRM(Rasch):
     def _stretch_parent_scope(self, model, anchor=False):
         """
         Run a pair-cpat stretch model's parent stage (the parent re-estimated
-        with the stretch model's settings) without changing the parent's own
+        with the stretch model's settings) without changing the parent's
         stored results: the parent stage's results are kept for the stretch
         model in _stretch_parent_{model} (read by _stretch_parent_get) and
         the parent's attributes are restored on exit. Anchored: the stretch
-        model's own parent results, item locations and thresholds are put in
+        model's parent results, item locations and thresholds are put in
         place for the parent's anchor calibration and the anchored results
         kept the same way.
         """
@@ -3680,7 +3762,7 @@ class MFRM(Rasch):
     def _stretch_parent_get(self, model, attr):
         """A pair-cpat stretch model's parent result attr (e.g.
         'facet_effects_thresholds' or 'anchor_facet_effects_thresholds' for
-        centrality), from the stretch model's own parent stage; None if
+        centrality), from the stretch model's parent stage; None if
         there is none."""
         return getattr(self, f"_stretch_parent_{model}", {}).get(attr)
 
@@ -3696,8 +3778,8 @@ class MFRM(Rasch):
         Jin & Wang (2018)-style facet element (e.g. rater) centrality/extremity facet_element
         effect -- a 2-parameter (lambda_r shift, omega_r stretch) restriction
         of the unrestricted 'thresholds' model. See _derive_stretch_model
-        for the shared closed-form recipe (including the regression=
-        argument). omega_r is Jin & Wang's own notation for this
+        for the shared recipe (including the regression=
+        argument). omega_r is Jin & Wang's notation for this
         threshold-stretch coefficient.
 
         omega_r > 1 spreads reference thresholds apart for that facet element
@@ -3735,7 +3817,7 @@ class MFRM(Rasch):
         (Pseudo-)halo-effect facet_element effect -- item-facet analogue
         of centrality/extremity, a 2-parameter (lambda_r shift, omega_r
         stretch) restriction of the unrestricted 'items' model. See
-        _derive_stretch_model for the shared closed-form recipe (including
+        _derive_stretch_model for the shared recipe (including
         the regression= argument).
 
         omega_r < 1 compresses the spread of reference item locations
@@ -3898,7 +3980,7 @@ class MFRM(Rasch):
                 self.marginal_facet_effects_thresholds
             )
         else:
-            # Direct pooled-PAIR estimator: each vector estimated from its own
+            # Direct pooled-PAIR estimator: each vector estimated from its
             # pooled comparison matrix (items PAIR summed over thresholds;
             # thresholds PAIR summed over items, corrected for μ_r).
             self._estimate_raters_items(**kw)
@@ -3931,10 +4013,10 @@ class MFRM(Rasch):
         Bivector-stretch ("bistretch") facet_element effect -- a
         3-parameter (lambda_r shift, omega_items_r item-stretch,
         omega_thresholds_r threshold-stretch) restriction of the
-        fully-free 'bivector' model, derived closed-form from bivector's
-        own item_effect/threshold_effect marginal vectors.
+        fully-free 'bivector' model, derived from bivector's
+        item_effect/threshold_effect marginal vectors.
 
-        Reuses bivector's own existing identification convention
+        Reuses bivector's identification convention
         directly -- no new scheme needed. bivector's item vector already
         carries the facet element's (e.g. rater's) overall level (nonzero mean by construction),
         and its threshold vector is already zero-summed per facet element (pure
@@ -4046,7 +4128,7 @@ class MFRM(Rasch):
             return 0.05 if robust else 0.1
         if model == "bivector":
             # matrix-marginal route: 0.3 on the underlying matrix cells;
-            # direct route (robust): the direct estimator's own flat wide
+            # direct route (robust): the direct estimator's flat wide
             # basin, ~2.0.
             return 0.3 if mm else 2.0
         if model == "matrix":
@@ -4622,7 +4704,7 @@ class MFRM(Rasch):
         self._warn_facet_groups(stacklevel=3)
         # a new calibration of this sub-model replaces any unused_categories='null' markers
         getattr(self, "_null_categories", {}).pop(model, None)
-        # a pair-cpat stretch fit below sets its own parent stage's results again
+        # a pair-cpat stretch fit below sets its parent stage's results again
         self.__dict__.pop(f"_stretch_parent_{model}", None)
         if estimation == "cml":
             self._calibrate_cml(
@@ -5725,7 +5807,7 @@ class MFRM(Rasch):
     def _mixed_quantities(design, theta, null=None):
         """
         A 'mixed' fit's reported quantities at theta, as flat arrays: the item locations and thresholds (centred),
-        every facet element's effects in the matrix layout (R, I, K), and each facet element's own parameters
+        every facet element's effects in the matrix layout (R, I, K), and each facet element's parameters
         (native: a list, per facet element, of its arrays in _mixed_params' order). Each is at most quadratic in
         theta, so central differences give their Jacobians exactly. With null (unused_categories='null'), as a
         single representation's fit reports them (_store_null_effects): each free threshold holds the run G of
@@ -5949,7 +6031,7 @@ class MFRM(Rasch):
         """std_errors(model='mixed', no_data_se=) for the estimates the data do not inform, as for a single
         representation (_apply_no_data_se): the shared thresholds and widths next to an unused score category
         (set by the empty-category rule under 'cp-full-rcl' / 'cpat-rcl': NaN; by the width ridge under 'cml':
-        the posterior SE or NaN), and each facet element's effects with no data under its own representation
+        the posterior SE or NaN), and each facet element's effects with no data under its representation
         (_no_data_cells: a facet element x item cell with no responses for the item effects, its thresholds next
         to a score category it never used for the threshold effects; the posterior SE or NaN). se is the flat
         vector of _mixed_std_errors (items, thresholds, matrix-layout effects, native parameters, global effects) and
@@ -5997,7 +6079,7 @@ class MFRM(Rasch):
                     se[I + k - 1] = np.nan
                 for k in widths:
                     w_se[k - 1] = np.nan
-        # each facet element's effects with no data, under its own representation
+        # each facet element's effects with no data, under its representation
         item_any, thr_any = self._no_data_cells("matrix")
         mask = np.zeros(len(se), bool)
         listed = dict(cells=[], thresholds=[])
@@ -6066,7 +6148,7 @@ class MFRM(Rasch):
         """
         Store a joint 'mixed' fit: items_mixed / thresholds_mixed (the instrument, as the anchors see it),
         facet_effects_mixed (every facet element's effects in the matrix layout, (facet element, item) x
-        threshold), one table per representation used with its facet elements' own parameters
+        threshold), one table per representation used with its facet elements' parameters
         (facet_effects_mixed_{model}; bivector as _bivector_items / _bivector_thresholds; the stretch models as
         columns lambda, omega or omega_items, omega_thresholds), rater_params_mixed ({facet element:
         (model, params)}, the form MFRM_Sim(model='mixed', rater_models=) takes), rater_models and anchors_mixed.
@@ -6321,7 +6403,7 @@ class MFRM(Rasch):
             )
         return d, widths
 
-    # Backwards-compatible aliases
+    # Per-model aliases
     def calibrate_global(self, **kw):
         """Alias for calibrate(model='global'). See calibrate for full documentation."""
         self.calibrate(model="global", **kw)
@@ -6353,6 +6435,10 @@ class MFRM(Rasch):
     def calibrate_bistretch(self, **kw):
         """Alias for calibrate(model='bistretch'). See calibrate for full documentation."""
         self.calibrate(model="bistretch", **kw)
+
+    def calibrate_mixed(self, **kw):
+        """Alias for calibrate(model='mixed'). See calibrate for full documentation."""
+        self.calibrate(model="mixed", **kw)
 
     # ------------------------------------------------------------------
     # Anchor calibration
@@ -6610,9 +6696,28 @@ class MFRM(Rasch):
         test = rater_homogeneity_test
         if test is None:
             test = "screen" if est in ("cp-full-rcl", "cpat-rcl", "cml") else "cochran"
+        cochran_args = ("per_component", "robust_z_threshold", "no_of_samples", "constant", "method", "robust",
+                        "matrix_power", "log_lik_tol", "seed")
+        unknown = sorted(set(cochran_kw) - set(cochran_args))
+        if unknown:
+            raise TypeError(f"check_anchor_homogeneity() got unexpected keyword argument(s) {unknown}.")
         if test in ("cochran", "robust"):
             if model is None:
-                raise ValueError(f"check_anchor_homogeneity(rater_homogeneity_test={test!r}) needs model=.")
+                raise ValueError(
+                    f"check_anchor_homogeneity(rater_homogeneity_test={test!r}) needs model=: the representation "
+                    f"whose anchor effects are compared, e.g. model='bivector'."
+                )
+            screen_only = dict(split_alpha=(split_alpha, True), min_effect=(min_effect, 0.0),
+                               action=(action, "report"), max_share=(max_share, 0.5),
+                               min_anchors=(min_anchors, 2), estimation=(estimation, None))
+            ignored = [k for k, (v, default) in screen_only.items() if v != default]
+            if ignored:
+                warnings.warn(
+                    f"check_anchor_homogeneity(rater_homogeneity_test={test!r}) ignores {ignored}, which apply to "
+                    f"rater_homogeneity_test='screen' only.",
+                    UserWarning,
+                    stacklevel=2,
+                )
             if isinstance(anchors, AnchorSet):
                 anchors = anchors.anchors
             return self._check_anchor_homogeneity_single(
@@ -6664,7 +6769,7 @@ class MFRM(Rasch):
         different facet_effect from the rest, the anchor-implied "zero" is
         unstable and the whole anchored scale inherits that instability.
         This is unrelated to per_rater_model_selection (which asks how
-        COMPLEX a facet element's own facet_effect structure needs to be) — this asks
+        COMPLEX a facet element's facet_effect structure needs to be) — this asks
         whether the specific set of facet elements chosen to DEFINE the anchor
         actually agree with each other. A separate, opt-in diagnostic
         (not run automatically by calibrate_anchor) since the 'cochran'
@@ -6672,7 +6777,7 @@ class MFRM(Rasch):
         default and would add unexpected cost to every calibrate_anchor
         call.
 
-        Uses each facet element's own free (unanchored) facet_effects_{model} —
+        Uses each facet element's free (unanchored) facet_effects_{model} —
         deliberately not anchor_facet_effects_{model} — since the point is
         to check whether this candidate anchor SET is internally
         consistent before it gets used to define anything, using an
@@ -6698,7 +6803,7 @@ class MFRM(Rasch):
             supplied. Which specific facet element(s) are responsible is then
             identified by sequential exclusion (standard meta-analysis
             outlier diagnostic): repeatedly drop the facet element with the
-            largest |z| against the CURRENT remaining group's own
+            largest |z| against the CURRENT remaining group's
             weighted mean and retest, until Q is no longer significant. A
             single-pass z-test against the full group's mean isn't used
             for per-facet-element flagging because one severely deviant facet element
@@ -6707,7 +6812,7 @@ class MFRM(Rasch):
             on each remaining subgroup instead, so it isolates the true
             offender(s) rather than flagging the whole set.
             'robust': Iglewicz & Hoaglin modified z-score against the
-            anchor group's own median/MAD (same convention as
+            anchor group's median/MAD (same convention as
             _robust_anchor_selection, applied within the group rather
             than against an external reference). Purely descriptive
             outlier flagging (threshold=robust_z_threshold) — there's no
@@ -6739,7 +6844,7 @@ class MFRM(Rasch):
             rater_homogeneity_test='cochran' only.
         robust_z_threshold : float, default 3.5
             Flagging threshold for rater_homogeneity_test='robust'
-            (Iglewicz & Hoaglin's own recommended default).
+            (Iglewicz & Hoaglin's recommended default).
         no_of_samples : int, default 500
             Bootstrap samples, only used if unanchored SEs for this model
             aren't already stored (rater_homogeneity_test='cochran' only).
@@ -6765,7 +6870,7 @@ class MFRM(Rasch):
             One row per anchor facet element. rater_homogeneity_test='cochran':
             Facet effect, SE, z, p, Flagged — Flagged is whether
             sequential exclusion removed this facet element (z/p are relative to
-            whichever group they were tested against: their own removal
+            whichever group they were tested against: their removal
             step if dropped, or the final retained group if not).
             rater_homogeneity_test='robust': Facet effect, Robust z, Flagged.
         anchor_homogeneity_per_component : pandas.DataFrame or None
@@ -7015,7 +7120,7 @@ class MFRM(Rasch):
             self, f"estimation_{model}", "pair-cpat"
         ) in ("cp-full-rcl", "cpat-rcl", "cml"):
             return self._stretch_anchor_adj(model, anchors)
-        # pair-cpat stretch models: from their own parent stage
+        # pair-cpat stretch models: from their parent stage
         elif model == "centrality":
             fe = self._stretch_parent_get(model, "facet_effects_thresholds")
             return fe.loc[anchors].mean(axis=0)
@@ -7158,7 +7263,7 @@ class MFRM(Rasch):
         """
         Anchor calibration for centrality. Delegates to the
         parent 'thresholds' anchor calibration (same anchor adjustment,
-        since centrality is a closed-form reduction of an
+        since centrality is derived from an
         already-calibrated 'thresholds' fit), then re-derives lambda_r/omega_r
         from the anchored facet effects and anchored reference thresholds.
         See _derive_stretch_model for the regression= argument.
@@ -7189,8 +7294,8 @@ class MFRM(Rasch):
     def _calibrate_anchor_pseudo_halo(self, anchors, adj=None, regression="huber"):
         """
         Anchor calibration for pseudo_halo. Delegates to the parent 'items'
-        anchor calibration (same anchor adjustment, since pseudo_halo is a
-        closed-form reduction of an already-calibrated 'items' fit), then
+        anchor calibration (same anchor adjustment, since pseudo_halo is
+        derived from an already-calibrated 'items' fit), then
         re-derives lambda_r/omega_r from the anchored facet effects and
         anchored reference item locations. See _derive_stretch_model for
         the regression= argument.
@@ -7346,7 +7451,7 @@ class MFRM(Rasch):
         """
         Anchor calibration for bistretch. Delegates to the parent
         'bivector' anchor calibration (same anchor adjustment, since
-        bistretch is a closed-form reduction of an already-calibrated
+        bistretch is derived from an already-calibrated
         'bivector' fit), then re-derives lambda_r/omega_items_r/
         omega_thresholds_r from the anchored facet effects and anchored
         reference items/thresholds. See _derive_stretch_model for the
@@ -7409,7 +7514,7 @@ class MFRM(Rasch):
             omega_thresholds, "omega_thresholds", "bistretch"
         )
 
-    # Backwards-compatible aliases
+    # Per-model aliases
     def calibrate_global_anchor(self, anchors, **kw):
         """Alias for calibrate_anchor('global', anchors). See calibrate_anchor for full documentation."""
         self.calibrate_anchor("global", anchors, **kw)
@@ -7610,7 +7715,7 @@ class MFRM(Rasch):
                 f"with calibrate(model='mixed', rater_models=..., anchors=...) for another frame."
             )
         if joint:
-            anchors = None  # the frame is the fit's own
+            anchors = None  # the frame is the fit's
         if se_method not in (None, "sandwich", "bootstrap", "hessian"):
             raise ValueError(
                 f"se_method must be None, 'sandwich', 'hessian' or 'bootstrap', got {se_method!r}."
@@ -8667,7 +8772,7 @@ class MFRM(Rasch):
         self, model, samples, anchor, interval, prefix, param_names
     ):
         """
-        Bootstrap SE/CI for a stretch-restricted model's own raw shift/
+        Bootstrap SE/CI for a stretch-restricted model's raw shift/
         stretch parameters (lambda, omega -- or omega_items/
         omega_thresholds for bistretch), as opposed to the reconstructed
         full-vector SE _store_rater_se already computes.
@@ -8683,8 +8788,8 @@ class MFRM(Rasch):
         covariance-aware test, since lambda and omega come from one
         shared regression per facet element (e.g. rater) and are NOT independent. Each pair's
         covariance is computed only from bootstrap samples where BOTH
-        parameters were successfully estimated (their own valid subsets
-        may differ slightly from each single parameter's own SE
+        parameters were successfully estimated (their valid subsets
+        may differ slightly from each single parameter's SE
         computation above).
         """
         lo_p = 50 * (1 - interval) if interval is not None else None
@@ -9075,7 +9180,7 @@ class MFRM(Rasch):
 
         self._set_facet_aliases(model, anchor=(prefix == "anchor_"))
 
-    # Backwards-compatible aliases
+    # Per-model aliases
     def std_errors_global(self, anchors=None, **kw):
         """Alias for std_errors(model=\'global\'). See std_errors for full documentation."""
         self.std_errors(model="global", anchors=anchors, **kw)
@@ -9107,6 +9212,10 @@ class MFRM(Rasch):
     def std_errors_bistretch(self, anchors=None, **kw):
         """Alias for std_errors(model=\'bistretch\'). See std_errors for full documentation."""
         self.std_errors(model="bistretch", anchors=anchors, **kw)
+
+    def std_errors_mixed(self, anchors=None, **kw):
+        """Alias for std_errors(model=\'mixed\'). See std_errors for full documentation."""
+        self.std_errors(model="mixed", anchors=anchors, **kw)
 
     def std_errors_global_anchor(self, anchors, **kw):
         """Alias for std_errors(model=\'global\', anchors=anchors). See std_errors for full documentation."""
@@ -9447,7 +9556,7 @@ class MFRM(Rasch):
 
         setattr(self, f"cat_prob_dict_{model}", cat_prob_dict)
 
-    # Backwards-compatible aliases
+    # Per-model aliases
     def category_probability_dict_global(self, **kw):
         """Alias for category_probability_dict(model=\'global\'). See category_probability_dict for full documentation."""
         self.category_probability_dict(model="global", **kw)
@@ -9482,6 +9591,10 @@ class MFRM(Rasch):
     def category_probability_dict_bistretch(self, **kw):
         """Alias for category_probability_dict(model=\'bistretch\'). See category_probability_dict for full documentation."""
         self.category_probability_dict(model="bistretch", **kw)
+
+    def category_probability_dict_mixed(self, **kw):
+        """Alias for category_probability_dict(model=\'mixed\'). See category_probability_dict for full documentation."""
+        self.category_probability_dict(model="mixed", **kw)
 
     def person(
         self,
@@ -9785,6 +9898,18 @@ class MFRM(Rasch):
             **kw,
         )
 
+    def person_estimates_mixed(
+        self, anchor=False, items=None, facet_elements=None, **kw
+    ):
+        """Alias for person_estimates(model='mixed'). See person_estimates for full documentation."""
+        self.person_estimates(
+            model="mixed",
+            anchor=anchor,
+            items=items,
+            facet_elements=facet_elements,
+            **kw,
+        )
+
     def _wle_moments(
         self,
         person_locations,
@@ -9898,7 +10023,7 @@ class MFRM(Rasch):
         warm_corr = (part1 - part2 + part3) / den
         return pd.Series(warm_corr.values, index=person_locations.index)
 
-    # Backwards-compatible aliases
+    # Per-model aliases
     def warm_global(
         self, person_locations, items, facet_elements, facet_effects, pf, **kw
     ):
@@ -10011,6 +10136,20 @@ class MFRM(Rasch):
             self._thresholds_for("bivector"),
             pf,
             "bivector",
+        )
+
+    def warm_mixed(
+        self, person_locations, items, facet_elements, facet_effects, pf, **kw
+    ):
+        """Alias for warm(..., model='mixed'). See warm for full documentation."""
+        return self.warm(
+            person_locations,
+            items,
+            facet_elements,
+            facet_effects,
+            self._thresholds_for("mixed"),
+            pf,
+            "mixed",
         )
 
     # ------------------------------------------------------------------
@@ -10126,7 +10265,7 @@ class MFRM(Rasch):
 
         return 1.0 / (info_sum**0.5)
 
-    # Backwards-compatible aliases
+    # Per-model aliases
     def csem_global(self, **kw):
         """Alias for csem(model='global'). See csem for full documentation."""
         return self.csem(model="global", **kw)
@@ -10161,6 +10300,10 @@ class MFRM(Rasch):
     def csem_bistretch(self, **kw):
         """Alias for csem(model='bistretch'). See csem for full documentation."""
         return self.csem(model="bistretch", **kw)
+
+    def csem_mixed(self, **kw):
+        """Alias for csem(model='mixed'). See csem for full documentation."""
+        return self.csem(model="mixed", **kw)
 
     def score_lookup(
         self,
@@ -10296,7 +10439,7 @@ class MFRM(Rasch):
             )
         return estimate
 
-    # Backwards-compatible aliases
+    # Per-model aliases
     def score_lookup_global(
         self, score, anchor=False, items=None, facet_elements=None, **kw
     ):
@@ -10351,6 +10494,14 @@ class MFRM(Rasch):
         """Alias for score_lookup(..., model='bistretch'). See score_lookup for full documentation."""
         return self.score_lookup(
             score, "bistretch", anchor, items, facet_elements, **kw
+        )
+
+    def score_lookup_mixed(
+        self, score, anchor=False, items=None, facet_elements=None, **kw
+    ):
+        """Alias for score_lookup(..., model='mixed'). See score_lookup for full documentation."""
+        return self.score_lookup(
+            score, "mixed", anchor, items, facet_elements, **kw
         )
 
     def score_lookup_table(
@@ -10451,7 +10602,7 @@ class MFRM(Rasch):
         _save_table(table, filename, file_format)
         return table
 
-    # Backwards-compatible aliases
+    # Per-model aliases
     def score_lookup_table_global(self, **kw):
         """Alias for score_lookup_table(model='global'). See score_lookup_table for full documentation."""
         return self.score_lookup_table(model="global", **kw)
@@ -10486,6 +10637,10 @@ class MFRM(Rasch):
     def score_lookup_table_bistretch(self, **kw):
         """Alias for score_lookup_table(model='bistretch'). See score_lookup_table for full documentation."""
         return self.score_lookup_table(model="bistretch", **kw)
+
+    def score_lookup_table_mixed(self, **kw):
+        """Alias for score_lookup_table(model='mixed'). See score_lookup_table for full documentation."""
+        return self.score_lookup_table(model="mixed", **kw)
 
     def category_counts_df(
         self,
@@ -10945,7 +11100,7 @@ class MFRM(Rasch):
         The virtual items' thresholds the conditional fit bootstrap simulates from: model fitted with
         estimation='cp-full-rcl' and its defaults (_null_fit; 'mixed': 'matrix' with the object's per-facet
         element models), the most accurate estimate of the null distribution (the statistics and refits are
-        still the object's), or thr, the object's own fit, if it is a 'cp-full-rcl' or 'cml' fit. If that fit
+        still the object's), or thr, the object's fit, if it is a 'cp-full-rcl' or 'cml' fit. If that fit
         fails, or does not estimate every virtual item and category the object's fit does, thr is used, with
         a UserWarning. Returns (thresholds, the fit used: 'cp-full-rcl' or 'own').
         """
@@ -10966,7 +11121,7 @@ class MFRM(Rasch):
         ):
             return sim, "cp-full-rcl"
         warnings.warn(
-            "fit_statistics(conditional=True): the bootstrap datasets are simulated from the object's own "
+            "fit_statistics(conditional=True): the bootstrap datasets are simulated from the object's "
             "fit, as a 'cp-full-rcl' fit of these data does not estimate every item and category it does.",
             UserWarning,
             stacklevel=4,
@@ -10978,7 +11133,7 @@ class MFRM(Rasch):
     def _warn_conditional_unused(self, model, Xv, thr, persons):
         """
         fit_statistics(conditional=True): a UserWarning naming the score categories no person with a
-        non-extreme total used, in any rating or (for models with each facet element's own thresholds:
+        non-extreme total used, in any rating or (for models with each facet element's thresholds:
         'thresholds', 'bivector', 'matrix', and those facet elements of 'mixed') in a facet element's
         ratings, when the fit gives them a probability above zero: their neighbouring thresholds are set by
         the smoothing or the ridge, not the data, so the conditional fit statistics and p-values compare the
@@ -11123,6 +11278,10 @@ class MFRM(Rasch):
         """Alias for fit_matrices(model='bistretch'). See fit_matrices for full documentation."""
         self._ensure_fit_matrices("bistretch", **kw)
 
+    def fit_matrices_mixed(self, **kw):
+        """Alias for fit_matrices(model='mixed'). See fit_matrices for full documentation."""
+        self._ensure_fit_matrices("mixed", **kw)
+
     def item_fit_statistics(
         self,
         exp_score_df,
@@ -11219,6 +11378,10 @@ class MFRM(Rasch):
     def item_fit_statistics_bistretch(self, **kw):
         """Alias for item_fit_statistics(model='bistretch'). See item_fit_statistics for full documentation."""
         self._run_item_fit("bistretch", **kw)
+
+    def item_fit_statistics_mixed(self, **kw):
+        """Alias for item_fit_statistics(model='mixed'). See item_fit_statistics for full documentation."""
+        self._run_item_fit("mixed", **kw)
 
     def threshold_fit_statistics(self, person_locations, diff_df_dict):
         """Shared threshold fit statistics (dichotomised ICC approach).
@@ -11491,6 +11654,10 @@ class MFRM(Rasch):
         """Alias for threshold_fit_statistics(model='bistretch'). See threshold_fit_statistics for full documentation."""
         self._run_threshold_fit("bistretch", **kw)
 
+    def threshold_fit_statistics_mixed(self, **kw):
+        """Alias for threshold_fit_statistics(model='mixed'). See threshold_fit_statistics for full documentation."""
+        self._run_threshold_fit("mixed", **kw)
+
     def facet_pivot(self, df):
         """Pivot (Facet element (e.g. rater)×Person, Items) DataFrame to (Person×Items, Facet elements)."""
         return pd.DataFrame(
@@ -11609,6 +11776,10 @@ class MFRM(Rasch):
         """Alias for facet_fit_statistics(model='bistretch'). See facet_fit_statistics for full documentation."""
         self._run_facet_fit("bistretch", **kw)
 
+    def facet_fit_statistics_mixed(self, **kw):
+        """Alias for facet_fit_statistics(model='mixed'). See facet_fit_statistics for full documentation."""
+        self._run_facet_fit("mixed", **kw)
+
     @_progress.with_progress
     def person_fit_statistics(
         self, info_df, kurtosis_df, residual_df, std_residual_df, person_locations, **kw
@@ -11723,9 +11894,13 @@ class MFRM(Rasch):
         """Alias for person_fit_statistics(model='bistretch'). See person_fit_statistics for full documentation."""
         self._run_person_fit("bistretch", **kw)
 
+    def person_fit_statistics_mixed(self, **kw):
+        """Alias for person_fit_statistics(model='mixed'). See person_fit_statistics for full documentation."""
+        self._run_person_fit("mixed", **kw)
+
     def test_fit_statistics(self, person_locations, rsems, item_se=None, model=None):
         """Shared test-level separation and reliability statistics. model
-        selects the sub-model's own item locations and standard errors
+        selects the sub-model's item locations and standard errors
         (default: the latest calibration)."""
         if item_se is None:
             item_se = self.item_se if model is None else self._item_se_for(model)
@@ -11810,6 +11985,10 @@ class MFRM(Rasch):
         """Alias for test_fit_statistics(model='bistretch'). See test_fit_statistics for full documentation."""
         self._run_test_fit("bistretch", **kw)
 
+    def test_fit_statistics_mixed(self, **kw):
+        """Alias for test_fit_statistics(model='mixed'). See test_fit_statistics for full documentation."""
+        self._run_test_fit("mixed", **kw)
+
     def _log_likelihood(
         self,
         model="global",
@@ -11826,11 +12005,11 @@ class MFRM(Rasch):
             EXTERNALLY supplied parameter values instead of self's own
             current calibration (self.items / self.thresholds /
             self.facet_effects_{model}) -- the same "plug in a fixed
-            value instead of this object's own free estimate" pattern
+            value instead of this object's free estimate" pattern
             `persons=` already uses for pooled-abilities DIF/DRF omnibus
             tests. Lets a caller hold one or two parameter families fixed
-            (e.g. at a pooled/combined-group model's own values) while
-            evaluating this object's own value for the remaining one(s) --
+            (e.g. at a pooled/combined-group model's values) while
+            evaluating this object's value for the remaining one(s) --
             the mechanism behind axis-isolated DIF/DRF omnibus tests (pin
             facet_effects to test items in isolation, or pin items+
             thresholds to test facet_effects in isolation). None (default,
@@ -11986,7 +12165,7 @@ class MFRM(Rasch):
             parametric bootstrap reference distributions (Johansson): this many
             datasets simulated given each person's total, from the model fitted
             with estimation='cp-full-rcl' (the most accurate estimate of the
-            null distribution; the object's own fit if it is 'cp-full-rcl' or
+            null distribution; the object's fit if it is 'cp-full-rcl' or
             'cml'; null_fit in fit_bootstrap_info_{model}), each recalibrated with the object's settings, give studentised
             marginal and Westfall-Young p-values and 95% bands for item and
             facet element infit/outfit (item_fit_bootstrap_{model},
@@ -12138,7 +12317,7 @@ class MFRM(Rasch):
         elif bootstrap_samples:
             raise ValueError("bootstrap_samples= needs conditional=True.")
 
-    # Backwards-compatible aliases
+    # Per-model aliases
     def fit_statistics_global(self, **kw):
         """Alias for fit_statistics(model='global'). See fit_statistics for full documentation."""
         self.fit_statistics(model="global", **kw)
@@ -12173,6 +12352,10 @@ class MFRM(Rasch):
     def fit_statistics_bistretch(self, **kw):
         """Alias for fit_statistics(model='bistretch'). See fit_statistics for full documentation."""
         self.fit_statistics(model="bistretch", **kw)
+
+    def fit_statistics_mixed(self, **kw):
+        """Alias for fit_statistics(model='mixed'). See fit_statistics for full documentation."""
+        self.fit_statistics(model="mixed", **kw)
 
     def andersen_lr_test(self, model="global", split_by="score", **kwargs):
         """
@@ -12229,6 +12412,10 @@ class MFRM(Rasch):
         """Deprecated (a FutureWarning): use global_fit(method='andersen', model='bistretch')."""
         return self.andersen_lr_test(model="bistretch", **kw)
 
+    def andersen_lr_test_mixed(self, **kw):
+        """Deprecated (a FutureWarning): use global_fit(method='andersen', model='mixed')."""
+        return self.andersen_lr_test(model="mixed", **kw)
+
     # ------------------------------------------------------------------
     # Differential Item Functioning (DIF) / Differential Category
     # Functioning (DCF)
@@ -12284,7 +12471,7 @@ class MFRM(Rasch):
         its stored resamples, each anchored the same way with its own
         adjustment, so the sampling variance of the shared facet elements'
         mean is included. Under every sub-model except 'global', each
-        group's item locations and thresholds are averages over its own
+        group's item locations and thresholds are averages over its
         facet elements of the facet-element-specific ones, so groups with
         different facet elements are only comparable after this.
 
@@ -12295,7 +12482,7 @@ class MFRM(Rasch):
         item locations by the anchors' mean item stretch.
 
         For 'matrix', the anchored thresholds absorb the anchors' threshold
-        margin averaged over the group's own items; when the groups responded
+        margin averaged over the group's items; when the groups responded
         to different items it is averaged over `common_items` instead.
         """
         own_items = list(fitted.responses.columns)
@@ -12409,13 +12596,13 @@ class MFRM(Rasch):
         """
         A group model's parameters and person-location shift for evaluation
         with the pooled (combined-group) model's person locations, over the
-        group's own facet elements (dif_test()'s omnibus tests).
+        group's facet elements (dif_test()'s omnibus tests).
 
         Returns (items, thresholds, shift):
         items, thresholds : for the pooled model's facet element effects
             (item-only test): the group's, less the item and threshold
             margins of the pooled effects over the group's facet elements
-            and items, which the group's own estimates have absorbed
+            and items, which the group's estimates have absorbed
             (_dif_fe_margins); items only this group responded to are held at their
             pooled locations, as under H0, so only the shared items are
             free.
@@ -12475,7 +12662,7 @@ class MFRM(Rasch):
         group of persons. The persons are split into groups, the groups and their pooled persons are each
         calibrated with the sub-model's last calibrate() settings, and the test is on the pairwise
         conditional (composite) likelihood those estimates maximise: the composite LR is 2 (sum of the
-        groups' composite log-likelihoods at their own fits - at the pooled fit), unpenalised. Persons
+        groups' composite log-likelihoods at their fits - at the pooled fit), unpenalised. Persons
         appear in many pairs of ratings, so its null distribution is not chi-square.
         p_method='monte-carlo' (the default) refers the adjusted composite LR (Pace, Salvan and Sartori,
         2011: the LR multiplied by the ratio of the sandwich Wald statistic of the group differences to the
@@ -12732,7 +12919,7 @@ class MFRM(Rasch):
     def _andersen_pieces(self, model):
         """For a 'cp-full-rcl' or 'cpat-rcl' fit of model: the fitted grid b (R I K), its estimates in the fit's
         free coordinates, the unpenalised composite information H and the persons' score covariance J (both in
-        those coordinates, from the fit's own pattern set, unsmoothed: the full pattern set, or CPAT's for
+        those coordinates, from the fit's pattern set, unsmoothed: the full pattern set, or CPAT's for
         'cpat-rcl'), the comparisons, and a signature of the fit's parameters (facet elements, items, widths split
         out, free count)."""
         from raschpy import _rcl
@@ -12804,7 +12991,7 @@ class MFRM(Rasch):
 
     def _null_fit(self, model):
         """The bootstrap null: model fitted to the object's responses with estimation='cp-full-rcl' and its
-        defaults (the object's own fit if it already is one)."""
+        defaults (the object's fit if it already is one)."""
         if getattr(self, f"estimation_{model}", None) == "cp-full-rcl":
             return self
         with warnings.catch_warnings():
@@ -12826,7 +13013,7 @@ class MFRM(Rasch):
         total over all their ratings (and their missing pattern) under S's 'cp-full-rcl' fit (the most accurate
         estimate of the null distribution; the statistic is still the object's). The statistic compares the two
         fitted models of a pair (S, L): the sum over facet element x item x threshold of the squared difference
-        between L's and S's fitted location grids, each grid taken relative to its own mean. It is computed for
+        between L's and S's fitted location grids, each grid taken relative to its mean. It is computed for
         the fits to the data and recomputed on each simulated dataset with both models refitted with the object's
         settings. Returns {(S, L): (statistic, p, resamples used)}, p = (1 + #{T* >= T}) / (1 + B), B the
         resamples whose fits succeeded.
@@ -12934,7 +13121,7 @@ class MFRM(Rasch):
         """
         global_fit(method='andersen')'s test on responses: the pooled persons' and each group's refits,
         and _selection.composite_andersen_core's statistics with each group's composite log-likelihood at
-        its own fit (cl) and at the pooled fit (cl_pooled). Returns (statistics, pooled fit, {group: fit},
+        its fit (cl) and at the pooled fit (cl_pooled). Returns (statistics, pooled fit, {group: fit},
         the pooled fit's pieces), or None if the fits' parameters differ (observed=True: a ValueError).
         """
         from raschpy import _selection
@@ -13141,7 +13328,7 @@ class MFRM(Rasch):
         The per-item likelihood-ratio test (test='lr'/'both') compares, for
         each item, each group's log-likelihood with its own fitted item
         location against that with a single location pooled across groups
-        (precision-weighted, on each group's own scale), re-estimating
+        (precision-weighted, on each group's scale), re-estimating
         person locations under the pooled value and holding the facet
         effects at their fitted values; df = 1. It is mildly liberal;
         test='wald' (the default) is preferred.
@@ -13342,7 +13529,7 @@ class MFRM(Rasch):
         )
 
         # Non-extreme persons, aggregating across facet_elements (matches
-        # model_selection()/andersen_lr_test()'s own convention).
+        # model_selection()/andersen_lr_test()'s convention).
         total_scores = self.responses.groupby(level=1).sum().sum(axis=1)
         max_possible = (
             self.responses.notna().groupby(level=1).sum().sum(axis=1) * self.max_score
@@ -13566,7 +13753,7 @@ class MFRM(Rasch):
                     pooled_ref_scale = pooled
                     if reframe:
                         # from the common-facet-element anchoring back to
-                        # each group's own scale
+                        # each group's scale
                         pooled_ref_scale = (
                             ref_model.items[item]
                             + (pooled - ref_cmp.items[item]) / ref_cmp.slope
@@ -13609,7 +13796,7 @@ class MFRM(Rasch):
 
                 # When the groups were scored by different facet elements
                 # or responded to different items, each group's parameters are put
-                # on the pooled person scale over its own facet elements
+                # on the pooled person scale over its facet elements
                 # (_dif_pooled_reference).
                 ref_dif_items = ref_dif_thr = focal_dif_items = focal_dif_thr = None
                 ref_shift = focal_shift = 0.0
@@ -13626,8 +13813,8 @@ class MFRM(Rasch):
                 # Item-isolated DIF omnibus -- facet_effects pinned at the
                 # pooled (m_full) value on both sides, items/thresholds
                 # free per group. Properly nested against the same H0
-                # (m_full's own fit): the facet_effects axis is held EQUAL
-                # to H0's own value rather than left free, so df=items-1
+                # (m_full's fit): the facet_effects axis is held EQUAL
+                # to H0's value rather than left free, so df=items-1
                 # is correctly scoped.
                 ll_ref_dif = ref_model._log_likelihood(
                     model=model,
@@ -13691,11 +13878,11 @@ class MFRM(Rasch):
             focal_n_thr = focal_model.no_of_persons
             if size_adjust:
                 # Raw person-count cap, NOT _threshold_total_weights --
-                # deliberate, see dcf_cap's own docstring/known-issues for
+                # deliberate, see dcf_cap's docstring/known-issues for
                 # why (total_weight scales with rater-panel size R without
                 # a matching true-precision gain, an unresolved confound;
                 # raw N is invariant to R by construction, at the cost of
-                # not tracking per-category sparsity the way PCM/RSM's own
+                # not tracking per-category sparsity the way PCM/RSM's
                 # weight-based cap does).
                 ref_eff = min(ref_n_thr, dcf_cap)
                 focal_eff = min(focal_n_thr, dcf_cap)
@@ -13871,7 +14058,7 @@ class MFRM(Rasch):
         with the estimation of this object's fit ('cp-full-rcl', 'cpat-rcl'
         or 'cml').
         Each facet element common to both groups is then tested in its
-        representation's own terms. Its effects (matrix layout) are
+        representation's terms. Its effects (matrix layout) are
         summarised as the main effects of an additive fit (level + item
         effects + threshold effects) and, for 'matrix', the remaining
         interaction:
@@ -13900,7 +14087,7 @@ class MFRM(Rasch):
         the reference distribution; p_method='chi2' is faster but holds the
         pool fixed, which added about 0.01 to the no-DRF rates in
         simulation.
-        Reported per item: the item's own difference (level plus item
+        Reported per item: the item's difference (level plus item
         effect); per bounded category 1 to K - 1: the change in its width;
         each with a z-test, Holm-corrected within the facet element.
         The overall and component tests answer different questions and
@@ -13948,7 +14135,7 @@ class MFRM(Rasch):
         differs between the groups: one Wald statistic T of every tested
         facet element's differences on all of its components together, with
         each group's sandwich covariance; df is that covariance's rank (the
-        frame's own constraints, e.g. the global effects summing to zero, take
+        frame's constraints, e.g. the global effects summing to zero, take
         one per component; for 'global', common facet elements - 1). Its p
         is from a Hotelling-type F reference, F = T (n - df + 1) / (df n)
         on (df, n - df + 1) degrees of freedom, n = persons in both groups
@@ -14167,7 +14354,7 @@ class MFRM(Rasch):
             return resp.notna().any(axis=1).groupby(level=0).sum()
 
         # each group: a joint fit, every facet element on this representation (it reproduces the representation's
-        # own fit), or on its own for 'mixed'
+        # fit), or on its own for 'mixed'
         if model == "mixed":
             cal_kw = dict(self._refit_kw("mixed"))
         else:
@@ -14381,7 +14568,7 @@ class MFRM(Rasch):
           smaller model's 'cp-full-rcl' fit. The statistic compares the two
           fitted models: the sum over facet element x item x threshold of the
           squared difference between the larger and smaller models' fitted
-          location grids, each relative to its own mean. It is computed for
+          location grids, each relative to its mean. It is computed for
           the fits to the data and recomputed on each simulated dataset with
           both models refitted with the object's settings.
 
@@ -14422,7 +14609,7 @@ class MFRM(Rasch):
             model at level P(chi-square(d) > 2d + 2 ln(1/alpha)), d the
             difference in free parameters. A composite likelihood has no fixed
             scale, so for 'cp-full-rcl' and 'cpat-rcl' the test is made at that
-            level on the composite LR's own reference (the weighted chi-square
+            level on the composite LR's reference (the weighted chi-square
             above, d its tested directions), and p is the relative likelihood
             that a likelihood ratio with the same chi-square(d) tail
             probability would give. If the baseline is not nested in the best
@@ -14864,7 +15051,7 @@ class MFRM(Rasch):
 
         Each facet element's LL is evaluated over all observations made by that facet element
         (whether persons were single- or multi-marked), filtered to persons
-        non-extreme on that facet element's own data. Person person_locations come from the
+        non-extreme on that facet element's data. Person person_locations come from the
         full-data matrix-model estimates.
 
         Testing ladder (top-down):
@@ -14908,7 +15095,7 @@ class MFRM(Rasch):
           pseudo_halo : 2-param stretch restriction of the items vector
                         (λ_r + (ω_r-1)·δ_i), via _derive_stretch_single.
           bistretch   : 3-param stretch restriction of bivector, reusing
-                        bivector's own λ_ri·/λ_r·k split exactly as
+                        bivector's λ_ri·/λ_r·k split exactly as
                         _estimate_raters_bistretch does.
 
         Parameters
@@ -15135,7 +15322,7 @@ class MFRM(Rasch):
             # All observations made by this rater, single- or multi-marked
             responses_r = self.responses.loc[rater]  # (N_rater, I)
 
-            # Non-extreme filter on this rater's own data
+            # Non-extreme filter on this rater's data
             total_r = responses_r.sum(axis=1)
             max_r = responses_r.notna().sum(axis=1) * m
             non_extreme_r = (total_r > 0) & (total_r < max_r)
@@ -15185,14 +15372,14 @@ class MFRM(Rasch):
             eff_itm_glb = eff_biv_thr
             eff_thr_glb = eff_biv_itm
 
-            # 2/3-param stretch restrictions -- closed-form from the same
+            # 2/3-param stretch restrictions -- derived from the same
             # marginal vectors, same recipe _estimate_raters_centrality/
             # _pseudo_halo/_bistretch use, via _derive_stretch_single (the
             # single-rater wrapper around _derive_stretch_model). centrality
             # restricts thresholds (deviation = thresh_means, the direct
             # "thresholds" model values); pseudo_halo restricts items
             # (deviation = item_means); bistretch restricts bivector, reusing
-            # bivector's own item_means/lambda_rk split exactly as
+            # bivector's item_means/lambda_rk split exactly as
             # _estimate_raters_bistretch does.
             _, omega_cen, cen_1d = self._derive_stretch_single(
                 thresh_means, self._thresholds_for("matrix", anchor=anchored)
@@ -15634,7 +15821,7 @@ class MFRM(Rasch):
         test's pool is the facet elements kept in every one of the component pools); a Wald test, covariance from
         each group's sandwich covariance (the groups are independent). Item and threshold
         tests are run only for facet elements whose representation has item or threshold parameters. Reported per
-        item: the item's own difference (level plus item effect, as a bivector facet element's item effects); per
+        item: the item's difference (level plus item effect, as a bivector facet element's item effects); per
         bounded category 1 to K - 1: the change in its width; each with a z-test, Holm-corrected within the facet
         element. Returns (global effect, items, thresholds) DataFrames and {facet element: (left-out notes, tested)}.
         """
@@ -15771,7 +15958,7 @@ class MFRM(Rasch):
         stretch_items, stretch_thr = ("pseudo_halo", "bistretch"), ("centrality", "bistretch")
 
         def functional(q, comp, r, project=True):
-            """Rows (k x I K, over facet element q's own cells) giving test r's component comp of q (project:
+            """Rows (k x I K, over facet element q's cells) giving test r's component comp of q (project:
             a stretch facet element's item or threshold component is its change in omega)."""
             cells, P = fits[q]
             out_cells = [b * Kc + h for b, h in cells]
@@ -15980,7 +16167,7 @@ class MFRM(Rasch):
                     if stretch:
                         row["Difference omega"] = float(d[0])
                         row["SE omega"] = float(np.sqrt(V[0, 0]))
-                    # per item (its own difference) and per bounded category (its width), on the full coordinates
+                    # per item (its difference) and per bounded category (its width), on the full coordinates
                     if axis == "items":
                         dd, VV, _ = contrast(r, pool, ["severity", "items"], project=False)
                         L, labels = U_items, [str(it) for it in items]
@@ -16018,7 +16205,7 @@ class MFRM(Rasch):
         tables["anchor"] = pd.DataFrame({"Anchor": sev[0], "Observed": sev[1],
                                          "Selected": [a in pool for a in range(len(names))]}, index=names)
         # omnibus: every tested facet element's differences on all of its own components together, a Wald test
-        # (the frame's own constraints, e.g. the facet elements' global effects summing to zero, make the covariance
+        # (the frame's constraints, e.g. the facet elements' global effects summing to zero, make the covariance
         # singular: df is its rank)
         Hs = []
         for Eg, Cg, where, _ in groups:
@@ -16478,16 +16665,20 @@ class MFRM(Rasch):
         self._run_item_res_corr("bivector", **kw)
 
     def item_res_corr_analysis_centrality(self, **kw):
-        """Alias for item_res_corr_analysis(model='bivector'). See item_res_corr_analysis for full documentation."""
+        """Alias for item_res_corr_analysis(model='centrality'). See item_res_corr_analysis for full documentation."""
         self._run_item_res_corr("centrality", **kw)
 
     def item_res_corr_analysis_pseudo_halo(self, **kw):
-        """Alias for item_res_corr_analysis(model='bivector'). See item_res_corr_analysis for full documentation."""
+        """Alias for item_res_corr_analysis(model='pseudo_halo'). See item_res_corr_analysis for full documentation."""
         self._run_item_res_corr("pseudo_halo", **kw)
 
     def item_res_corr_analysis_bistretch(self, **kw):
         """Alias for item_res_corr_analysis(model='bistretch'). See item_res_corr_analysis for full documentation."""
         self._run_item_res_corr("bistretch", **kw)
+
+    def item_res_corr_analysis_mixed(self, **kw):
+        """Alias for item_res_corr_analysis(model='mixed'). See item_res_corr_analysis for full documentation."""
+        self._run_item_res_corr("mixed", **kw)
 
     def facet_res_corr_analysis_global(self, **kw):
         """Alias for facet_res_corr_analysis(model='global'). See facet_res_corr_analysis for full documentation."""
@@ -16526,6 +16717,10 @@ class MFRM(Rasch):
         """Alias for facet_res_corr_analysis(model='bistretch'). See facet_res_corr_analysis for full documentation."""
         self._run_facet_res_corr("bistretch", **kw)
 
+    def facet_res_corr_analysis_mixed(self, **kw):
+        """Alias for facet_res_corr_analysis(model='mixed'). See facet_res_corr_analysis for full documentation."""
+        self._run_facet_res_corr("mixed", **kw)
+
     def rater_res_corr_analysis_items(self, **kw):
         """Alias for rater_res_corr_analysis(model='items'). See facet_res_corr_analysis for full documentation."""
         self._run_facet_res_corr("items", **kw)
@@ -16546,19 +16741,23 @@ class MFRM(Rasch):
     # Output tables
     # ------------------------------------------------------------------
     def rater_res_corr_analysis_centrality(self, **kw):
-        """Alias for rater_res_corr_analysis(model='bivector'). See facet_res_corr_analysis for full documentation."""
+        """Alias for rater_res_corr_analysis(model='centrality'). See facet_res_corr_analysis for full documentation."""
         self._run_facet_res_corr("centrality", **kw)
 
     # ------------------------------------------------------------------
     # Output tables
     # ------------------------------------------------------------------
     def rater_res_corr_analysis_pseudo_halo(self, **kw):
-        """Alias for rater_res_corr_analysis(model='bivector'). See facet_res_corr_analysis for full documentation."""
+        """Alias for rater_res_corr_analysis(model='pseudo_halo'). See facet_res_corr_analysis for full documentation."""
         self._run_facet_res_corr("pseudo_halo", **kw)
 
     def rater_res_corr_analysis_bistretch(self, **kw):
         """Alias for rater_res_corr_analysis(model='bistretch'). See facet_res_corr_analysis for full documentation."""
         self._run_facet_res_corr("bistretch", **kw)
+
+    def rater_res_corr_analysis_mixed(self, **kw):
+        """Alias for rater_res_corr_analysis(model='mixed'). See facet_res_corr_analysis for full documentation."""
+        self._run_facet_res_corr("mixed", **kw)
 
     # ------------------------------------------------------------------
     # Output tables
@@ -16574,8 +16773,8 @@ class MFRM(Rasch):
         on the return value, rather than this method doing it implicitly.
         Deciding staleness by calling _ensure_calibrated as a pre-check would
         be wrong: it mutates anchor_rater_names_{model} as a side effect, so a
-        second call (e.g. fit_statistics' own internal _ensure_calibrated)
-        would then see no mismatch and skip its own cache invalidation.
+        second call (e.g. fit_statistics' internal _ensure_calibrated)
+        would then see no mismatch and skip its cache invalidation.
         """
         if anchors is None:
             return False
@@ -16589,12 +16788,11 @@ class MFRM(Rasch):
 
     def _sync_mixed(self, anchors, **selection_kw):
         """Ensure a working (unanchored-named) facet_effects_mixed/rater_models
-        exists for 'mixed', which has no calibrate() of its own -- it's always
-        derived via per_rater_model_selection(). Lazily runs
-        per_rater_model_selection() (with default selection criteria, matching
-        how other models lazily calibrate() with default settings) if it
-        hasn't been run yet, or if the given anchor set doesn't match what was
-        last run under anchors.
+        exists for 'mixed'. A fit from calibrate(model='mixed') is used as it
+        is. Otherwise lazily runs per_rater_model_selection() (with default
+        selection criteria, matching how other models lazily calibrate() with
+        default settings) if it hasn't been run yet, or if the given anchor set
+        doesn't match what was last run under anchors.
 
         Fit statistics and residuals are invariant to the anchor shift itself
         (a pure translation), so once a valid per-facet-element assignment exists we
@@ -16608,7 +16806,7 @@ class MFRM(Rasch):
             matrix_power, log_lik_tol, warm_corr, tolerance, max_iters,
             ext_score_adjustment) forwarded to per_rater_model_selection() if
             it needs to be run. Selection-criterion args (test, alpha,
-            min_effect, etc.) are left at their own defaults, same as any
+            min_effect, etc.) are left at their defaults, same as any
             other lazy auto-calibration in this class.
         """
         if getattr(self, "_mixed_fit", False):
@@ -16624,6 +16822,9 @@ class MFRM(Rasch):
                 "mixed", anchors
             ):
                 self.per_rater_model_selection(anchors=anchors, **selection_kw)
+                if getattr(self, "_mixed_fit", False):
+                    # 'cp-full-rcl' / 'cpat-rcl' / 'cml' selection ends in a joint fit in the anchors' frame
+                    return
             self.facet_effects_mixed = self.anchor_facet_effects_mixed
             self.rater_models = self.anchor_rater_models
         elif not hasattr(self, "facet_effects_mixed"):
@@ -16668,7 +16869,7 @@ class MFRM(Rasch):
             self.person_estimates(model=model, **abil_kw)
 
     def _mixed_anchor_args(self, model, anchors):
-        """anchors= for a stats table of a joint 'mixed' fit: the fit is already in its anchors' frame, so its own
+        """anchors= for a stats table of a joint 'mixed' fit: the fit is already in its anchors' frame, so its
         anchors (as a list or an anchor set) mean the fit as it is (None); other anchors need a refit."""
         from raschpy._anchors import AnchorSet
 
@@ -16934,7 +17135,7 @@ class MFRM(Rasch):
         _save_table(table, filename, file_format)
         return table
 
-    # Backwards-compatible aliases
+    # Per-model aliases
     def item_stats_df_global(self, **kw):
         """Alias for item_stats_df(model='global'). See item_stats_df for full documentation."""
         return self.item_stats_df(model="global", **kw)
@@ -16956,16 +17157,20 @@ class MFRM(Rasch):
         return self.item_stats_df(model="bivector", **kw)
 
     def item_stats_df_centrality(self, **kw):
-        """Alias for item_stats_df(model='bivector'). See item_stats_df for full documentation."""
+        """Alias for item_stats_df(model='centrality'). See item_stats_df for full documentation."""
         return self.item_stats_df(model="centrality", **kw)
 
     def item_stats_df_pseudo_halo(self, **kw):
-        """Alias for item_stats_df(model='bivector'). See item_stats_df for full documentation."""
+        """Alias for item_stats_df(model='pseudo_halo'). See item_stats_df for full documentation."""
         return self.item_stats_df(model="pseudo_halo", **kw)
 
     def item_stats_df_bistretch(self, **kw):
-        """Alias for item_stats_df(model='bivector'). See item_stats_df for full documentation."""
+        """Alias for item_stats_df(model='bistretch'). See item_stats_df for full documentation."""
         return self.item_stats_df(model="bistretch", **kw)
+
+    def item_stats_df_mixed(self, **kw):
+        """Alias for item_stats_df(model='mixed'). See item_stats_df for full documentation."""
+        return self.item_stats_df(model="mixed", **kw)
 
     def threshold_stats_df(
         self,
@@ -17187,16 +17392,20 @@ class MFRM(Rasch):
         return self.threshold_stats_df(model="bivector", **kw)
 
     def threshold_stats_df_centrality(self, **kw):
-        """Alias for threshold_stats_df(model='bivector'). See threshold_stats_df for full documentation."""
+        """Alias for threshold_stats_df(model='centrality'). See threshold_stats_df for full documentation."""
         return self.threshold_stats_df(model="centrality", **kw)
 
     def threshold_stats_df_pseudo_halo(self, **kw):
-        """Alias for threshold_stats_df(model='bivector'). See threshold_stats_df for full documentation."""
+        """Alias for threshold_stats_df(model='pseudo_halo'). See threshold_stats_df for full documentation."""
         return self.threshold_stats_df(model="pseudo_halo", **kw)
 
     def threshold_stats_df_bistretch(self, **kw):
-        """Alias for threshold_stats_df(model='bivector'). See threshold_stats_df for full documentation."""
+        """Alias for threshold_stats_df(model='bistretch'). See threshold_stats_df for full documentation."""
         return self.threshold_stats_df(model="bistretch", **kw)
+
+    def threshold_stats_df_mixed(self, **kw):
+        """Alias for threshold_stats_df(model='mixed'). See threshold_stats_df for full documentation."""
+        return self.threshold_stats_df(model="mixed", **kw)
 
     def category_stats_df(
         self,
@@ -17254,7 +17463,7 @@ class MFRM(Rasch):
         ----------
         model : str, default 'global'
             Facet element parameterisation. Affects the reported SE (via that
-            model's own bootstrap) but not the Estimate column itself.
+            model's bootstrap) but not the Estimate column itself.
         anchors : list or None, default None
             Anchor facet_elements. If given, uses anchor_thresholds_{model}
             and the anchored bootstrap SEs.
@@ -17406,16 +17615,20 @@ class MFRM(Rasch):
         return self.category_stats_df(model="bivector", **kw)
 
     def category_stats_df_centrality(self, **kw):
-        """Alias for category_stats_df(model='bivector'). See category_stats_df for full documentation."""
+        """Alias for category_stats_df(model='centrality'). See category_stats_df for full documentation."""
         return self.category_stats_df(model="centrality", **kw)
 
     def category_stats_df_pseudo_halo(self, **kw):
-        """Alias for category_stats_df(model='bivector'). See category_stats_df for full documentation."""
+        """Alias for category_stats_df(model='pseudo_halo'). See category_stats_df for full documentation."""
         return self.category_stats_df(model="pseudo_halo", **kw)
 
     def category_stats_df_bistretch(self, **kw):
-        """Alias for category_stats_df(model='bivector'). See category_stats_df for full documentation."""
+        """Alias for category_stats_df(model='bistretch'). See category_stats_df for full documentation."""
         return self.category_stats_df(model="bistretch", **kw)
+
+    def category_stats_df_mixed(self, **kw):
+        """Alias for category_stats_df(model='mixed'). See category_stats_df for full documentation."""
+        return self.category_stats_df(model="mixed", **kw)
 
     def person_stats_df(
         self,
@@ -17574,16 +17787,20 @@ class MFRM(Rasch):
         return self.person_stats_df(model="bivector", **kw)
 
     def person_stats_df_centrality(self, **kw):
-        """Alias for person_stats_df(model='bivector'). See person_stats_df for full documentation."""
+        """Alias for person_stats_df(model='centrality'). See person_stats_df for full documentation."""
         return self.person_stats_df(model="centrality", **kw)
 
     def person_stats_df_pseudo_halo(self, **kw):
-        """Alias for person_stats_df(model='bivector'). See person_stats_df for full documentation."""
+        """Alias for person_stats_df(model='pseudo_halo'). See person_stats_df for full documentation."""
         return self.person_stats_df(model="pseudo_halo", **kw)
 
     def person_stats_df_bistretch(self, **kw):
-        """Alias for person_stats_df(model='bivector'). See person_stats_df for full documentation."""
+        """Alias for person_stats_df(model='bistretch'). See person_stats_df for full documentation."""
         return self.person_stats_df(model="bistretch", **kw)
+
+    def person_stats_df_mixed(self, **kw):
+        """Alias for person_stats_df(model='mixed'). See person_stats_df for full documentation."""
+        return self.person_stats_df(model="mixed", **kw)
 
     def test_stats_df(
         self,
@@ -17719,22 +17936,26 @@ class MFRM(Rasch):
     # Rater stats table (most complex -- varies substantially by model)
     # ------------------------------------------------------------------
     def test_stats_df_centrality(self, **kw):
-        """Alias for test_stats_df(model='bivector'). See test_stats_df for full documentation."""
+        """Alias for test_stats_df(model='centrality'). See test_stats_df for full documentation."""
         return self.test_stats_df(model="centrality", **kw)
 
     # ------------------------------------------------------------------
     # Rater stats table (most complex -- varies substantially by model)
     # ------------------------------------------------------------------
     def test_stats_df_pseudo_halo(self, **kw):
-        """Alias for test_stats_df(model='bivector'). See test_stats_df for full documentation."""
+        """Alias for test_stats_df(model='pseudo_halo'). See test_stats_df for full documentation."""
         return self.test_stats_df(model="pseudo_halo", **kw)
 
     # ------------------------------------------------------------------
     # Rater stats table (most complex -- varies substantially by model)
     # ------------------------------------------------------------------
     def test_stats_df_bistretch(self, **kw):
-        """Alias for test_stats_df(model='bivector'). See test_stats_df for full documentation."""
+        """Alias for test_stats_df(model='bistretch'). See test_stats_df for full documentation."""
         return self.test_stats_df(model="bistretch", **kw)
+
+    def test_stats_df_mixed(self, **kw):
+        """Alias for test_stats_df(model='mixed'). See test_stats_df for full documentation."""
+        return self.test_stats_df(model="mixed", **kw)
 
     # ------------------------------------------------------------------
     # Rater stats table (most complex -- varies substantially by model)
@@ -17779,7 +18000,7 @@ class MFRM(Rasch):
           matrix     — marginal=True: twin-vector (per-item + per-threshold marginals
                        recentred to zero); marginal=False: full (item, threshold)
                        cell table.
-          centrality, pseudo_halo, bistretch — the model's own raw shift/
+          centrality, pseudo_halo, bistretch — the model's raw shift/
                        stretch parameters (lambda, plus omega -- or
                        omega_items and omega_thresholds for bistretch)
                        with their direct bootstrap SEs, one row per
@@ -17792,7 +18013,7 @@ class MFRM(Rasch):
                        The reconstructed full-length location vector (per
                        item for pseudo_halo, per threshold for centrality,
                        both for bistretch) that used to be this table's
-                       own content is stored separately as
+                       content is stored separately as
                        self.rater_stats_{model}_full_vector -- if
                        divergence_test is set AND full=True, that table
                        also gets a per-item/per-threshold boolean
@@ -17828,7 +18049,7 @@ class MFRM(Rasch):
         divergence_test : {None, 'wald', 't'}, default None
             For centrality/pseudo_halo/bistretch only: if set, runs an
             item-by-item (or threshold-by-threshold, or both for
-            bistretch) test comparing the free vector model's own
+            bistretch) test comparing the free vector model's
             per-element estimates against the stretch model's
             reconstruction of them, flagging elements where the simpler
             representation diverges significantly -- see
@@ -17851,14 +18072,14 @@ class MFRM(Rasch):
             after that summary -- a plain True/False per element, for
             scanning flagged status across all elements at a glance --
             AND adds a per-element boolean 'Flagged' row to
-            rater_stats_{model}_full_vector, alongside that element's own
+            rater_stats_{model}_full_vector, alongside that element's
             Estimate/SE/CI (the same information, positioned instead
-            next to each element's own detail). Ignored (no effect) for
+            next to each element's detail). Ignored (no effect) for
             every other model.
         correction : {None, 'bh'}, default None
             Only relevant when divergence_test is set. If 'bh',
             Benjamini-Hochberg FDR correction is applied within each
-            facet element's own family of tests (that facet element's items, or that
+            facet element's family of tests (that facet element's items, or that
             facet element's thresholds -- not pooled across facet elements). No-op when
             divergence_test=None.
         alpha : float, default 0.05
@@ -18088,7 +18309,7 @@ class MFRM(Rasch):
                     result[key] = sub.T
 
             elif model in ("centrality", "pseudo_halo", "bistretch"):
-                # Primary table: the model's own raw shift/stretch parameters
+                # Primary table: the model's raw shift/stretch parameters
                 # (lambda, omega -- or omega_items/omega_thresholds for
                 # bistretch), with their direct bootstrap SEs -- not the
                 # reconstructed full-vector profile below.
@@ -18163,7 +18384,7 @@ class MFRM(Rasch):
                     # a plain True/False per element, for scanning flagged
                     # status across all elements at a glance, alongside
                     # (not instead of) the per-element 'Flagged' row folded
-                    # into each element's own Estimate/SE/CI block in
+                    # into each element's Estimate/SE/CI block in
                     # rater_stats_{model}_full_vector below.
                     if full:
                         if "items" in div_results:
@@ -18485,7 +18706,7 @@ class MFRM(Rasch):
                 # Same dtype-taint pattern as flagged_cols above, but from
                 # mixing a genuinely non-numeric (string) group -- the
                 # concat+transpose above forces every column to object
-                # dtype once one row is text, not just the text one's own
+                # dtype once one row is text, not just the text one's
                 # column. Cast every other column back to float; leave
                 # ('Rater model', 'Model') as the object/string dtype it
                 # actually is.
@@ -18531,6 +18752,10 @@ class MFRM(Rasch):
     def rater_stats_df_bistretch(self, **kw):
         """Alias for rater_stats_df(model='bistretch'). See rater_stats_df for full documentation."""
         return self.rater_stats_df(model="bistretch", **kw)
+
+    def rater_stats_df_mixed(self, **kw):
+        """Alias for rater_stats_df(model='mixed'). See rater_stats_df for full documentation."""
+        return self.rater_stats_df(model="mixed", **kw)
 
     def save_stats(
         self,
@@ -18589,7 +18814,7 @@ class MFRM(Rasch):
             through to the internal rater_stats_df() call. See
             rater_stats_df for details. Note the per-element 'Flagged'
             breakdown in rater_stats_{model}_full_vector requires
-            rater_stats_df's own full=True, which save_stats does not
+            rater_stats_df's full=True, which save_stats does not
             currently expose -- only the 'Flagged items'/'Flagged
             categories' summary column(s) in the primary table will
             appear here.
@@ -18744,6 +18969,10 @@ class MFRM(Rasch):
         """Alias for save_stats(model='bistretch'). See save_stats for full documentation."""
         self.save_stats(model="bistretch", **kw)
 
+    def save_stats_mixed(self, **kw):
+        """Alias for save_stats(model='mixed'). See save_stats for full documentation."""
+        self.save_stats(model="mixed", **kw)
+
     def save_residuals(
         self,
         eigenvectors,
@@ -18884,16 +19113,20 @@ class MFRM(Rasch):
         self._save_residuals_for("bivector", "item", filename, **kw)
 
     def save_residuals_items_centrality(self, filename, **kw):
-        """Alias for save_residuals_centrality(model='centrality'). See save_residuals_items for full documentation."""
+        """Alias for save_residuals_items(model='centrality'). See save_residuals_items for full documentation."""
         self._save_residuals_for("centrality", "item", filename, **kw)
 
     def save_residuals_items_pseudo_halo(self, filename, **kw):
-        """Alias for save_residuals_pseudo_halo(model='pseudo_halo'). See save_residuals_items for full documentation."""
+        """Alias for save_residuals_items(model='pseudo_halo'). See save_residuals_items for full documentation."""
         self._save_residuals_for("pseudo_halo", "item", filename, **kw)
 
     def save_residuals_items_bistretch(self, filename, **kw):
-        """Alias for save_residuals_bistretch(model='bistretch'). See save_residuals_items for full documentation."""
+        """Alias for save_residuals_items(model='bistretch'). See save_residuals_items for full documentation."""
         self._save_residuals_for("bistretch", "item", filename, **kw)
+
+    def save_residuals_items_mixed(self, filename, **kw):
+        """Alias for save_residuals_items(model='mixed'). See save_residuals_items for full documentation."""
+        self._save_residuals_for("mixed", "item", filename, **kw)
 
     def save_residuals_raters_global(self, filename, **kw):
         """Alias for save_residuals_raters(model='global'). See save_residuals_raters for full documentation."""
@@ -18949,6 +19182,10 @@ class MFRM(Rasch):
     def save_residuals_raters_bistretch(self, filename, **kw):
         """Alias for save_residuals_raters(model='bistretch'). See save_residuals_raters for full documentation."""
         self._save_residuals_for("bistretch", "rater", filename, **kw)
+
+    def save_residuals_raters_mixed(self, filename, **kw):
+        """Alias for save_residuals_raters(model='mixed'). See save_residuals_raters for full documentation."""
+        self._save_residuals_for("mixed", "rater", filename, **kw)
 
     def _facet_effect_item_offset(self, model, facet_effects, facet_element):
         """Return per-item facet_effect offset Series for a given facet_element and model."""
@@ -19362,6 +19599,14 @@ class MFRM(Rasch):
             **kw,
         )
 
+    def class_intervals_cats_mixed(
+        self, person_locations, item_locations, thresholds, facet_effects, **kw
+    ):
+        """Alias for class_intervals_cats(model='mixed'). See class_intervals_cats for full documentation."""
+        return self.class_intervals_cats(
+            person_locations, item_locations, thresholds, facet_effects, "mixed", **kw
+        )
+
     def class_intervals_thr_global(
         self, person_locations, item_locations, facet_effects, **kw
     ):
@@ -19426,9 +19671,17 @@ class MFRM(Rasch):
             person_locations, item_locations, facet_effects, "bistretch", **kw
         )
 
+    def class_intervals_thr_mixed(
+        self, person_locations, item_locations, facet_effects, **kw
+    ):
+        """Alias for class_intervals_thr(model='mixed'). See class_intervals_thr for full documentation."""
+        return self.class_intervals_thr(
+            person_locations, item_locations, facet_effects, "mixed", **kw
+        )
+
     def _label_height_frac(self, font, axis_font_size, figsize):
         """
-        Fraction of the axes' own pixel height that one line of label
+        Fraction of the axes' pixel height that one line of label
         text occupies, at the given font/size/figure size -- measured
         directly via a probe render (not guessed), so callers can
         convert it into an exact data-unit label height for whatever
@@ -19621,9 +19874,9 @@ class MFRM(Rasch):
                             zorder=3,
                         )
                     elif obs_by_column:
-                        # icc()'s own multi-curve convention: one column
+                        # icc()'s multi-curve convention: one column
                         # per curve (item and/or facet_element list),
-                        # matching y_data's own column layout -- colour
+                        # matching y_data's column layout -- colour
                         # each to match its curve.
                         for j in range(y_obs_data.shape[1]):
                             col = (
@@ -19729,14 +19982,14 @@ class MFRM(Rasch):
 
             if central_location:
                 # items may be a list (one curve per item) -- draw each
-                # item's own central location, always plain darkred
+                # item's central location, always plain darkred
                 # (colour isn't needed to disambiguate since each line
                 # is labelled with its own item name).
                 items_multi = isinstance(items, list)
                 items_list = items if items_multi else [items]
                 n_labels = len(items_list)
                 if central_location_fit and items_multi and n_labels > 0:
-                    # "Fit" style (iic): the curve's own peak sits right
+                    # "Fit" style (iic): the curve's peak sits right
                     # at each item's central location, so labels are
                     # stacked with a probe-measured height above that
                     # peak -- ymax is pre-widened by the caller to fit
@@ -19768,7 +20021,7 @@ class MFRM(Rasch):
                         # line (curves rise left-to-right, so that side
                         # stays clear of the curve even close to the
                         # ceiling) rather than boosting y_max past its
-                        # own meaningful value.
+                        # meaningful value.
                         label_y = y_max * 0.95 - idx * y_max * 0.05
                         label_x = xval - (x_max - x_min) / 100
                         ha = "right"
@@ -19788,11 +20041,11 @@ class MFRM(Rasch):
 
             if score_lines_item[1] is not None:
                 # ICC score line(s): invert each curve numerically by
-                # finding the x value where that curve's own y_data column
+                # finding the x value where that curve's y_data column
                 # is closest to s. y_data has one column per curve
                 # (item and/or facet_element list), so this naturally
                 # covers every combination without needing to know which
-                # dimension(s) were lists -- each curve's own line(s) are
+                # dimension(s) were lists -- each curve's line(s) are
                 # drawn in that curve's own colour (single-curve calls
                 # keep the original plain black lines).
                 n_curves = y_data.shape[1]
@@ -19913,7 +20166,7 @@ class MFRM(Rasch):
             if point_info_lines_item[1] is not None:
                 # items and/or facet_elements may be a list (one curve
                 # per combination) -- for a given location, every
-                # curve's own information value is genuinely different
+                # curve's information value is genuinely different
                 # (that's the whole point of comparing them), so each
                 # gets its own "curve: info" label near the y-axis,
                 # nudged sideways per curve so close values don't
@@ -20179,6 +20432,10 @@ class MFRM(Rasch):
         """Alias for plot_data(model='bistretch'). See plot_data for full documentation."""
         return self.plot_data(*args, model="bistretch", **kw)
 
+    def plot_data_mixed(self, *args, **kw):
+        """Alias for plot_data(model='mixed'). See plot_data for full documentation."""
+        return self.plot_data(*args, model="mixed", **kw)
+
     # ------------------------------------------------------------------
     # ICC, CRCS, Threshold CCS, IIC, TCC, Test info, Test CSEM, Residuals
     # ------------------------------------------------------------------
@@ -20221,12 +20478,12 @@ class MFRM(Rasch):
             A single name draws one curve, as before. A list overlays one
             curve per item (in the given order), each in its own colour.
             thresh_lines/cat_highlight only make sense for one curve's
-            own location, so they just silently no-op with several
+            location, so they just silently no-op with several
             plotted at once rather than erroring. obs, central_location,
             and score_lines all work fine with item and/or facet_element
-            as a list -- obs and score_lines each draw every curve's own
+            as a list -- obs and score_lines each draw every curve's
             point(s)/line(s) in that curve's own colour; central_location
-            draws each item's own line, labelled with the value (and
+            draws each item's line, labelled with the value (and
             item name, when item is a list -- staggered downward from
             the top, one step per item, so nearby curves' labels don't
             overwrite each other), colour-matched too when facet_element
@@ -20266,7 +20523,7 @@ class MFRM(Rasch):
 
         if items_multi or raters_multi:
             # thresh_lines/cat_highlight each only make sense for a
-            # single item's own location -- silently no-op with several
+            # single item's location -- silently no-op with several
             # curves plotted at once rather than erroring, since they'd
             # just be visual clutter with no obvious single "right" curve
             # anyway.
@@ -20333,7 +20590,7 @@ class MFRM(Rasch):
                 # Same person-location class intervals for every curve
                 # where possible (quantile groups come from the overall
                 # ability estimate, not an item/rater-specific one, so
-                # they mostly line up); the first curve's own x values
+                # they mostly line up); the first curve's x values
                 # are reused for the rest. One observed-mean column per
                 # curve, in that curve's own colour (obs_by_column=True
                 # tells plot_data to read y_obs_data this way).
@@ -20434,6 +20691,10 @@ class MFRM(Rasch):
     def icc_bistretch(self, items=None, item=None, **kw):
         """Alias for icc(model='bistretch'). See icc for full documentation."""
         return self.icc(items, model="bistretch", item=item, **kw)
+
+    def icc_mixed(self, items=None, item=None, **kw):
+        """Alias for icc(model='mixed'). See icc for full documentation."""
+        return self.icc(items, model="mixed", item=item, **kw)
 
     def crcs(
         self,
@@ -20600,6 +20861,10 @@ class MFRM(Rasch):
     def crcs_bistretch(self, item=None, **kw):
         """Alias for crcs(model='bistretch'). See crcs for full documentation."""
         return self.crcs(model="bistretch", item=item, **kw)
+
+    def crcs_mixed(self, item=None, **kw):
+        """Alias for crcs(model='mixed'). See crcs for full documentation."""
+        return self.crcs(model="mixed", item=item, **kw)
 
     def threshold_ccs(
         self,
@@ -20792,6 +21057,10 @@ class MFRM(Rasch):
         """Alias for threshold_ccs(model='bistretch'). See threshold_ccs for full documentation."""
         return self.threshold_ccs(model="bistretch", item=item, **kw)
 
+    def threshold_ccs_mixed(self, item=None, **kw):
+        """Alias for threshold_ccs(model='mixed'). See threshold_ccs for full documentation."""
+        return self.threshold_ccs(model="mixed", item=item, **kw)
+
     def iic(
         self,
         items=None,
@@ -20827,12 +21096,12 @@ class MFRM(Rasch):
             A single name draws one curve, as before. A list overlays
             one curve per item (in the given order), each in its own
             colour. thresh_lines/cat_highlight only make sense for one
-            curve's own location, so they just silently no-op with
+            curve's location, so they just silently no-op with
             several plotted at once rather than erroring. central_location
             and point_info_lines both work fine with item and/or
             facet_element as a list -- central_location draws each
-            item's own line, labelled with its value (and item name);
-            point_info_lines draws every curve's own information value
+            item's line, labelled with its value (and item name);
+            point_info_lines draws every curve's information value
             at each requested location, labelled "curve: info", since
             that comparison at a shared location is the point.
         item : str or list of str, optional
@@ -20859,7 +21128,7 @@ class MFRM(Rasch):
 
         if items_multi or raters_multi:
             # thresh_lines/cat_highlight each only make sense for a
-            # single curve's own location -- silently no-op with several
+            # single curve's location -- silently no-op with several
             # plotted at once rather than erroring, since they'd just be
             # visual clutter with no obvious single "right" curve anyway.
             thresh_lines = False
@@ -20903,8 +21172,8 @@ class MFRM(Rasch):
         if ymax is None:
             ymax = float(y.max()) * 1.1
             if central_location and len(items_to_plot) > 0:
-                # central_location's labels stack above the curve's own
-                # peak (which sits right at each item's own central
+                # central_location's labels stack above the curve's
+                # peak (which sits right at each item's central
                 # location -- exactly where those labels are), so widen
                 # ymax by exactly the measured label-stack height plus a
                 # small gap, rather than guessing a fixed fraction (see
@@ -20912,7 +21181,7 @@ class MFRM(Rasch):
                 # measure, don't guess). Labels are then placed using
                 # this same y.max()/k/gap_frac relationship in plot_data,
                 # so the fit is exact, not approximate. (central_location's
-                # own loop is item-only, independent of facet_element.)
+                # loop is item-only, independent of facet_element.)
                 n_labels = len(items_to_plot)
                 k = self._label_height_frac(font, axis_font_size, (8, 6))
                 gap_frac = 0.3
@@ -20980,6 +21249,10 @@ class MFRM(Rasch):
     def iic_bistretch(self, items=None, item=None, **kw):
         """Alias for iic(model='bistretch'). See iic for full documentation."""
         return self.iic(items, model="bistretch", item=item, **kw)
+
+    def iic_mixed(self, items=None, item=None, **kw):
+        """Alias for iic(model='mixed'). See iic for full documentation."""
+        return self.iic(items, model="mixed", item=item, **kw)
 
     def tcc(
         self,
@@ -21180,6 +21453,10 @@ class MFRM(Rasch):
         """Alias for tcc(model='bistretch'). See tcc for full documentation."""
         return self.tcc(model="bistretch", **kw)
 
+    def tcc_mixed(self, **kw):
+        """Alias for tcc(model='mixed'). See tcc for full documentation."""
+        return self.tcc(model="mixed", **kw)
+
     def test_info(
         self,
         model="global",
@@ -21299,6 +21576,10 @@ class MFRM(Rasch):
         """Alias for test_info(model='bistretch'). See test_info for full documentation."""
         return self.test_info(model="bistretch", **kw)
 
+    def test_info_mixed(self, **kw):
+        """Alias for test_info(model='mixed'). See test_info for full documentation."""
+        return self.test_info(model="mixed", **kw)
+
     def test_csem(
         self,
         model="global",
@@ -21417,6 +21698,10 @@ class MFRM(Rasch):
         """Alias for test_csem(model='bistretch'). See test_csem for full documentation."""
         return self.test_csem(model="bistretch", **kw)
 
+    def test_csem_mixed(self, **kw):
+        """Alias for test_csem(model='mixed'). See test_csem for full documentation."""
+        return self.test_csem(model="mixed", **kw)
+
     def std_residuals_plot(
         self,
         model="global",
@@ -21526,7 +21811,11 @@ class MFRM(Rasch):
         """Alias for std_residuals_plot(model='pseudo_halo'). See std_residuals_plot for full documentation."""
         return self.std_residuals_plot(model="pseudo_halo", **kw)
 
-    # Backwards-compatible aliases
+    def std_residuals_plot_mixed(self, **kw):
+        """Alias for std_residuals_plot(model='mixed'). See std_residuals_plot for full documentation."""
+        return self.std_residuals_plot(model="mixed", **kw)
+
+    # Per-model aliases
     def wright_map_global(self, **kw):
         """Alias for wright_map(model='global'). See wright_map for full documentation."""
         return self.wright_map(model="global", **kw)
@@ -21559,6 +21848,10 @@ class MFRM(Rasch):
         """Alias for wright_map(model='bistretch'). See wright_map for full documentation."""
         return self.wright_map(model="bistretch", **kw)
 
+    def wright_map_mixed(self, **kw):
+        """Alias for wright_map(model='mixed'). See wright_map for full documentation."""
+        return self.wright_map(model="mixed", **kw)
+
     # ------------------------------------------------------------------
     # Simulation recovery diagnostics
     # ------------------------------------------------------------------
@@ -21573,7 +21866,7 @@ class MFRM(Rasch):
     def _rater_effect_subvectors(self, model, anchor=False):
         """
         (label, generating_series, estimated_series, se_series) tuples
-        for model's own compact facet-effect representation --
+        for model's compact facet-effect representation --
         1 sub-vector for global/items/thresholds/matrix, 2 for
         bivector/centrality/pseudo_halo, 3 for bistretch. Only valid when
         model == self.generating.model (the matched case) -- see
@@ -21584,7 +21877,7 @@ class MFRM(Rasch):
         prefix = "anchor_" if anchor else ""
         gen = self.generating
         if model == "mixed":
-            # each representation's own table, against the simulation's table of the same name (in the
+            # each representation's table, against the simulation's table of the same name (in the
             # simulation's anchors' frame: recovery is guaranteed only under the same anchoring choice)
             out = []
             for name in sorted(n for n in vars(self) if n.startswith("facet_effects_mixed_")):
@@ -21700,19 +21993,19 @@ class MFRM(Rasch):
         Buttery (2022a) themselves used exactly this construction (fitting
         a simpler model to data generated under a richer one) to
         demonstrate the person-measurement cost of model misspecification,
-        so a strict match would block MFRM's own primary use case for
+        so a strict match would block MFRM's primary use case for
         this method.
 
         Items/thresholds/category_widths are compared directly regardless
-        of model vs self.generating.model, using the sub-model's own
+        of model vs self.generating.model, using the sub-model's
         estimates (_items_for(model)/_thresholds_for(model)).
 
         Facet-effect recovery has two modes. When model ==
-        self.generating.model (the matched case), it uses model's own
+        self.generating.model (the matched case), it uses model's
         compact representation with proper bootstrap SEs (1 sub-vector for
         global/items/thresholds/matrix, 2 for bivector/centrality/
         pseudo_halo, 3 for bistretch -- see _rater_effect_subvectors; for
-        'mixed', each representation's own table, matched only when every
+        'mixed', each representation's table, matched only when every
         facet element has its generating representation).
         When they differ (a deliberate misspecification study), it falls
         back to comparing the full broadcast (facet element, item, category)
@@ -21741,9 +22034,9 @@ class MFRM(Rasch):
 
         groups='rater' (MFRM-specific) triggers a by-facet-element breakdown of
         person recovery: for each facet element R, both the recovered estimate and
-        the pseudo-estimate are recomputed restricted to just R's own
+        the pseudo-estimate are recomputed restricted to just R's
         response row per person (person(facet_elements=[R])), isolating
-        whether a SPECIFIC facet element's own location/calibration quality is
+        whether a SPECIFIC facet element's location/calibration quality is
         dragging down person measurement, as distinct from the general
         (all-facet-elements-pooled) case. This is NOT a plain partition of the
         pooled result by group label (a person is typically rated by
@@ -21781,7 +22074,7 @@ class MFRM(Rasch):
             Significance threshold for the per-parameter z-test.
         correction : {'bh', 'bonferroni', None}, default 'bh'
             Multiple-comparison correction, applied within each parameter
-            type's own family of tests.
+            type's family of tests.
         divergence_tol : float, default 0.1
             Threshold for the OLS-vs-Huber slope divergence flag.
         plot : bool, default True
@@ -21867,7 +22160,7 @@ class MFRM(Rasch):
 
         self.recovery = _SimParams()
 
-        # the sub-model's own item locations / thresholds (anchored or not)
+        # the sub-model's item locations / thresholds (anchored or not)
         est_items = self._items_for(model, anchor=anchor)
         items_table, items_summary = self._parameter_recovery_table(
             self.generating.items,
@@ -21924,14 +22217,14 @@ class MFRM(Rasch):
         setattr(probe, probe._sev_attr(gen_model), self.generating.facet_effects)
         # _get_params' auto-calibrate gate checks hasattr(self,
         # f"facet_effects_{model}") -- the COMPACT name, not _sev_attr's
-        # own name (which has a "_full_vector" suffix for centrality/
+        # name (which has a "_full_vector" suffix for centrality/
         # pseudo_halo/bistretch specifically). Without also setting the
         # compact name here, that gate would see "not yet calibrated" for
         # those three models and silently trigger a full independent
         # recalibration of the probe from the real data -- discovered
         # empirically: persons RMSE came out as exactly 0.0 for all three
         # stretch models before this fix, since the probe was just
-        # reproducing self's own real fit rather than using the injected
+        # reproducing self's real fit rather than using the injected
         # generating facet element effects at all. The compact attribute's VALUE is
         # never actually read for these three models (only its presence
         # matters for the gate -- _get_params returns the _full_vector
@@ -22020,7 +22313,7 @@ class MFRM(Rasch):
         # generating shared thresholds) and (estimated item location,
         # estimated shared thresholds), jointly -- at the true generating
         # theta throughout. Deliberately facet-free (ignores rater
-        # effects entirely), matching wright_map's own established
+        # effects entirely), matching wright_map's established
         # facet-free convention for item/threshold-only point-position
         # math -- rater recovery has its own, separate comparison below
         # (self.recovery.raters), and folding 8 different rater-

@@ -73,7 +73,7 @@ class _SimParams:
         'stretch'/'stretch_items'/'stretch_thresholds' for
         'omega'/'omega_items'/'omega_thresholds'. setattr-based copying
         (see MFRM.__init__'s sim-aware instantiation) only transfers the
-        sim's real instance attributes, not its own __getattr__-resolved
+        sim's real instance attributes, not its __getattr__-resolved
         aliases, so this namespace needs the same alias resolution
         applied again here -- generically, so it works regardless of
         which sim type populated it. Raises AttributeError (rather than
@@ -372,7 +372,7 @@ class Rasch:
     }
 
     # plot_style schemes whose background is dark/saturated enough that
-    # the 'colorblind multi' palette's black entry (Okabe & Ito's own
+    # the 'colorblind multi' palette's black entry (Okabe & Ito's
     # 8th colour) would be invisible or near-invisible against it. Curve-
     # colouring code checks this set and substitutes white for that one
     # entry when the active plot_style is a member -- see palette_dict
@@ -395,7 +395,7 @@ class Rasch:
         std_residuals_hist() call across all four model classes, so a new
         scheme only needs to be added once, here, to become available
         everywhere. Falls back to 'white' for an unrecognised name rather
-        than raising, matching the original if/else's own silent
+        than raising, matching the original if/else's silent
         fallback behaviour.
 
         Parameters
@@ -427,7 +427,7 @@ class Rasch:
         Validate whether the item response network is fully connected.
 
         Builds the same directed pairwise comparison matrix each concrete
-        subclass's own calibrate() uses (via self._build_pairwise_matrix(),
+        subclass's calibrate() uses (via self._build_pairwise_matrix(),
         which every subclass must implement) and checks it for structural
         zeroes — entries that stay zero no matter how many times the matrix
         is powered, because there is no chain of comparisons linking the
@@ -512,7 +512,7 @@ class Rasch:
         row_items = np.asarray(row_items)
 
         # Row/column-level structural zero check, at whatever granularity
-        # the model's own matrix uses (one row per item, or — for PCM —
+        # the model's matrix uses (one row per item, or — for PCM —
         # one row per item-category). XOR excludes rows/columns that are
         # both zero (no responses at all), already caught as isolated
         # singletons by the BFS below.
@@ -644,7 +644,7 @@ class Rasch:
                 f"sub-networks, with no empirical comparisons spanning them: "
                 f"{sub_group_summary}. Items in different sub-networks cannot be "
                 f"placed on a single scale -- each sub-network's estimates are "
-                f"identified only up to its own origin -- and un-smoothed "
+                f"identified only up to its origin -- and un-smoothed "
                 f"calibration breaks down.",
                 UserWarning,
                 stacklevel=2,
@@ -730,10 +730,10 @@ class Rasch:
                          a trivial margin on dense data, up to ~10% under
                          sparsity. Needs a strongly connected win-graph (see
                          check_data_connectivity); falls over otherwise, where
-                         the closed-form methods below still return an answer.
+                         the non-iterative methods below still return an answer.
             'cos'      — cosine maximisation method (Kou & Lin, 2014): sum of
                          L2-normalised columns of the reciprocal matrix. Fast,
-                         robust, closed-form; least sensitive to heavy-tailed
+                         robust, non-iterative; least sensitive to heavy-tailed
                          cell ratios, so no single column dominates.
             'ls'       — least squares (row mean of reciprocal matrix).
             'evm'      — eigenvector method (Garner & Engelhard, 2002) via PCA.
@@ -810,7 +810,7 @@ class Rasch:
 
         elif method == "log-lik":
             # Bradley-Terry strengths via the Hunter (2004) MM update.
-            # Warm-start from the closed-form cosine-maximisation solution,
+            # Warm-start from the non-iterative cosine-maximisation solution,
             # inverted: 'cos' weights track exp(difficulty) whereas BT strengths
             # track exp(-difficulty). This starts near the optimum and typically
             # cuts the iteration count several-fold versus a wins-proportional
@@ -916,7 +916,7 @@ class Rasch:
         (strictly concave), found by Newton's method safeguarded by a bracket
         on the root of the score (which is strictly decreasing in D), with
         bisection whenever a step leaves the bracket. Unlike the
-        information-weighted estimator, the weights are the model's own
+        information-weighted estimator, the weights are the model's
         probabilities at D rather than the observed proportions, so they are
         not correlated with the sampling noise and do not compress the scale.
 
@@ -1560,7 +1560,7 @@ class Rasch:
 
         Used identically for item-bank anchoring (anchor = external bank
         locations) and for DIF purification (anchor = a reference
-        group's own item estimates, observed = the focal group's).
+        group's item estimates, observed = the focal group's).
 
         Parameters
         ----------
@@ -1834,7 +1834,7 @@ class Rasch:
 
         current = list(table.index)
         dropped_anchors = []
-        dropped_stats = {}  # item -> (deviation, z, p) at its own removal step
+        dropped_stats = {}  # item -> (deviation, z, p) at its removal step
         converged = True
 
         while True:
@@ -1892,11 +1892,11 @@ class Rasch:
         """
         (B, len(index)) pandas.DataFrame of a Series-valued attribute
         (e.g. items, facet_effects_global, lambda_centrality) across a
-        model's own stored bootstrap resamples, columns=index. Samples
+        model's stored bootstrap resamples, columns=index. Samples
         whose attribute doesn't cover the full index (a resample that
         dropped a unit, or where calibration produced a ragged result)
         are skipped rather than filled with NaN, matching
-        _store_rater_se's own validity filter.
+        _store_rater_se's validity filter.
         """
         rows = []
         for s in samples:
@@ -2066,7 +2066,7 @@ class Rasch:
         Returns
         -------
         tc_per_unit : pandas.Series, indexed like ref_col -- computed
-            WITHOUT r's own (ref_col[r], focal_col[r]) pair.
+            WITHOUT r's (ref_col[r], focal_col[r]) pair.
         ref_var_per_unit, focal_var_per_unit : pandas.Series --
             Var(ref_col[r] - anchor_mean(ref, sel)) and
             Var(focal_col[r] - anchor_mean(focal, sel)) respectively;
@@ -2241,7 +2241,7 @@ class Rasch:
         """
         Shared core of calibrate_anchor() across SLM/PCM/RSM.
 
-        The subclasses pass their own calibrate()/std_errors() keyword
+        The subclasses pass their calibrate()/std_errors() keyword
         arguments; each keeps its own threshold-compatibility test. MFRM
         has its own calibrate_anchor().
 
@@ -2249,12 +2249,12 @@ class Rasch:
         none selection), applies it to get anchor_items, resolves
         overwrite_anchors, builds anchor_summary, and (if applicable)
         triggers plot_anchor_selection() -- exactly the behaviour each
-        subclass's own calibrate_anchor() docstring documents under
+        subclass's calibrate_anchor() docstring documents under
         the same parameter names, this is a pure implementation-sharing
         extraction with no behaviour change.
 
         Callers must already have anchors as a pd.Series and self.items
-        already calibrated (calibrate()'s own re-run trigger differs
+        already calibrated (calibrate()'s re-run trigger differs
         slightly per subclass -- constant/threshold_constant/etc.
         -- so that step stays in each subclass's own calibrate_anchor(),
         before calling this).
@@ -2265,10 +2265,10 @@ class Rasch:
             Forwarded to self.std_errors(no_of_samples=no_of_samples,
             seed=seed, **std_errors_kwargs) if selection_method='wald'
             needs to auto-trigger it (self.item_se not already present).
-            Carries whichever calibration kwarg name this subclass's own
+            Carries whichever calibration kwarg name this subclass's
             calibrate()/std_errors() uses (e.g. {'constant':..., 'method':...,
             'matrix_power':..., 'log_lik_tol':...} for SLM/PCM, or the RSM
-            equivalent with 'threshold_constant') -- exactly what each subclass's own
+            equivalent with 'threshold_constant') -- exactly what each subclass's
             calibrate_anchor() forwarded inline before this extraction.
 
         See any of SLM.calibrate_anchor / PCM.calibrate_anchor /
@@ -2435,10 +2435,10 @@ class Rasch:
 
     def _run_rsm_pcm_selection(self, test, aic_sig_test, alpha, min_effect, no_of_samples, seed):
         """
-        model_selection()'s RSM-vs-PCM comparison on the object's own estimation (see RSM.model_selection):
+        model_selection()'s RSM-vs-PCM comparison on the object's estimation (see RSM.model_selection):
         'cml' -> LR of the conditional log-likelihoods, the other model fitted by CML; 'cp-full-rcl' or 'cpat-rcl'
         -> composite LR (on the full pattern set, or CPAT's patterns), the other model fitted with the same
-        estimation; PAIR with method='log-lik' (PCM 'pair', RSM 'pair-cpat') -> composite LR within PAIR's own
+        estimation; PAIR with method='log-lik' (PCM 'pair', RSM 'pair-cpat') -> composite LR within PAIR's
         Bradley-Terry objective (PCM's PAIR fit, and RSM as that objective's maximum under the restriction
         b = delta_i + tau_h); PAIR's other methods -> conditional parametric bootstrap. Sets model_comparison_rsm_pcm_*.
         """
@@ -2772,7 +2772,7 @@ class Rasch:
             Difference between the two estimates (however signed) for
             each row (item, threshold, etc.).
         se1, se2 : array-like
-            Each estimate's own standard error, same shape as diff.
+            Each estimate's standard error, same shape as diff.
         n1, n2 : int
             Number of persons (or other independent sampling units) each
             SE was estimated from. Used only in the Satterthwaite
@@ -2788,7 +2788,7 @@ class Rasch:
         df : ndarray
             Welch-Satterthwaite degrees of freedom, same shape as diff.
         p : ndarray
-            Two-sided p-value from the t-distribution at each row's own df.
+            Two-sided p-value from the t-distribution at each row's df.
         """
         se1 = np.asarray(se1, dtype=float)
         se2 = np.asarray(se2, dtype=float)
@@ -2920,7 +2920,7 @@ class Rasch:
         return items
 
     def _cml_design(self, n_thresholds):
-        """The design A of the CML thresholds b = A @ theta (+ the unused-category markers): the fit's own
+        """The design A of the CML thresholds b = A @ theta (+ the unused-category markers): the fit's
         after unused_categories='null', else the model's basis (RSM's, or a zero-sum basis)."""
         from raschpy import _rcl
 
@@ -3930,7 +3930,7 @@ class Rasch:
     ):
         """Draw icc()'s observed overlay with conditional expected points (cond_obs=True: hollow diamonds,
         with 95% bars for the observed mean if cond_obs_bars) and/or split by obs_groups (single item: one
-        colour and marker per group, against that group's own conditional expectations), on the figure
+        colour and marker per group, against that group's conditional expectations), on the figure
         plot_data() returned without its observed overlay, then save it."""
         from matplotlib.lines import Line2D
 
@@ -4017,7 +4017,7 @@ class Rasch:
         if cond_obs:
             if (
                 obs_groups is None
-            ):  # with groups, their own entries mark the observed points
+            ):  # with groups, their entries mark the observed points
                 handles.append(
                     Line2D(
                         [],
@@ -4244,7 +4244,7 @@ class Rasch:
         """
         The thresholds the conditional fit bootstrap and item_q1_overall simulate from: the model fitted to
         the object's responses with estimation='cp-full-rcl' and its defaults (the most accurate estimate of
-        the null distribution; the statistics and refits are still the object's), or the object's own fit
+        the null distribution; the statistics and refits are still the object's), or the object's fit
         if it is a 'cp-full-rcl' or 'cml' fit. If that fit fails, or does not estimate every item and
         category the object's fit does, the object's fit is used, with a UserWarning. Returns (thresholds,
         the fit used: 'cp-full-rcl' or 'own').
@@ -4265,7 +4265,7 @@ class Rasch:
             return thr, "cp-full-rcl"
         warnings.warn(
             "fit_statistics(conditional=True): the datasets for the bootstrap and the overall Q1 p-values "
-            "are simulated from the object's own fit, as a 'cp-full-rcl' fit of these data does not estimate "
+            "are simulated from the object's fit, as a 'cp-full-rcl' fit of these data does not estimate "
             "every item and category it does.",
             UserWarning,
             stacklevel=4,
@@ -4517,7 +4517,7 @@ class Rasch:
         do not exist (_esf.screen_items), with one UserWarning. They go to
         self.cml_dropped_responses; persons left with no responses are added
         to self.null_persons. Returns {item: reason} for the dropped items
-        (empty if none); a subclass also subsets its own per-item attributes.
+        (empty if none); a subclass also subsets its per-item attributes.
         With keep_unused=True (unused_categories='null'), items are not dropped for an unused category;
         self._cml_used is set to {item: boolean array over its categories, used among the persons who
         contribute}.
@@ -4691,7 +4691,7 @@ class Rasch:
         items are free (df = shared items - 1), and the pooled person
         locations are shifted by the difference between the pooled and
         group models' mean locations over the shared items
-        (_mean_location), since each model is centred over its own items.
+        (_mean_location), since each model is centred over its items.
         """
         own = list(group.responses.columns)
         if set(own) == set(pooled.responses.columns):
@@ -4926,7 +4926,7 @@ class Rasch:
         (test='lr'/'both'): multiple-comparison correction and the
         Flagged_LR gate. The LR statistics themselves (lr_rows, a dict
         {item: {'LR':..., 'p_LR':...}}) are computed by the caller, since
-        that part IS genuinely model-specific (each class's own scratch-
+        that part IS genuinely model-specific (each class's scratch-
         model reconstruction for H0).
 
         Returns
@@ -5009,15 +5009,15 @@ class Rasch:
         """
         Shared item-location purification + per-item Wald test block from
         dif_test() -- byte-identical across SLM/PCM/RSM/MFRM aside from
-        which bootstrap matrix the caller supplies for tc's own variance
+        which bootstrap matrix the caller supplies for tc's variance
         (item_bootstrap for SLM/RSM, central_bootstrap for PCM, a matrix
         MFRM builds per-model via _bootstrap_value_matrix before calling
         this, since MFRM stores its bootstrap resamples per facet-element-
         parameterisation rather than under one fixed attribute name).
-        Only the item-location component; each class's own threshold-
+        Only the item-location component; each class's threshold-
         structure DIF/DCF block (PCM's per-item, RSM/MFRM's shared-vector
         category-width test) is NOT part of this -- those differ by
-        design (see calibrate_anchor's own docstring on why PCM/RSM's
+        design (see calibrate_anchor's docstring on why PCM/RSM's
         threshold handling isn't the same statistical procedure) and stay
         in each subclass.
 
@@ -5249,7 +5249,7 @@ class Rasch:
             Significance threshold for Flagged/Flagged_corrected.
         correction : {'bh', 'bonferroni', None}, default 'bh'
             Multiple-comparison correction for p_corrected, matching
-            dif_test's own convention (self._bh_correction for BH; the
+            dif_test's convention (self._bh_correction for BH; the
             package's standard inline (p*n).clip(upper=1) idiom for
             Bonferroni). None skips correction (p_corrected/Flagged_corrected
             left all-NaN/False).
@@ -5396,14 +5396,14 @@ class Rasch:
         noise via a pseudo-estimate -- both constructions difference out
         one source of noise to isolate another.
 
-        Only evaluated over self.responses' own observed (non-null)
+        Only evaluated over self.responses' observed (non-null)
         cells, so missing-data conditions are handled automatically.
 
         Parameters
         ----------
         true_theta : pandas.Series
             TRUE generating person locations, indexed by person -- NOT
-            this object's own recovered or pseudo-estimated persons.
+            this object's recovered or pseudo-estimated persons.
         exp_score_generating, exp_score_estimated : callable
             (theta, item) -> expected score, using the generating and
             estimated item/threshold parameters respectively.
@@ -5598,7 +5598,7 @@ class Rasch:
         pseudo-estimates built from PCM_Sim-generated thresholds, or vice
         versa), unlike item/threshold recovery which needs the two
         structures to be genuinely nested to mean anything (see each
-        model's recovery_stats() docstring). MFRM's own version of this
+        model's recovery_stats() docstring). MFRM's version of this
         (which also needs to reconstruct a full facet-effect grid)
         lives in mfrm.py instead, since it needs MFRM-specific machinery
         (_sev_attr, per-submodel reconstruction) this shared version
@@ -6075,7 +6075,7 @@ class Rasch:
         """
         global_fit(method='andersen'): Andersen's conditional likelihood
         ratio test, LR = 2 (sum_g ll_g - ll_pooled), each conditional
-        log-likelihood at its own CML maximum, with df = (groups - 1) x the
+        log-likelihood at its CML maximum, with df = (groups - 1) x the
         model's free parameters. All fits use the items with CML estimates
         in both groups (repeated until stable, since dropping an item changes
         which persons contribute); the pooled model is fitted to the persons
@@ -6472,14 +6472,14 @@ class Rasch:
         """
         Each person's contribution to the deviation of the fitted uncentred thresholds (stacked item by
         item, as _cml_threshold_list) from their limit, to first order, for responses X to items (the
-        object's own responses and items), with the estimator's free directions A: (Phi, A). CML: the
+        object's responses and items), with the estimator's free directions A: (Phi, A). CML: the
         conditional scores times the inverse of the (penalised) information; the other estimators from
         _estimator_influence(). Raises ValueError for other items.
         """
         from raschpy import _esf
 
         if list(items) != list(self.item_names):
-            raise ValueError("The influence functions are for the fit's own items.")
+            raise ValueError("The influence functions are for the fit's items.")
         thr = self._cml_threshold_list(items)
         m = sum(len(t) for t in thr)
         if getattr(self, "estimation", None) == "cml":
@@ -6540,7 +6540,7 @@ class Rasch:
         Each person's contribution to the deviation of PAIR's measures (priority_vector() of the
         smoothed, possibly powered pairwise matrix, as calibrate() computed them) from their limit, to
         first order, for the object's responses X: the derivative of the measures in the direction of the
-        person's own comparisons (_pair_terms: the person's part of the raw matrix is the sum of the outer
+        person's comparisons (_pair_terms: the person's part of the raw matrix is the sum of the outer
         products u v' of its terms, times the mask; the smoothing constants belong to no one). (persons, m).
         """
         st = self._pair_state
@@ -6577,7 +6577,7 @@ class Rasch:
         global_fit_obsexp (per item and group: persons, observed and expected mean item score under the
         pooled fit, the expectation conditional on each person's total and items, and the standardised
         difference, its variance allowing for the estimation of the item parameters at the pooled fit
-        (_obsexp_variances)) and global_fit_item_table (per item: each group's own CML item location,
+        (_obsexp_variances)) and global_fit_item_table (per item: each group's CML item location,
         their difference and Wald z, and the conditional item chi-square over the groups with df =
         groups - 1, its p-value and BH-adjusted p-value). thr: the pooled fit's uncentred thresholds per item
         (default its CML thresholds); item_table=False sets global_fit_item_table to None ('cp-full-rcl').
@@ -6746,7 +6746,7 @@ class Rasch:
         method='andersen': Andersen's conditional likelihood ratio test
         (SLM, PCM, RSM; CML estimates, or 'cp-full-rcl' estimates as below),
         LR = 2 (sum of the groups' ll - ll_pooled), each the conditional
-        log-likelihood at its own CML maximum, referred to chi-square with
+        log-likelihood at its CML maximum, referred to chi-square with
         df = (groups - 1) x the model's free parameters. The pooled model is
         fitted to the persons of the groups. Items without CML estimates in
         every group (an item one group
@@ -6768,7 +6768,7 @@ class Rasch:
         expected mean item score under the pooled fit, the expectation
         conditional on each person's total and items, and the standardised
         difference, z, whose variance allows for the estimation of the item
-        parameters at the pooled fit, Glas's correction) and global_fit_item_table (per item: each group's own
+        parameters at the pooled fit, Glas's correction) and global_fit_item_table (per item: each group's
         CML location, their difference and Wald z, and the item's
         conditional chi-square over the groups, df = groups - 1, with p and
         BH-adjusted p).
@@ -6778,12 +6778,12 @@ class Rasch:
         maximise: the groups and their pooled persons are refitted with
         'cp-full-rcl' (PCM's groups at the pooled fit's ridge weight), and the
         composite LR is 2 (sum of the groups' composite log-likelihoods at their
-        own fits - at the pooled fit), unpenalised. Persons appear in many item
+        fits - at the pooled fit), unpenalised. Persons appear in many item
         pairs, so its null distribution is not chi-square. p_method='monte-carlo'
         (the default here) refers the adjusted composite LR (Pace, Salvan and
         Sartori, 2011: the LR multiplied by the ratio of the sandwich Wald
         statistic of the group differences to the Wald statistic from the
-        likelihood's own curvature) to datasets simulated from the pooled fit
+        likelihood's curvature) to datasets simulated from the pooled fit
         given each person's total and items, every fit repeated. 'chi2' refers
         the composite LR to a weighted sum of chi-square(1) variables (Kent,
         1982), with that sum's exact tail probability. In null simulations (SLM, PCM
@@ -7359,14 +7359,14 @@ class Rasch:
             wright_map_thresholds, wright_map_matrix, wright_map_bivector,
             wright_map_centrality, wright_map_pseudo_halo,
             wright_map_bistretch) when convenient. For 'items'/
-            'thresholds', each facet element's own multiple locations
+            'thresholds', each facet element's multiple locations
             (one per item, or one per threshold) are all plotted
             individually, named e.g. 'Rater_1_Item_1'/'Rater_1_1'. For
             'matrix', every (facet element, item, threshold) combination
             is plotted individually, named e.g. 'Rater_1_Item_1_1' --
             this can be a *lot* of individual values (facet elements x
             items x max_score), so facet_labels=True in particular can
-            produce a very tall panel there. For 'bivector', its own two
+            produce a very tall panel there. For 'bivector', its two
             marginal location vectors (per item, per threshold) are
             plotted directly by default rather than the full (facet
             element, item, threshold) grid they're summed to reconstruct
@@ -7397,7 +7397,7 @@ class Rasch:
             reconstructed vector instead of its single marginal/lambda
             point -- shaped differently depending on model:
               - 'bivector': the full (facet element, item, threshold)
-                grid, from summing its own two marginal location vectors
+                grid, from summing its two marginal location vectors
                 -- every entry is just one item-vector value plus one
                 threshold-vector value, not an independent estimate, but
                 this can still be useful to see how the two vectors
@@ -7423,7 +7423,7 @@ class Rasch:
             omega -- each facet element's stretch factor(s) -- as its own
             panel(s) bolted onto the right of the whole figure, one bar
             per facet element in plain facet-name order, centred on 1 (>1
-            expands, <1 compresses; see each model's own calibrate_*
+            expands, <1 compresses; see each model's calibrate_*
             docstring for what that means there) rather than 0, on its
             own scale entirely unrelated to the shared Location axis.
             bistretch gets two such panels stacked (omega_items above
@@ -7457,7 +7457,7 @@ class Rasch:
             by root-finding -- also always ordered. Both alternatives use
             the same baseline as 'rasch-andrich' (facet/rater-free for
             MFRM, consistent across all 8 model sub-types there). Ignored
-            when item_level='items'. Also governs item_strip=True's own
+            when item_level='items'. Also governs item_strip=True's
             category-boundary segments: 'rasch-andrich' draws the
             most-probable-category regions (the upper envelope of each
             category's response-probability curve, which can drop a
@@ -7484,7 +7484,7 @@ class Rasch:
             mirrored as a second distribution sharing the same axis.
         item_strip : bool, default False
             If True, draws each item as a Winsteps-style divided strip --
-            one row per item, spanning its own threshold range, divided
+            one row per item, spanning its threshold range, divided
             into coloured category segments with a boundary line at each
             threshold. Implies item_labels=True.
         item_distribution : bool, default False
@@ -7516,7 +7516,7 @@ class Rasch:
             when item_strip=True.
         sort : str, default 'location'
             Ordering of item strip rows. 'location' sorts by each item's
-            lowest threshold. 'order' preserves self.items' own index
+            lowest threshold. 'order' preserves self.items' index
             order. Only used when item_strip=True.
         palette : str or None, default 'dark multi'
             Named colour palette for the strip's category segments,
@@ -7556,7 +7556,7 @@ class Rasch:
             horizontal orientation) beyond what's needed to fit the
             longest item name. The same value produces matching-looking
             margins in both orientations. Only used when item_strip=True
-            (facet_labels' own binned panel, like item_labels' own,
+            (facet_labels' binned panel, like item_labels' own,
             doesn't need this margin -- names are drawn inside the panel,
             not as outside row labels).
         distribution_markers : bool, default False
@@ -7587,27 +7587,27 @@ class Rasch:
             If True, normalises each distribution to proportions/density
             rather than raw counts.
         person_lim : float or None, default None
-            One-sided magnitude for persons' own Count/Proportion axis
+            One-sided magnitude for persons' Count/Proportion axis
             (e.g. person_lim=30 shows 0 to 30). If None, chosen
-            automatically from persons' own natural peak, independently
-            of items'/facets' own scale. Persons' own panel always keeps
+            automatically from persons' natural peak, independently
+            of items'/facets' scale. Persons' panel always keeps
             its full physical size regardless of this value -- items'
-            and facets' own panels (when they get a dedicated hist/kde
+            and facets' panels (when they get a dedicated hist/kde
             panel, i.e. item_distribution=True and/or a non-facet_labels,
             non-overlaid facet panel) are sized proportionally against
             it, so a given Count/Proportion value reads at the same
             physical scale in every panel that participates.
         item_lim : float or None, default None
-            One-sided magnitude for items' own Count/Proportion axis.
+            One-sided magnitude for items' Count/Proportion axis.
             Same semantics as person_lim, for whichever panel items end
             up in (mirrored onto the same axis as persons when
-            item_labels=False, or their own item_distribution panel).
+            item_labels=False, or their item_distribution panel).
         facet_lim : float or None, default None
-            One-sided magnitude for the facet-element distribution's own
+            One-sided magnitude for the facet-element distribution's
             Count/Proportion axis. Same semantics as person_lim, for
             whichever panel the facet distribution ends up in (overlaid
             onto the items panel/axis when overlay_facet=True, or its
-            own dedicated panel). Only used when the facet is shown as a
+            dedicated panel). Only used when the facet is shown as a
             distribution rather than facet_labels.
         person_scaling : float or None, default None
             Rebalances the item (and facet) distribution against the
@@ -7631,7 +7631,7 @@ class Rasch:
             comparison isn't well-defined when items are shown only as
             labels with no distribution.
         facet_scaling : float, default 1
-            Reduces the facet panel's own physical size by this factor,
+            Reduces the facet panel's physical size by this factor,
             on top of person_scaling -- independent of it, so the facet
             panel can be dialled back without changing the item panel.
             facet_scaling=10 makes the facet panel 10x smaller than it
@@ -7676,7 +7676,7 @@ class Rasch:
             panel gets half of this (matching how much space it occupied
             in the original mirrored layout), and the figure grows further
             to fit however many stacked item and/or facet-element rows are
-            needed -- the person distribution's own size is never reduced
+            needed -- the person distribution's size is never reduced
             to make room.
         title : str or None, default None
             Plot title. If None, no title is shown.
@@ -7734,7 +7734,7 @@ class Rasch:
         tick_interval : float, default 1
             Spacing between Location axis ticks. Ticks are evenly spaced
             at multiples of this value across the plotted range, rather
-            than using matplotlib's own automatic tick choice.
+            than using matplotlib's automatic tick choice.
         filename : str or None, default None
             If provided, saves the plot to this path. No file extension
             needed.
@@ -7873,7 +7873,7 @@ class Rasch:
 
             # facet_element_names always filters by rater name (matching
             # what it does for 'global'), applied before flattening below --
-            # for 'items'/'thresholds' that's the raw table's own row index;
+            # for 'items'/'thresholds' that's the raw table's row index;
             # for 'matrix' it's the first level of its (rater, item) row
             # index, which .loc[] with a plain list of rater names also
             # selects on
@@ -7888,7 +7888,7 @@ class Rasch:
                 # one row per rater, one column per item/threshold/category
                 # -- stacking flattens that to one entry per combination,
                 # e.g. 'Rater_1_Item_1' or 'Rater_1_1' for a 2-level table,
-                # 'Rater_1_Item_1_1' for a 3-level one (matrix's own (rater,
+                # 'Rater_1_Item_1_1' for a 3-level one (matrix's (rater,
                 # item) row index plus the stacked category column)
                 stacked = table.stack().dropna()
                 return stacked.set_axis(
@@ -7912,9 +7912,9 @@ class Rasch:
             # unrestricted model (thresholds/items/matrix) would be. The
             # omega panel(s) below are unaffected either way, since they show
             # what drove the expansion, not a location. Same argument
-            # bivector's own expansion below uses -- each model resolves it
+            # bivector's expansion below uses -- each model resolves it
             # to whatever shape (flat per-element vector here; a (facet
-            # element, item, threshold) grid there) its own restriction
+            # element, item, threshold) grid there) its restriction
             # implies.
             stretch_omega = None
             if model in ("centrality", "pseudo_halo", "bistretch"):
@@ -8017,7 +8017,7 @@ class Rasch:
                 # ignores rater effects for point positions, consistent
                 # across all 8 model sub-types. cat_prob_fn/exp_score_fn
                 # dispatch to whichever underlying probability model this
-                # instance actually has: MFRM's own rater-free softmax
+                # instance actually has: MFRM's rater-free softmax
                 # (self.cat_prob/self.exp_score take a facet_element and
                 # facet_effects argument neither has a meaning for here, so
                 # this method keeps its own local, facet-free reimplementation
@@ -8116,7 +8116,7 @@ class Rasch:
                 # kept grouped by item (not flattened) for the strip
                 # renderer, which needs each item's own ordered threshold
                 # list rather than one independent point per threshold.
-                # Segments are the item's own *most probable category*
+                # Segments are the item's *most probable category*
                 # map -- the theta interval where each category actually
                 # has the highest response probability -- rather than
                 # just the interval between two raw threshold values.
@@ -8180,7 +8180,7 @@ class Rasch:
                     # a category missing from its item's segments never has
                     # the highest response probability anywhere -- exactly
                     # what disordered Rasch-Andrich thresholds mean
-                    # geometrically (its own probability "bump" never rises
+                    # geometrically (its probability "bump" never rises
                     # above its neighbours')
                     item_missing_categories = {
                         item: sorted(
@@ -8239,7 +8239,7 @@ class Rasch:
             combined = np.concatenate([persons.values, items.values, facets.values])
             span_lo, span_hi = float(combined.min()), float(combined.max())
             if item_strip:
-                # item_strip's own segment boundaries (built above, from
+                # item_strip's segment boundaries (built above, from
                 # item/threshold locations directly) can fall well outside
                 # the persons/items/facets span -- e.g. a wide bottom
                 # category on an easy item -- and get clipped to nothing
@@ -8284,15 +8284,15 @@ class Rasch:
 
         bins = np.linspace(lo, hi, no_of_bins + 1)
 
-        # each distribution's own natural peak, computed analytically
+        # each distribution's natural peak, computed analytically
         # (no plotting needed) so panel sizing/axis ranges can be
         # resolved before the figure is even built. Computed
         # independently per distribution -- deliberately NOT sharing a
         # single "widest" value across persons/items/facets, since a
-        # small-N facet's own much more sharply peaked KDE would
-        # otherwise force persons' own well-populated distribution onto
+        # small-N facet's much more sharply peaked KDE would
+        # otherwise force persons' well-populated distribution onto
         # a needlessly inflated scale (and vice versa for a tiny facet
-        # squeezed onto persons' own wide one)
+        # squeezed onto persons' wide one)
         def _natural_max(values, n):
             if map_type == "hist":
                 counts, _ = np.histogram(values, bins=bins)
@@ -8315,13 +8315,13 @@ class Rasch:
         # divides it exactly, from a matching per-fraction divisor,
         # rather than leaving the step to a separately-chosen locator
         # that has no reason to land on a divisor of this specific
-        # ceiling (which previously left the axis's own true top edge
+        # ceiling (which previously left the axis's true top edge
         # short of its last drawn tick, e.g. ticks 0..28 against a
         # ceiling of 30). The 10% pad before searching guarantees the
         # chosen ceiling sits visibly above the true peak even when that
         # peak already IS a neat number itself (a small integer count,
         # for instance) -- without it, the tallest bar/curve would land
-        # flush against the axis's own edge, with no headroom at all.
+        # flush against the axis's edge, with no headroom at all.
         _nice_fractions = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10]
         _nice_divisors = {
             1: 4,
@@ -8425,16 +8425,16 @@ class Rasch:
         # breathing room reserved before row 0 of the item panel (used for
         # both the boundary_margin below and, when distribution_markers
         # draws a tick alongside each item-side mark, for keeping that
-        # tick inside the margin and clear of row 0's own text -- shared
+        # tick inside the margin and clear of row 0's text -- shared
         # so the two stay consistent if this value ever changes)
         item_row_margin = 0.45
         # same idea for the facet-labels panel, which never carries
-        # distribution_markers' own reserved band -- kept as its own named
+        # distribution_markers' reserved band -- kept as its own named
         # constant (same value) purely for readability at its call sites
         facet_row_margin = 0.45
 
         # shared physical sizing for distribution_markers' ticks: a fixed
-        # gap (inches) between a tick and its own label, and a fixed tick
+        # gap (inches) between a tick and its label, and a fixed tick
         # length (rows) on the item side -- both fixed in real inches
         # rather than a fraction of whatever data range is being plotted,
         # so the two sides (persons' count-axis-based scale vs items'
@@ -8442,16 +8442,16 @@ class Rasch:
         # apart depending on the dataset
         mark_gap_in = 0.065
         mark_tick_rows = 0.15
-        # physical breathing room (inches) between the widest mark's own
+        # physical breathing room (inches) between the widest mark's
         # label and where item names start -- separate from the +0.5-row
         # collision buffer below (that one exists purely to stop an
-        # item's own centred text reaching back into the mark's text; this
+        # item's centred text reaching back into the mark's text; this
         # one is just visual spacing between the two blocks of text)
         item_label_gap_in = 0.08
 
         # when item_labels shows a dedicated item panel (rather than
         # item_distribution's separate histogram/KDE), distribution_markers'
-        # item-side marks are drawn straight into that panel's own row
+        # item-side marks are drawn straight into that panel's row
         # grid, all at row 0 -- items then start uniformly at row 1,
         # regardless of which bin(s) the marks themselves land in.
         item_mark_rows = {}
@@ -8492,7 +8492,7 @@ class Rasch:
 
             if item_labels and item_strip:
                 # divided-strip layout: each item is one row spanning its
-                # own threshold range. Row labels are drawn once per row,
+                # threshold range. Row labels are drawn once per row,
                 # like a tick label, so each item always gets its own row
                 # (no packing) to keep that labelling unambiguous.
                 strip_ext = (hi - lo) * 0.03
@@ -8565,7 +8565,7 @@ class Rasch:
                 # the panel to only max_depth*row_height_in would leave
                 # every row rendered slightly smaller than row_height_in
                 # actually intended, quietly eating into the buffer built
-                # into row_height_in's own measurement
+                # into row_height_in's measurement
                 # distribution_markers' item-side marks hang below the
                 # persons' zero line into the top of this panel: tick
                 # (1.5% of the persons panel, as _mark_len), gap, then
@@ -8674,7 +8674,7 @@ class Rasch:
                 # the panel to only max_depth*row_height_in would leave
                 # every row rendered slightly smaller than row_height_in
                 # actually intended, quietly eating into the buffer built
-                # into row_height_in's own measurement (most visible on
+                # into row_height_in's measurement (most visible on
                 # whichever item lands in the last row, right against the
                 # panel's outer edge)
                 item_panel_in = (max_depth + 0.1 + item_row_margin) * row_height_in
@@ -8732,7 +8732,7 @@ class Rasch:
             # figsize originally described the whole mirrored plot (persons
             # above, items below, sharing base_h/base_w). Now that items
             # get their own panel, persons only need the half of that
-            # budget they used to occupy -- and persons' own panel always
+            # budget they used to occupy -- and persons' panel always
             # gets that full share regardless of person_range, per the
             # docstring's promise that it never shrinks to make room.
             #
@@ -8745,7 +8745,7 @@ class Rasch:
             # fraction of the whole figure regardless of what it actually
             # needs.
             #
-            # The facet panel always matches items' own effective scale.
+            # The facet panel always matches items' effective scale.
             # When items have their own panel (item_labels=True, or
             # item_distribution=True), that's the same person_panel_h/
             # person_range reference item_dist_panel_h itself uses below.
@@ -8753,8 +8753,8 @@ class Rasch:
             # instead (item_labels=False), items' effective scale IS ax's
             # own: a single physical axis has one px-per-unit throughout,
             # regardless of the two sides showing different data values,
-            # so ax's own combined span (person_range + item_range)
-            # against its own physical size gives that same reference
+            # so ax's combined span (person_range + item_range)
+            # against its physical size gives that same reference
             # directly -- and person_scaling then stretches the item side
             # of that span by mirror_item_scale (the facet panel picking
             # up the same factor, below).
@@ -8788,7 +8788,7 @@ class Rasch:
                     # mirrored map: persons and items share ax, whose total
                     # span is (person_range + item_range * mirror_item_scale)
                     # -- the item side stretched by mirror_item_scale (==
-                    # person_scaling here, 1 otherwise). Size the facet's own
+                    # person_scaling here, 1 otherwise). Size the facet's
                     # panel so a facet count reads at the SAME physical
                     # per-count scale as an item count on that stretched item
                     # side: facet_panel_in / facet_range must equal
@@ -8916,7 +8916,7 @@ class Rasch:
             # -- the last one is the true outer edge of the whole figure
             # (gets the real Location ticks/label); everything before it
             # is an interior panel (shares the Location scale but hides
-            # its own duplicate tick labels)
+            # its duplicate tick labels)
             extra_axes = []
             if item_dist_panel:
                 extra_axes.append(ax_item_dist)
@@ -8927,11 +8927,11 @@ class Rasch:
             outer_ax = extra_axes[-1] if extra_axes else ax
             interior_axes = extra_axes[:-1]
 
-            # each later panel's own opaque background would otherwise
+            # each later panel's opaque background would otherwise
             # paint over anything from an earlier (lower z-order) sibling
             # panel that legitimately overhangs across their shared
             # boundary -- e.g. distribution_markers' item marks, drawn
-            # with clip_on=False so they aren't cut off at their own
+            # with clip_on=False so they aren't cut off at their
             # panel's edge. Transparent panels let that overhang show
             # through instead of being hidden by whichever panel happens
             # to be drawn on top.
@@ -8958,7 +8958,7 @@ class Rasch:
 
             if overlay_facet:
                 # facets overlay onto wherever items themselves are
-                # drawn -- their own separate distribution panel if they
+                # drawn -- their separate distribution panel if they
                 # have one (even without item_labels, per item_dist_panel
                 # above), the item_labels row panel otherwise (though
                 # overlay_facet is already forced off whenever
@@ -9156,7 +9156,7 @@ class Rasch:
             # labelled rows in a dedicated panel ---
             # an overlaid facet shares the mirrored ax's item side, so it
             # takes the same person_scaling stretch as items; a facet in
-            # its own panel does not (that panel has its own extent).
+            # its panel does not (that panel has its own extent).
             facet_mirror_scale = mirror_item_scale if facet_dist_ax is ax else 1
             if facet_dist_ax is not None:
                 if map_type == "hist":
@@ -9241,7 +9241,7 @@ class Rasch:
 
             # the labelled panel is independent of whether item_ax drew a
             # hist/kde above -- item_distribution can add that panel on
-            # top of either labelling style, so this is its own if/elif
+            # top of either labelling style, so this is its if/elif
             # rather than chained onto the item_ax branch above
             if item_labels and item_strip:
                 boundary_margin = strip_margin
@@ -9326,7 +9326,7 @@ class Rasch:
                     row = item_rows[name]
                     # the open (unbounded) top/bottom categories always draw
                     # out to the panel edge -- there's no real boundary to
-                    # stop at, so stopping partway (at item_spans' own
+                    # stop at, so stopping partway (at item_spans'
                     # adjacent-width bound) just left an unexplained gap of
                     # blank background between the strip and the axis edge.
                     # neutral_extremes only controls whether that edge fill
@@ -9799,7 +9799,7 @@ class Rasch:
 
             has_extra_panels = bool(extra_axes)
 
-            # ax's, ax_item_dist's, and ax_facet's own Count/Proportion
+            # ax's, ax_item_dist's, and ax_facet's Count/Proportion
             # limits are set explicitly further below (from
             # person_range/item_range/facet_range), which fully
             # supersedes pinning just one side of each to 0 here.
@@ -9853,9 +9853,9 @@ class Rasch:
 
             is_vertical = orientation == "vertical"
 
-            # each panel's own (lo, hi) limits, set directly from
+            # each panel's (lo, hi) limits, set directly from
             # person_range/item_range/facet_range (an explicit *_lim
-            # override, or each distribution's own natural peak,
+            # override, or each distribution's natural peak,
             # resolved earlier) rather than left to independent
             # autoscale -- this is also exactly what panel sizing above
             # already assumed, so the rendered axis and the physical
@@ -9924,12 +9924,12 @@ class Rasch:
                     (-t * neg_scale, -t) for t in _side_ticks(neg_reach, neg_step)
                 }
                 pairs = sorted(pairs)
-                # item_dist's/facet's own zero always sits exactly at the
+                # item_dist's/facet's zero always sits exactly at the
                 # boundary shared with its neighbour -- in horizontal
                 # orientation that boundary is a narrow vertical seam
-                # with both panels' own "0" label sitting right next to
+                # with both panels' "0" label sitting right next to
                 # it, close enough to visually collide. Dropping the
-                # secondary panel's own redundant zero (ax's own stays)
+                # secondary panel's redundant zero (ax's stays)
                 # avoids that; not an issue in vertical orientation,
                 # where the seam is horizontal and the two labels don't
                 # compete for the same space.
@@ -10033,12 +10033,12 @@ class Rasch:
                 )
                 if item_distribution:
                     # one shared "Count"/"Density"/"Proportion" label instead
-                    # of one per panel -- re-centre ax's own label (rather than also
+                    # of one per panel -- re-centre ax's label (rather than also
                     # labelling ax_item_dist) across both panels' combined
                     # span, computed in ax's own axes-fraction coordinates
                     # since item_dist sits directly below it. The x offset
                     # has to clear whichever panel's tick labels are wider.
-                    # Measuring the tick labels' own rendered extent
+                    # Measuring the tick labels' rendered extent
                     # directly (rather than reading label.get_position()
                     # after a draw, which returns a display-space value
                     # from matplotlib's internal auto-layout transform,
@@ -10086,7 +10086,7 @@ class Rasch:
                 )
                 if item_distribution:
                     # one shared "Count"/"Density"/"Proportion" label
-                    # instead of one per panel -- re-centre ax's own label across both panels'
+                    # instead of one per panel -- re-centre ax's label across both panels'
                     # combined span (in ax's own axes-fraction coordinates,
                     # since item_dist sits directly to its right) instead
                     # of also labelling ax_item_dist. Measured the same way
@@ -10228,11 +10228,11 @@ class Rasch:
 
             # Stretch panel(s) -- bolted onto the right of the whole
             # figure, after everything else is built and sized. omega
-            # isn't a logit value (see the comment by stretch_omega's own
+            # isn't a logit value (see the comment by stretch_omega's
             # definition above), so it gets its own axis/scale entirely,
             # centred on 1 rather than 0, one bar per rater in plain
             # facet-name order (unrelated to whatever order the shift
-            # panel's own binning happened to place them in). bistretch
+            # panel's binning happened to place them in). bistretch
             # gets two such panels, stacked (omega_items above
             # omega_thresholds), sharing the same rater order/x-axis.
             if stretch_omega is not None and show_stretch:
@@ -10285,7 +10285,7 @@ class Rasch:
                 # Shared y-limits across every stretch panel (e.g.
                 # bistretch's omega_items/omega_thresholds), so a bar's
                 # length is comparable panel to panel rather than each
-                # auto-scaling to its own data independently.
+                # auto-scaling to its data independently.
                 all_omega_vals = [
                     v for s in stretch_omega.values() for v in s.values if v == v
                 ]

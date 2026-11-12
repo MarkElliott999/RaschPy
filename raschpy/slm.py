@@ -107,7 +107,7 @@ class SLM(Rasch):
             # recovery_stats() can compare an SLM fit against another
             # model class's generating data (e.g. for a person-recovery
             # pseudo-estimate check) -- SLM needs no extra sizing
-            # parameter to do this, unlike PCM/RSM's own cross-model
+            # parameter to do this, unlike PCM/RSM's cross-model
             # branches.
             sim = responses
             self.generating = _SimParams()
@@ -676,7 +676,7 @@ class SLM(Rasch):
         """
         Anchor item location estimates onto externally-supplied values.
 
-        Supports item banking: calibrates this dataset's own item
+        Supports item banking: calibrates this dataset's item
         locations as usual, then shifts the whole scale by a translation
         constant so that a subset of common ("anchor") items line up with
         externally-supplied reference locations (e.g. from a bank of
@@ -685,7 +685,7 @@ class SLM(Rasch):
 
         By default (selection_method='robust_z'), the translation constant
         is computed via _robust_anchor_selection() (Iglewicz & Hoaglin
-        modified z-score against the anchor set's own median/MAD), which
+        modified z-score against the anchor set's median/MAD), which
         iteratively excludes anchor items whose calibrated value has
         drifted too far from its supplied reference value, so a handful of
         stale or misbehaving anchor items cannot distort the shift applied
@@ -753,14 +753,14 @@ class SLM(Rasch):
             definition, not re-estimated).
             'rejected': anchors kept by selection still keep their exact
             supplied value, but anchors rejected as outliers instead
-            receive their own shifted, freshly-calibrated value — useful
+            receive their shifted, freshly-calibrated value — useful
             when a rejected anchor's supplied value is itself suspected to
-            be stale or wrong, so you'd rather trust this dataset's own
+            be stale or wrong, so you'd rather trust this dataset's
             estimate for that specific item. Requires selection_method in
             ('robust_z', 'wald') and no adj override; otherwise there is
             no selected/rejected distinction to act on, and this falls
             back to 'none' with a warning.
-            'all': every anchor item receives its own shifted value like
+            'all': every anchor item receives its shifted value like
             any other item, overwriting the supplied anchor value with
             what this dataset actually observed.
         plot : bool, default True
@@ -1964,7 +1964,7 @@ class SLM(Rasch):
             conditional item infit and outfit (Johansson): this many datasets
             simulated given each person's total over the items they responded
             to, from the model fitted with estimation='cp-full-rcl' (the most
-            accurate estimate of the null distribution; the object's own fit if
+            accurate estimate of the null distribution; the object's fit if
             it is 'cp-full-rcl' or 'cml'; null_fit in item_fit_bootstrap_info),
             each recalibrated with the object's
             calibrate() settings, give each item's observed mean square a
@@ -2455,10 +2455,10 @@ class SLM(Rasch):
         Attributes set
         --------------
         andersen_lr : float
-            Likelihood ratio statistic. Each group's own log-likelihood
+            Likelihood ratio statistic. Each group's log-likelihood
             (the H1 side) is computed by plugging in person location estimates
             from the pooled (combined-group) model rather than the
-            group's own separately-fit person locations, so the comparison
+            group's separately-fit person locations, so the comparison
             differs from the pooled model only in item parameters —
             otherwise nuisance person location parameters are re-optimised
             independently on each side, inflating the statistic beyond
@@ -2688,14 +2688,14 @@ class SLM(Rasch):
 
         Per-item LR mechanics: H1 (every item free per group) log-
         likelihood is just ref_model._log_likelihood() +
-        focal_model._log_likelihood() — each group's own natively-
+        focal_model._log_likelihood() — each group's natively-
         calibrated fit, computed once and reused for every item's test
         (translating one group's scale by a constant doesn't change its
-        own internal fit, so no combined-dataset object is needed for
+        internal fit, so no combined-dataset object is needed for
         this). For H0 on item i: replace item i's location in each
         group with a single value pooled across both groups (precision-
         weighted, on the reference/common scale, converted back to each
-        group's own scale for the focal side), re-estimate that group's
+        group's scale for the focal side), re-estimate that group's
         person locations under the modified item set, and recompute its log-
         likelihood. LR_i = 2*(LL_H1 - LL_H0_i), df=1. This is quite a bit
         more expensive than the Wald test (two person location re-estimations per
@@ -2750,7 +2750,7 @@ class SLM(Rasch):
             test — one extra combined-group model fit per focal group, not
             per item. The H1 side (ll_ref + ll_focal) plugs in person location
             estimates from the pooled reference+focal model rather than
-            each group's own separately-fit person locations — otherwise the two
+            each group's separately-fit person locations — otherwise the two
             sides of the comparison re-optimise nuisance person location parameters
             independently, which inflates the LR statistic beyond what
             df=k-1 accounts for (confirmed by null-DIF simulation: ~1.3-1.7x
@@ -2767,7 +2767,7 @@ class SLM(Rasch):
             If True, the Wald test (test='wald' or 'both') becomes a
             Welch's t-test: the statistic is unchanged (diff / combined
             SE) but its p-value is computed against a t-distribution with
-            Welch-Satterthwaite degrees of freedom (using each group's own
+            Welch-Satterthwaite degrees of freedom (using each group's
             person count) instead of a normal distribution — more
             conservative than a z-test when group sizes are small,
             unequal, or the two SEs differ substantially. Adds a 'df'
@@ -2782,21 +2782,21 @@ class SLM(Rasch):
             Measurement Transactions 20:3 — an adjustment for the opposite
             problem from welch's: at very large N, SE shrinks enough that
             trivial differences become "significant", swamping the
-            logit-magnitude thresholds' intent). Each group's own SE is
+            logit-magnitude thresholds' intent). Each group's SE is
             rescaled independently by sqrt(actual_n / reference_n) using
-            that group's own person count, then combined as usual — so
+            that group's person count, then combined as usual — so
             unequal reference/focal group sizes are put on equal footing
             too, not just corrected for extremity. Applied to the Wald/
             Welch test, the category tests, and (if welch=True) the
             Welch-Satterthwaite df, which then also uses reference_n
             rather than each group's actual n, for internal consistency —
             everything behaves as if the data had been collected at
-            reference_n. Does not affect the LR test's own precision-
+            reference_n. Does not affect the LR test's precision-
             weighted pooling (a nuisance-parameter estimation detail, not
             the significance-test artefact this targets) or the omnibus
             test (an exact chi-squared test, not SE-based).
         reference_n : int, default 100
-            Reference sample size for size_adjust=True. 100 is Tristán's own
+            Reference sample size for size_adjust=True. 100 is Tristán's
             default recommendation; ~60 is suggested there for closer
             alignment with the ETS Category B boundary specifically
             (100*(0.43/0.55)**2). Unused unless size_adjust=True.
@@ -2845,7 +2845,7 @@ class SLM(Rasch):
             different source or convention.
         category_alpha : float, default 0.05
             Significance level for both of the category tests above — the
-            ETS scheme's own literature-standard .05, kept independent of
+            ETS scheme's literature-standard .05, kept independent of
             `alpha` (which governs Flagged/Flagged_LR) so overriding one
             doesn't silently change the other.
         no_of_samples : int, default 500
@@ -2947,7 +2947,7 @@ class SLM(Rasch):
             ext_score_adjustment=ext_score_adjustment,
         )
 
-        # the object's own calibration settings, unless passed explicitly
+        # the object's calibration settings, unless passed explicitly
         cal_kw = self._calibration_kw(
             constant=constant,
             method=method,
@@ -3196,7 +3196,7 @@ class SLM(Rasch):
         se : bool, default True
             Passed through to the internal fit_statistics() call (only
             used if not already computed). If False, skips the SEs
-            entirely — this analysis's own output (residual correlations,
+            entirely — this analysis's output (residual correlations,
             PCA) does not depend on it, so se=False is purely a speed-up
             (e.g. for repeated simulation runs) with no effect on the
             output.
@@ -3485,7 +3485,7 @@ class SLM(Rasch):
         se : bool, default True
             Passed through to the internal fit_statistics() call (only
             used if not already computed). If False, skips the SEs
-            entirely — this table's own columns (CSEM, RSEM, Infit/Outfit)
+            entirely — this table's columns (CSEM, RSEM, Infit/Outfit)
             do not depend on it, so se=False is purely a speed-up (e.g.
             for repeated simulation runs) with no effect on the output.
         warm_corr : bool, default True
@@ -4133,17 +4133,17 @@ class SLM(Rasch):
             curve set (crcs()'s obs= is a list of category indices, not
             necessarily 0..n in order). None means the identity mapping
             (position i belongs to curve i), correct whenever the two
-            already line up, e.g. icc()'s own multi-item obs columns.
+            already line up, e.g. icc()'s multi-item obs columns.
         marker_border : bool, default True
             If True, observed-data markers get a black edge (matching
-            plot_anchor_selection's own marker style). If False, markers
+            plot_anchor_selection's marker style). If False, markers
             are drawn with no edge.
         line_border : bool, default False
             If True, each curve line gets a thin contrasting stroke
             (white on the darker plot_style schemes -- see
             _DARK_BACKGROUND_STYLES -- black otherwise), so it stays
             legible against a background/gridline colour close to its
-            own. Off by default; the 'colorblind multi' palette's own
+            own. Off by default; the 'colorblind multi' palette's
             black entry is separately swapped for white on those same
             dark schemes regardless of this flag.
         x_obs_data : numpy.ndarray, default empty
@@ -4381,7 +4381,7 @@ class SLM(Rasch):
             ):
 
                 # items may be a list (one curve per item) -- draw each
-                # item's own score lines in that item's own curve colour,
+                # item's score lines in that item's own curve colour,
                 # so they stay distinguishable when several are overlaid.
                 # Single-item calls keep the original plain black lines.
                 items_multi = isinstance(items, list)
@@ -4516,9 +4516,9 @@ class SLM(Rasch):
         if point_info_lines_item[1] is not None:
 
             # items may be a list (one curve per item) -- for a given
-            # location, every item's own information value is genuinely
+            # location, every item's information value is genuinely
             # different (that's the whole point of comparing them), so
-            # each gets its own "item: info" label at its own natural
+            # each gets its own "item: info" label at its natural
             # height, nudged sideways per item so close values don't
             # collide. Single-item calls keep the original separate
             # location/info label pair.
@@ -4711,7 +4711,7 @@ class SLM(Rasch):
             before. A list overlays one curve per item (in the given
             order), each in its own colour with a legend keyed by item
             name. thresh_line/cat_highlight only make sense for one
-            item's own location, so they just silently no-op with
+            item's location, so they just silently no-op with
             several plotted at once rather than erroring. obs and
             score_lines both work fine with a list.
         item : str or list of str, optional
@@ -4745,7 +4745,7 @@ class SLM(Rasch):
             With obs=True and a single item: observed points split by group
             (a column of the exogenous data, a Series indexed by person, or
             labels in responses order), one colour and marker per group --
-            with cond_obs, each against its own conditional expectations --
+            with cond_obs, each against its conditional expectations --
             for a visual check of DIF. Silently ignored if item is a list.
         title : str or None, default None
             Plot title. If None, no title is shown.
@@ -4755,7 +4755,7 @@ class SLM(Rasch):
         score_lines : list or None, default None
             List of proportions (between 0 and 1) at which to draw
             horizontal and vertical reference lines on the ICC. Works
-            with a list of items too -- draws each item's own lines in
+            with a list of items too -- draws each item's lines in
             that item's own curve colour, so they stay distinguishable.
         score_labels : bool, default False
             If True, annotates score line intersections with numeric values.
@@ -4796,7 +4796,7 @@ class SLM(Rasch):
         multi = isinstance(item, list)
         if multi:
             # thresh_line/cat_highlight each only make sense for a single
-            # item's own location -- silently no-op with several items
+            # item's location -- silently no-op with several items
             # plotted at once rather than erroring, since they'd just be
             # visual clutter with no obvious single "right" item anyway.
             thresh_line = False
@@ -4811,9 +4811,9 @@ class SLM(Rasch):
                 # (quantile groups are computed from self.persons -- the
                 # overall ability estimate, not an item-specific one --
                 # so they line up across items with complete data; the
-                # first item's own x values are reused for the rest).
+                # first item's x values are reused for the rest).
                 # One observed proportion column per item, in that
-                # item's own curve colour (via plot_data's own multi-
+                # item's curve colour (via plot_data's multi-
                 # column obs branch).
                 xobsdata = None
                 yobs_cols = []
@@ -5090,9 +5090,9 @@ class SLM(Rasch):
             before. A list overlays one curve per item (in the given
             order), each in its own colour with a legend keyed by item
             name. thresh_line/cat_highlight only make sense for one
-            item's own location, so they just silently no-op with
+            item's location, so they just silently no-op with
             several plotted at once rather than erroring. point_info_lines
-            works fine with a list too -- draws every item's own
+            works fine with a list too -- draws every item's
             information value at each requested location, labelled
             "item: info", since that comparison across items at a shared
             location is the point.
@@ -5149,7 +5149,7 @@ class SLM(Rasch):
         multi = isinstance(item, list)
         if multi:
             # thresh_line/cat_highlight each only make sense for a single
-            # item's own location -- silently no-op with several items
+            # item's location -- silently no-op with several items
             # plotted at once rather than erroring, since they'd just be
             # visual clutter with no obvious single "right" item anyway.
             thresh_line = False
@@ -5762,10 +5762,10 @@ class SLM(Rasch):
 
         No-op (warns, returns None) unless this object was built from a
         simulation (self.generating exists) -- NOT restricted to
-        self.generating.model == 'SLM'. But unlike RSM/PCM's own
+        self.generating.model == 'SLM'. But unlike RSM/PCM's
         recovery_stats() (which skip just thresholds/category_widths on
         an incompatible pairing while still comparing items/persons),
-        SLM's own dichotomous assumption means a mismatched max_score
+        SLM's dichotomous assumption means a mismatched max_score
         invalidates the WHOLE comparison, not just a threshold-shape
         detail: if the generating side is an RSM_Sim, this is a no-op
         unless self.generating.max_score == 1; if PCM_Sim, unless
@@ -5818,7 +5818,7 @@ class SLM(Rasch):
             (Flagged/Flagged_corrected).
         correction : {'bh', 'bonferroni', None}, default 'bh'
             Multiple-comparison correction, applied within each parameter
-            type's own family of tests (matches dif_test's convention).
+            type's family of tests (matches dif_test's convention).
         divergence_tol : float, default 0.1
             Threshold for the OLS-vs-Huber slope divergence flag.
         plot : bool, default True

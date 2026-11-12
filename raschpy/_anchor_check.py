@@ -79,7 +79,9 @@ class AnchorCheck:
         The anchor set checked, and that set with the suggestions applied (pass check.suggested, or
         check.apply_suggested().anchors, to calibrate(..., anchors=)).
     notes : list of str
-        What the check could not decide (e.g. two anchors left that disagree).
+        What the check could not decide (e.g. two anchors left that disagree). If the suggestions would drop more
+        than half the anchors, the anchors have no majority core: nothing is suggested (suggestions is empty,
+        suggested is the set checked) and a note says so; screen still shows each round.
 
     Methods cut(anchor, cell), drop(anchor), restore(anchor, cell=None) and apply_suggested() return a new
     AnchorCheck on the adjusted set; this one is unchanged.
@@ -210,14 +212,18 @@ class AnchorCheck:
         for alt in ("items", "thresholds") if len(free) >= 2 or (free and len(frame) > len(free)) else ():
             large = self._fit({a: alt for a in free}, frame, aset, matrices=True)
             cS, cL = small[3], large[3]
+            # nothing to test when the frame fixes the free anchors' effects (e.g. one free anchor)
             if self.estimation == "cml":
                 stat = max(2.0 * (cL["ll"] - cS["ll"]), 0.0)
                 df = int(cL["k"] - cS["k"])
-                rows[alt] = dict(Statistic=stat, df=df, p=float(chi2.sf(stat, df)))
+                if df > 0:
+                    rows[alt] = dict(Statistic=stat, df=df, p=float(chi2.sf(stat, df)))
             else:
                 JL = cL["Jac"]
                 Cb = orth(np.linalg.lstsq(JL, cS["Jac"], rcond=None)[0])
                 B = np.hstack([Cb, null_space(Cb.T)])
+                if B.shape[1] == Cb.shape[1]:
+                    continue
                 r = _selection.composite_lr_core(2.0 * (cL["ll"] - cS["ll"]), B.T @ cL["H"] @ B,
                                                  B.T @ cL["J"] @ B, Cb.shape[1])
                 rows[alt] = dict(Statistic=r["statistic"], df=r["df"], p=r["p"])
@@ -256,8 +262,41 @@ class AnchorCheck:
         return dict(anchors=out, wald=W, df=int(keep.sum()), p=self._wald_p(W, int(keep.sum())))
 
     # ---- 2. screen -------------------------------------------------------------------------------------------
+    def _coverage(self, w, frame):
+        """(I, K) number of the anchors in frame not cut at each item x threshold cell."""
+        I, K = len(self.items), self.K
+        cov = np.zeros((I, K), int)
+        for a in frame:
+            held = np.ones((I, K), bool)
+            for kind, lab in w.cuts.get(a, []):
+                held[self._cells(kind, lab)] = False
+            cov += held
+        return cov
+
+    def _cells(self, kind, lab):
+        """Index into an (I, K) array for an item, threshold or (item, threshold) label."""
+        th = lambda t: int(str(t).split()[-1]) - 1
+        if kind == "item":
+            return np.s_[self.items.index(lab), :]
+        if kind == "threshold":
+            return np.s_[:, th(lab)]
+        return np.s_[self.items.index(lab[0]), th(lab[1])]
+
+    def _sole_cells(self, a, w):
+        """Cells where every anchor but a is cut (a alone defines the zero point there), as labels."""
+        frame = [x for x in w.anchors if x != a]
+        bare = np.argwhere(self._coverage(w, frame) == 0)
+        return [(self.items[i], threshold_label(k + 1)) for i, k in bare]
+
     def _select(self, a, w, extra):
         """Anchor a's representation against the rest of w (a out of the frame): (rep, scaled AIC gain, p)."""
+        sole = self._sole_cells(a, w)
+        if sole:
+            note = (f"{a}: the only anchor not cut at {len(sole)} cell(s) (e.g. {sole[0]}), so it can't be compared "
+                    "with the other anchors there; not screened.")
+            if note not in self.notes:
+                self.notes.append(note)
+            return "global", 0.0, 1.0
         frame = [x for x in w.anchors if x != a]
         crit = {}
         for rep in CANDIDATES:
@@ -304,6 +343,11 @@ class AnchorCheck:
         th = fit["theta"]
         fam = self._families(design, self._names.index(a), rep)
         left = {f: list(range(len(v[0]))) for f, v in fam.items()}
+        # a cell is cut only while at least two other anchors still define the zero point there, so that screening
+        # any one of them later leaves one
+        cov = self._coverage(w, frame)
+        cuttable = lambda f, j: cov[self._cells(f, fam[f][0][j])].min() >= 2
+        held_back = []
         cuts, p_joint = [], np.nan
         m_at_cell = len(frame) + 1
         while True:
@@ -328,9 +372,22 @@ class AnchorCheck:
                     shift, se = float(c @ th), float(np.sqrt(max(c @ V @ c, 1e-300)))
                     zj = shift / se
                     pj = self._z_p(zj)
-                    if pj <= st["alpha"] and abs(shift) >= st["min_effect"] and (best is None or abs(zj) > abs(best[3])):
+                    if not (pj <= st["alpha"] and abs(shift) >= st["min_effect"]):
+                        continue
+                    if not cuttable(f, j):
+                        if fam[f][0][j] not in held_back:
+                            held_back.append(fam[f][0][j])
+                        continue
+                    if best is None or abs(zj) > abs(best[3]):
                         best = (f, j, shift, zj, se, pj)
             if best is None:
+                if held_back:
+                    # it still differs, at cells it can't be cut at: as for too many cuts (max_share), drop it
+                    self.notes.append(
+                        f"{a}: differs at {len(held_back)} cell(s) where fewer than two other anchors are uncut, so it "
+                        "can't be cut there; dropped instead."
+                    )
+                    return dict(outcome="drop", cuts=cuts, p_remaining=p_joint)
                 break
             f, j, shift, zj, se, pj = best
             left[f].remove(j)
@@ -352,6 +409,10 @@ class AnchorCheck:
             if len(w.anchors) - 1 < st["min_anchors"]:
                 self.notes.append(f"{a}: the suggestion is to drop it, but that would leave fewer than "
                                   f"min_anchors={st['min_anchors']} anchors; kept.")
+                return w
+            if self._sole_cells(a, w):
+                self.notes.append(f"{a}: the suggestion is to drop it, but it is the only anchor not cut at "
+                                  f"{self._sole_cells(a, w)[0]}, so the zero point there would be undefined; kept.")
                 return w
             extra[a] = rep
             ev = (dict(reason="global effect", shift=res["severity"]["shift"], se=res["severity"]["se"],
@@ -483,12 +544,28 @@ class AnchorCheck:
                 if lab not in given:
                     final = final.cut(a, lab, self.items, self.K, source="suggested", shift=c["shift"], se=c["se"],
                                       p=c["p"])
-        sugg = pd.DataFrame(rows, columns=[f, "Action", "Reason", "Cell", "Representation", "Shift", "SE", "z", "p",
-                                           "Pull on zero point"])
+        n0 = len(self.anchors.anchors)
+        if 2 * len(final.anchors) < n0:
+            return self._no_core(rounds, n0 - len(final.anchors), n0)
+        return rounds, self._suggestion_table(rows), final
+
+    def _suggestion_table(self, rows):
+        sugg = pd.DataFrame(rows, columns=[self.model.facet, "Action", "Reason", "Cell", "Representation", "Shift",
+                                           "SE", "z", "p", "Pull on zero point"])
         sugg = sugg.drop(columns=[c for c in ("Representation",) if sugg[c].isna().all()])
         # pandas 3 infers a string column, whose missing values are NaN: keep None for 'no cell'
         sugg["Cell"] = pd.Series([r.get("Cell") for r in rows], index=sugg.index, dtype=object)
-        return rounds, sugg, final
+        return sugg
+
+    def _no_core(self, rounds, dropped, n0):
+        """The suggestions would drop more than half the anchors: no agreeing majority to adjust the set towards, so
+        nothing is suggested (the screen's rounds are kept; the notes on the discarded steps are not)."""
+        self.notes[:] = []
+        self.notes.append(
+            f"Suggestions would drop {dropped} of the {n0} anchors, so the anchors have no majority core that agree to "
+            "adjust the set towards; no changes are suggested. Recommend choosing a different anchor set."
+        )
+        return rounds, self._suggestion_table([]), self.anchors
 
     # ---- actions ---------------------------------------------------------------------------------------------
     def _new(self, aset):

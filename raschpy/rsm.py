@@ -518,12 +518,12 @@ class RSM(Rasch):
 
     def _threshold_total_weights(self, constant=0.1):
         """
-        CPAT's own total_weight (the harmonic-mean information weight
+        CPAT's total_weight (the harmonic-mean information weight
         _threshold_distance() sums over item pairs), for every threshold
         1..max_score-1 -- the shared-vector analogue of PCM's
         _pairwise_harmonic_weights(), used as the effective sample size for
         dif_test's DCF dynamic SE cap (dcf_cap). Mirrors the information-
-        weighted estimator's own weight computation (not the distance itself),
+        weighted estimator's weight computation (not the distance itself),
         so this is cheap relative to a full calibrate() and doesn't need item
         locations.
 
@@ -537,7 +537,7 @@ class RSM(Rasch):
         -------
         pandas.Series
             total_weight per threshold, indexed 1..max_score-1 (matching
-            cat_width_se's own indexing convention).
+            cat_width_se's indexing convention).
         """
         weights = {}
         for threshold in range(1, self.max_score):
@@ -609,7 +609,7 @@ class RSM(Rasch):
         Parameters
         ----------
         item_locations : pandas.Series
-            Item locations from Stage 1 (PAIR), indexed by item name.
+            Item locations from the item stage (PAIR), indexed by item name.
         constant : float, default 0.03
             Additive smoothing constant for every adjacent-threshold link not
             touching an empty category.
@@ -1057,15 +1057,15 @@ class RSM(Rasch):
         one side, is pulled toward the mean of the other widths by a ridge
         of 0.5 * (1 - T/20) (0.5 if one-sided), T its pattern count. The
         widths next to an empty middle category are not identified by
-        their own patterns: they are left out of the joint fit and
+        their patterns: they are left out of the joint fit and
         estimated by the cpat-cl rule of threshold_set(), given the item
         locations from the joint fit.
 
         estimation='pair-cpat': the two-stage method used before v1.4.0
-        (Elliott & Buttery, 2022). Stage 1 builds a pairwise contingency
+        (Elliott & Buttery, 2022). The item stage builds a pairwise contingency
         matrix (entry (i,j) = count of persons scoring one point higher on
         item i than j), resolves structural zeroes via matrix powers, and
-        extracts item locations with priority_vector(). Stage 2, given the
+        extracts item locations with priority_vector(). The threshold stage, given the
         item locations, estimates adjacent-threshold distances via CPAT
         (threshold_set()), chains them, and centres the result.
 
@@ -1082,12 +1082,12 @@ class RSM(Rasch):
             ``min(1, 0.548 * I ** (-0.2 * log10(N * K)))``, with N the number
             of persons with at least one response, I the number of items and
             K = max_score. If ``threshold_constant`` is left ``None``
-            it also sets the Stage 2 (CPAT threshold) constant: to 0.03 when
+            it also sets the CPAT threshold constant: to 0.03 when
             ``constant`` is ``None``, or to the same explicit value otherwise.
-            Use 0 to disable Stage 1 smoothing (item estimation then fails if
+            Use 0 to disable item smoothing (item estimation then fails if
             any item has all-maximum scores).
         threshold_constant : float or None, default None
-            Additive smoothing constant for the Stage 2 CPAT threshold
+            Additive smoothing constant for the CPAT threshold
             distances. ``None`` follows ``constant`` (0.03 when ``constant`` is
             ``None``, else the explicit ``constant`` value); pass a float to
             set the threshold stage independently of the item stage. The
@@ -1114,7 +1114,7 @@ class RSM(Rasch):
         threshold_method : {'cpat-cl', 'cpat-info-weighted'} or None, default None
             ('cpat-cml', its name before v2.0.0, is still accepted, with a
             FutureWarning)
-            estimation='pair-cpat' only: estimator for the Stage 2 threshold
+            estimation='pair-cpat' only: estimator for the threshold
             distances. None resolves to
             'cpat-cl', the maximum of the composite likelihood of the threshold
             patterns over item pairs (a product of binomials, one per pair;
@@ -1196,9 +1196,9 @@ class RSM(Rasch):
             Shared Rasch-Andrich threshold vector, length max_score,
             centred at 0.
         constant : float
-            Stage 1 (item) smoothing constant actually used.
+            Item smoothing constant actually used.
         threshold_constant : float
-            Stage 2 (CPAT threshold) smoothing constant actually used.
+            CPAT threshold smoothing constant actually used.
         null_persons : pandas.Index
             Persons dropped (entirely missing data).
         """
@@ -1363,7 +1363,7 @@ class RSM(Rasch):
             theta=self.items.to_numpy(dtype=float),
         )
 
-        # Stage 2: CPAT threshold estimation
+        # CPAT threshold estimation
         self.thresholds = pd.Series(
             self.threshold_set(
                 self.items,
@@ -1820,7 +1820,7 @@ class RSM(Rasch):
         """
         Anchor item location estimates onto externally-supplied values.
 
-        Supports item banking: calibrates this dataset's own item
+        Supports item banking: calibrates this dataset's item
         locations as usual, then shifts the whole item-location scale
         by a translation constant so that a subset of common ("anchor")
         items line up with externally-supplied reference locations (e.g.
@@ -1840,13 +1840,13 @@ class RSM(Rasch):
         self.thresholds.
 
         Optionally (anchor_thresholds=), if you also have an externally-supplied reference threshold
-        structure (e.g. the bank's own category structure), this runs two
+        structure (e.g. the bank's category structure), this runs two
         checks of whether it's actually compatible with this dataset.
 
         The first is an omnibus likelihood-ratio test: holding item
         locations fixed at anchor_items, it compares the model fit (log-
         likelihood, person locations re-estimated in each case) using this
-        dataset's own freely-estimated thresholds (self.thresholds) against
+        dataset's freely-estimated thresholds (self.thresholds) against
         using the given anchor_thresholds instead. (AIC/BIC don't apply
         here: both candidates are point-values plugged into the exact same
         threshold-vector-length model, so there's no genuine difference in
@@ -1865,10 +1865,10 @@ class RSM(Rasch):
         undermine a translation-only equating assumption.
 
         The second is a per-category test, run alongside the omnibus one:
-        this dataset's own bootstrap category widths (self.thresholds.diff(),
+        this dataset's bootstrap category widths (self.thresholds.diff(),
         with SEs from cat_width_se — auto-triggers std_errors() if not
         already computed) are compared directly against anchor_thresholds'
-        own widths via a Wald z-test, one per category. Unlike the omnibus
+        widths via a Wald z-test, one per category. Unlike the omnibus
         test, this localises *which* category's shape differs, the same
         way dif_test's category-width (DCF) test does across groups —
         comparing raw threshold locations here would be the wrong quantity,
@@ -1878,7 +1878,7 @@ class RSM(Rasch):
 
         By default (selection_method='robust_z'), the translation constant
         is computed via _robust_anchor_selection() (Iglewicz & Hoaglin
-        modified z-score against the anchor set's own median/MAD), which
+        modified z-score against the anchor set's median/MAD), which
         iteratively excludes anchor items whose calibrated value has
         drifted too far from its supplied reference value, so a handful of
         stale or misbehaving anchor items cannot distort the shift applied
@@ -1946,14 +1946,14 @@ class RSM(Rasch):
             definition, not re-estimated).
             'rejected': anchors kept by selection still keep their exact
             supplied value, but anchors rejected as outliers instead
-            receive their own shifted, freshly-calibrated value — useful
+            receive their shifted, freshly-calibrated value — useful
             when a rejected anchor's supplied value is itself suspected to
-            be stale or wrong, so you'd rather trust this dataset's own
+            be stale or wrong, so you'd rather trust this dataset's
             estimate for that specific item. Requires selection_method in
             ('robust_z', 'wald') and no adj override; otherwise there is
             no selected/rejected distinction to act on, and this falls
             back to 'none' with a warning.
-            'all': every anchor item receives its own shifted value like
+            'all': every anchor item receives its shifted value like
             any other item, overwriting the supplied anchor value with
             what this dataset actually observed.
         plot : bool, default True
@@ -2053,7 +2053,7 @@ class RSM(Rasch):
             Flagged bool. None if anchor_thresholds was not supplied.
         anchor_category_width_test : pandas.DataFrame or None
             Per-category Wald test, indexed by category: Estimate (this
-            dataset's own bootstrap category width), Given (anchor_thresholds'
+            dataset's bootstrap category width), Given (anchor_thresholds'
             width at that category), Difference, SE (from cat_width_se), z,
             p, p_corrected (if correction is set), and a Flagged bool. None
             if anchor_thresholds was not supplied.
@@ -2158,7 +2158,7 @@ class RSM(Rasch):
             if flagged:
                 warnings.warn(
                     "anchor_thresholds differs substantially from this "
-                    "dataset's own estimated threshold structure "
+                    "dataset's estimated threshold structure "
                     "(LR test; see anchor_threshold_test). "
                     "The rating-scale category structure may not actually "
                     "be shared with the anchor source — translation-only "
@@ -2215,7 +2215,7 @@ class RSM(Rasch):
             if table["Flagged"].any():
                 warnings.warn(
                     "anchor_thresholds differs substantially from this "
-                    "dataset's own estimated category widths at "
+                    "dataset's estimated category widths at "
                     f"{list(table.index[table['Flagged']])} (per-category "
                     "Wald test; see anchor_category_width_test). The "
                     "rating-scale category structure may not actually be "
@@ -2255,7 +2255,7 @@ class RSM(Rasch):
         can't be reused across candidates since they depend on the
         threshold vector too. Uses a scratch RSM instance (same convention
         as std_errors' bootstrap and andersen_lr_test's group refits) so
-        self's own calibration state is never touched.
+        self's calibration state is never touched.
         """
         if not isinstance(thresholds, pd.Series):
             thresholds = pd.Series(thresholds, index=range(1, self.max_score + 1))
@@ -3514,7 +3514,7 @@ class RSM(Rasch):
         constant : float or None, default None
             Smoothing constant, passed to calibrate(); None resolves to the data-adaptive default (see calibrate()).
         threshold_constant : float or None, default None
-            Passed to calibrate() as the Stage 2 CPAT constant; None
+            Passed to calibrate() as the CPAT threshold constant; None
             follows `constant` (0.03 when constant is None). See calibrate().
         matrix_power : int or None, default None
             Matrix power for calibration. None resolves to 0 for
@@ -3559,7 +3559,7 @@ class RSM(Rasch):
             conditional item infit and outfit (Johansson): this many datasets
             simulated given each person's total over the items they responded
             to, from the model fitted with estimation='cp-full-rcl' (the most
-            accurate estimate of the null distribution; the object's own fit if
+            accurate estimate of the null distribution; the object's fit if
             it is 'cp-full-rcl' or 'cml'; null_fit in item_fit_bootstrap_info),
             each recalibrated with the object's
             calibrate() settings, give each item's observed mean square a
@@ -4316,10 +4316,10 @@ class RSM(Rasch):
         Attributes set
         --------------
         andersen_lr : float
-            Likelihood ratio statistic. Each group's own log-likelihood
+            Likelihood ratio statistic. Each group's log-likelihood
             (the H1 side) is computed by plugging in person location estimates
             from the pooled (combined-group) model rather than the
-            group's own separately-fit person locations, so the comparison
+            group's separately-fit person locations, so the comparison
             differs from the pooled model only in item parameters —
             otherwise nuisance person location parameters are re-optimised
             independently on each side, inflating the statistic beyond
@@ -4559,7 +4559,7 @@ class RSM(Rasch):
            needs person locations instead, which are otherwise never
            estimated by this method — see calibrate_anchor's/SLM's
            dif_test docstring for the exact per-item LR mechanics (H1 =
-           each group's own natively-calibrated fit, computed once;
+           each group's natively-calibrated fit, computed once;
            H0_i = item i's location pooled across groups, precision-
            weighted, with that group's person locations re-estimated under the
            swap). Results in self.dif_table and self.dif_omnibus_table.
@@ -4634,7 +4634,7 @@ class RSM(Rasch):
             Cheap relative to the per-item LR test — one extra combined-
             group model fit per focal group, not per item. The H1 side
             (ll_ref + ll_focal) plugs in person location estimates from the pooled
-            reference+focal model rather than each group's own separately-
+            reference+focal model rather than each group's separately-
             fit person locations — otherwise the two sides of the comparison
             re-optimise nuisance person-location parameters independently, which
             inflates the LR statistic beyond what df=k-1 accounts for
@@ -4653,7 +4653,7 @@ class RSM(Rasch):
             structure) becomes a Welch's t-test: the statistic is
             unchanged (diff / combined SE) but its p-value is computed
             against a t-distribution with Welch-Satterthwaite degrees of
-            freedom (using each group's own person count) instead of a
+            freedom (using each group's person count) instead of a
             normal distribution — more conservative than a z-test when
             group sizes are small, unequal, or the two SEs differ
             substantially. Adds a 'df' column to both dif_table and
@@ -4662,7 +4662,7 @@ class RSM(Rasch):
             one-sample comparison against a fixed anchor value, not the
             two-independent-samples case Welch's t-test addresses).
         size_adjust : bool, default False
-            If True, rescales each group's own SE (item location AND
+            If True, rescales each group's SE (item location AND
             threshold — same scope as welch, unlike category below) to
             guard against the opposite problem from welch's: at very
             large N, SE shrinks enough that trivial differences become
@@ -4673,7 +4673,7 @@ class RSM(Rasch):
             unconditionally (Tristán, 2006, Rasch Measurement Transactions
             20:3); threshold (DCF) SE is rescaled by a per-threshold
             dynamic cap on its own CPAT total_weight (dcf_cap), applied
-            only above the cap. Each group's own SE is rescaled
+            only above the cap. Each group's SE is rescaled
             independently, then combined as usual. Applied to the
             Wald/Welch test, the category tests, and (if welch=True) the
             Welch-Satterthwaite df, which then also uses the adjusted n
@@ -4681,7 +4681,7 @@ class RSM(Rasch):
         reference_n : int, default 100
             Reference sample size for size_adjust=True's item-location
             component only (dif_table) — does not affect threshold_dif_table,
-            which uses dcf_cap instead (see below). 100 is Tristán's own
+            which uses dcf_cap instead (see below). 100 is Tristán's
             default recommendation; ~60 is suggested there for closer
             alignment with the ETS Category B boundary specifically
             (100*(0.43/0.55)**2). Unused unless size_adjust=True. Checked
@@ -4695,12 +4695,12 @@ class RSM(Rasch):
             only — does not affect dif_table. Per threshold, independently
             for each group: effective_weight = min(total_weight, dcf_cap);
             se_adjusted = se_actual * max(1, sqrt(total_weight/dcf_cap)),
-            where total_weight is that threshold's own CPAT harmonic-mean
+            where total_weight is that threshold's CPAT harmonic-mean
             information weight, summed across every item pair (see
             _threshold_total_weights — the same weighting _threshold_distance
             itself uses, Elliott & Buttery 2022). Below the cap, no
             adjustment at all — unlike reference_n's unconditional rescale,
-            an ordinary-sized study's own SE is used as-is. This replaces
+            an ordinary-sized study's SE is used as-is. This replaces
             an earlier design (a single fixed reference_n shared with
             dif_table) that was found by direct simulation to make DCF
             power collapse at real effect sizes as N grows, because
@@ -4709,9 +4709,9 @@ class RSM(Rasch):
             reference_n could serve both. Calibrated by simulation across
             max_score in {3, 5, 8} (I=15, 0.8-logit category-width shift,
             N in {500,...,6000}/group) — total_weight runs roughly 5-6x
-            larger than PCM's own analogous per-cell weight at matched N
+            larger than PCM's analogous per-cell weight at matched N
             (RSM pools information across every item into one shared
-            vector), so dcf_cap is correspondingly larger than PCM's own
+            vector), so dcf_cap is correspondingly larger than PCM's
             default. Power-saturation and Type-I-nominal cap ranges were
             stable across all three max_score values tested at matched N —
             see the raschpy_dynamic_n_calibration project notes for the
@@ -4757,7 +4757,7 @@ class RSM(Rasch):
             (B boundary, C boundary) in logits, per Zwick et al. (1999).
         category_alpha : float, default 0.05
             Significance level for both category tests — the ETS scheme's
-            own literature-standard .05, independent of `alpha`.
+            literature-standard .05, independent of `alpha`.
         no_of_samples : int, default 500
             Bootstrap resamples for each group's std_errors() call (bootstrap SEs only).
         seed : int or None, default None
@@ -4872,7 +4872,7 @@ class RSM(Rasch):
             ext_score_adjustment=ext_score_adjustment,
         )
 
-        # the object's own calibration settings, unless passed explicitly
+        # the object's calibration settings, unless passed explicitly
         cal_kw = self._calibration_kw(
             constant=constant,
             threshold_constant=threshold_constant,
@@ -5227,7 +5227,7 @@ class RSM(Rasch):
           person's total under RSM's 'cp-full-rcl' fit (the most accurate estimate of the null distribution).
           The statistic compares the two fitted models: each item's thresholds are taken relative to that item's
           central location in RSM's fit and in PCM's fit, and the squared differences are summed over items and
-          thresholds. It is computed for the object's own fits and recomputed on each simulated dataset, with RSM
+          thresholds. It is computed for the object's fits and recomputed on each simulated dataset, with RSM
           refitted with the object's settings and PCM with PAIR and the same method. Only test='LR' is available.
 
         In null simulations (RSM data, alpha = 0.05; 10 or 20 items, maximum score 3 or 4, complete or 20%
@@ -5257,7 +5257,7 @@ class RSM(Rasch):
             p = exp(-|AIC_RSM - AIC_PCM| / 2), is at or below alpha. With a likelihood ('cml') this is a likelihood
             ratio test of RSM within PCM at level P(chi-square(d) > 2d + 2 ln(1/alpha)), d = (I - 1)(K - 1). A
             composite likelihood has no fixed scale, so for 'cp-full-rcl', 'cpat-rcl' and PAIR's 'log-lik' the test
-            is made at that level on the composite LR's own reference (the weighted chi-square above, d its tested
+            is made at that level on the composite LR's reference (the weighted chi-square above, d its tested
             directions), and p is the relative likelihood that a likelihood ratio with the same chi-square(d) tail
             probability would give (model_comparison_rsm_pcm_aic_gate holds the test).
         alpha : float, default 0.05
@@ -5340,7 +5340,7 @@ class RSM(Rasch):
         constant : float or None, default None
             Smoothing constant, passed to calibrate(); None resolves to the data-adaptive default (see calibrate()).
         threshold_constant : float or None, default None
-            Passed to calibrate() as the Stage 2 CPAT constant; None
+            Passed to calibrate() as the CPAT threshold constant; None
             follows `constant` (0.03 when constant is None). See calibrate().
         method : str, default 'log-lik'
             Priority vector extraction method.
@@ -5356,7 +5356,7 @@ class RSM(Rasch):
         se : bool, default True
             Passed through to the internal fit_statistics() call (only
             used if not already computed). If False, skips the SEs
-            entirely — this analysis's own output (residual correlations,
+            entirely — this analysis's output (residual correlations,
             PCA) does not depend on it, so se=False is purely a speed-up
             (e.g. for repeated simulation runs) with no effect on the
             output.
@@ -5479,7 +5479,7 @@ class RSM(Rasch):
         constant : float or None, default None
             Smoothing constant, passed to calibrate(); None resolves to the data-adaptive default (see calibrate()).
         threshold_constant : float or None, default None
-            Passed to calibrate() as the Stage 2 CPAT constant; None
+            Passed to calibrate() as the CPAT threshold constant; None
             follows `constant` (0.03 when constant is None). See calibrate().
         matrix_power : int or None, default None
             Matrix power for calibration. None resolves to 0 for
@@ -5632,7 +5632,7 @@ class RSM(Rasch):
         constant : float or None, default None
             Smoothing constant, passed to calibrate(); None resolves to the data-adaptive default (see calibrate()).
         threshold_constant : float or None, default None
-            Passed to calibrate() as the Stage 2 CPAT constant; None
+            Passed to calibrate() as the CPAT threshold constant; None
             follows `constant` (0.03 when constant is None). See calibrate().
         no_of_samples : int, default 500
             Bootstrap samples.
@@ -5871,7 +5871,7 @@ class RSM(Rasch):
         se : bool, default True
             Passed through to the internal fit_statistics() call (only
             used if not already computed). If False, skips the SEs
-            entirely — this table's own columns (CSEM, RSEM, Infit/Outfit)
+            entirely — this table's columns (CSEM, RSEM, Infit/Outfit)
             do not depend on it, so se=False is purely a speed-up (e.g.
             for repeated simulation runs) with no effect on the output.
         warm_corr : bool, default True
@@ -5887,7 +5887,7 @@ class RSM(Rasch):
         constant : float or None, default None
             Smoothing constant, passed to calibrate(); None resolves to the data-adaptive default (see calibrate()).
         threshold_constant : float or None, default None
-            Passed to calibrate() as the Stage 2 CPAT constant; None
+            Passed to calibrate() as the CPAT threshold constant; None
             follows `constant` (0.03 when constant is None). See calibrate().
         filename : str or None, default None
             If given, also saves the returned table to
@@ -5987,7 +5987,7 @@ class RSM(Rasch):
         constant : float or None, default None
             Smoothing constant, passed to calibrate(); None resolves to the data-adaptive default (see calibrate()).
         threshold_constant : float or None, default None
-            Passed to calibrate() as the Stage 2 CPAT constant; None
+            Passed to calibrate() as the CPAT threshold constant; None
             follows `constant` (0.03 when constant is None). See calibrate().
         alpha : bool, default False
             If True, adds a 'Cronbach alpha' row (Persons column only —
@@ -6099,7 +6099,7 @@ class RSM(Rasch):
         constant : float or None, default None
             Smoothing constant, passed to calibrate(); None resolves to the data-adaptive default (see calibrate()).
         threshold_constant : float or None, default None
-            Passed to calibrate() as the Stage 2 CPAT constant; None
+            Passed to calibrate() as the CPAT threshold constant; None
             follows `constant` (0.03 when constant is None). See calibrate().
         no_of_samples : int, default 500
             Bootstrap samples.
@@ -6228,7 +6228,7 @@ class RSM(Rasch):
         constant : float or None, default None
             Smoothing constant, passed to calibrate(); None resolves to the data-adaptive default (see calibrate()).
         threshold_constant : float or None, default None
-            Passed to calibrate() as the Stage 2 CPAT constant; None
+            Passed to calibrate() as the CPAT threshold constant; None
             follows `constant` (0.03 when constant is None). See calibrate().
         """
 
@@ -6522,7 +6522,7 @@ class RSM(Rasch):
 
     def _label_height_frac(self, font, axis_font_size, figsize):
         """
-        Fraction of the axes' own pixel height that one line of label
+        Fraction of the axes' pixel height that one line of label
         text occupies, at the given font/size/figure size -- measured
         directly via a probe render (not guessed), so callers can
         convert it into an exact data-unit label height for whatever
@@ -6623,17 +6623,17 @@ class RSM(Rasch):
             curve set (crcs()'s obs= is a list of category indices, not
             necessarily 0..n in order). None means the identity mapping
             (position i belongs to curve i), correct whenever the two
-            already line up, e.g. icc()'s own multi-item obs columns.
+            already line up, e.g. icc()'s multi-item obs columns.
         marker_border : bool, default True
             If True, observed-data markers get a black edge (matching
-            plot_anchor_selection's own marker style). If False, markers
+            plot_anchor_selection's marker style). If False, markers
             are drawn with no edge.
         line_border : bool, default False
             If True, each curve line gets a thin contrasting stroke
             (white on the darker plot_style schemes -- see
             _DARK_BACKGROUND_STYLES -- black otherwise), so it stays
             legible against a background/gridline colour close to its
-            own. Off by default; the 'colorblind multi' palette's own
+            own. Off by default; the 'colorblind multi' palette's
             black entry is separately swapped for white on those same
             dark schemes regardless of this flag.
         x_obs_data, y_obs_data : array-like
@@ -6845,14 +6845,14 @@ class RSM(Rasch):
 
             if central_location:
                 # items may be a list (one curve per item) -- draw each
-                # item's own central location, always plain darkred
+                # item's central location, always plain darkred
                 # (colour isn't needed to disambiguate since each line
                 # is labelled with its own item name).
                 items_multi = isinstance(items, list)
                 items_list = items if items_multi else [items]
                 n_labels = len(items_list)
                 if central_location_fit and items_multi and n_labels > 0:
-                    # "Fit" style (iic): the curve's own peak sits right
+                    # "Fit" style (iic): the curve's peak sits right
                     # at each item's central location, so labels are
                     # stacked with a probe-measured height above that
                     # peak -- ymax is pre-widened by the caller to fit
@@ -6884,7 +6884,7 @@ class RSM(Rasch):
                         # line (curves rise left-to-right, so that side
                         # stays clear of the curve even close to the
                         # ceiling) rather than boosting y_max past its
-                        # own meaningful value.
+                        # meaningful value.
                         label_y = y_max * 0.95 - idx * y_max * 0.05
                         label_x = xval - (x_max - x_min) / 100
                         ha = "right"
@@ -6904,7 +6904,7 @@ class RSM(Rasch):
 
             if score_lines_item[1] is not None:
                 # score_lines_item[0] may be a list (one curve per item)
-                # -- draw each item's own score lines in that item's own
+                # -- draw each item's score lines in that item's own
                 # curve colour. Single-item calls keep the original plain
                 # black lines.
                 items_arg = score_lines_item[0]
@@ -7015,10 +7015,10 @@ class RSM(Rasch):
 
             if point_info_lines_item[1] is not None:
                 # items may be a list (one curve per item) -- for a
-                # given location, every item's own information value is
+                # given location, every item's information value is
                 # genuinely different (that's the whole point of
                 # comparing them), so each gets its own "item: info"
-                # label at its own natural height, nudged sideways per
+                # label at its natural height, nudged sideways per
                 # item so close values don't collide. Single-item calls
                 # keep the original separate location/info label pair.
                 items_arg = point_info_lines_item[0]
@@ -7226,9 +7226,9 @@ class RSM(Rasch):
             A list overlays one curve per item (in the given order), each
             in its own colour with a legend keyed by item name.
             thresh_lines/cat_highlight only make sense for one item's
-            own location, so they just silently no-op with several
+            location, so they just silently no-op with several
             plotted at once rather than erroring. obs, central_location,
-            and score_lines all work fine with a list -- each item's own
+            and score_lines all work fine with a list -- each item's
             point(s)/line(s) are drawn in that item's own curve colour,
             so they stay distinguishable.
         item : str or list of str, optional
@@ -7262,7 +7262,7 @@ class RSM(Rasch):
             With obs=True and a single item: observed points split by group
             (a column of the exogenous data, a Series indexed by person, or
             labels in responses order), one colour and marker per group --
-            with cond_obs, each against its own conditional expectations --
+            with cond_obs, each against its conditional expectations --
             for a visual check of DIF. Silently ignored if item is a list.
         title : str or None, default None
             Plot title.
@@ -7303,7 +7303,7 @@ class RSM(Rasch):
         multi = isinstance(item, list)
         if multi:
             # thresh_lines/cat_highlight each only make sense for a single
-            # item's own location -- silently no-op with several items
+            # item's location -- silently no-op with several items
             # plotted at once rather than erroring, since they'd just be
             # visual clutter with no obvious single "right" item anyway.
             thresh_lines = False
@@ -7320,7 +7320,7 @@ class RSM(Rasch):
                 # (quantile groups come from self.persons, the overall
                 # ability estimate, not an item-specific one -- so they
                 # line up across items with complete data; the first
-                # item's own x values are reused for the rest). One
+                # item's x values are reused for the rest). One
                 # observed mean-score column per item, in that item's
                 # own curve colour.
                 xobsdata = None
@@ -7704,11 +7704,11 @@ class RSM(Rasch):
             A list overlays one curve per item (in the given order), each
             in its own colour with a legend keyed by item name.
             thresh_lines/cat_highlight only make sense for one item's
-            own location, so they just silently no-op with several
+            location, so they just silently no-op with several
             plotted at once rather than erroring. central_location and
             point_info_lines both work fine with a list -- central_location
-            draws each item's own line, labelled with its value (and
-            name); point_info_lines draws every item's own information
+            draws each item's line, labelled with its value (and
+            name); point_info_lines draws every item's information
             value at each requested location, labelled "item: info",
             since that comparison across items at a shared location is
             the point.
@@ -7753,7 +7753,7 @@ class RSM(Rasch):
         multi = isinstance(item, list)
         if multi:
             # thresh_lines/cat_highlight each only make sense for a
-            # single item's own location -- silently no-op with several
+            # single item's location -- silently no-op with several
             # items plotted at once rather than erroring, since they'd
             # just be visual clutter with no obvious single "right" item
             # anyway.
@@ -7778,8 +7778,8 @@ class RSM(Rasch):
         if ymax is None:
             ymax = float(y.max()) * 1.1
             if central_location and multi and len(item) > 0:
-                # central_location's labels stack above the curve's own
-                # peak (which sits right at each item's own central
+                # central_location's labels stack above the curve's
+                # peak (which sits right at each item's central
                 # location -- exactly where those labels are), so widen
                 # ymax by exactly the measured label-stack height plus a
                 # small gap, rather than guessing a fixed fraction (see
@@ -8229,7 +8229,7 @@ class RSM(Rasch):
         """
         Category widths (tau_{k+1} - tau_k) from a threshold Series indexed
         1..max_score, relabelled 1..max_score-1 to match cat_width_se's
-        own indexing convention (std_errors(), rsm.py).
+        indexing convention (std_errors(), rsm.py).
         """
         widths = thresholds.diff().dropna()
         widths.index = range(1, len(thresholds))
@@ -8261,8 +8261,8 @@ class RSM(Rasch):
         The RSM<->PCM pairing specifically is stricter than a per-
         parameter-type skip: if the generating side is a PCM_Sim, NOTHING
         fires at all (the whole method no-ops, not just thresholds)
-        unless EVERY max score matches -- PCM_Sim's own max_score_vector
-        must be constant across items AND equal this RSM's own max_score.
+        unless EVERY max score matches -- PCM_Sim's max_score_vector
+        must be constant across items AND equal this RSM's max_score.
         A partial mismatch means the two models aren't testing the same
         category structure at all, not merely a threshold-shape mismatch,
         so allowing items/persons through while just skipping thresholds
@@ -8317,7 +8317,7 @@ class RSM(Rasch):
             (Flagged/Flagged_corrected).
         correction : {'bh', 'bonferroni', None}, default 'bh'
             Multiple-comparison correction, applied within each parameter
-            type's own family of tests (matches dif_test's convention).
+            type's family of tests (matches dif_test's convention).
         divergence_tol : float, default 0.1
             Threshold for the OLS-vs-Huber slope divergence flag.
         plot : bool, default True
@@ -8366,8 +8366,8 @@ class RSM(Rasch):
         if gen_model == "PCM":
             # Cross-model RSM<->PCM comparison: nothing fires at all
             # (not just thresholds) unless EVERY max score matches --
-            # PCM's own per-item max scores must be constant AND equal
-            # this RSM object's own max_score. A partial mismatch means
+            # PCM's per-item max scores must be constant AND equal
+            # this RSM object's max_score. A partial mismatch means
             # the two models aren't testing the same category structure
             # at all, not just a threshold-shape mismatch.
             msv = self.generating.max_score_vector
@@ -8383,13 +8383,13 @@ class RSM(Rasch):
                 return None
         elif gen_model == "SLM" and self.max_score != 1:
             # SLM_Sim's data is genuinely dichotomous -- only a valid
-            # nested comparison when this RSM object's own max_score is
+            # nested comparison when this RSM object's max_score is
             # also 1 (same "every max score must match" rule as the PCM
             # case above, SLM implicitly being max_score=1).
             warnings.warn(
                 "recovery_stats() is a no-op: SLM_Sim-generated data is "
                 "dichotomous, only a valid nested comparison when this "
-                f"RSM's own max_score is also 1 (got {self.max_score}).",
+                f"RSM's max_score is also 1 (got {self.max_score}).",
                 UserWarning,
                 stacklevel=2,
             )
