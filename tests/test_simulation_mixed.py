@@ -13,6 +13,7 @@ from raschpy.simulation import (
     MFRM_Sim,
     MFRM_Sim_Bistretch,
     MFRM_Sim_Centrality,
+    MFRM_Sim_Mixed,
     MFRM_Sim_PseudoHalo,
 )
 
@@ -163,3 +164,22 @@ def test_anchored_truth_matches_calibrate_anchor():
     m.calibrate_anchor("items", a)
     assert np.abs(m.anchor_facet_effects_items.to_numpy() - s.facet_effects.to_numpy()).max() < 0.15
     assert np.abs(m.anchor_items_items.to_numpy() - s.items.to_numpy()).max() < 0.1
+
+
+def test_mfrm_sim_mixed_class_matches_mfrm_sim_mixed():
+    """MFRM_Sim_Mixed(items, persons, max_score, facet elements, global_range=g) gives the same data and
+    parameters as MFRM_Sim(items, persons, facet elements, max_score, model='mixed', facet_range=g); facet_range
+    and model are refused."""
+    kw = dict(rater_models=EIGHT[:R], seed=7, anchors=["Rater_1"])
+    a = MFRM_Sim_Mixed(I, 60, K, R, global_range=3, **kw)
+    b = MFRM_Sim(I, 60, R, K, model="mixed", facet_range=3, **kw)
+    assert a.model == "mixed" and a.global_range == 3 and a.facet_range == 3
+    pd.testing.assert_frame_equal(a.responses, b.responses)
+    pd.testing.assert_frame_equal(a.facet_effects, b.facet_effects)
+    pd.testing.assert_series_equal(a.rater_models, b.rater_models)
+    c = MFRM_Sim_Mixed(I, 60, K, R, seed=7, candidate_models=["global", "centrality"], proportions=[1, 0])
+    assert (c.rater_models == "global").all()
+    with pytest.raises(ValueError, match="global_range"):
+        MFRM_Sim_Mixed(I, 60, K, R, facet_range=3)
+    with pytest.raises(ValueError, match="fixes model"):
+        MFRM_Sim_Mixed(I, 60, K, R, model="global")

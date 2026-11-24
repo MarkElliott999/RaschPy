@@ -12,6 +12,7 @@ import os
 import warnings
 
 import numpy as np
+import scipy.stats as scipy_stats
 import pandas as pd
 import pytest
 from scipy.special import logsumexp
@@ -783,12 +784,12 @@ def test_conditional_model_selection_mfrm():
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         m = MFRM(resp)
-        m.model_selection()  # cp-full-rcl candidates: the composite route
+        m.model_selection(delta=0, stretch_delta=0)  # cp-full-rcl candidates: the composite route, no tolerance
         assert m.model_comparison_mfrm_info["route"] == "composite"
         assert m.model_comparison_mfrm_aic_preferred == "bivector"
         mc = MFRM(resp)
         mc.calibrate(model="global", estimation="cml")
-        mc.model_selection()  # CML candidates: scored at their estimates
+        mc.model_selection(delta=0, stretch_delta=0)  # CML candidates: scored at their estimates, no tolerance
         assert mc.model_comparison_mfrm_info["route"] == "cml"
         for mod in ("bivector", "bistretch"):
             Xv, thr, _ = mc._virtual_items(mod)
@@ -1035,11 +1036,11 @@ def test_local_dependence_gamma():
     mc2 = m.local_dependence_gamma(p_method="monte-carlo", samples=50, seed=4)
     pd.testing.assert_frame_equal(mc1, mc2)
     assert mc1["p"].min() == pytest.approx(1 / 51)
-    asy = m.local_dependence_gamma(p_method="asymptotic")
-    np.testing.assert_allclose(asy.set_index(["Item", "Paired item"])["Gamma"].sort_index(),
+    np.testing.assert_allclose(mc1.set_index(["Item", "Paired item"])["Gamma"].sort_index(),
                                tab.set_index(["Item", "Paired item"])["Gamma"].sort_index())
-    with pytest.raises(ValueError, match="p_method must be"):
-        m.local_dependence_gamma(p_method="exact")
+    for bad in ("asymptotic", "exact"):
+        with pytest.raises(ValueError, match="p_method must be"):
+            m.local_dependence_gamma(p_method=bad)
 
 
 @pytest.mark.parametrize("name", ["SLM", "PCM", "RSM"])
@@ -1459,7 +1460,9 @@ def test_pcm_no_data_se(estimation):
     others = [c for c in X.columns if c not in (a, b)]
     np.testing.assert_allclose(m.item_se[others].values, sand[0][others].values)
     lo = m.threshold_low[a][2]
-    assert lo == pytest.approx(m.thresholds_uncentred.loc[a, 3] - 1.959964 * m.threshold_se[a][2], abs=1e-5)
+    # analytic intervals: estimate +/- t * SE, t on persons - 1
+    q = scipy_stats.t.ppf(0.975, m.no_of_persons - 1)
+    assert lo == pytest.approx(m.thresholds_uncentred.loc[a, 3] - q * m.threshold_se[a][2], abs=1e-10)
     with pytest.raises(ValueError, match="no_data_se must be"):
         m.std_errors(no_data_se="zero")
 

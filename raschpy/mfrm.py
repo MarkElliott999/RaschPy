@@ -18,7 +18,67 @@ from matplotlib import cm as cmx
 import seaborn as sns
 import matplotlib.patheffects as path_effects
 
-from raschpy.base import Rasch, _BootstrapWarnings, _save_table
+from raschpy.base import Rasch, _BootstrapWarnings, _save_table, _f_reference, _welch_df
+
+
+_EXACT_PER_RATER = True  # research switch: exact close-fit null in per_rater_model_selection(test='LR')
+_PAIR_CPAT_OTHER_STRETCH = False  # research switch: pair-cpat LR ladder tests the other stretch beside a single one
+_IC_ORDER = "up"  # research switch: fitted per_rater_model_selection(test='AIC'/'BIC'): "up" (default since 2.0.0:
+# LR's ladder from 'global', each step decided by the criterion and tolerances) or "min" (the lowest criterion, then the
+# tolerance step-down)
+_IC_STEP = "test"  # research switch, with _IC_ORDER "up": tolerance judged by the close-fit test as test='LR' ("test",
+# default) or by the estimates ("estimate")
+_LR_ORDER = "up"  # research switch: fitted per_rater_model_selection(test='LR') order, "up" (default) or "down"
+_LONE_ANCHOR = "always"  # research switch: an anchor alone without a part is tested against the anchors' average in
+# every pass ("always", default since 2.0.0) or only after the passes ("after"; the passes can then cycle and never reach it)
+_ANCHOR_ORDER = "names"  # research switch: the order per_rater_model_selection visits facet elements in each pass,
+# "names" (as listed) or "worst_first" (the anchors first, by their likelihood ratio for 'matrix' over 'global' at the
+# start, largest first, then the others as listed)
+
+
+def _stretch_deltas(stretch_delta):
+    """per_rater_model_selection(stretch_delta=): one tolerance for both stretches, or {'items': x, 'thresholds':
+    y}; returned as {'c': item stretch, 'd': threshold stretch}, each a float >= 0."""
+    if isinstance(stretch_delta, dict):
+        unknown = set(stretch_delta) - {"items", "thresholds"}
+        if unknown:
+            raise ValueError(f"stretch_delta: a number, or a dict with keys 'items' and/or 'thresholds' (a key left "
+                             f"out is 0); unknown keys {sorted(unknown)}.")
+        out = {"c": float(stretch_delta.get("items", 0.0)), "d": float(stretch_delta.get("thresholds", 0.0))}
+    else:
+        out = {"c": float(stretch_delta), "d": float(stretch_delta)}
+    for k, v in out.items():
+        if not np.isfinite(v) or v < 0:
+            raise ValueError(f"stretch_delta must be >= 0, got {stretch_delta!r}.")
+    return out
+
+def _se_correction_arg(func):
+    """Decorator for a method with an se_correction= argument ('kauermann-carroll' or None): the method's tests use
+    that small-sample correction (the object's _se_correction_opt, read through _kc_on(), is set for the call and
+    restored afterwards, so the call does not change later methods' setting)."""
+    import inspect
+
+    sig = inspect.signature(func)
+
+    @functools.wraps(func)
+    def wrapper(self, *args, **kwargs):
+        bound = sig.bind(self, *args, **kwargs)
+        bound.apply_defaults()
+        se_correction = bound.arguments["se_correction"]
+        if se_correction not in ("kauermann-carroll", None):
+            raise ValueError(f"se_correction must be 'kauermann-carroll' or None, got {se_correction!r}.")
+        missing = object()
+        before = self.__dict__.get("_se_correction_opt", missing)
+        self._se_correction_opt = se_correction
+        try:
+            return func(self, *args, **kwargs)
+        finally:
+            if before is missing:
+                self.__dict__.pop("_se_correction_opt", None)
+            else:
+                self._se_correction_opt = before
+
+    return wrapper
 
 
 class MFRM(Rasch):
@@ -49,6 +109,10 @@ class MFRM(Rasch):
     # ------------------------------------------------------------------
     # Model registry — maps model name to facet_effect attribute names
     # ------------------------------------------------------------------
+    # per_rater_model_selection's tolerance defaults for test='LR' with 'cp-full-rcl', 'cpat-rcl' or 'cml' (delta and
+    # delta_max in delta_units; stretch_delta a proportion); elsewhere the tolerances default to off
+    _TOL_DEFAULTS = {"delta": 0.1, "delta_max": 0.2, "stretch_delta": 0.1, "delta_measure": "either"}
+
     _MODELS = (
         "global",
         "items",
@@ -4191,13 +4255,16 @@ class MFRM(Rasch):
         two starts, from a 'pair-cpat' fit: its stretch parameters, and
         omega = 1; the fit with the higher composite likelihood is kept.
 
-        estimation='cml': penalised conditional maximum likelihood. Each
-        facet element x item pair is treated as an item (a virtual item), and
-        the likelihood conditions on each person's total over all their
-        ratings, so the person parameters drop out. The facet element effects
-        are penalised (see global_ridge and the other penalties) towards the
-        next simpler representation; without the penalties, estimates often do
-        not exist in small or sparsely linked designs. The fit starts from the
+        estimation='cml': conditional maximum likelihood, penalised by
+        default. Each facet element x item pair is treated as an item (a
+        virtual item), and the likelihood conditions on each person's total
+        over all their ratings, so the person parameters drop out. The facet
+        element effects are penalised (see global_ridge and the other
+        penalties) towards the next simpler representation; set the penalties
+        to 0 for unpenalised CML, but without them estimates often do not
+        exist in small or sparsely linked designs. The widths next to an
+        unused score category keep a separate penalty (1.0), which the
+        ridge arguments do not set. The fit starts from the
         'cp-full-rcl' estimates and takes longer (about 0.1-5 s per fit
         against 0.01-0.1 s), more so for 'matrix' and with many facet
         elements; bootstrap standard errors and model selection multiply this
@@ -4409,21 +4476,29 @@ class MFRM(Rasch):
             its ridges (see std_errors(no_data_se=), no_data_parameters['mixed']).
             Not yet available: an explicit constant.
         anchors : list or None, model='mixed' only
-            The facet elements whose average defines the instrument: their
-            average deviation from the shared item locations and thresholds
-            is zero in every part (global effect, effect on each item and each
-            threshold, including stretch, and interactions), and each facet
-            element's representation is read relative to them. None means all
-            facet elements (the average facet element). The frame is part of
+            The facet elements that define the instrument: their global
+            effects sum to zero, and in each part (effect on each item, on
+            each threshold, including stretch, and interactions) the anchors
+            whose representation lacks that part fix the instrument there; an
+            anchor with the part is free in it, entering the frame through its
+            global effect only. When every anchor has a part, their average
+            deviation in it is zero. Each facet element's representation is
+            read relative to them. None means all facet elements, averaged in
+            every part (the average facet element). The frame is part of
             the model: the same data and rater_models in another frame can fit
             differently, and the representations that fit best can differ, so
             the anchors should come from knowledge outside the data (e.g.
             which raters are trusted). May also be an anchor set from
             check_anchor_homogeneity() (check.anchors) in which some anchors
-            have cells cut: such an anchor (on 'global') is not an anchor at
-            those items, thresholds or item-threshold cells, where it gets a
-            free shift (anchor_cuts_mixed) and the zero point is the other
-            anchors' average. Results: items_mixed,
+            have cells cut: such an anchor is not an anchor at those items,
+            thresholds or item-threshold cells, where it gets a free shift
+            (anchor_cuts_mixed), and its uncut cells stay at its global effect
+            and fix the instrument. It is reported under the representation
+            its cuts imply: threshold cuts only 'thresholds', item cuts only
+            'items', both 'bivector', any item-threshold cell 'matrix'
+            (rater_models may give that representation or 'global' for it).
+            At least one anchor on 'global' must remain uncut at every cell.
+            Results: items_mixed,
             thresholds_mixed, facet_effects_mixed (every facet element's
             effects in the matrix layout), facet_effects_mixed_{model} (one
             table per representation used, in its own layout),
@@ -4779,6 +4854,9 @@ class MFRM(Rasch):
             "centrality": 1 / I,
             "pseudo_halo": 1 / K,
             "bistretch": (I + K) / (I * K),
+            # the likelihood ratio ladder's hidden representations (a full set beside the other side's stretch)
+            "items_centrality": (I + K) / (I * K),
+            "thresholds_pseudo_halo": (I + K) / (I * K),
         }[model]
 
     def _refit_kw(self, model):
@@ -4838,6 +4916,20 @@ class MFRM(Rasch):
                 UserWarning,
                 stacklevel=stacklevel,
             )
+
+    def _warn_outer_unused(self, cat_counts, estimation=None):
+        """RSM's empty-category warning for unused bottom or top score categories when no middle one is empty (the
+        pooled CPAT threshold estimator, which gives the warning otherwise, is then not run)."""
+        from types import SimpleNamespace
+        from raschpy.rsm import RSM
+
+        unused = [j for j in range(int(self.max_score) + 1) if cat_counts[j] == 0]
+        if not unused:
+            return
+        est = estimation or getattr(self, "estimation", None)
+        ns = SimpleNamespace(max_score=int(self.max_score), _empty_warning_estimation=est, estimation=est)
+        RSM._warn_empty_categories(ns, unused)
+        self._unused_warned = set(getattr(self, "_unused_warned", ())) | set(ns._unused_warned)
 
     def _shipped_widths(self, item_locations, threshold_constant, estimation=None):
         """Category widths from RSM's CPAT threshold estimator (threshold_method='cpat-cl', with its
@@ -4941,6 +5033,8 @@ class MFRM(Rasch):
         counts = _rcl.pattern_counts(X, K)
         cat_counts = _rcl.category_counts(X, K)
         split = _rcl.empty_widths(cat_counts, K)
+        if not split and not self._resample:
+            self._warn_outer_unused(cat_counts)
         full_arg = (
             dict(X=X, empty=_rcl.empty_categories(cat_counts))
             if full_patterns
@@ -5398,8 +5492,8 @@ class MFRM(Rasch):
         """
         calibrate(model='mixed'): one joint fit with each facet element (e.g. rater) on its own representation
         (rater_models), sharing the item locations and thresholds, in the frame of the anchors (None: all facet
-        elements, the average facet element) -- see _rcl.MixedDesign. estimation 'cml' (penalised conditional
-        likelihood on the facet element x item virtual items), 'cp-full-rcl' (penalised composite likelihood on
+        elements, the average facet element) -- see _rcl.MixedDesign. estimation 'cml' (conditional likelihood,
+        penalised by default, on the facet element x item virtual items), 'cp-full-rcl' (penalised composite likelihood on
         the full pattern set) or 'cpat-rcl' (CPAT's patterns with additive smoothing; each facet element pair's
         constant is the larger of the two representations'); each facet element's penalties are those of its own representation (an explicit
         weight replaces the default for every representation it applies to). 'pair-cpat' derives each facet
@@ -5447,17 +5541,34 @@ class MFRM(Rasch):
             raise ValueError(f"rater_models: unknown representation(s) {bad}; expected one of {list(self._MODELS)}.")
         anchors, cuts, anchor_set = self._anchor_spec(anchors)
         if cuts:
-            off = {a: models[facets.index(a)] for a in anchor_set.cuts if a in facets
-                   and models[facets.index(a)] != "global"}
+            # an anchor with cells cut is fitted on 'global' with a free shift at each cut cell, and reported under
+            # the representation its cuts imply; rater_models may give either
+            implied = {a: _rcl.cut_representation(kind for kind, _ in anchor_set.cuts[a])
+                       for a in anchor_set.cuts if a in facets}
+            off = {a: models[facets.index(a)] for a in implied if models[facets.index(a)] not in ("global", implied[a])}
             if off:
                 raise ValueError(
-                    f"anchors: cells are cut for {list(off)}, which needs them on 'global'; rater_models gives "
-                    f"{off}. Drop the anchor instead, or put it on 'global'."
+                    f"anchors: cells are cut for {list(off)}, which fits them on 'global' with a free shift at each cut "
+                    f"cell, reported as {', '.join(f'{a!r}: {implied[a]!r}' for a in off)}; rater_models gives {off}. "
+                    "Give 'global' or the implied representation, or drop the anchor."
                 )
+            for a in implied:
+                models[facets.index(a)] = "global"
             if estimation == "pair-cpat" or (estimation is None and getattr(self, "estimation", None) == "pair-cpat"):
                 raise ValueError("anchors with cells cut need estimation='cp-full-rcl', 'cpat-rcl' or 'cml'.")
             if unused_categories == "null":
                 raise ValueError("anchors with cells cut are not available with unused_categories='null'.")
+        if anchor_set is not None and anchor_set.pattern_free:
+            held = [a for a in anchor_set.pattern_free if a in facets and models[facets.index(a)] == "global"]
+            if held:
+                warnings.warn(
+                    f"calibrate(model='mixed', anchors=): the anchor set frees the patterns of {held} (they should "
+                    f"anchor through their global effects only), but rater_models puts them on 'global', which "
+                    f"anchors their patterns too. Give them a representation with a pattern (e.g. 'matrix'), or "
+                    f"take rater_models from per_rater_model_selection(anchors=).",
+                    UserWarning,
+                    stacklevel=3,
+                )
         if anchors is not None:
             # anchors these data do not have are left out (a refit of a group); at least one must remain
             anchors = [a for a in anchors if a in facets]
@@ -5517,6 +5628,8 @@ class MFRM(Rasch):
             # the empty-category warning of RSM's CPAT threshold estimator on the pooled responses, once (the fits below run it quietly)
             self._shipped_widths(pd.Series(0.0, index=self.responses.columns),
                                  0.03 if threshold_constant is None else float(threshold_constant), estimation)
+        elif estimation != "cml":
+            self._warn_outer_unused(cc, estimation)
         over = dict(global_ridge=global_ridge, item_ridge=item_ridge, threshold_ridge=threshold_ridge,
                     interaction_ridge=interaction_ridge, stretch_ridge=stretch_ridge)
         self._clear_model_results("mixed")
@@ -5542,7 +5655,8 @@ class MFRM(Rasch):
         self._mixed_fit = True
         self._calibrate_args_by_model = {
             **getattr(self, "_calibrate_args_by_model", {}),
-            "mixed": dict(rater_models=rm.to_dict(), anchors=anchor_set if anchor_set is not None else anchors,
+            "mixed": dict(rater_models=self.rater_models.to_dict(),
+                          anchors=anchor_set if anchor_set is not None else anchors,
                           estimation=estimation, threshold_constant=threshold_constant,
                           unused_categories=unused_categories, **over),
         }
@@ -5681,13 +5795,15 @@ class MFRM(Rasch):
             rows.append({self.facet: facets[r], "Cell": cell, "Shift": float(v)})
         return pd.DataFrame(rows)
 
-    def _mixed_fit_core(self, ctx, models, anchor_idx, cuts=None):
+    def _mixed_fit_core(self, ctx, models, anchor_idx, cuts=None, frame="part"):
         """One 'mixed' fit: (design, fit, what _rcl_fits['mixed'] keeps). cuts: the anchors' cut cells in
-        MixedDesign's form."""
+        MixedDesign's form; frame: MixedDesign's frame rule."""
         from raschpy import _rcl
 
         I, K = self.no_of_items, int(self.max_score)
-        design = _rcl.MixedDesign(models, I, K, anchors=anchor_idx, weights=ctx["weights"], cuts=cuts)
+        # no anchors: the average facet element in every part (the unanchored frame)
+        design = _rcl.MixedDesign(models, I, K, anchors=anchor_idx, weights=ctx["weights"], cuts=cuts,
+                                  frame="average" if anchor_idx is None else frame)
         theta0 = design.theta_from(*ctx["start"])
         if ctx["estimation"] == "cml" and ctx.get("null") is not None:
             # unused_categories='null': Wilson and Masters' markers, each free threshold holding the run of unused
@@ -5798,9 +5914,13 @@ class MFRM(Rasch):
         free[[design.slices["tau"].start + w for w in split]] = False  # the widths next to an empty middle category are not fitted
         H, U = H[np.ix_(free, free)], U[:, free]
         out = dict(ll=_selection._ll(D0, t0, u0, b.ravel()), k=int(free.sum()),
-                   pen=_selection.penalty((H + H.T) / 2, U.T @ U))
+                   pen=_selection.penalty((H + H.T) / 2, U.T @ U))  # AIC penalty: uncorrected scores
         if matrices:
-            out.update(H=(H + H.T) / 2, J=U.T @ U, Jac=J[:, free])
+            Uk = U
+            if self._kc_on():  # the tests' variability: Kauermann-Carroll corrected scores
+                Uk = _rcl.kc_grid_scores(U, b, ctx["X3"], K, J[:, free], np.linalg.pinv((H + H.T) / 2), split,
+                                         None if ctx["estimation"] == "cpat-rcl" else ctx["empty"])
+            out.update(H=(H + H.T) / 2, J=Uk.T @ Uk, Jac=J[:, free])
         return out
 
     @staticmethod
@@ -5822,8 +5942,15 @@ class MFRM(Rasch):
         item_eff = u["lam"][:, None] + u["A"] + (u["c"] - 1.0)[:, None] * delta[None, :]
         thr_eff = u["T"] + (u["d"] - 1.0)[:, None] * tau[None, :]
         native = []
-        for r, m in enumerate(design.models):
-            if m == "global":
+        for r, m in enumerate(design.reported):
+            if m != design.models[r]:
+                # an anchor with cells cut (fitted on 'global' with free shifts), in the representation its cuts
+                # imply: its parts are the means of its effects s[r] (global effect plus shifts), which are additive
+                # in item and threshold unless a single cell is cut
+                row, col, mu = s[r].mean(axis=1), s[r].mean(axis=0), s[r].mean()
+                native.append([row] if m == "items" else [col] if m == "thresholds"
+                              else [row, col - mu] if m == "bivector" else [s[r].ravel()])
+            elif m == "global":
                 native.append([u["lam"][r : r + 1]])
             elif m == "items":
                 native.append([item_eff[r]])
@@ -5848,7 +5975,7 @@ class MFRM(Rasch):
         tau_n = np.where(free, Tg - mult * (f @ Tg) / msum, 0.0)
         S = np.einsum("hk,rik->rih", G, s) * f
         out = []
-        for r, (m, parts) in enumerate(zip(design.models, native)):
+        for r, (m, parts) in enumerate(zip(design.reported, native)):
             if m == "thresholds":
                 out.append([(G @ parts[0]) * f])
             elif m == "bivector":
@@ -5868,7 +5995,7 @@ class MFRM(Rasch):
         I, K = design.I, design.K
         items_idx, thr = self.responses.columns, list(range(1, K + 1))
         out = {}
-        for fe, m, v in zip(self.facet_names, design.models, native):
+        for fe, m, v in zip(self.facet_names, design.reported, native):
             if m == "global":
                 out[fe] = float(v[0][0])
             elif m == "items":
@@ -5896,32 +6023,41 @@ class MFRM(Rasch):
         fit = self._rcl_fits["mixed"]
         design, theta, bread = fit["design"], fit["theta"], fit["info"]
         R, I, K = design.R, design.I, design.K
+        kc = self._kc_on() and not posterior
         if fit.get("null") is not None:
             # in the identified coordinates phi (theta = V phi) of the marked grid
             marked, phi, Vb = fit["marked"], fit["phi"], fit["V"]
-            _, meat = _esf.cml_sandwich(fit["X"], marked.grid_jacobian(phi), marked.grid(phi).ravel(),
-                                        [K] * (R * I), hessian=fit["hessian"])
             Binv = np.linalg.pinv(bread, hermitian=True)
+            _, meat = _esf.cml_sandwich(fit["X"], marked.grid_jacobian(phi), marked.grid(phi).ravel(),
+                                        [K] * (R * I), hessian=fit["hessian"], small_sample=kc,
+                                        kc_scores=self._kc_scores, bread_inv=Binv)
             Vp = Binv if posterior else Binv @ meat @ Binv
             return Vb @ Vp @ Vb.T, Vb @ _rcl.null_directions(bread)
         J, b = design.grid_jacobian(theta), design.grid(theta)
-        if fit["estimation"] == "cml":
-            _, meat = _esf.cml_sandwich(fit["X"], J, b.ravel(), [K] * (R * I), hessian=fit["hessian"])
-        else:
-            X3 = self.responses.to_numpy(dtype=np.float64).reshape(R, -1, I)
-            cc = _rcl.category_counts(X3, K)
-            split = fit.get("split", [])
-            G = (
-                _rcl.person_grid_scores(b, X3, K, split) if fit["estimation"] == "cpat-rcl"
-                else _rcl.full_person_grid_scores(b, X3, K, split, _rcl.empty_categories(cc))
-            )
-            U = G.reshape(G.shape[0], -1) @ J
-            meat = U.T @ U
         # coordinates held fixed (widths set by the empty-category rule) have no sampling variance here
         free = np.ones(len(theta), bool)
         free[list(fit.get("fixed", []))] = False
         ix = np.ix_(free, free)
         Binv = np.linalg.pinv(bread[ix], hermitian=True)
+        if fit["estimation"] == "cml":
+            Bfull = np.zeros((len(theta), len(theta)))
+            Bfull[ix] = Binv
+            _, meat = _esf.cml_sandwich(fit["X"], J, b.ravel(), [K] * (R * I), hessian=fit["hessian"],
+                                        small_sample=kc, kc_scores=self._kc_scores, bread_inv=Bfull)
+        else:
+            X3 = self.responses.to_numpy(dtype=np.float64).reshape(R, -1, I)
+            cc = _rcl.category_counts(X3, K)
+            split = fit.get("split", [])
+            empty = None if fit["estimation"] == "cpat-rcl" else _rcl.empty_categories(cc)
+            G = (
+                _rcl.person_grid_scores(b, X3, K, split) if empty is None
+                else _rcl.full_person_grid_scores(b, X3, K, split, empty)
+            )
+            U = G.reshape(G.shape[0], -1) @ J
+            if kc:
+                U = U.copy()
+                U[:, free] = _rcl.kc_grid_scores(U[:, free], b, X3, K, J[:, free], Binv, split, empty)
+            meat = U.T @ U
         V = np.zeros((len(theta), len(theta)))
         V[ix] = Binv if posterior else Binv @ meat[ix] @ Binv
         null = np.zeros((len(theta), 0))
@@ -6022,7 +6158,7 @@ class MFRM(Rasch):
         self.se_covariance_mixed = V
         self.se_method = self.se_method_mixed = "hessian" if hessian else "sandwich"
         if interval is not None:
-            z = norm.ppf(0.5 + interval / 2)
+            z = self._se_quantile(interval)
             self.item_low_mixed, self.item_high_mixed = self.items_mixed - z * item_se, self.items_mixed + z * item_se
             self.rater_low_mixed = self.facet_effects_mixed - z * eff_se
             self.rater_high_mixed = self.facet_effects_mixed + z * eff_se
@@ -6085,7 +6221,7 @@ class MFRM(Rasch):
         listed = dict(cells=[], thresholds=[])
         o_eff = I + K
         o_nat = o_eff + R * I * K
-        for r, (m, parts) in enumerate(zip(design.models, q0["native"])):
+        for r, (m, parts) in enumerate(zip(design.reported, q0["native"])):
             n_r = sum(len(p) for p in parts)
             item_free = item_any[r] if m in _rcl._MIXED_ITEM_EFFECTS else np.zeros(I, bool)
             thr_free = thr_any[r] if m in _rcl._MIXED_THRESHOLD_EFFECTS else np.zeros(K, bool)
@@ -6133,7 +6269,7 @@ class MFRM(Rasch):
         S = q["effects"].copy()
         S[:, :, gone] = fill
         native = []
-        for m, parts in zip(design.models, q["native"]):
+        for m, parts in zip(design.reported, q["native"]):
             parts = [p.copy() for p in parts]
             if m == "thresholds":
                 parts[0][gone] = fill
@@ -6155,6 +6291,8 @@ class MFRM(Rasch):
         """
         R, I, K = design.R, design.I, design.K
         facets = list(self.facet_names)
+        # an anchor with cells cut is reported under the representation its cuts imply (design.reported)
+        rater_models = pd.Series(design.reported, index=facets, name="Representation")
         q = self._mixed_quantities(design, theta, null)
         if null is not None:
             # the markers: +/-inf shared thresholds, NaN threshold-level effects
@@ -6186,7 +6324,7 @@ class MFRM(Rasch):
         self.items_mixed = pd.Series(delta, index=items_idx)
         self.thresholds_mixed = pd.Series(tau, index=thr)
         self.items, self.thresholds = self.items_mixed, self.thresholds_mixed
-        self.rater_params_mixed = {fe: (m, params[fe]) for fe, m in zip(facets, design.models)}
+        self.rater_params_mixed = {fe: (m, params[fe]) for fe, m in zip(facets, design.reported)}
         self.anchor_cuts_mixed = self._anchor_cuts_table(design, theta)
         # each facet element's global effect: its mean effect over the item x threshold cells, whatever its
         # representation
@@ -6485,7 +6623,26 @@ class MFRM(Rasch):
             centrality/pseudo_halo/bistretch only -- see calibrate(). Ignored
             for every other model.
         """
+        from raschpy._anchors import AnchorSet
+
         model = self._MODEL_ALIASES.get(model, model)
+        if isinstance(anchors, AnchorSet):
+            # an anchor set from check_anchor_homogeneity: cut cells apply to 'mixed' fits only
+            if anchors.cuts and model != "mixed":
+                raise ValueError(
+                    f"calibrate_anchor({model!r}, ...): the anchor set has cut cells, which apply to "
+                    f"calibrate(model='mixed', anchors=) only; pass a list of anchors, or fit model='mixed'."
+                )
+            if anchors.pattern_free and model not in ("global", "mixed"):
+                warnings.warn(
+                    f"calibrate_anchor({model!r}, ...): {anchors.pattern_free} should anchor through their global "
+                    f"effects only (their patterns over items and thresholds differ from the other anchors'), but "
+                    f"{model!r} anchors their patterns too. calibrate(model='mixed', anchors=) with a representation "
+                    f"that has a pattern for them anchors on their global effects only.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            anchors = list(anchors.anchors)
         if model == "mixed" and getattr(self, "_mixed_fit", False):
             if set(anchors) == set(self.anchors_mixed or self.facet_names):
                 return  # already the fit's frame
@@ -6555,6 +6712,7 @@ class MFRM(Rasch):
         """Not available for MFRM (SLM, PCM and RSM only): raises NotImplementedError."""
         self._single_facet_only("global_stats_df")
 
+    @_se_correction_arg
     def check_anchor_homogeneity(
         self,
         model=None,
@@ -6562,13 +6720,15 @@ class MFRM(Rasch):
         rater_homogeneity_test=None,
         alpha=0.05,
         correction="bh",
-        split_alpha=True,
         min_effect=0.0,
         action="report",
-        max_share=0.5,
         min_anchors=2,
         estimation=None,
         threshold_constant=None,
+        delta=None,
+        delta_units="width",
+        report="final",
+        se_correction=None,
         **cochran_kw,
     ):
         """
@@ -6583,63 +6743,83 @@ class MFRM(Rasch):
         them. The check therefore treats agreement in global effect and agreement in pattern (over items and
         thresholds) as both part of what makes a coherent anchor set.
 
-        With estimation 'cp-full-rcl', 'cpat-rcl' or 'cml' the default (rater_homogeneity_test='screen') uses joint
-        fits of the anchors' responses only:
+        With estimation 'cp-full-rcl', 'cpat-rcl' or 'cml' the default (rater_homogeneity_test='screen') uses one
+        joint fit of the anchors' responses only, every anchor with its own location at every cell (item x
+        threshold; 'matrix'), and two steps:
 
-        1. Overall agreement: all anchors on 'global' against all on 'items' and against all on 'thresholds'
-           (composite likelihood ratio test with Kent's weights; the conditional likelihood ratio test for 'cml'),
-           and a Wald test that all anchors have the same global effect, with a Holm correction across the three.
-        2. Pattern screen: each anchor's representation ('global', 'items', 'thresholds', 'bivector', 'matrix')
-           chosen as per_rater_model_selection() chooses it (AIC with its significance gate), with the zero point at
-           the average of the other anchors (its global effect is free, so a difference in global effect does not affect
-           this); the gate p-values corrected across the anchors (correction). The flagged anchor with the smallest p is
-           resolved first and the rest screened again.
-        3. Cells: for the anchor being resolved, each cell of its representation (an item, a threshold, or an
-           item-threshold pair for 'matrix') is compared with the mean of the anchor's remaining cells (Wald test,
-           sandwich standard errors). The cell with the largest |z| is cut if p <= alpha and its shift is at least
-           min_effect, and the remaining cells are tested again, until they are equal. A cut cell is one where the
-           anchor stops being an anchor: the zero point there is the other anchors' average and the anchor gets one
-           free shift. If more than max_share of an item or threshold family's cells would be cut, the
-           suggestion is to drop the anchor.
-        4. Global effect screen, on the set adjusted by 2-3 (a cut anchor's global effect is defined by its uncut
-           cells, so a shift at one cell does not pass for a difference in global effect): each anchor's global effect
-           against the mean of the rest's (Wald test), corrected across the anchors; a flagged anchor (shift at least
-           min_effect) is suggested for dropping, worst first, and the rest screened again.
-        5. Refinement: each resolved anchor is re-estimated against the final set of anchors (pattern, then
-           global effect).
+        1. Global effect. An anchor's global effect is its mean location over the cells. Every subset of the
+           anchors is tried, largest first (up to 12 anchors; with more, the worst anchor is dropped in turn from the
+           full set and from each set without one anchor): a subset agrees when each member's global effect minus
+           the mean of the other members' is within delta (close-fit test, corrected across the members, and at
+           least min_effect to count). Dropping an anchor moves the others' mean, so a set can agree when one of its
+           subsets does not. The largest agreeing set is suggested, the anchors left out dropped. Sets that tie are
+           ranked by the shift of the zero point from the average of all the anchors given, then the range of their
+           global effects, then their number of responses (most first), and a warning lists them; check.ties holds
+           them and check.apply_suggested(choice=k) applies the k-th. The first two are reported as a near tie when
+           their zero-point shifts differ by less than one standard error.
+        2. Pattern, within the suggested set. per_rater_model_selection(scheme='one-pass') is run on the suggested
+           set's responses only, with the set as the anchors, so each member is tested by the selection's steps,
+           with the other members on 'global' as the reference, at the check's delta (in logits from the width of the
+           fit anchored on the set; delta_max twice delta, stretch_delta the selection's default) and with the
+           check's alpha and min_effect. The check and per_rater_model_selection(anchors=check.suggested) therefore
+           judge an anchor's pattern by the same tests. An anchor with cells cut stays on 'global' in the selection
+           (cuts need it), so it is tested instead by a close-fit test of the root mean square of its departures over
+           its cells not cut (corrected across such anchors, and at least min_effect, bias-corrected, to count). The
+           size reported for each member (check.pattern): its location at each cell minus the mean of the other
+           members' there, less the weighted mean of these over the cells (so a difference in global effect does not
+           count), summarised as the root mean square (RMS) over the cells, each cell weighted by the inverse
+           sampling variance of the anchor's location there (as per_rater_model_selection sizes a departure, so a
+           departure at a rarely used category counts for less). An anchor selected off 'global' is
+           suggested to anchor through its global effect only: it still helps fix the zero point, but its pattern
+           over the cells is estimated freely rather than held with the other anchors' (check.suggested.pattern_free).
+           In calibrate(model='mixed', anchors=check.suggested) give such an anchor a representation with a pattern in
+           rater_models; per_rater_model_selection(anchors=check.suggested) selects one. If every anchor in the set
+           fails, the zero point rests on their global effects alone and the instrument's pattern on their average
+           (a note says so).
 
-        With split_alpha=True (the default) the decisions to flag an anchor in 2, 4 and 5 are each made at
-        alpha / 2, so that the chance of changing an anchor when all agree stays near alpha. In simulations (5
-        anchors, 8 items, maximum score 3, 'cp-full-rcl'; 400 datasets with no disagreement and 100 per scenario at
-        each N), a good anchor was changed with no disagreement in 0.062, 0.033 and 0.040 of datasets at N = 200, 400
-        and 1,000, against 0.107, 0.048 and 0.060 with split_alpha=False. The cost is detection of small effects:
-        one anchor shifted by 0.3 logits at one threshold was found in 0.62 of datasets at N = 200 (0.72 with
-        split_alpha=False) and 0.93 at N = 400 (0.95); shifted by 0.3 at one item, 0.18 at N = 400 (0.24) and 0.83
-        at N = 1,000 (0.87); global effect shifts of 0.3 were found in every dataset either way, and of 0.15 in 0.66 at
-        N = 200 (0.71) and 0.97 at N = 400 (0.98). Which to prefer is a matter of which error matters more. (These
-        figures were simulated with chi-squared references for the Wald tests, before the references below.)
+        An overall test of agreement is also reported (all anchors on 'global' against all on 'items' and against all
+        on 'thresholds', composite likelihood ratio test with Kent's weights or the conditional likelihood ratio test
+        for 'cml', and a Wald test that all anchors have the same global effect, Holm across the three); it does
+        not drive the suggestions.
 
-        The Wald tests (the global effect test in 1, and the tests in 3, 4 and 5) take Hotelling-type references on
-        persons - 1 degrees of freedom: for a joint test of df contrasts, F = W (n - df + 1) / (df n) on (df,
-        n - df + 1), n = persons - 1; for a single contrast, t on n. The sandwich covariance is estimated from one
-        score per person, and with few persons a chi-squared reference rejects too often. In simulations (fully
-        crossed, 5 or 8 anchors, 8 items, maximum score 3; 200 datasets with no deviant anchor per design), a good
-        anchor was changed with no deviant anchor in 0.050-0.065, 0.045-0.085, 0.030-0.035 and 0.045-0.050 of
-        datasets at N = 25, 50, 100 and 400 under 'cp-full-rcl' (0.105-0.130 at N = 25 with chi-squared references),
-        and 0.040-0.060, 0.035-0.040, 0.020-0.030 and 0.040 under 'cml'. The 0.085 ('cp-full-rcl', 8 anchors,
-        N = 50) comes from the pattern screen's significance gate, which is not a Wald test. With few persons only
-        large deviations are found: at N = 25 (100 datasets per scenario), an anchor whose global effect was 0.3
-        logits off in 0.27-0.32 of datasets, one 1.0 off at one item in 0.04-0.09 and one 1.0 off at one threshold
-        in 0.25-0.35; at N = 100, 0.92-0.94, 0.71-0.82 and 0.84-0.89; at N = 400, 1.00, 0.96-1.00 and 0.91-0.94.
+        Tolerance. At large N every real difference between anchors is significant, however small, so a check on
+        significance alone changes good anchors. Each decision is therefore a close-fit test: its null hypothesis is
+        that the departure is at most delta (default 0.1), a size treated as negligible, in median category widths
+        (delta_units='width') or in logits; delta=0 gives plain tests. The widths are those of the joint fit of every
+        facet element's responses with the anchors on 'global' and the others on 'matrix' (per_rater_model_selection's
+        starting fit), anchored on the anchors given for the global effects and on the suggested set for the
+        pattern, so the check and per_rater_model_selection(anchors=check.suggested) measure departures in the same
+        unit. For a global effect the close-fit p is P(|T| >= |shift| / se), T noncentral t on persons - 1 degrees of
+        freedom; for a pattern, the tests are per_rater_model_selection's (see its delta). For an anchor with cells
+        cut, the weighted sum of its squared departures is referred to a weighted sum of noncentral chi-squares
+        (weights the eigenvalues of the weighted departures' sandwich covariance) with the departures' weighted RMS at
+        delta in their observed direction.
+
+        In simulations ('cp-full-rcl'; 5 anchors and one other rater, every rater marking every person, 8 items,
+        maximum score 3; thresholds 3 logits apart ("wide") or 0.6 apart ("narrow"); N = 300 and 800; 20 datasets
+        with no departure and 10 per departure scenario at each instrument and N), with no departure no anchor was
+        dropped and 4 of 400 anchors were given a free pattern (14 of 1199 anchors with no departure over all the
+        scenarios). An anchor 0.3 widths off in global effect was dropped in every dataset except 1 of 10 (narrow,
+        N = 300). An anchor was given a free pattern (of 10), wide N = 300 / 800, narrow N = 300 / 800, in: one item
+        shifted 0.5 widths, 10 / 10, 1 / 7; thresholds shifted by -0.25, 0 and +0.25 widths (RMS 0.20 widths),
+        10 / 10, 3 / 6; one middle-threshold cell shifted 1 width, 10 / 10, 3 / 3; one top-threshold cell shifted 1
+        width, 2 / 0, 0 / 5. For 99.5% of the anchors in the suggested sets, whether the check gave a free pattern
+        matched whether per_rater_model_selection(anchors=the 5 given) on every rater's responses selected the anchor
+        off 'global'. A narrow category carries little information per width, and few responses fall at an extreme
+        threshold, so departures there are hard to detect.
+
+        The Wald tests take Hotelling-type references on persons - 1 degrees of freedom: for a joint test of df
+        contrasts, F = W (n - df + 1) / (df n) on (df, n - df + 1), n = persons - 1; for a single contrast, t on n.
+        The sandwich covariance is estimated from one score per person, and with few persons a chi-squared reference
+        rejects too often.
 
         Nothing is changed: the result is a check object (also kept as anchor_check) whose report lists the
-        suggestions (anchor, action, reason, cell, shift in logits, SE, z, p and the pull on the zero point, shift /
-        number of anchors), and whose methods return a new check on an adjusted anchor set:
-        check.cut(anchor, cell), check.drop(anchor), check.restore(anchor, cell=None) and
-        check.apply_suggested(). Pass check.anchors (an anchor set, with any cut cells) to
-        calibrate(model='mixed', anchors=) or per_rater_model_selection(anchors=). Cells are named as the
-        package's tables print them: an item name, a threshold label ('Threshold 2', in any case) or an
-        (item, threshold) pair.
+        suggestions, and whose methods return a new check on an adjusted anchor set: check.cut(anchor, cell) (an
+        item, 'Threshold k' or an (item, threshold) pair, left out of that anchor's pattern test), check.drop(anchor),
+        check.restore(anchor), check.free_pattern(anchor), check.hold_pattern(anchor) and
+        check.apply_suggested(choice=0). Pass check.suggested (an anchor set) to calibrate(model='mixed', anchors=) or
+        per_rater_model_selection(anchors=). To anchor on the anchors' mean with no check, as before v2.0.0, pass a
+        list of anchors to calibrate_anchor() or calibrate(anchors=).
 
         With 'pair-cpat' (which has no joint fits), and with rater_homogeneity_test='cochran' or 'robust' for any
         estimation, the test is the earlier one on a single representation (model=): each anchor's mean effect,
@@ -6659,26 +6839,34 @@ class MFRM(Rasch):
         alpha : float, default 0.05
             Significance level.
         correction : {'bh', 'holm', None}, default 'bh'
-            Correction across the anchors in each screen ('screen'), or across the per-component tests
-            ('cochran').
-        split_alpha : bool, default True
-            'screen': flag anchors at alpha / 2 in the pattern and global effect screens (see above); False flags at
-            alpha in each, detecting more small differences and changing more anchors that agree.
+            Correction across the anchors in each step ('screen'), or across the per-component tests ('cochran').
         min_effect : float, default 0
-            Smallest shift (logits) for a cell to be cut or an anchor to be dropped for global effect; with 0, on
-            significance alone. Effects near min_effect are kept or missed depending on sampling error.
-        action : {'report', 'drop', 'cells'}, default 'report'
-            'report' returns the check. 'drop' and 'cells' return the check on the suggested set: 'drop' resolves
-            each flagged anchor by dropping it, 'cells' by cutting cells (or dropping, by max_share, or for
-            global effect).
-        max_share : float, default 0.5
-            Drop an anchor rather than cut more than this share of an item or threshold family's cells.
+            Smallest shift in global effect (logits) to act on; in the pattern step, passed to
+            per_rater_model_selection as its min_effect (for an anchor with cells cut: the smallest bias-corrected
+            weighted RMS departure, logits). With 0, the tests alone decide.
+        action : {'report', 'apply'}, default 'report'
+            'report' returns the check; 'apply' returns the check on the first suggested set.
         min_anchors : int, default 2
-            Never suggest dropping below this many anchors (a note says so instead).
+            The smallest set the global-effect search may suggest.
         estimation : str or None
-            The joint fits' estimation; default the model's (calibrate's) estimation.
+            The joint fit's estimation; default the model's (calibrate's) estimation.
         threshold_constant : float or None
             As for calibrate().
+        delta : float or None, default None
+            'screen': the tolerance of the global effect and pattern tests (see Tolerance). None: 0.1.
+        delta_units : {'width', 'logits'}, default 'width'
+            Units of delta. 'width': the median category width of the joint fit of every facet element (see
+            Tolerance); if the widths are unusable (maximum score 1,
+            disordered thresholds), the default delta becomes 0 with a warning, and a given one raises an error.
+        report : {'final', 'full'}, default 'final'
+            'screen': 'full' also sets check.profile (for delta = 0.1, 0.15, 0.2 and 0.3 widths: the suggested set,
+            its pattern-free anchors and the number of tied sets) and check.subsets (each subset tried by the
+            global-effect search: each member's shift, SE, p and whether flagged).
+        se_correction : 'kauermann-carroll' or None, default None
+            'kauermann-carroll' applies the Kauermann-Carroll small-sample correction (as in std_errors()) to the
+            check's tests, including the pattern step's per_rater_model_selection() and refits through check.cut().
+            It may help with very small sample sizes, where its time cost is also small; with many persons and
+            parameters it can take most of the run time.
 
         Returns
         -------
@@ -6707,9 +6895,9 @@ class MFRM(Rasch):
                     f"check_anchor_homogeneity(rater_homogeneity_test={test!r}) needs model=: the representation "
                     f"whose anchor effects are compared, e.g. model='bivector'."
                 )
-            screen_only = dict(split_alpha=(split_alpha, True), min_effect=(min_effect, 0.0),
-                               action=(action, "report"), max_share=(max_share, 0.5),
-                               min_anchors=(min_anchors, 2), estimation=(estimation, None))
+            screen_only = dict(min_effect=(min_effect, 0.0), action=(action, "report"),
+                               min_anchors=(min_anchors, 2), estimation=(estimation, None), delta=(delta, None),
+                               delta_units=(delta_units, "width"), report=(report, "final"))
             ignored = [k for k, (v, default) in screen_only.items() if v != default]
             if ignored:
                 warnings.warn(
@@ -6729,13 +6917,13 @@ class MFRM(Rasch):
             raise TypeError(f"check_anchor_homogeneity(rater_homogeneity_test='screen') received arguments for the "
                             f"'cochran' test: {sorted(cochran_kw)}. To run the Cochran test, pass "
                             f"rater_homogeneity_test='cochran'; the default check doesn't use these arguments.")
-        if action not in ("report", "drop", "cells"):
-            raise ValueError(f"action must be 'report', 'drop' or 'cells', got {action!r}.")
+        if action not in ("report", "apply"):
+            raise ValueError(f"action must be 'report' or 'apply', got {action!r}.")
         check = AnchorCheck(self, anchors, est, alpha=alpha, correction=correction, min_effect=min_effect,
-                            max_share=max_share, min_anchors=min_anchors, allow_cuts=action != "drop",
-                            threshold_constant=threshold_constant, split_alpha=split_alpha)
+                            min_anchors=min_anchors, threshold_constant=threshold_constant, delta=delta,
+                            delta_units=delta_units, report=report)
         self.anchor_check = check
-        if action != "report":
+        if action == "apply":
             check = check.apply_suggested()
         return check
 
@@ -7639,6 +7827,7 @@ class MFRM(Rasch):
         seed=None,
         se_method=None,
         no_data_se="posterior",
+        se_correction="kauermann-carroll",
     ):
         """
         Standard errors for item locations, thresholds, and facet_element
@@ -7650,7 +7839,10 @@ class MFRM(Rasch):
         penalised composite log-likelihood at the estimates and meat the
         sum over persons of their score outer products (persons as the
         independent units); the standard errors of every reported quantity
-        follow by the delta method, and intervals are estimate +/- z * SE.
+        follow by the delta method, and intervals are estimate +/- t * SE (t
+        the (1 + interval) / 2 quantile of the t-distribution on persons - 1
+        degrees of freedom). By default the sandwich has the Kauermann-Carroll
+        small-sample correction (se_correction).
         se_method='bootstrap': no_of_samples bootstrap resamples of persons,
         each recalibrated, as before v1.4.0.
         se_method=None (default): the sandwich for a 'cp-full-rcl', 'cpat-rcl' or 'cml' sub-model and
@@ -7697,8 +7889,37 @@ class MFRM(Rasch):
             effects in them may be missed. 'nan' (and always for 'pair-cpat'):
             NaN, so they are left out of confidence intervals and tests. A
             UserWarning names them.
+        se_correction : {'kauermann-carroll', None}, default 'kauermann-carroll'
+            Small-sample correction of the sandwich standard errors (CML
+            included). The sandwich builds the variance from each person's
+            contribution to the estimating equations at the estimates, and the
+            estimates are chosen to make those contributions sum to zero, so in
+            small samples it understates the variance, just as a standard
+            deviation computed with divisor N understates the population SD.
+            'kauermann-carroll' (Kauermann and Carroll, 2001) scales each
+            person's contribution up by their leverage, the pull they have on
+            the estimates; for a mean it is exactly the N - 1 divisor. A
+            person's leverage on a parameter is about their share of the
+            information about it, so the correction matters most for
+            parameters informed by few persons: few persons per facet element
+            (sparse rating designs) and representations with a parameter per
+            facet element x item x threshold cell ('matrix'). For stretch
+            models and 'mixed', each person's contribution to the information
+            is its Gauss-Newton part. None gives the uncorrected sandwich.
+            Hessian and bootstrap standard errors take no correction. The
+            setting also applies to the tests that use the sandwich
+            (per_rater_model_selection(), model_selection(), drf_test(),
+            dif_test(), global_fit() including the z of its observed against
+            expected tables, check_anchor_homogeneity(), divergence_test()):
+            they use the correction unless the last
+            std_errors() call gave se_correction=None. self.se_correction (and
+            self.se_correction_{model}) record the correction applied (None
+            for the Hessian and the bootstrap).
         """
         model = self._MODEL_ALIASES.get(model, model)
+        if se_correction not in ("kauermann-carroll", None):
+            raise ValueError(f"se_correction must be 'kauermann-carroll' or None, got {se_correction!r}.")
+        self._se_correction_opt = se_correction
         if no_data_se not in ("posterior", "nan"):
             raise ValueError(f"no_data_se must be 'posterior' or 'nan', got {no_data_se!r}.")
         self._no_data_se_opt = no_data_se
@@ -7706,6 +7927,7 @@ class MFRM(Rasch):
         if joint and self.estimation_mixed != "pair-cpat" and se_method != "bootstrap" and not store_bootstrap:
             if se_method == "hessian" and self.estimation_mixed != "cml":
                 raise ValueError("se_method='hessian' needs model='mixed' calibrated with estimation='cml'.")
+            self.se_correction = self.se_correction_mixed = None if se_method == "hessian" else se_correction
             self._mixed_std_errors(interval, hessian=se_method == "hessian")
             setattr(self, "_se_interval_mixed", interval)
             return
@@ -7757,12 +7979,16 @@ class MFRM(Rasch):
         if se_method == "sandwich":
             self.se_method = "hessian" if self._cml_se_hessian else "sandwich"
             setattr(self, f"se_method_{model}", self.se_method)
+            self.se_correction = None if self._cml_se_hessian else se_correction
+            setattr(self, f"se_correction_{model}", self.se_correction)
             setattr(self, f"_bootstrap_stored_{model}", False)
             setattr(self, f"_bootstrap_interval_{model}", interval)
             self._rcl_sandwich_std_errors(model, anchors, interval)
             return
         self.se_method = "bootstrap"
         setattr(self, f"se_method_{model}", "bootstrap")
+        self.se_correction = None
+        setattr(self, f"se_correction_{model}", None)
         if model == "mixed":
             self._sync_mixed(
                 anchors,
@@ -8065,7 +8291,7 @@ class MFRM(Rasch):
             T = _rcl.threshold_basis(K)
             post_w = np.sqrt(np.clip(np.diag(Vw), 0, None))
             post_t = np.sqrt(np.clip(np.diag(T @ Vw @ T.T), 0, None))
-        z = norm.ppf(0.5 + interval / 2) if interval else None
+        z = self._se_quantile(interval) if interval else None
         thr = np.asarray(self._thresholds_for(model, anchor=bool(prefix)), dtype=float)
         ts = getattr(self, f"{prefix}threshold_se_{model}", None)
         if ts is not None:
@@ -8184,7 +8410,7 @@ class MFRM(Rasch):
         facets, items, cols = list(self.facet_names), list(self.responses.columns), list(range(1, K + 1))
         Cs = self._rcl_posterior_cells(model) if opt == "posterior" else None
         kind = "ridge" if (getattr(self, "_rcl_fits", {}).get(model) or {}).get("kind") in ("cell", "cml-cell") else "rule"
-        z = norm.ppf(0.5 + interval / 2) if interval else None
+        z = self._se_quantile(interval) if interval else None
         L = np.eye(K) - np.full((K, K), 1 / K)
 
         def cell(r, i, h):
@@ -8312,10 +8538,18 @@ class MFRM(Rasch):
                         )
                 setattr(self, name, v)
 
+    def _kc_on(self):
+        """Whether the sandwich covariances (standard errors and the tests built on them) use the Kauermann-Carroll
+        small-sample correction: yes unless the last std_errors() call gave se_correction=None. model_selection(),
+        per_rater_model_selection() and check_anchor_homogeneity() set it for their call from their own
+        se_correction= (default None)."""
+        return getattr(self, "_se_correction_opt", "kauermann-carroll") is not None
+
     def _cml_covariance_theta(self, model, posterior=False):
         """Covariance of a CML sub-model's coordinates theta: the sandwich (bread the negative penalised
-        Hessian, meat the persons' score outer products), the inverse bread with se_method='hessian' or
-        posterior=True. Returns (V, free, null, J) with J the location grid's Jacobian (R*I*K, p)."""
+        Hessian, meat the persons' score outer products, with the Kauermann-Carroll correction where _kc_on()),
+        the inverse bread with se_method='hessian' or posterior=True. Returns (V, free, null, J) with J the
+        location grid's Jacobian (R*I*K, p)."""
         from raschpy import _esf, _rcl
 
         fit = self._rcl_fits[model]
@@ -8327,13 +8561,16 @@ class MFRM(Rasch):
             if H is None:
                 H = _esf.cond_loglik(Xv, list(b.reshape(R * I, K)), hessian=True)[2]
                 fit["hessian"] = H
-            bread, meat = _esf.cml_sandwich(Xv, J, b, Ks, hessian=H, penalty=Q)
+            bread = -(J.T @ H @ J) + Q
         else:
             sm = fit["sm"]
             J, b = sm.grid_jacobian(theta), sm.grid(theta).ravel()
-            _, meat = _esf.cml_sandwich(Xv, J, b, Ks, hessian=fit["hessian"])
+            H = fit["hessian"]
             bread = fit["info"]  # includes the bilinear term and the penalty
         Binv = np.linalg.pinv(bread, hermitian=True)
+        kc = self._kc_on() and not (posterior or getattr(self, "_cml_se_hessian", False))
+        _, meat = _esf.cml_sandwich(Xv, J, b, Ks, hessian=H, small_sample=kc, kc_scores=self._kc_scores,
+                                    bread_inv=Binv)
         if posterior or getattr(self, "_cml_se_hessian", False):
             V = Binv
         else:
@@ -8383,7 +8620,10 @@ class MFRM(Rasch):
             free = np.ones(len(theta), bool)
             if _rcl.null_directions(bread).shape[1]:
                 return None
-            IF = U @ np.linalg.pinv(bread, hermitian=True)
+            Binv = np.linalg.pinv(bread, hermitian=True)
+            if self._kc_on():
+                U = self._kc_scores(U, _esf.cml_person_breads(Xv, thr, J), Binv)
+            IF = U @ Binv
         elif fit["kind"] == "cell":
             cm, info = fit["cm"], fit["info"]
             try:
@@ -8398,7 +8638,11 @@ class MFRM(Rasch):
                 bgrid = cm.grid(theta)
                 G = (_rcl.person_grid_scores(bgrid, X, K, st["drop_widths"]) if st.get("full_empty") is None
                      else _rcl.full_person_grid_scores(bgrid, X, K, st["drop_widths"], st["full_empty"]))
-                IF = (G.reshape(G.shape[0], -1) @ J[:, free]) @ np.linalg.pinv(Bf)
+                Binv = np.linalg.pinv(Bf)
+                U = G.reshape(G.shape[0], -1) @ J[:, free]
+                if self._kc_on():
+                    U = _rcl.kc_grid_scores(U, bgrid, X, K, J[:, free], Binv, st["drop_widths"], st.get("full_empty"))
+                IF = U @ Binv
             finally:
                 _rcl.release_state(info)
         else:
@@ -8413,7 +8657,11 @@ class MFRM(Rasch):
             Bf = -sm.evaluate(theta)["H"][np.ix_(free, free)]
             if _rcl.null_directions(Bf).shape[1]:
                 return None
-            IF = (G.reshape(G.shape[0], -1) @ J) @ np.linalg.pinv(Bf)
+            Binv = np.linalg.pinv(Bf)
+            U = G.reshape(G.shape[0], -1) @ J
+            if self._kc_on():
+                U = _rcl.kc_grid_scores(U, bgrid, X, K, J, Binv, fit["split"], sm.full_empty)
+            IF = U @ Binv
         # from the coordinates to the effects: the grid's derivative less its item-location and threshold parts
         if fit["kind"] in ("cell", "cml-cell"):
             cm = fit["cm"]
@@ -8506,7 +8754,7 @@ class MFRM(Rasch):
             cm, theta = fit["cm"], fit["theta"]
             if fit["kind"] == "cell":
                 info = fit["info"]
-                V, free, null = _rcl.cell_sandwich(cm, theta, info, X, K)
+                V, free, null = _rcl.cell_sandwich(cm, theta, info, X, K, small_sample=self._kc_on())
                 J = info["_state"]["J"]
             Z = np.zeros((I + K + n_s, cm.p))
             Z[:I, cm.slices["delta"]] = cm._NI
@@ -8528,7 +8776,7 @@ class MFRM(Rasch):
             sm, theta = fit["sm"], fit["theta"]
             if fit["kind"] == "stretch":
                 V, free, null = _rcl.stretch_sandwich(
-                    sm, theta, X, K, fixed=fit["fixed"], drop_widths=fit["split"]
+                    sm, theta, X, K, fixed=fit["fixed"], drop_widths=fit["split"], small_sample=self._kc_on()
                 )
             null_fit = fit.get("null")
             if null_fit is not None:  # MarkedDesign: theta = V phi on the base design
@@ -8596,7 +8844,7 @@ class MFRM(Rasch):
             C[gone, :] = np.nan
             C[:, gone] = np.nan
         var = np.clip(np.diag(C), 0, None)
-        z = norm.ppf(0.5 + interval / 2) if interval else None
+        z = self._se_quantile(interval) if interval else None
         items_idx, cols_k = self.responses.columns, range(1, K + 1)
 
         # items
@@ -9222,6 +9470,37 @@ class MFRM(Rasch):
         self.std_errors(model="global", anchors=anchors, **kw)
 
     @_progress.with_progress
+    def _anchor_std_errors_joint_mixed(self, anchors, interval):
+        """anchor_std_errors(model='mixed') for a joint fit from calibrate(model='mixed'): the fit is already in its
+        anchors' frame, so its std_errors() results are the anchored ones, stored again under the anchor_ names.
+        Other anchors raise, as the frame is part of the fit."""
+        import re
+
+        frame = self.anchors_mixed or self.facet_names
+        if anchors is not None and set(anchors) != set(frame):
+            raise ValueError(
+                f"anchor_std_errors(model='mixed', anchors=...): the fit's frame is anchors={self.anchors_mixed}, "
+                f"and a 'mixed' fit's frame is part of the fit. Refit with calibrate(model='mixed', "
+                f"rater_models=..., anchors={list(anchors)})."
+            )
+        done = hasattr(self, "se_method_mixed")
+        stored = getattr(self, "_se_interval_mixed", getattr(self, "_bootstrap_interval_mixed", None))
+        if not done or (interval is not None and (interval or None) != stored):
+            kw = {"se_method": self.se_method_mixed} if done else {}
+            self.std_errors(model="mixed", interval=interval or None, **kw)
+        pat = re.compile(
+            r"^(item|threshold|cat_width|rater|global_effect)_(se|low|high)_mixed$|^rater_params_se_mixed$|"
+            r"^rater_se_mixed_\w+$|^se_covariance_mixed$"
+        )
+        has_interval = bool(getattr(self, "_se_interval_mixed", getattr(self, "_bootstrap_interval_mixed", None)))
+        for name in [n for n in vars(self) if pat.match(n)]:
+            bound = name.endswith(("_low_mixed", "_high_mixed"))
+            setattr(self, f"anchor_{name}", getattr(self, name) if has_interval or not bound else None)
+        if hasattr(self, "item_se_mixed"):
+            self.anchor_item_se = self.item_se_mixed
+            for b in ("low", "high"):
+                setattr(self, f"anchor_item_{b}", getattr(self, f"anchor_item_{b}_mixed", None))
+
     def anchor_std_errors(
         self,
         model="global",
@@ -9237,12 +9516,19 @@ class MFRM(Rasch):
         seed=None,
     ):
         """
-        Compute bootstrap standard errors for anchor-adjusted parameters.
+        Compute standard errors for anchor-adjusted parameters, by the
+        method std_errors() used for this model.
 
-        If std_errors() was previously called with store_bootstrap=True for
-        this model, reuses the stored bootstrap samples — applying
-        calibrate_anchor() to each — without resampling. Otherwise reruns
-        the full bootstrap.
+        Sandwich (or, for estimation='cml', Hessian) standard errors are
+        computed in the anchors' frame directly, with no resampling. With
+        bootstrap standard errors, if std_errors() was previously called
+        with store_bootstrap=True for this model, the stored bootstrap
+        samples are reused, applying calibrate_anchor() to each, without
+        resampling; otherwise the full bootstrap is rerun. A fit from
+        calibrate(model='mixed') is already in its anchors' frame: its
+        std_errors(model='mixed') results are stored under the anchor_
+        names (std_errors() is run first if needed), and other anchors
+        raise a ValueError.
 
         interval is inherited from std_errors() if not explicitly provided,
         so anchor CIs are consistent with the unanchored CIs.
@@ -9255,7 +9541,8 @@ class MFRM(Rasch):
         Parameters
         ----------
         model : str
-            One of 'global', 'items', 'thresholds', 'matrix'.
+            One of 'global', 'items', 'thresholds', 'matrix', 'bivector',
+            'centrality', 'pseudo_halo', 'bistretch', 'mixed'.
         anchors : list or None
             Facet elements (e.g. raters) whose mean facet_effect is anchored to zero. If None,
             falls back to anchor_rater_names_{model} set by calibrate_anchor().
@@ -9274,6 +9561,9 @@ class MFRM(Rasch):
         """
         # Inherit interval from std_errors() if not explicitly provided
         model = self._MODEL_ALIASES.get(model, model)
+        if model == "mixed" and getattr(self, "_mixed_fit", False):
+            self._anchor_std_errors_joint_mixed(anchors, interval)
+            return
         if interval is None:
             interval = getattr(self, f"_bootstrap_interval_{model}", None)
         if getattr(self, f"se_method_{model}", None) in ("sandwich", "hessian"):
@@ -10902,48 +11192,30 @@ class MFRM(Rasch):
         out["mom"] = mom
         return out
 
-    @staticmethod
-    def _restscore_frame(gamma, se, gexp, labels, bh):
-        """Item-restscore table: gamma observed and expected, SE, two-sided normal p and BH-adjusted p."""
-        with np.errstate(invalid="ignore", divide="ignore"):
-            z = (gamma - gexp) / se
-        p = np.where(np.isfinite(z), 2 * norm.sf(np.abs(z)), np.nan)
-        tab = pd.DataFrame(
-            {"Observed gamma": gamma, "Expected gamma": gexp, "SE": se, "p": p},
-            index=labels,
-        )
-        tab["p (BH)"] = bh(tab["p"].fillna(1.0)).where(tab["p"].notna())
-        return tab
-
     def _mfrm_conditional_extras(
-        self, model, st, Xv, thr, prep, persons, samples, seed
+        self, model, st, Xv, thr, prep, persons, samples, seed, restscore_p_method="studentised"
     ):
-        """fit_statistics(conditional=True): item and facet element restscore tables, person p-values."""
+        """fit_statistics(conditional=True): item and facet element restscore tables (each gamma tested against
+        its conditional Monte Carlo distribution, from the same draws at the null fit of _conditional_null; see
+        _restscore_table), person p-values. Returns _conditional_null's (thresholds, fit used)."""
         from raschpy import _esf
 
         items, facets = list(self.item_names), list(self.facet_names)
-        setattr(
-            self,
-            f"item_restscore_table_{model}",
-            self._restscore_frame(
-                st["item_gamma"],
-                st["item_gamma_se"],
-                st["item_gamma_exp"],
-                items,
-                self._bh_correction,
-            ),
+        R, I = len(facets), len(items)
+        null = self._conditional_null(model, thr)
+        col = np.arange(R * I)  # virtual items, facet element-major
+        sims_i, sims_r = _esf.restscore_monte_carlo(
+            Xv, null[0], [len(b) for b in thr], [col % I, col // I], int(samples), self._restscore_rng(seed)
         )
-        setattr(
-            self,
-            f"rater_restscore_table_{model}",
-            self._restscore_frame(
-                st["rater_gamma"],
-                st["rater_gamma_se"],
-                st["rater_gamma_exp"],
-                facets,
-                self._bh_correction,
-            ),
-        )
+        for who, labels, sims in (("item", items, sims_i), ("rater", facets, sims_r)):
+            setattr(
+                self,
+                f"{who}_restscore_table_{model}",
+                self._restscore_table(
+                    st[f"{who}_gamma"], st[f"{who}_gamma_exp"], st[f"{who}_gamma_se"], sims, labels,
+                    restscore_p_method,
+                ),
+            )
         pv = _esf.person_pattern_pvalues(
             Xv, thr, samples=samples, rng=seed, prepared=prep
         )
@@ -10952,8 +11224,9 @@ class MFRM(Rasch):
             f"person_conditional_p_{model}",
             pd.Series(pv, index=persons, name="Conditional p"),
         )
+        return null
 
-    def _mfrm_conditional_bootstrap(self, model, obs, Xv, thr, prep, persons, B, seed):
+    def _mfrm_conditional_bootstrap(self, model, obs, Xv, thr, prep, persons, B, seed, null=None):
         """
         Parametric bootstrap for MFRM conditional fit: B datasets simulated from the 'cp-full-rcl' fit
         (_conditional_null) given each person's total over all their ratings (virtual items), each recalibrated with the object's settings
@@ -10961,7 +11234,8 @@ class MFRM(Rasch):
         _mfrm_conditional_stats recomputed. Studentised marginal and Westfall-Young p-values (two-sided for
         fit and restscore, upper one-sided for Q3), 95% highest-density bands for fit, bootstrap mean and
         95th percentile for Q3, and the bootstrap mean, 95th percentile and p-value of the first residual
-        contrast. Datasets that cannot be recalibrated are skipped and counted.
+        contrast. Datasets that cannot be recalibrated are skipped and counted. null: (thresholds, fit used)
+        from _conditional_null if already computed.
         """
         from raschpy import _esf
 
@@ -10979,7 +11253,7 @@ class MFRM(Rasch):
             "q3",
             "eig1",
         )
-        sim_thr, null_fit = self._conditional_null(model, thr)
+        sim_thr, null_fit = self._conditional_null(model, thr) if null is None else null
         sims, skipped = {k: [] for k in keys}, 0
         for _ in _progress.track(range(B), "Conditional fit bootstrap", unit="samples"):
             Yv = _esf.sample_given_totals(Xv, sim_thr, rng)
@@ -11097,7 +11371,8 @@ class MFRM(Rasch):
 
     def _conditional_null(self, model, thr):
         """
-        The virtual items' thresholds the conditional fit bootstrap simulates from: model fitted with
+        The virtual items' thresholds the restscore draws and the conditional fit bootstrap simulate from: model
+        fitted with
         estimation='cp-full-rcl' and its defaults (_null_fit; 'mixed': 'matrix' with the object's per-facet
         element models), the most accurate estimate of the null distribution (the statistics and refits are
         still the object's), or thr, the object's fit, if it is a 'cp-full-rcl' or 'cml' fit. If that fit
@@ -12087,6 +12362,7 @@ class MFRM(Rasch):
         conditional=False,
         conditional_samples=1000,
         bootstrap_samples=None,
+        restscore_p_method="studentised",
     ):
         """
         Compute all item, threshold, facet_element, person, and test-level fit statistics.
@@ -12144,9 +12420,10 @@ class MFRM(Rasch):
             out. Threshold fit, which is defined through the person locations,
             is unchanged. Works with any estimation method. Also sets
             item_restscore_table_{model} and rater_restscore_table_{model}
-            (Kreiner's item-restscore gamma, observed against expected under
-            the model, on tables pooled over facet elements and over items
-            respectively) and person_conditional_p_{model} (each person's
+            (Kreiner's item-restscore gamma on tables pooled over facet
+            elements and over items respectively, tested against its
+            conditional Monte Carlo distribution; columns as
+            SLM.item_restscore_table) and person_conditional_p_{model} (each person's
             probability, given their total, of a rating pattern no more
             likely than theirs). Q3* is set by item_res_corr_analysis
             (item_q3_star_{model}). A UserWarning names any score category that
@@ -12159,7 +12436,18 @@ class MFRM(Rasch):
             warnings already named it).
         conditional_samples : int, default 1000
             conditional=True only: Monte Carlo samples for
-            person_conditional_p_{model}.
+            person_conditional_p_{model} and for the item and facet element
+            restscore tests.
+        restscore_p_method : {'studentised', 'monte-carlo'}, default 'studentised'
+            conditional=True only: the item and facet element restscore tests
+            refer each observed gamma to its distribution in
+            conditional_samples datasets drawn from the model given each
+            person's total over all the ratings they received (exact and free
+            of the person locations, at the fitted grid; no refit).
+            'studentised': z = (observed - mean of the draws) / their SD,
+            normal p-value; 'monte-carlo': the share of draws at least as far
+            from their mean, (1 + count) / (1 + draws). See SLM.fit_statistics
+            for the null simulations (SLM, PCM, RSM).
         bootstrap_samples : int or None, default None
             conditional=True only: if set (at least 400 recommended),
             parametric bootstrap reference distributions (Johansson): this many
@@ -12307,12 +12595,16 @@ class MFRM(Rasch):
         ):
             setattr(self, f"{name}_{model}", None)
         if conditional:
-            self._mfrm_conditional_extras(
-                model, cstats, Xv, thr, prep, persons, conditional_samples, seed
+            if restscore_p_method not in ("studentised", "monte-carlo"):
+                raise ValueError(
+                    f"restscore_p_method must be 'studentised' or 'monte-carlo', got {restscore_p_method!r}."
+                )
+            null = self._mfrm_conditional_extras(
+                model, cstats, Xv, thr, prep, persons, conditional_samples, seed, restscore_p_method
             )
             if bootstrap_samples:
                 self._mfrm_conditional_bootstrap(
-                    model, cstats, Xv, thr, prep, persons, int(bootstrap_samples), seed
+                    model, cstats, Xv, thr, prep, persons, int(bootstrap_samples), seed, null=null
                 )
         elif bootstrap_samples:
             raise ValueError("bootstrap_samples= needs conditional=True.")
@@ -12655,15 +12947,38 @@ class MFRM(Rasch):
         mc_exceedances=None,
     ):
         """
-        Andersen's test of parameter invariance across groups of persons, for a sub-model calibrated with
-        calibrate(estimation='cp-full-rcl') (the default).
+        Andersen's test of parameter invariance across groups of persons. The test needs estimates from
+        calibrate(estimation='cp-full-rcl') (the default), 'cpat-rcl' or 'cml'; 'pair-cpat' estimates
+        do not maximise a likelihood, and raise a ValueError.
 
         Under the model, the item, threshold and facet element (e.g. rater) parameters are the same in any
-        group of persons. The persons are split into groups, the groups and their pooled persons are each
-        calibrated with the sub-model's last calibrate() settings, and the test is on the pairwise
-        conditional (composite) likelihood those estimates maximise: the composite LR is 2 (sum of the
-        groups' composite log-likelihoods at their fits - at the pooled fit), unpenalised. Persons
-        appear in many pairs of ratings, so its null distribution is not chi-square.
+        group of persons. The persons are split into groups, and the groups and their pooled persons are
+        each calibrated with the last calibrate() settings for the representation given by model.
+
+        estimation='cml': the test is Andersen's conditional likelihood ratio on the facet element x item
+        virtual items, LR = 2 (sum of the groups' conditional log-likelihoods at their fits - at the pooled
+        fit), unpenalised, with df = the groups' identified parameters minus the pooled fit's.
+        p_method=None gives 'chi2'. With the default ridges the fits are penalised, so they are not at the
+        conditional likelihood's maxima; in the null simulations below the chi-square p-value held its level
+        all the same, and 'monte-carlo' (the LR against datasets simulated from the pooled fit given each
+        person's total over all their ratings, every fit repeated) did no better and took about 20 times as
+        long.
+
+        In null simulations with 'cml' (all eight representations, each fitted to data generated from it;
+        6 items, maximum score 3; 4 and 8 facet elements; every person rated by every facet element, or by 2
+        of them; 200 and 500 persons; 20 datasets per design), with the default ridges the chi-square
+        p-value rejected 0.052 at alpha = 0.05 over the score, score-group, random and exogenous splits
+        (5,120 tests; 0.034-0.064 by representation), and the Monte Carlo test 0.060 over the score and
+        exogenous splits (2,560 tests; 0.038-0.088 by representation). With every ridge set to 0 the
+        chi-square p-value rejected 0.048-0.070 by representation except 'matrix', which rejected 0.152:
+        0.538 with 8 facet elements, each person rated by 2 of them and 200 persons, and 0.062-0.138 in the
+        other designs. In the same designs, with 'cpat-rcl' the Monte Carlo test rejected 0.047
+        (0.034-0.075 by representation) and the chi-square p-value 0.049 (0.017-0.064).
+
+        estimation='cp-full-rcl' or 'cpat-rcl': the test is on the pairwise conditional (composite)
+        likelihood: the composite LR is 2 (sum of the groups' composite log-likelihoods at their fits - at
+        the pooled fit), unpenalised, on the full set of response patterns ('cp-full-rcl') or CPAT's
+        ('cpat-rcl'). Persons appear in many pairs of ratings, so its null distribution is not chi-square.
         p_method='monte-carlo' (the default) refers the adjusted composite LR (Pace, Salvan and Sartori,
         2011: the LR multiplied by the ratio of the sandwich Wald statistic of the group differences to the
         Wald statistic from the likelihood's curvature) to datasets simulated from the pooled fit
@@ -12672,39 +12987,45 @@ class MFRM(Rasch):
         alpha. 'chi2' refers the composite LR to a weighted sum of chi-square(1) variables (Kent, 1982),
         with that sum's exact tail probability, with a UserWarning: it is not dependable for MFRM.
 
-        In null simulations (all eight sub-models, each fitted to data generated from it; 6 items,
-        maximum score 3; 4 and 8 facet elements; every person rated by every facet element, or by 2 of
-        them; 200 and 500 persons; score, score-group, random and exogenous splits; 15,360 tests) the
-        Monte Carlo test rejected 0.039-0.056 at alpha = 0.05 by sub-model, and 0.042-0.061 in designs
+        In null simulations with 'cp-full-rcl' (all eight representations, each fitted to data generated
+        from it; 6 items, maximum score 3; 4 and 8 facet elements; every person rated by every facet
+        element, or by 2 of them; 200 and 500 persons; score, score-group, random and exogenous splits;
+        15,360 tests) the Monte Carlo test rejected 0.039-0.056 at alpha = 0.05 by representation, and 0.042-0.061 in designs
         with 10 items, 12 facet elements, maximum score 5 with sparse top categories, or three groups.
-        The chi-square p-value (30 datasets per design, 7,680 tests) rejected 0.028-0.061 by sub-model,
-        and 0.000-0.108 by sub-model and design. With 0.5 logits of DIF on
+        The chi-square p-value (30 datasets per design, 7,680 tests) rejected 0.028-0.061 by representation,
+        and 0.000-0.108 by representation and design. With 0.5 logits of DIF on
         two items in one of two exogenous groups, the Monte Carlo test rejected 0.30-0.75 with 200 persons
         ('matrix' lowest, 'global' highest) and 0.78-0.98 with 500. With sparse categories (maximum score
         5, persons 1.5 logits below the items) 'matrix' had little power (0.00-0.28).
 
-        Groups whose fits have different parameters (a facet element or item not rated in a group, or a
-        score category unused in a group but not in the pooled persons) cannot be compared, and raise a
-        ValueError; a Monte Carlo sample whose fits differ is skipped and counted. In the simulations above
-        'chi2' took under a second, and the Monte Carlo test a median of 1.3-5.2 s by sub-model.
+        Groups whose fits have different parameters (a facet element or item not rated in a group, or, with
+        'cp-full-rcl' and 'cpat-rcl', a score category unused in a group but not in the pooled persons)
+        cannot be compared, and raise a ValueError; a Monte Carlo sample whose fits differ is skipped and
+        counted. ('cml' keeps a category unused in a group, with the width penalty next to it.) In the
+        'cp-full-rcl' simulations above 'chi2' took under a second, and the Monte Carlo test a median of
+        1.3-5.2 s by representation.
 
-        For sub-models 'global', 'items', 'thresholds', 'bivector' and 'matrix', it also sets the
+        For representations 'global', 'items', 'thresholds', 'bivector' and 'matrix' (with 'cml', not with
+        unused_categories='null'), global_fit also sets the
         observed and expected scores of each group under the pooled fit: global_fit_obsexp (per item and
         group, the person's ratings of the item summed over the facet elements), global_fit_obsexp_facets
         (per facet element and group, its ratings summed over the items) and global_fit_obsexp_cells (per
         facet element, item and group), each with the persons, the observed and expected mean score
         (expected conditional on each person's total over all their ratings) and z, the standardised
         difference, its variance allowing for the estimation of the pooled fit's parameters. In null
-        simulations (those five sub-models, the designs above, 1,600 datasets) z's SD was 0.98-1.02 and
-        |z| > 1.96 0.046-0.054 by sub-model and table. For 'centrality', 'pseudo_halo' and 'bistretch'
-        they are None.
+        simulations with 'cp-full-rcl' (those five representations, the designs above, 1,600 datasets) z's
+        SD was 0.98-1.02 and |z| > 1.96 0.046-0.054 by representation and table. With 'cml' and the default ridges
+        (those five representations; 4 and 8 facet elements, every person rated by every facet element; 300
+        persons; random and score splits; 400 datasets) z's SD was 0.90-1.04 and |z| > 1.96 0.021-0.060 by
+        representation, split and table. For 'centrality', 'pseudo_halo',
+        'bistretch' and 'mixed' the three tables are None.
 
         Parameters
         ----------
         method : {'andersen'}, default 'andersen'
             The only test offered for MFRM.
         model : str, default 'global'
-            The sub-model, calibrated with estimation='cp-full-rcl'.
+            The representation tested: one of the eight, or 'mixed'.
         split : str or None, default None
             How persons are split: 'score' (the default; at the median of each person's mean rating, so
             that the groups are of equal size, persons with the same score possibly in different groups),
@@ -12720,7 +13041,7 @@ class MFRM(Rasch):
             split='score': the share of persons in each of the low and high groups (at most 0.5; with less,
             the middle persons are left out).
         p_method : {'monte-carlo', 'chi2'} or None, default None
-            None gives 'monte-carlo'.
+            None gives 'chi2' with 'cml' and 'monte-carlo' with 'cp-full-rcl' and 'cpat-rcl'.
         no_of_samples : int, default 500
             The most Monte Carlo samples.
         mc_exceedances : int or None, default None
@@ -12730,10 +13051,13 @@ class MFRM(Rasch):
         Attributes set
         --------------
         global_fit_summary : pandas.Series
-            Method, sub-model, split, the statistic the p-value refers to (the adjusted composite LR with
-            'monte-carlo', the composite LR with 'chi2'), df, both statistics, the Satterthwaite scale and
-            df, the composite log-likelihoods, p_method, p-value, the chi-square p-value, the Monte Carlo
-            samples used and skipped and whether they stopped early, the decision and the group sizes.
+            Method, estimation, representation, split, the statistic the p-value refers to, df, p_method,
+            p-value, the chi-square p-value, the Monte Carlo samples used and skipped and whether they
+            stopped early, the decision and the group sizes. With 'cml' the statistic is the LR, and the
+            summary also holds the conditional log-likelihoods and whether the fits were penalised. With
+            'cp-full-rcl' or 'cpat-rcl' the statistic is the adjusted composite LR with 'monte-carlo' and the
+            composite LR with 'chi2', and the summary also holds both statistics, the Satterthwaite scale and
+            df, and the composite log-likelihoods.
         global_fit_obsexp, global_fit_obsexp_facets, global_fit_obsexp_cells : pandas.DataFrame or None
             See above.
         global_fit_groups : dict
@@ -12753,17 +13077,17 @@ class MFRM(Rasch):
         fit = getattr(self, "_rcl_fits", {}).get(model)
         if args is None:
             raise ValueError(f"Calibrate model={model!r} first: calibrate(model={model!r}).")
-        if args.get("estimation") != "cp-full-rcl" or fit is None or fit["kind"] not in ("cell", "stretch", "mixed"):
+        est = args.get("estimation")
+        conditional = est == "cml"
+        kinds = ("cml-cell", "cml-stretch", "mixed") if conditional else ("cell", "stretch", "mixed")
+        if est not in ("cp-full-rcl", "cpat-rcl", "cml") or fit is None or fit["kind"] not in kinds:
             raise ValueError(
-                "global_fit(method='andersen') needs estimates from calibrate(estimation='cp-full-rcl') "
-                f"(the default); model={model!r} was calibrated with estimation={args.get('estimation')!r}."
+                "global_fit(method='andersen') needs estimates from calibrate(estimation='cp-full-rcl') (the "
+                f"default), 'cpat-rcl' or 'cml'; model={model!r} was calibrated with estimation={est!r}, whose "
+                "estimates do not maximise a likelihood to compare."
             )
-        if p_method is None:
-            p_method = "monte-carlo"
-        if p_method not in ("monte-carlo", "chi2"):
+        if p_method not in (None, "monte-carlo", "chi2"):
             raise ValueError(f"p_method must be 'monte-carlo' or 'chi2', got {p_method!r}.")
-        if p_method == "monte-carlo" and mc_exceedances is None:
-            mc_exceedances = 10
         if mc_exceedances is not None and int(mc_exceedances) < 1:
             raise ValueError(f"mc_exceedances must be a positive integer or None, got {mc_exceedances!r}.")
         if covariate is not None:
@@ -12782,18 +13106,23 @@ class MFRM(Rasch):
             raise ValueError(f"split_prop must be in (0, 0.5], got {split_prop!r}.")
         groups = self._andersen_person_groups(split, covariate, seed, split_prop)
         names = list(groups)
-        res, pooled, fitted, p0 = self._andersen_composite(self.responses, groups, names, model, observed=True)
+        test = self._andersen_conditional if conditional else self._andersen_composite
+        key = "lr" if conditional else "adjusted"
+        res, pooled, fitted, thr = test(self.responses, groups, names, model, observed=True)
+        if p_method is None:
+            p_method = "chi2" if conditional else "monte-carlo"
+        if p_method == "monte-carlo" and mc_exceedances is None:
+            mc_exceedances = 10
         p, used, skipped, stopped = res["p"], None, None, None
         if p_method == "monte-carlo":
             from raschpy import _esf
 
             rng = np.random.default_rng(seed)
-            R, I, K = pooled.no_of_facet_elements, pooled.no_of_items, pooled.max_score
+            R, I = pooled.no_of_facet_elements, pooled.no_of_items
             X3 = pooled.responses.to_numpy(dtype=np.float64).reshape(R, -1, I)
             N = X3.shape[1]
             Xw = X3.transpose(1, 0, 2).reshape(N, R * I)
-            thr = list(np.asarray(p0["b"]).reshape(R * I, K))
-            T = res["adjusted"]
+            T = res[key]
             exceed, used, skipped, stopped = 0, 0, 0, False
             for _ in _progress.track(range(no_of_samples), "Andersen LR Monte Carlo p-value", unit="samples",
                                      alternative="mc_exceedances= stops early once the p-value is clearly "
@@ -12803,14 +13132,14 @@ class MFRM(Rasch):
                     Z.reshape(R * N, I), index=pooled.responses.index, columns=pooled.responses.columns
                 )
                 try:
-                    ts = self._andersen_composite(sim, groups, names, model)
+                    ts = test(sim, groups, names, model)
                 except (ValueError, np.linalg.LinAlgError):
                     skipped += 1
                     continue
                 if ts is None:
                     skipped += 1  # the fits' parameters differ: not comparable
                     continue
-                exceed += ts[0]["adjusted"] >= T - 1e-9 * max(1.0, abs(T))
+                exceed += ts[0][key] >= T - 1e-9 * max(1.0, abs(T))
                 used += 1
                 if exceed >= mc_exceedances:
                     stopped = True  # Besag-Clifford sequential stopping
@@ -12821,28 +13150,44 @@ class MFRM(Rasch):
                     "group; use p_method='chi2'."
                 )
             p = exceed / used if stopped else (1 + exceed) / (1 + used)
+        pooled_fit = pooled._rcl_fits[model]
         tables = (
-            pooled._obsexp_tables(groups, names, model=model) if fit["kind"] == "cell" else dict.fromkeys(
-                ("item", "facet", "cell"))
+            pooled._obsexp_tables(groups, names, model=model)
+            if pooled_fit["kind"] in ("cell", "cml-cell") and "null" not in pooled_fit
+            else dict.fromkeys(("item", "facet", "cell"))
         )
         self.global_fit_obsexp = tables["item"]
         self.global_fit_obsexp_facets = tables["facet"]
         self.global_fit_obsexp_cells = tables["cell"]
         self.global_fit_groups = fitted
-        statistic = res["adjusted"] if p_method == "monte-carlo" else res["lr"]
-        summary = {"method": "andersen", "estimation": "cp-full-rcl", "model": model, "split": split,
+        statistic = res["adjusted"] if p_method == "monte-carlo" and not conditional else res["lr"]
+        summary = {"method": "andersen", "estimation": est, "model": model, "split": split,
                    "statistic": statistic, "df": res["df"]}
         if split == "score":
             summary["split_prop"] = split_prop
         if split == "exogenous":
             summary["covariate"] = covariate
+        if conditional:
+            summary.update(
+                {
+                    "log-likelihoods": {**dict(zip(names, res["ll"])), "pooled": float(sum(res["ll_pooled"]))},
+                    "penalised": res["penalised"],
+                }
+            )
+        else:
+            summary.update(
+                {
+                    "composite LR": res["lr"],
+                    "adjusted composite LR": res["adjusted"],
+                    "Satterthwaite scale": res["scale"],
+                    "Satterthwaite df": res["df_satterthwaite"],
+                    "composite log-likelihoods": {
+                        **dict(zip(names, res["cl"])), "pooled": float(sum(res["cl_pooled"]))
+                    },
+                }
+            )
         summary.update(
             {
-                "composite LR": res["lr"],
-                "adjusted composite LR": res["adjusted"],
-                "Satterthwaite scale": res["scale"],
-                "Satterthwaite df": res["df_satterthwaite"],
-                "composite log-likelihoods": {**dict(zip(names, res["cl"])), "pooled": float(sum(res["cl_pooled"]))},
                 "p_method": p_method,
                 "p-value": p,
                 "p-value (chi-square)": res["p"],
@@ -12861,11 +13206,18 @@ class MFRM(Rasch):
         if not hasattr(self, "global_fit_results"):
             self.global_fit_results = {}
         self.global_fit_results[("andersen", "; ".join(details))] = self.global_fit_summary.copy()
-        if p_method == "chi2":
+        if p_method == "chi2" and not conditional:
             warnings.warn(
-                "The chi-square p-value of Andersen's test is not dependable for MFRM (in null simulations "
-                "it rejected 0.6-11% at alpha = 0.05, by sub-model and design); p_method='monte-carlo' (the "
-                "default) held its level.",
+                "The chi-square p-value of Andersen's test is not dependable for MFRM with "
+                f"estimation={est!r} (in null simulations with 'cp-full-rcl' it rejected 0.6-11% at "
+                "alpha = 0.05, by representation and design); p_method='monte-carlo' (the default) held its level.",
+                UserWarning,
+                stacklevel=3,
+            )
+        if conditional and res["not_converged"]:
+            warnings.warn(
+                f"The CML fit did not converge for {res['not_converged']}; the likelihood ratio may be "
+                f"unreliable.",
                 UserWarning,
                 stacklevel=3,
             )
@@ -12913,6 +13265,7 @@ class MFRM(Rasch):
                 facet=self.facet if self.facet_label != "facet element" else None,
                 facet_plural=self.facets if self.facet_label != "facet element" else None,
             )
+            m._se_correction_opt = getattr(self, "_se_correction_opt", "kauermann-carroll")
             m.calibrate(model=model, **self._calibrate_args_by_model[model])
         return m
 
@@ -12964,11 +13317,46 @@ class MFRM(Rasch):
         s = 1 / (1 + np.exp(-(D @ b)))
         Hg = np.asarray((D.T @ D.multiply(((t + u) * s * (1 - s))[:, None])).todense())
         Gs = G.reshape(X.shape[1], -1) @ Jac
+        H = Jac.T @ Hg @ Jac
+        J_raw = np.cov(Gs, rowvar=False) * Gs.shape[0]
+        J = J_raw
+        if self._kc_on():  # the tests' variability: Kauermann-Carroll corrected scores, at the unpenalised bread
+            empty_k = None if getattr(self, f"estimation_{model}", None) == "cpat-rcl" else empty
+            Gk = _rcl.kc_grid_scores(Gs, b.reshape(R, I, K), X, K, Jac, np.linalg.pinv((H + H.T) / 2), split,
+                                     empty_k)
+            J = np.cov(Gk, rowvar=False) * Gk.shape[0]
         sig = (tuple(self.facet_names), tuple(self.responses.columns), tuple(split), int(free.sum()))
         return dict(
-            b=b, theta=np.asarray(theta)[free], H=Jac.T @ Hg @ Jac, J=np.cov(Gs, rowvar=False) * Gs.shape[0],
+            b=b, theta=np.asarray(theta)[free], H=H, J=J, J_raw=J_raw,
             Dtu=(D, t, u), sig=sig, Jac=Jac, free=free,
         )
+
+    def _cml_pieces(self, model):
+        """For a 'cml' fit of model (not unused_categories='null'): _andersen_pieces's keys that the close-fit test
+        uses -- the fitted grid b (R I K), the Jacobian of the grid in the fit's coordinates, the unpenalised
+        conditional information H there (J = H: a full likelihood) -- and ll, the unpenalised conditional
+        log-likelihood. None for a fit under unused_categories='null'."""
+        from raschpy import _esf
+
+        R, I, K = self.no_of_facet_elements, self.no_of_items, int(self.max_score)
+        f = self._rcl_fits[model]
+        if f.get("null") is not None or "null" in f or f["kind"] not in ("cml-cell", "cml-stretch"):
+            return None
+        Xv, theta = f["X"], np.asarray(f["theta"], float)
+        if f["kind"] == "cml-cell":
+            Jac, b = np.asarray(f["A"], float), np.asarray(f["b"], float).ravel()
+            Hb = f["hessian"]
+            if Hb is None:
+                Hb = _esf.cond_loglik(Xv, list(b.reshape(R * I, K)), hessian=True)[2]
+                f["hessian"] = Hb
+            H = -(Jac.T @ Hb @ Jac)
+        else:
+            sm = f["sm"]
+            Jac, b = np.asarray(sm.grid_jacobian(theta), float), np.asarray(sm.grid(theta), float).ravel()
+            H = np.asarray(f["info"], float) - np.asarray(f["Q"], float)  # info includes the penalty
+        H = (H + H.T) / 2
+        ll = float(_esf.cond_loglik(Xv, list(b.reshape(R * I, K)))[0])
+        return dict(b=b, theta=theta, H=H, J=H, Jac=Jac, ll=ll)
 
     def _stretch_tested(self, small, large):
         """For a stretch model large and a model small nested in it: the free-coordinate indices of large's omega
@@ -12978,13 +13366,18 @@ class MFRM(Rasch):
         free = np.ones(sm.p, bool)
         free[list(f.get("fixed", []))] = False
         nr = sm.R - 1
-        start = sm.lambda_cols.stop  # the omega blocks follow lambda, items before thresholds
         blocks = {}
-        if sm.useI:
-            blocks["I"] = range(start, start + nr)
-            start += nr
-        if sm.useT:
-            blocks["T"] = range(start, start + nr)
+        if hasattr(sm, "lambda_cols"):
+            start = sm.lambda_cols.stop  # the omega blocks follow lambda, items before thresholds
+            if sm.useI:
+                blocks["I"] = range(start, start + nr)
+                start += nr
+            if sm.useT:
+                blocks["T"] = range(start, start + nr)
+        else:  # 'cml' (_rcl.StretchDesign): named blocks
+            for k, nm in (("I", "omegaI"), ("T", "omegaT")):
+                if nm in sm.slices:
+                    blocks[k] = range(sm.slices[nm].start, sm.slices[nm].stop)
         keep = {"centrality": ("T",), "pseudo_halo": ("I",), "bistretch": ("I", "T")}.get(small, ())
         pos = np.cumsum(free) - 1
         return sorted(int(pos[c]) for k, r in blocks.items() if k not in keep for c in r if free[c])
@@ -13108,7 +13501,7 @@ class MFRM(Rasch):
             B = np.eye(JL.shape[1])[:, phi + psi]
             q0 = len(phi)
         else:
-            Cb = orth(np.linalg.lstsq(JL, pS["Jac"], rcond=None)[0])  # small's directions in large's coordinates
+            Cb = orth(_selection.lstsq(JL, pS["Jac"]))  # small's directions in large's coordinates
             B = np.hstack([Cb, null_space(Cb.T)])
             q0 = Cb.shape[1]
         D, t, u = pL["Dtu"]
@@ -13117,12 +13510,144 @@ class MFRM(Rasch):
             B.T @ pL["H"] @ B, B.T @ pL["J"] @ B, q0,
         )
 
+    # model_selection's build-up ladder: each side (items, thresholds) at nothing ("0"), a stretch ("S") or a full set
+    # ("F"); the two mixed levels (a full set beside a stretch) are not offered there
+    _PANEL_LEVELS = {"global": ("0", "0"), "pseudo_halo": ("S", "0"), "items": ("F", "0"), "centrality": ("0", "S"),
+                     "thresholds": ("0", "F"), "bistretch": ("S", "S"), "bivector": ("F", "F")}
+
+    @classmethod
+    def _panel_ladder(cls, kept):
+        """model_selection()'s build-up from 'global' (per_rater_model_selection's ladder for one form shared by every
+        facet element). kept(small, large) decides one step; small or large None is a level not offered. Each side
+        with the other at nothing: nothing unless the stretch or the full set beats nothing, then the full set if it
+        beats the stretch, else the stretch; then each side again with the other at its level, until neither changes;
+        both at nothing: bistretch over global, each side then re-examined beside the other's stretch; last, matrix
+        over bivector (the item-by-threshold interactions alone)."""
+        by_level = {v: k for k, v in cls._PANEL_LEVELS.items()}
+
+        def level(side, other):
+            ms = {lv: by_level.get((lv, other) if side == 0 else (other, lv)) for lv in "0SF"}
+            if not (kept(ms["0"], ms["S"]) or kept(ms["0"], ms["F"])):
+                return "0"
+            return "F" if kept(ms["S"], ms["F"]) else "S"
+
+        def settle(lv):
+            for _ in range(4):
+                new = [level(0, lv[1]), None]
+                new[1] = level(1, new[0])
+                if new == lv:
+                    break
+                lv = new
+            return lv
+
+        lv = settle([level(0, "0"), level(1, "0")])
+        if lv == ["0", "0"] and kept("global", "bistretch"):
+            start = [level(0, "S"), level(1, "S")]
+            lv = ["S", "S"] if start == ["0", "0"] else settle(start)
+            if lv == ["0", "0"]:
+                lv = start
+        cur = by_level.get(tuple(lv), "bivector")
+        if kept("bivector", "matrix"):
+            cur = "matrix"
+        return cur
+
+    def _stretch_factor_cov(self, model, G):
+        """A stretch fit's item and threshold stretch factors per facet element, each with its covariance from G (the
+        sandwich covariance in the fit's free coordinates); for other forms every factor is 1, with no variance."""
+        R = self.no_of_facet_elements
+        f = self._rcl_fits[model]
+        if f["kind"] not in ("stretch", "cml-stretch"):
+            one = np.ones(R)
+            return {"items": (one, np.zeros((R, R))), "thresholds": (one, np.zeros((R, R)))}
+        sm, theta = f["sm"], np.asarray(f["theta"], float)
+        free = np.ones(sm.p, bool)
+        free[list(f.get("fixed", []))] = False
+        u0 = sm.unpack(theta)
+        idx = np.flatnonzero(free)
+        J = {"items": np.zeros((R, len(idx))), "thresholds": np.zeros((R, len(idx)))}
+        for j, k in enumerate(idx):  # unpack is linear in theta, so one step gives the exact Jacobian
+            t = theta.copy()
+            t[k] += 1e-6
+            u = sm.unpack(t)
+            J["items"][:, j] = (np.asarray(u[3]) - np.asarray(u0[3])) / 1e-6
+            J["thresholds"][:, j] = (np.asarray(u[4]) - np.asarray(u0[4])) / 1e-6
+        return {"items": (np.asarray(u0[3], float), J["items"] @ G @ J["items"].T),
+                "thresholds": (np.asarray(u0[4], float), J["thresholds"] @ G @ J["thresholds"].T)}
+
+    def _panel_close_fit(self, small, large, pieces, unit, delta, stretch_delta):
+        """
+        model_selection()'s close-fit test of small within large (composite fits, pieces from _andersen_pieces: the
+        composite LR statistic, as _composite_pair's; 'cml' fits, pieces from _cml_pieces: the conditional LR
+        statistic, J = H) against the null that the departure is at most the tolerance.
+        The departure: for a step adding one or both stretches to a form without them, the root-mean-square over
+        facet elements (and stretch axes) of the change in the stretch factors, against stretch_delta; otherwise
+        the information-weighted root-mean-square over facet element x item x threshold of large's fitted grid
+        minus small's, each cell centred over facet elements, in units (logits per unit), against delta. The
+        tail is the weighted noncentral chi-square of the local approximation with the observed departure scaled
+        to the tolerance (_selection.close_fit_parts). Returns {'departure', 'p'} (p 1 with no departure or no
+        tested directions, the plain test's p with a tolerance of 0).
+        """
+        from scipy.linalg import null_space, orth
+        from raschpy import _selection
+
+        R, I, K = self.no_of_facet_elements, self.no_of_items, int(self.max_score)
+        pS, pL = pieces[small], pieces[large]
+        JL = pL["Jac"]
+        if self._rcl_fits[large]["kind"] in ("stretch", "cml-stretch"):
+            psi = self._stretch_tested(small, large)
+            phi = [k for k in range(JL.shape[1]) if k not in set(psi)]
+            B = np.eye(JL.shape[1])[:, phi + psi]
+            q0 = len(phi)
+        else:
+            Cb = orth(_selection.lstsq(JL, pS["Jac"]))
+            B = np.hstack([Cb, null_space(Cb.T)])
+            q0 = Cb.shape[1]
+        HB, JB = B.T @ pL["H"] @ B, B.T @ pL["J"] @ B
+        if "ll" in pL:  # 'cml': the conditional log-likelihoods
+            lr = 2.0 * (pL["ll"] - pS["ll"])
+        else:
+            D, t, u = pL["Dtu"]
+            lr = 2.0 * (_selection._ll(D, t, u, pL["b"]) - _selection._ll(D, t, u, pS["b"]))
+        core = _selection.composite_lr_core(max(lr, 0.0), HB, JB, q0)
+        gap = pL["b"] - pS["b"]
+        lam, b_obs = _selection.close_fit_parts(HB, JB, q0, _selection.lstsq(JL @ B, gap))
+        Hi = _selection._pinv_sym(pL["H"])
+        G = Hi @ pL["J"] @ Hi
+        sl, ss = self._PANEL_LEVELS.get(large), self._PANEL_LEVELS.get(small)
+        axes = [] if sl is None or ss is None else [
+            ax for ax, a, b in (("items", ss[0], sl[0]), ("thresholds", ss[1], sl[1])) if (a, b) == ("0", "S")]
+        stretch_step = bool(axes) and all(a == b for a, b in zip(ss, sl) if (a, b) != ("0", "S"))
+        if stretch_step:
+            fl = self._stretch_factor_cov(large, G)
+            if self._rcl_fits[small]["kind"] in ("stretch", "cml-stretch"):
+                Gs = _selection._pinv_sym(pS["H"])
+                fs = self._stretch_factor_cov(small, Gs @ pS["J"] @ Gs)
+            else:
+                fs = {ax: (np.ones(R), None) for ax in axes}
+            ch = np.array([fl[ax][0] - fs[ax][0] for ax in axes])
+            size, tol, scale = float(np.sqrt(np.mean(ch**2))), stretch_delta, 1.0
+        else:
+            C = np.eye(R * I * K) - np.kron(np.ones((R, R)) / R, np.eye(I * K))  # each cell centred over elements
+            e = C @ gap
+            v = np.diag(C @ (JL @ G @ JL.T) @ C.T)
+            w = np.where(v > 0, 1.0 / np.where(v > 0, v, 1.0), 0.0)
+            size = float(np.sqrt((w * e**2).sum() / w.sum())) if w.sum() > 0 else float(np.sqrt(np.mean(e**2)))
+            tol, scale = delta, unit
+        if tol <= 0:
+            p = core["p"]
+        elif size <= 0 or not len(lam):
+            p = 1.0
+        else:
+            p = float(_selection.nc_weighted_chi2_sf(core["statistic"], lam, (tol * scale * b_obs / size) ** 2))
+        return {"departure": size / scale, "p": p, "stretch": stretch_step}
+
     def _andersen_composite(self, responses, groups, names, model, observed=False):
         """
         global_fit(method='andersen')'s test on responses: the pooled persons' and each group's refits,
         and _selection.composite_andersen_core's statistics with each group's composite log-likelihood at
         its fit (cl) and at the pooled fit (cl_pooled). Returns (statistics, pooled fit, {group: fit},
-        the pooled fit's pieces), or None if the fits' parameters differ (observed=True: a ValueError).
+        the pooled fit's thresholds of each facet element x item virtual item, for the Monte Carlo samples),
+        or None if the fits' parameters differ (observed=True: a ValueError).
         """
         from raschpy import _selection
 
@@ -13155,14 +13680,100 @@ class MFRM(Rasch):
             [p["H"] for p in parts], [p["J"] for p in parts], [p["theta"] for p in parts],
         )
         res.update(cl=cl, cl_pooled=cl0)
-        return res, pooled, fitted, p0
+        R, I, K = pooled.no_of_facet_elements, pooled.no_of_items, int(pooled.max_score)
+        return res, pooled, fitted, list(np.asarray(p0["b"]).reshape(R * I, K))
+
+    def _cml_info_rank(self, model):
+        """The number of directions a CML fit of model identifies: the rank of the unpenalised conditional
+        information in the fit's coordinates."""
+        from raschpy import _esf
+
+        fit = self._rcl_fits[model]
+        if fit["kind"] == "cml-cell":
+            H = fit["hessian"]
+            if H is None:
+                R, I, K = self.no_of_facet_elements, self.no_of_items, int(self.max_score)
+                H = _esf.cond_loglik(fit["X"], list(np.asarray(fit["b"], float).reshape(R * I, K)),
+                                     hessian=True)[2]
+                fit["hessian"] = H
+            M = -(fit["A"].T @ H @ fit["A"])
+        else:
+            M = np.asarray(fit["info"], float) - np.asarray(fit["Q"], float)
+        ev = np.linalg.eigvalsh((M + M.T) / 2)
+        return int((ev > 1e-8 * max(ev.max(), 1e-300)).sum())
+
+    def _andersen_conditional(self, responses, groups, names, model, observed=False):
+        """
+        global_fit(method='andersen') for 'cml' estimates: the pooled persons' and each group's CML refits
+        (the object's calibrate() settings), LR = 2 (sum over groups of the conditional log-likelihood at the
+        group's fit - at the pooled fit), each unpenalised, on the facet element x item virtual items, and df =
+        the groups' identified directions (_cml_info_rank) minus the pooled fit's. Returns (statistics, pooled
+        fit, {group: fit}, the pooled fit's thresholds of each virtual item), or None if a group's fit has other
+        facet elements or items than the pooled fit (observed=True: a ValueError).
+        """
+        from raschpy import _esf
+
+        persons = responses.index.get_level_values(1)
+        both = pd.Index(np.concatenate([np.asarray(groups[n]) for n in names]))
+        pooled = self._andersen_refit(responses[persons.isin(both)], model)
+        _, thr0, _ = pooled._virtual_items(model)
+        sig0 = (tuple(pooled.facet_names), tuple(pooled.item_names))
+        fitted, ll, ll0 = {}, [], []
+        for n in names:
+            m = self._andersen_refit(responses[persons.isin(groups[n])], model)
+            if (tuple(m.facet_names), tuple(m.item_names)) != sig0:
+                if not observed:
+                    return None
+                raise ValueError(
+                    f"global_fit(method='andersen'): group {n!r}'s fit has different parameters from the "
+                    f"pooled fit ({self.facets_label} or items not rated by its persons), so the groups cannot "
+                    f"be compared. Use a split with more persons in each group."
+                )
+            Xg, thr, _ = m._virtual_items(model)
+            ll.append(float(_esf.cond_loglik(Xg, thr)[0]))
+            ll0.append(float(_esf.cond_loglik(Xg, thr0)[0]))
+            fitted[n] = m
+        lr = max(2.0 * (sum(ll) - sum(ll0)), 0.0)
+        df = sum(m._cml_info_rank(model) for m in fitted.values()) - pooled._cml_info_rank(model)
+        fits = {**fitted, "pooled": pooled}
+        penalised = any(np.any(np.asarray(m._rcl_fits[model]["Q"]) != 0) for m in fits.values())
+        not_converged = [
+            k for k, m in fits.items()
+            if not (getattr(m, f"convergence_{model}", None) or m.convergence).get("converged", True)
+        ]
+        res = dict(lr=lr, df=df, p=float(chi2.sf(lr, df)) if df > 0 else np.nan, ll=ll, ll_pooled=ll0,
+                   penalised=bool(penalised), not_converged=not_converged)
+        return res, pooled, fitted, thr0
+
+    def _cml_cell_influence(self, model):
+        """
+        For a CML fit of a cell model (without unused_categories='null'): each person's contribution to the
+        deviation of the fitted grid (facet element x item x threshold, uncentred) from its limit, to first
+        order -- the person's conditional scores (Kauermann-Carroll corrected, as _cell_influence) times the inverse
+        of the penalised information -- with the
+        grid's Jacobian and the grid: (Phi (persons x R I K), A, b), as _cell_influence.
+        """
+        from raschpy import _esf
+
+        fit = self._rcl_fits[model]
+        R, I, K = self.no_of_facet_elements, self.no_of_items, int(self.max_score)
+        A, b, Xv = fit["A"], np.asarray(fit["b"], float), fit["X"]
+        thr = list(b.reshape(R * I, K))
+        S = _esf.person_scores(Xv, thr)
+        keep = np.abs(S).sum(1) > 0
+        H = A.T @ (-_esf.cond_loglik(Xv[keep], thr, hessian=True)[2]) @ A + fit["Q"]
+        Hinv = np.linalg.pinv((H + H.T) / 2, rcond=1e-10, hermitian=True)
+        U = S @ A
+        if self._kc_on():
+            U = self._kc_scores(U, _esf.cml_person_breads(Xv, thr, A), Hinv)
+        return U @ Hinv @ A.T, A, b
 
     def _cell_influence(self, model):
         """
         For a 'cp-full-rcl' or 'cpat-rcl' fit of a cell model: each person's contribution to the deviation
         of the fitted grid (facet element x item x threshold, uncentred) from its limit, to first order --
-        the person's composite-likelihood scores times the inverse of the fit's penalised information --
-        with the grid's Jacobian in the fit's free coordinates and the grid: (Phi (persons x R I K), J, b).
+        the person's composite-likelihood scores (Kauermann-Carroll corrected unless the last std_errors() call
+        set se_correction=None) times the inverse of the fit's penalised information -- with the grid's Jacobian in the fit's free coordinates and the grid: (Phi (persons x R I K), J, b).
         """
         from raschpy import _rcl
 
@@ -13183,7 +13794,11 @@ class MFRM(Rasch):
             J = st["J"][:, free]
             J = np.asarray(J.todense() if hasattr(J, "todense") else J, dtype=float)
             U = Gs.reshape(X3.shape[1], -1) @ J
-            Phi = U @ np.linalg.pinv(st["negH"][np.ix_(free, free)], hermitian=True) @ J.T
+            Hinv = np.linalg.pinv(st["negH"][np.ix_(free, free)], hermitian=True)
+            if self._kc_on():
+                U = _rcl.kc_grid_scores(U, b.reshape(R, I, K), X3, K, J, Hinv, st["drop_widths"],
+                                        st.get("full_empty"))
+            Phi = U @ Hinv @ J.T
         finally:
             _rcl.release_state(info)
         return Phi, J, b
@@ -13206,16 +13821,21 @@ class MFRM(Rasch):
 
         model = self._MODEL_ALIASES.get(model, model)
         fit = getattr(self, "_rcl_fits", {}).get(model)
-        if fit is None or fit["kind"] != "cell" or self.estimation not in ("cp-full-rcl", "cpat-rcl"):
+        est = getattr(self, f"estimation_{model}", None)
+        if fit is None or not (
+            (fit["kind"] == "cell" and est in ("cp-full-rcl", "cpat-rcl"))
+            or (fit["kind"] == "cml-cell" and "null" not in fit)
+        ):
             raise NotImplementedError(
-                "The observed and expected score tables need a calibrate(estimation='cp-full-rcl') or "
-                "'cpat-rcl' fit of model='global', 'items', 'thresholds', 'bivector' or 'matrix'."
+                "The observed and expected score tables need a calibrate(estimation='cp-full-rcl'), 'cpat-rcl' "
+                "or 'cml' fit of model='global', 'items', 'thresholds', 'bivector' or 'matrix' ('cml' without "
+                "unused_categories='null')."
             )
         R, I, K = self.no_of_facet_elements, self.no_of_items, self.max_score
         X3 = self.responses.to_numpy(dtype=np.float64).reshape(R, -1, I)
         N = X3.shape[1]
         X = X3.transpose(1, 0, 2).reshape(N, R * I)  # virtual item r * I + i
-        Phi, Jf, b = self._cell_influence(model)
+        Phi, Jf, b = self._cml_cell_influence(model) if fit["kind"] == "cml-cell" else self._cell_influence(model)
         thr = list(b.reshape(R * I, K))
         persons = self.responses.index.get_level_values(1)[:N]
         labels = np.full(N, -1)
@@ -13416,8 +14036,10 @@ class MFRM(Rasch):
             largest group.
         selection_method : {'wald', 'robust_z', 'none'}, default 'wald'
             Purification of the item-location scale: sequential Wald tests
-            ('wald'), modified z-score exclusion ('robust_z'), or a mean
-            shift over all shared items ('none').
+            ('wald'; t statistics from both groups' errors in each item's
+            deviation from the translation constant, Welch-Satterthwaite
+            df), modified z-score exclusion ('robust_z'), or a mean shift
+            over all shared items ('none').
         corr_tol, sd_ratio_tol, min_anchors, wald_alpha : floats/int
             Settings of the active selection method. min_anchors defaults
             to 2: the standard errors include the variability of choosing
@@ -13481,8 +14103,9 @@ class MFRM(Rasch):
         dif_table : pandas.DataFrame
             One row per (item, focal group) pair. Columns: 'Group',
             'Reference' / 'Focal' / 'Focal (purified)', 'Difference', 'SE',
-            'z', 'p', 'p (corrected)', 'Selected', 'Flagged'; 'df' if
-            welch=True; 'LR', 'p_LR', 'p_LR (corrected)', 'Flagged_LR' if
+            'z', 'p', 'p (corrected)', 'Selected', 'Flagged'; with
+            welch=True, 't' (Welch t-statistic) in place of 'z', and 'df'
+            (Welch-Satterthwaite); 'LR', 'p_LR', 'p_LR (corrected)', 'Flagged_LR' if
             test is 'lr' or 'both'; 'Category' if category=True.
         dif_omnibus_table : pandas.DataFrame or None
             One row per focal group: 'LR', 'df', 'p', 'Flagged', for the
@@ -13494,7 +14117,8 @@ class MFRM(Rasch):
             DCF on category widths (thresholds[k+1] - thresholds[k]). One
             row per (category, focal group) pair: 'Group', 'Category',
             'Reference' / 'Focal', 'Difference', 'SE', 'z', 'p',
-            'p (corrected)', 'Flagged'; 'df' if welch=True.
+            'p (corrected)', 'Flagged'; 't' and 'df' with welch=True, as
+            in dif_table.
         dif_reference, dif_covariate : the reference group value and
             covariate column name used.
         dif_reference_model : MFRM
@@ -13606,6 +14230,7 @@ class MFRM(Rasch):
 
         ref_idx = cov_values.index[cov_values == reference]
         ref_model = MFRM(_group_responses(ref_idx), max_score=self.max_score)
+        ref_model._se_correction_opt = getattr(self, "_se_correction_opt", "kauermann-carroll")
         ref_model.calibrate(model=model, **cal_kw)
         ref_model.std_errors(model=model, **se_kw)
         if needs_ll:
@@ -13625,6 +14250,7 @@ class MFRM(Rasch):
         for focal in focal_levels:
             focal_idx = cov_values.index[cov_values == focal]
             focal_model = MFRM(_group_responses(focal_idx), max_score=self.max_score)
+            focal_model._se_correction_opt = getattr(self, "_se_correction_opt", "kauermann-carroll")
             focal_model.calibrate(model=model, **cal_kw)
             focal_model.std_errors(model=model, **se_kw)
             if needs_ll:
@@ -13784,6 +14410,7 @@ class MFRM(Rasch):
             if omnibus:
                 combined_idx = ref_idx.append(focal_idx)
                 m_full = MFRM(_group_responses(combined_idx), max_score=self.max_score)
+                m_full._se_correction_opt = getattr(self, "_se_correction_opt", "kauermann-carroll")
                 m_full.calibrate(model=model, **cal_kw)
                 m_full.person_estimates(model=model, **pe_kw)
                 pooled_items, pooled_thresholds, pooled_facet_effects = (
@@ -13935,7 +14562,8 @@ class MFRM(Rasch):
                 },
                 index=thr_index,
             )
-            if welch:
+            if welch:  # Welch t on Welch-Satterthwaite df
+                threshold_table = threshold_table.rename(columns={"z": "t"})
                 threshold_table["df"] = thr_welch_df
 
             all_item_rows.append(item_table)
@@ -14057,11 +14685,12 @@ class MFRM(Rasch):
         element on `model`, or on its own representation for 'mixed'),
         with the estimation of this object's fit ('cp-full-rcl', 'cpat-rcl'
         or 'cml').
-        Each facet element common to both groups is then tested in its
-        representation's terms. Its effects (matrix layout) are
-        summarised as the main effects of an additive fit (level + item
-        effects + threshold effects) and, for 'matrix', the remaining
-        interaction:
+        Each facet element common to both groups is then tested for a
+        difference between the groups in each type of effect that the
+        facet element's representation includes. The facet element's
+        effects (matrix layout) are summarised as the main effects of an
+        additive fit (level + item effects + threshold effects) and, for
+        'matrix', the remaining interaction:
 
         - global effect (the level, 1 df): drf_table;
         - item effects (I - 1 df; 1 df, the change in omega(_items), for
@@ -14078,18 +14707,31 @@ class MFRM(Rasch):
         difference with the average over the other facet elements (a
         leave-one-out pool, dropping one at a time facet elements whose own
         difference is significant at wald_alpha, keeping at least
-        min_anchors), a Wald test with each group's sandwich covariance.
-        With p_method='monte-carlo' (the default) its p-value is a Monte
-        Carlo one (no_of_samples draws of both groups' effects from their
-        sandwich covariances, about a version of the data with no DRF for
-        the facet element and its pool, with the pool's trimming repeated on
-        each draw), so that choosing the pool from the same data is part of
-        the reference distribution; p_method='chi2' is faster but holds the
-        pool fixed, which added about 0.01 to the no-DRF rates in
-        simulation.
+        min_anchors), a Wald test T with each group's sandwich covariance,
+        on df = the rank of that covariance. The covariance is estimated
+        from the persons, so T is referred to a multivariate Welch F
+        distribution (Nel and van der Merwe, 1986), as in global_fit():
+        F = T (nu - df + 1) / (df nu) on (df, nu - df + 1) degrees of
+        freedom ('Denominator df'), with nu = [tr(V^2) + tr(V)^2] / sum over
+        the groups of [tr(V_g^2) + tr(V_g)^2] / (n_g - 1), V_g each group's
+        part of the covariance and n_g its number of persons. The trimming
+        uses the same reference. With p_method='monte-carlo' (the default)
+        the p-value is a Monte Carlo one: no_of_samples draws of both
+        groups' effects from their sandwich covariances, about a version of
+        the data with no DRF for the facet element and its pool, with the
+        pool's trimming repeated on each draw, so that choosing the pool
+        from the same data is part of the reference distribution. Each
+        draw's statistic is multiplied by nu / chi2(nu - df + 1), an
+        independent draw for the noise in estimating the covariance: T =
+        nu chi2(df) / chi2(nu - df + 1) is the distribution of Hotelling's
+        T^2 (Anderson, 2003, Section 5.2), so with the pool held fixed the
+        draws follow the F reference above, as in the parametric bootstrap
+        of Krishnamoorthy and Lu (2010). p_method='f' gives the F p-values
+        with the pool held fixed (faster, slightly liberal: see below).
         Reported per item: the item's difference (level plus item
         effect); per bounded category 1 to K - 1: the change in its width;
-        each with a z-test, Holm-corrected within the facet element.
+        each with a Welch t-test (each group's variance counted with its
+        own number of persons), Holm-corrected within the facet element.
         The overall and component tests answer different questions and
         either one can flag a facet element without the other doing so: the
         overall test pools the evidence, so it can flag diffuse DRF spread
@@ -14098,8 +14740,9 @@ class MFRM(Rasch):
         change that the overall test does not flag due to its higher
         degrees of freedom.
 
-        Cells (item, threshold) whose categories have fewer than
-        min_category_count ratings in either group are left out of a
+        Item-threshold pairs with fewer than min_category_count ratings in
+        either score category next to the threshold, in either group
+        (listed in the 'Cells left out' columns), are left out of a
         'matrix' facet element's additive fit ('thresholds'/'bivector': a
         threshold rarely used over all items; 'items'/'bivector': an item
         rarely rated), with one warning; a facet element whose remaining
@@ -14113,16 +14756,15 @@ class MFRM(Rasch):
         nearly unused category mostly at 0.015-0.070 at alpha = 0.05
         (without the guard: up to 0.250, with 10 items, groups of 400,
         item test), with power kept except where a category was rarely
-        used on most items. Simulations of smaller
-        designs (fully crossed, 50-200 persons per group; double marking,
-        about 70-200 scripts per facet element per group; these sizes come
-        from these simulations, not from a published rule) indicate rates
-        of 0.025-0.095 for the 'matrix' facet element and 0.034-0.078 for
-        the others (without the guard: up to 0.155); with 20 persons per
-        group, or about 22 scripts per facet element, the 'matrix' facet
-        element could not be tested and the others rejected 0.064-0.105;
-        the simulations found no alternative that holds the nominal level
-        with this little data, so treat results there as indicative.
+        used on most items. In simulations of smaller designs with no DRF
+        (6 facet elements, 5 items, K = 3, fully crossed; 'global' and
+        'thresholds' with 25-200 persons per group, 'matrix' with 50-200;
+        200 datasets per design), the rejection rates at alpha = 0.05 with
+        p_method='monte-carlo' were 0.034-0.062 for the global effect tests
+        and 0.039-0.061 for the item, threshold, interaction and overall
+        tests; with p_method='f', up to 0.073 for the global effect and
+        0.071 for the others (the pool held fixed). With 25 persons per
+        group most 'matrix' facet elements could not be tested.
 
         A facet element that gave fewer than min_category_count ratings in
         a score category in either group is still tested for global effect
@@ -14137,9 +14779,10 @@ class MFRM(Rasch):
         each group's sandwich covariance; df is that covariance's rank (the
         frame's constraints, e.g. the global effects summing to zero, take
         one per component; for 'global', common facet elements - 1). Its p
-        is from a Hotelling-type F reference, F = T (n - df + 1) / (df n)
-        on (df, n - df + 1) degrees of freedom, n = persons in both groups
-        - 2. With many degrees of freedom the chi-squared reference is
+        is from the multivariate Welch F reference above, F = T
+        (nu - df + 1) / (df nu) on (df, nu - df + 1) degrees of freedom
+        (with equal covariances and group sizes nu = persons in both groups
+        - 2). With many degrees of freedom the chi-squared reference is
         liberal: simulations with 9 facet elements on 8 representations
         (37 df, no DRF) rejected 0.103 at alpha = 0.05 with chi-squared
         and 0.061 with F (groups of 400, 620 datasets), and 0.070 and 0.058
@@ -14170,8 +14813,9 @@ class MFRM(Rasch):
             Minimum number of persons a facet element must have rated in
             each group to be tested.
         min_category_count : int or None, default 5
-            Cells whose categories have fewer ratings than this in either
-            group are left out of the tests (see above); None leaves
+            Item-threshold pairs with fewer ratings than this in either
+            score category next to the threshold, in either group, are left
+            out of the tests (see above); None leaves
             nothing out (liberal with nearly unused categories).
         omnibus : bool or None, default None
             Whether to run the omnibus test; None runs it.
@@ -14182,13 +14826,13 @@ class MFRM(Rasch):
         logit_threshold : float, default 0.43
             Minimum absolute difference in global effect, in logits, for
             flagging in drf_table.
-        p_method : {'monte-carlo', 'chi2'}, default 'monte-carlo'
+        p_method : {'monte-carlo', 'f'}, default 'monte-carlo'
             'monte-carlo': p-values with the pool's selection repeated on
-            each draw (see above). 'chi2': chi-squared p-values with the pool
-            held fixed; faster (about 45% less time in a 9-facet-element
-            example), slightly liberal (about +0.01 at alpha = 0.05). The
-            per-item and per-category follow-up z-tests hold the pool fixed
-            either way.
+            each draw (see above). 'f': multivariate Welch F p-values with
+            the pool held fixed; faster (about 45% less time in a
+            9-facet-element example), slightly liberal (about +0.01 at
+            alpha = 0.05). The per-item and per-category follow-up Welch
+            t-tests hold the pool fixed either way.
         no_of_samples : int, default 500
             Draws for p_method='monte-carlo'.
         seed : int or None, default None
@@ -14207,11 +14851,12 @@ class MFRM(Rasch):
         drf_table : pandas.DataFrame
             Global effect tests, one row per (facet element, focal group):
             'Group', 'Representation', 'Reference', 'Focal' (each group's
-            global effect), 'Difference', 'SE', 'T', 'df', 'p', 'p (corrected)',
-            'Flagged', 'Pool', 'Cells left out', 'Note'.
+            global effect), 'Difference', 'SE', 'T', 'df', 'Denominator df',
+            'p', 'p (corrected)', 'Flagged', 'Pool', 'Cells left out', 'Note'.
         drf_item_table, drf_threshold_table : pandas.DataFrame or None
             Item and threshold tests: 'Group', 'Representation', 'T', 'df',
-            'p', 'p (corrected)', 'Flagged', 'Pool', 'Cells left out',
+            'Denominator df', 'p', 'p (corrected)', 'Flagged', 'Pool',
+            'Cells left out',
             'Note'; per item 'Difference {item}', 'SE {item}',
             'p {item} (Holm)', or per bounded category 'Difference category
             k', 'SE category k', 'p category k (Holm)'; 'Difference omega',
@@ -14266,12 +14911,12 @@ class MFRM(Rasch):
             omnibus = True
         if correction not in ("bh", "bonferroni", None):
             raise ValueError("correction must be 'bh', 'bonferroni', or None")
-        if p_method not in ("monte-carlo", "chi2"):
-            raise ValueError(f"p_method must be 'monte-carlo' or 'chi2', got {p_method!r}.")
+        if p_method not in ("monte-carlo", "f"):
+            raise ValueError(f"p_method must be 'monte-carlo' or 'f', got {p_method!r}.")
         if p_method == "monte-carlo" and int(no_of_samples) < 1:
             raise ValueError(
-                "no_of_samples must be at least 1 with p_method='monte-carlo'; for the chi-squared p-values (pool "
-                "held fixed) use p_method='chi2'."
+                "no_of_samples must be at least 1 with p_method='monte-carlo'; for the F p-values (pool held "
+                "fixed) use p_method='f'."
             )
         if min_persons_per_group < 1:
             raise ValueError("min_persons_per_group must be at least 1.")
@@ -14369,6 +15014,7 @@ class MFRM(Rasch):
         ref_idx = cov_values.index[cov_values == reference]
         ref_responses = _group_responses(ref_idx)
         ref_model = MFRM(ref_responses, max_score=self.max_score)
+        ref_model._se_correction_opt = getattr(self, "_se_correction_opt", "kauermann-carroll")
         ref_model.calibrate(model="mixed", **cal_kw)
         ref_counts = _rated_person_counts(ref_responses)
 
@@ -14380,6 +15026,7 @@ class MFRM(Rasch):
             focal_idx = cov_values.index[cov_values == focal]
             focal_responses = _group_responses(focal_idx)
             focal_model = MFRM(focal_responses, max_score=self.max_score)
+            focal_model._se_correction_opt = getattr(self, "_se_correction_opt", "kauermann-carroll")
             focal_model.calibrate(model="mixed", **cal_kw)
             focal_counts = _rated_person_counts(focal_responses)
 
@@ -14428,7 +15075,7 @@ class MFRM(Rasch):
                 omnibus_rows[focal] = {**om, "Flagged": bool(om["p"] <= alpha)}
             focal_models[focal] = focal_model
 
-        front = ["Group", "Representation", "Reference", "Focal", "Difference", "SE", "T", "df", "p",
+        front = ["Group", "Representation", "Reference", "Focal", "Difference", "SE", "T", "df", "Denominator df", "p",
                  "p (corrected)", "Flagged", "Pool", "Cells left out", "Note"]
         out = {}
         for k, rows in tables.items():
@@ -14484,8 +15131,34 @@ class MFRM(Rasch):
         self.drf_plots = plot_dict
         self.drf_group_sizes = group_sizes
 
-    def _candidate_models(self, candidate_models, models, name):
-        """candidate_models= (or the deprecated models=, FutureWarning) with model aliases resolved; None for all."""
+    def _candidate_models(self, candidate_models, models, name, excluded_models=None, allowed=None):
+        """candidate_models= (or the deprecated models=, FutureWarning) with model aliases resolved; None for all.
+        excluded_models= instead gives the full set (_MODELS) less those named; both may be given only if they come
+        to the same set. allowed: the names excluded_models may contain (default _MODELS)."""
+        if excluded_models is not None:
+            if isinstance(excluded_models, str):
+                excluded_models = [excluded_models]
+            excl = [self._MODEL_ALIASES.get(m, m) for m in excluded_models]
+            ok = tuple(allowed) if allowed is not None else self._MODELS
+            unknown = sorted(set(excl) - set(ok))
+            if unknown:
+                raise ValueError(f"{name}(): excluded_models contains unrecognised model name(s) {unknown}; "
+                                 f"must be a subset of {ok}.")
+            kept = [m for m in self._MODELS if m not in set(excl)]
+            if not kept:
+                raise ValueError(f"{name}(): excluded_models leaves no models to compare.")
+            given = candidate_models if candidate_models is not None else models
+            if given is not None:
+                if isinstance(given, str):
+                    given = [given]
+                if {self._MODEL_ALIASES.get(m, m) for m in given} != set(kept):
+                    raise ValueError(
+                        f"{name}(): candidate_models and excluded_models give different sets of models "
+                        f"({sorted({self._MODEL_ALIASES.get(m, m) for m in given})} against {kept}); pass one "
+                        "of them."
+                    )
+            else:
+                candidate_models = kept
         if models is not None:
             if candidate_models is not None:
                 raise ValueError(f"{name}(): pass candidate_models= only (models= is its deprecated name).")
@@ -14500,11 +15173,12 @@ class MFRM(Rasch):
         return [self._MODEL_ALIASES.get(m, m) for m in candidate_models]
 
     @_progress.with_progress
+    @_se_correction_arg
     def model_selection(
         self,
         test=None,
         candidate_models=None,
-        aic_sig_test=True,
+        aic_relative_likelihood=True,
         alpha=0.05,
         min_effect=0,
         no_of_samples=199,
@@ -14522,6 +15196,19 @@ class MFRM(Rasch):
         log_lik_tol=0.000001,
         seed=None,
         models=None,
+        estimation=None,
+        aic_sig_test=None,
+        global_ridge=None,
+        item_ridge=None,
+        threshold_ridge=None,
+        interaction_ridge=None,
+        stretch_ridge=None,
+        excluded_models=None,
+        delta=None,
+        delta_units="width",
+        stretch_delta=None,
+        n_subsamples=1,
+        se_correction=None,
     ):
         """
         Compare MFRM facet element (e.g. rater) parameterisations using AIC, BIC, or LR.
@@ -14529,7 +15216,9 @@ class MFRM(Rasch):
         Calibrates the active models (all eight -- global, items, thresholds,
         bivector, matrix, centrality, pseudo_halo, bistretch -- unless
         candidate_models= restricts this) if not already done, computes the
-        log-likelihood for each, and ranks them by the chosen criterion.
+        log-likelihood for each, and chooses one form for every facet
+        element by the chosen criterion (AIC, BIC), or reports the nested
+        pairwise tests (LR).
         centrality and pseudo_halo are each 2-parameter restrictions of
         thresholds/items respectively (Jin & Wang 2018-style facet element
         centrality/extremity, and a pseudo-halo-effect item-difficulty-
@@ -14537,9 +15226,9 @@ class MFRM(Rasch):
         bivector, combining both stretch axes -- see calibrate()'s
         docstring.
 
-        All candidates must have the same estimation (models not yet
-        calibrated are fitted with the estimation of those that are), and the
-        comparison follows it:
+        Every candidate is compared under one estimation (see estimation):
+        candidates not yet calibrated, or calibrated with another estimation,
+        are calibrated with it. The comparison follows the estimation:
 
         - 'cml': the conditional log-likelihood of the facet element x item
           virtual items given each person's total over all their ratings, at
@@ -14577,10 +15266,23 @@ class MFRM(Rasch):
         test : str or None, default None
             Criterion: 'AIC', 'BIC', or 'LR'. None resolves to 'LR' (the
             bootstrap test, the only one available) for 'pair-cpat', and to
-            'AIC' for 'cml', 'cp-full-rcl' and 'cpat-rcl'. For 'LR', nested pairwise tests
+            'AIC' for 'cml', 'cp-full-rcl' and 'cpat-rcl'. AIC and BIC build
+            the choice up from 'global', one form for every facet element, on
+            per_rater_model_selection()'s ladder: each side (items,
+            thresholds) is at nothing, a stretch (pseudo_halo, centrality) or
+            a full set of effects (items, thresholds); a side moves up only
+            if the larger form is kept over the smaller, first with the other
+            side at nothing and then with it at its current level, until
+            neither changes; if both stay at nothing, bistretch is tried over
+            global; last, matrix over bivector. A step keeps the larger form
+            only if the criterion prefers it (with aic_relative_likelihood,
+            the smaller form's relative likelihood at most alpha) and, with a
+            tolerance (see delta), the close-fit test rejects. 'mixed', if a
+            candidate, is then compared with the ladder's choice by the
+            criterion alone. For 'LR', nested pairwise tests
             are computed (global vs each alternative, bivector vs matrix,
             centrality vs thresholds, pseudo_halo vs items, bistretch vs
-            bivector/centrality/pseudo_halo/global).
+            bivector/centrality/pseudo_halo/global), with no overall choice.
         candidate_models : list/tuple of str, or None, default None
             Restrict the comparison to just these model names (each one of
             self._MODELS) instead of the full family of eight -- only these
@@ -14595,33 +15297,99 @@ class MFRM(Rasch):
             and 'pseudo_halo', which restrict different parent models) are
             silently skipped for LR but still fine for AIC/BIC, which don't
             require nesting. None (default) uses all eight models.
-        aic_sig_test : bool, default True
-            When True and test='AIC': applies a significance test against a
-            baseline model. The baseline is whichever active model has the
-            fewest free parameters (ties broken by lowest AIC) -- 'global'
-            whenever it is in the active set, since it always has the fewest
-            parameters of all eight models, but otherwise the simplest model
-            actually available (e.g. centrality/pseudo_halo if candidate_models=
-            excludes 'global'). p = e^(-|Δ|/2) where Δ = AIC_baseline -
-            AIC_best. A more complex model is preferred only if p <= alpha;
-            otherwise the baseline is retained. With a likelihood ('cml')
-            this is a likelihood ratio test of the baseline within the best
-            model at level P(chi-square(d) > 2d + 2 ln(1/alpha)), d the
-            difference in free parameters. A composite likelihood has no fixed
-            scale, so for 'cp-full-rcl' and 'cpat-rcl' the test is made at that
-            level on the composite LR's reference (the weighted chi-square
-            above, d its tested directions), and p is the relative likelihood
-            that a likelihood ratio with the same chi-square(d) tail
-            probability would give. If the baseline is not nested in the best
-            model, Δ is divided by the mean chi-square weight of the
-            directions the best model adds (its penalty minus the baseline's,
-            per extra free parameter).
+        excluded_models : list/tuple of str, or None, default None
+            The models to leave out of the full set of eight, as an
+            alternative to listing the rest in candidate_models (e.g.
+            excluded_models=['matrix']). Aliases ('threshold_stretch',
+            'item_stretch') are accepted. Passing both is an error unless
+            they give the same set of models.
+        delta : float or None, default None
+            'cp-full-rcl', 'cpat-rcl' and 'cml' only: the tolerance, the size of
+            departure treated as negligible. A step adding item, threshold or
+            item-by-threshold effects keeps the larger form only if the
+            close-fit test rejects (p <= alpha) the null hypothesis that its
+            departure from the smaller form is at most delta. The departure
+            is the root mean square over facet element x item x threshold of
+            the larger form's fitted locations minus the smaller's, each
+            cell taken relative to its mean over facet elements, weighted by
+            1 / (sampling variance of the larger form's estimate); it is
+            reported as 'Departure'. The test's statistic is the composite
+            LR's ('cml': the conditional LR's); its distribution at a
+            departure of size delta is the weighted noncentral chi-square of
+            the local approximation (central chi-square weights of 1 for
+            'cml'), the observed departure scaled to size delta. None:
+            0.2 (in delta_units, so 0.2 median category widths by default).
+            0: no tolerance (the plain tests). The departure is averaged over
+            every facet element, so one element departing strongly while the
+            rest do not moves the whole set less than a departure they share:
+            the choice is the form that best describes the facet elements as a
+            group (per_rater_model_selection() chooses one per element). In
+            simulations (6 raters, each person marked by 2; 6 items x 3
+            thresholds and 12 x 5, thresholds 1 logit apart; N = 600 and
+            2000; 100 datasets per setting; 'cp-full-rcl' and 'cml' on each
+            dataset), with the default, data with global effects only stayed
+            on 'global' in every dataset with both; item effects shared by
+            every rater moved the set off 'global' in 17-66% of datasets with
+            'cp-full-rcl' (21-74% with 'cml') at an RMS of 0.2 widths and
+            96-100% (97-100%) at 0.25; shared threshold effects in 6-18%
+            (5-14%) at 0.2 and 69-100% (73-100%) at 0.25; one rater of six
+            with item effects of RMS 0.3 in none, and of 0.5 in 1-9% (2-9%).
+            The two estimations chose the same form in 80-100% of datasets
+            per setting. At a departure equal to the tolerance the test
+            rejects more often than alpha, so it is better read as a size
+            threshold than as a test at level alpha. Where the instrument has
+            no usable category width (maximum score 1, or disordered
+            thresholds) the default falls back to 0 with a warning; set delta
+            in logits (delta_units='logits') there. With 'pair-cpat', or 'cml'
+            with unused_categories='null', there is no close-fit test: the
+            default is not applied, and passing delta raises.
+        delta_units : {'width', 'logits'}, default 'width'
+            The units of delta and 'Departure': shares of the instrument's
+            median category width (the gaps between consecutive shared
+            thresholds in the simplest candidate fit, recorded in
+            model_comparison_mfrm_info), or logits.
+        stretch_delta : float or None, default None
+            'cp-full-rcl', 'cpat-rcl' and 'cml' only: the tolerance of steps that add
+            one or both stretches to a form without them (global to
+            centrality, pseudo_halo or bistretch; centrality or pseudo_halo to
+            bistretch). There the departure is the root mean square over
+            facet elements of the change in the added stretch factor(s), a
+            proportion: 0.2 means stretching or shrinking the thresholds (or
+            item locations) by about 20%. None: 0.2. 0: the plain test.
+        aic_relative_likelihood : bool, default True
+            When True and test='AIC': a step of the ladder keeps the larger
+            form only if the smaller form's relative likelihood, e^(-Δ/2),
+            Δ = AIC_smaller - AIC_larger, is at or below alpha (with Δ > 0).
+            With a likelihood ('cml') this is a likelihood ratio test of the
+            smaller form within the larger at level
+            P(chi-square(d) > 2d + 2 ln(1/alpha)), d the difference in free
+            parameters: below alpha and falling as d grows (at alpha = 0.05:
+            0.0063 at d = 6, 0.00095 at d = 19), so more conservative than
+            test='LR', and the relative likelihood is not a p-value. A
+            composite likelihood has no fixed scale, so for 'cp-full-rcl' and
+            'cpat-rcl' the test is made at that level on the composite LR's
+            reference (the weighted chi-square above, d its tested
+            directions), and the relative likelihood reported is the one a
+            likelihood ratio with the same chi-square(d) tail probability
+            would give. Against 'mixed' (not nested), Δ is divided by the mean
+            chi-square weight of the directions the larger form adds (its
+            effective number of parameters minus the smaller's, divided by the
+            difference in free parameters). False:
+            the step needs only Δ > 0.
+        aic_sig_test : bool or None, default None
+            Deprecated name of aic_relative_likelihood (FutureWarning); if
+            given, its value is used.
         alpha : float, default 0.05
-            Significance level for the AIC relative-likelihood test
-            (used only when test='AIC' and aic_sig_test=True).
+            Significance level: for the AIC relative-likelihood test (when
+            test='AIC' and aic_relative_likelihood=True), the close-fit tests
+            and test='LR'.
         min_effect : float, default 0
             Minimum effect size (logits) required to prefer a more complex
-            model over a simpler one. The effect between two models is the
+            model over a simpler one. It is the size guard where there is no
+            close-fit test, estimation='pair-cpat'; with 'cp-full-rcl', 'cpat-rcl' or 'cml', delta and
+            stretch_delta do the same job with a test and are preferred (min_effect compares one estimate with
+            the cut-off, so effects near it are kept or dropped by sampling error, and it is in logits, not
+            category widths). The effect between two models is the
             max absolute difference between their fitted location surfaces
             (each model's facet_effects broadcast to a common (facet element, item,
             category) grid -- see _severity_grid -- same units as
@@ -14643,32 +15411,88 @@ class MFRM(Rasch):
         no_of_samples : int, default 199
             Simulated datasets per smaller model for the bootstrap test
             ('pair-cpat').
-        sampling, likelihood, warm_corr, tolerance, max_iters, ext_score_adjustment
+        sampling : None, 'dynamic' or int, default None
+            None: the comparison on all the data. An int n: every candidate
+            refitted on n persons drawn at random (each with all their
+            ratings, with the candidates' calibration settings), and the
+            comparison (test) made on each of n_subsamples subsamples:
+            with 'LR', the larger model of a pair is preferred if more than
+            half the subsamples reject the smaller (and min_effect holds on
+            all the data); with AIC or BIC, the model chosen most often
+            (ties to the one with fewer free parameters; min_effect then
+            applied on all the data). 'dynamic': n = min(20 R (I - 1)
+            (K - 1), 1500) (R facet elements, I items, K = max_score, K - 1
+            taken as 1 for dichotomous data). With n at least the number of
+            persons, the comparison on all the data. Not with delta or
+            stretch_delta (the close-fit test), whose defaults are then 0.
+            'auto' (v1.4.0's default) means None. In simulations (6 raters,
+            each person marked by 2; 6 items x 3 thresholds; N = 2000;
+            n = 300 and 600, one subsample; 200 datasets per setting), on
+            data with global effects only, the LR tests rejected at 0.035-
+            0.062 per pair on average (at most 0.075 for any one pair;
+            'cp-full-rcl', 'cml' and 'pair-cpat'), and AIC and BIC left
+            'global' in at most 0.035 of datasets. With item effects of RMS
+            0.25 median category widths shared by every rater, global v items
+            was rejected in every dataset; AIC chose items in 0.96-0.99, BIC
+            in 0.14-0.27 at n = 300 and 0.94-0.97 at n = 600.
+        n_subsamples : int, default 1
+            sampling=n or 'dynamic': the number of subsamples.
+        likelihood, warm_corr, tolerance, max_iters, ext_score_adjustment
             Deprecated and ignored (FutureWarning): the comparison follows the
             candidates' estimation and needs no person estimates.
         constant, threshold_constant, method, robust, matrix_power, log_lik_tol
-            Calibration settings, used only for candidates not yet calibrated.
+            Calibration settings, used only for candidates calibrated by this
+            call (see estimation).
         seed : int or None, default None
-            Seed for the bootstrap test's simulations.
+            Seed for the bootstrap test's simulations, and for the subsamples
+            (sampling); None draws one, recorded in
+            model_comparison_mfrm_sampling so the draws can be repeated.
         models
             Deprecated name of candidate_models (FutureWarning).
+        estimation : {'cp-full-rcl', 'cpat-rcl', 'cml', 'pair-cpat'} or None, default None
+            The estimation every candidate is compared under. Candidates not
+            yet calibrated, or calibrated with another estimation, are
+            calibrated with this one; a recalibrated candidate's fit replaces
+            the earlier fit ('mixed' is refitted with its rater_models and
+            anchors). None uses the estimation of the object's latest
+            calibration ('cp-full-rcl' if there is none), and a UserWarning
+            names any candidate recalibrated. 'mixed' needs 'cp-full-rcl',
+            'cpat-rcl' or 'cml'.
+        global_ridge, item_ridge, threshold_ridge, interaction_ridge, stretch_ridge : float or None, default None
+            'cp-full-rcl', 'cpat-rcl' and 'cml' only: the penalties, as in
+            calibrate(). Given, every candidate is recalibrated with them
+            (replacing its earlier fit); None leaves fitted candidates as they
+            are and calibrates the others with calibrate()'s defaults. The
+            penalties pull each facet element's effects towards simpler
+            forms, most strongly with few ratings; smaller values (0 where the
+            fits converge) compare the candidates with less of this pull.
+        se_correction : 'kauermann-carroll' or None, default None
+            'kauermann-carroll' applies the Kauermann-Carroll small-sample
+            correction (as in std_errors()) to the composite likelihood ratio
+            and close-fit tests ('cp-full-rcl' and 'cpat-rcl'). It may help
+            with very small sample sizes, where its time cost is also small;
+            with many persons and parameters it can take most of the run
+            time.
 
-        Attributes set (AIC with aic_sig_test=True)
-        --------------------------------------------
-        model_comparison_mfrm_aic : dict  {model: AIC value}
-        model_comparison_mfrm_aic_baseline : str  model tested against (fewest free parameters in the active set)
-        model_comparison_mfrm_aic_gate : dict or None  for 'cp-full-rcl', the composite LR test behind p
-            (statistic, the Satterthwaite approximation's scale and df for reference, tested directions,
-            tail probability); None otherwise
-        model_comparison_mfrm_aic_p : float  relative likelihood p-value vs baseline
-        model_comparison_mfrm_aic_preferred : str  preferred model name
-        model_comparison_mfrm_aic_summary : pd.DataFrame  ranked comparison table (ΔAIC is vs baseline)
+        Attributes set (AIC, BIC)
+        -------------------------
+        model_comparison_mfrm_info : dict  the route ('cml', 'composite' or 'bootstrap'), the estimation, and the
+            tolerances used (delta, delta_units, stretch_delta, median_width; None where there is no close-fit test)
+        model_comparison_mfrm_aic / _bic : dict  {model: criterion}
+        model_comparison_mfrm_aic_preferred / _bic_preferred : str  the chosen model
+        model_comparison_mfrm_aic_summary / _bic_summary : pd.DataFrame  every candidate, ranked; ΔAIC (ΔBIC) is
+            relative to the candidate with the fewest free parameters
+        model_comparison_mfrm_aic_steps / _bic_steps : pd.DataFrame  each step of the ladder taken: the criterion's
+            difference (smaller minus larger), for AIC with aic_relative_likelihood the relative likelihood (and,
+            composite, the tail probability behind it), with tolerances 'Departure' and 'p-value (close fit)', and
+            'Kept'
 
-        Attributes set (BIC)
-        --------------------
-        model_comparison_mfrm_bic : dict  {model: BIC value}
-        model_comparison_mfrm_bic_preferred : str
-        model_comparison_mfrm_bic_summary : pd.DataFrame
+        Attributes set (sampling)
+        -------------------------
+        model_comparison_mfrm_sampling : dict or None  n, n_subsamples, the seed, the decision ('subsamples' or
+            'full data'), and each subsample's choice (AIC, BIC: 'choices', with 'shares' per model) or p-values
+            ('LR': 'p', with 'share_rejecting' per pair); subsamples whose fits failed are counted in 'failed'.
+            The AIC (BIC) summary gains 'Subsample share', the LR summary 'Share rejecting'; None without sampling.
 
         Attributes set (LR)
         -------------------
@@ -14677,17 +15501,38 @@ class MFRM(Rasch):
             'cp-full-rcl' also the Satterthwaite scale and df, for the bootstrap the statistic and the
             resamples used in place of LR and df
         model_comparison_mfrm_lr_summary : pd.DataFrame  Effect and Preferred columns
-            reflect min_effect (see above); Preferred is per-pair, not an
-            overall selected model.
+            reflect min_effect (see above); with tolerances also 'Departure'
+            and 'p-value (close fit)', which then decides Preferred.
+            Preferred is per-pair, not an overall selected model.
         """
-        models = self._candidate_models(candidate_models, models, "model_selection")
+        aic_relative_likelihood = self._resolve_aic_sig_test(aic_relative_likelihood, aic_sig_test)
+        models = self._candidate_models(candidate_models, models, "model_selection", excluded_models,
+                                        allowed=self._MODELS + ("mixed",))
         if test not in (None, "LR", "AIC", "BIC"):
             raise ValueError("test must be 'LR', 'AIC', 'BIC' or None")
         self._warn_selection_deprecated(
-            [n for n, v in (("sampling", sampling), ("likelihood", likelihood), ("warm_corr", warm_corr),
+            [n for n, v in (("likelihood", likelihood), ("warm_corr", warm_corr),
                             ("tolerance", tolerance), ("max_iters", max_iters),
                             ("ext_score_adjustment", ext_score_adjustment)) if v is not None]
         )
+        if isinstance(sampling, str) and sampling == "auto":
+            sampling = None  # v1.4.0's default: subsampled only under the joint likelihood, which is no longer used
+        if sampling is not None:
+            if isinstance(sampling, str):
+                if sampling != "dynamic":
+                    raise ValueError("sampling must be None, 'dynamic' or a whole number of persons.")
+            elif isinstance(sampling, bool) or int(sampling) != sampling or sampling < 2:
+                raise ValueError("sampling must be None, 'dynamic' or a whole number of persons (at least 2).")
+            else:
+                sampling = int(sampling)
+            if (delta is not None and delta > 0) or (stretch_delta is not None and stretch_delta > 0):
+                raise ValueError("model_selection(): delta and stretch_delta (the close-fit test) cannot be combined "
+                                 "with sampling; use one or the other.")
+            delta = 0.0 if delta is None else delta
+            stretch_delta = 0.0 if stretch_delta is None else stretch_delta
+        if isinstance(n_subsamples, bool) or int(n_subsamples) != n_subsamples or n_subsamples < 1:
+            raise ValueError("n_subsamples must be a whole number of at least 1.")
+        self.model_comparison_mfrm_sampling = None
 
         if models is None:
             active_models = list(self._MODELS)
@@ -14745,24 +15590,58 @@ class MFRM(Rasch):
             matrix_power=matrix_power,
             log_lik_tol=log_lik_tol,
         )
-        fitted = [mod for mod in active_models if getattr(self, f"estimation_{mod}", None) is not None]
-        ests = {mod: getattr(self, f"estimation_{mod}", None) for mod in fitted}
-        if len(set(ests.values())) > 1:
+        explicit = estimation is not None
+        est = estimation if explicit else getattr(self, "estimation", "cp-full-rcl")
+        if est not in ("cp-full-rcl", "cpat-rcl", "pair-cpat", "cml"):
+            raise ValueError(f"estimation must be 'cp-full-rcl', 'cpat-rcl', 'pair-cpat', 'cml' or None, got {est!r}.")
+        if "mixed" in active_models and est == "pair-cpat":
             raise ValueError(
-                "model_selection() compares candidates fitted with the same estimation; these were fitted with "
-                + ", ".join(f"{mod}: {e!r}" for mod, e in ests.items())
-                + ". Recalibrate them with one estimation (calibrate(model=..., estimation=...))."
+                "model_selection(): 'mixed' is a candidate only with estimation 'cp-full-rcl', 'cpat-rcl' or 'cml'."
             )
-        est = next(iter(ests.values()), None)
+        ridges = {k: v for k, v in dict(global_ridge=global_ridge, item_ridge=item_ridge,
+                                         threshold_ridge=threshold_ridge, interaction_ridge=interaction_ridge,
+                                         stretch_ridge=stretch_ridge).items() if v is not None}
+        if ridges and est == "pair-cpat":
+            raise ValueError(
+                f"model_selection({', '.join(ridges)}=...) needs estimation='cp-full-rcl', 'cpat-rcl' or 'cml'."
+            )
+        cal_kw.update(ridges)
+        # candidates calibrated with another estimation are recalibrated with est
+        refit = [
+            mod for mod in active_models
+            if getattr(self, f"estimation_{mod}", None) not in (None, est)
+        ]
+        if refit and not explicit:
+            one = len(refit) == 1
+            warnings.warn(
+                f"model_selection() compares every candidate under one estimation, here {est!r} (the latest "
+                f"calibration's). {', '.join(repr(m) for m in refit)} {'was' if one else 'were'} calibrated with "
+                f"another estimation and {'is' if one else 'are'} recalibrated with {est!r}, replacing the earlier "
+                f"{'fit' if one else 'fits'}. Pass estimation= to choose the estimation.",
+                UserWarning,
+                stacklevel=2,
+            )
         for mod in _progress.track(
             active_models,
             "Model selection: candidate fits",
             unit="models",
             alternative="Calibrating fewer candidate models (candidate_models=) is faster.",
         ):
-            if mod not in fitted:
+            if getattr(self, f"estimation_{mod}", None) == est and not ridges:
+                continue
+            if mod == "mixed":
+                self.calibrate(
+                    model="mixed",
+                    rater_models=self.rater_models,
+                    anchors=(
+                        self.anchor_set_mixed if getattr(self, "anchor_set_mixed", None) is not None
+                        else self.anchors_mixed
+                    ),
+                    estimation=est,
+                    **cal_kw,
+                )
+            else:
                 self.calibrate(model=mod, estimation=est, **cal_kw)
-                est = getattr(self, f"estimation_{mod}")
 
         # Non-extreme persons (aggregate total score across all raters): BIC's n
         total_scores = self.responses.groupby(level=1).sum().sum(axis=1)
@@ -14788,6 +15667,10 @@ class MFRM(Rasch):
             prep = _esf.prepare(Xv, [int(m)] * Xv.shape[1])
             ll = {mod: _esf.cond_loglik(Xv, self._virtual_items(mod)[1], prepared=prep)[0] for mod in active_models}
             pen = dict(k_model)
+            # the close-fit test's pieces (not under unused_categories='null')
+            pieces = {mod: self._cml_pieces(mod) for mod in active_models if mod != "mixed"}
+            if any(p is None for p in pieces.values()):
+                pieces = None
         elif route == "composite":
             from raschpy import _selection
 
@@ -14799,7 +15682,7 @@ class MFRM(Rasch):
                 )
             D, t, u = pieces[active_models[0]]["Dtu"]
             ll = {mod: _selection._ll(D, t, u, p["b"]) for mod, p in pieces.items()}
-            pen = {mod: _selection.penalty(p["H"], p["J"]) for mod, p in pieces.items()}
+            pen = {mod: _selection.penalty(p["H"], p["J_raw"]) for mod, p in pieces.items()}  # AIC: uncorrected
             if self._rcl_fits[active_models[0]]["split"]:
                 from raschpy import _rcl
 
@@ -14818,80 +15701,151 @@ class MFRM(Rasch):
         else:
             ll = pen = None
 
-        if test == "AIC":
-            aic = {mod: 2 * pen[mod] - 2 * ll[mod] for mod in active_models}
-            best_mod = min(aic, key=aic.__getitem__)
-            self.model_comparison_mfrm_aic = aic
+        # tolerances ('cp-full-rcl' / 'cpat-rcl' / 'cml'): the departure a step must exceed, in logits (delta, scaled by the
+        # median category width of the simplest fit's shared thresholds with delta_units='width') and as a
+        # proportion of the stretch factors (stretch_delta)
+        if delta_units not in ("width", "logits"):
+            raise ValueError(f"delta_units must be 'width' or 'logits', got {delta_units!r}.")
+        for nm, v in (("delta", delta), ("stretch_delta", stretch_delta)):
+            if v is not None and not (np.isfinite(v) and v >= 0):
+                raise ValueError(f"{nm} must be a number >= 0 or None, got {v!r}.")
+        tol_d = 0.2 if delta is None else float(delta)
+        tol_s = 0.2 if stretch_delta is None else float(stretch_delta)
+        unit = np.nan
+        close_route = route == "composite" or (route == "cml" and pieces is not None)
+        if not close_route:
+            given = [nm for nm, v in (("delta", delta), ("stretch_delta", stretch_delta)) if v]
+            if given and route == "cml":
+                raise ValueError(
+                    f"model_selection({', '.join(given)}=...): with estimation='cml' and unused_categories='null' "
+                    "there is no close-fit test. Recalibrate without unused_categories='null', or pass "
+                    "estimation='cp-full-rcl'.")
+            if given:
+                raise ValueError(
+                    f"model_selection({', '.join(given)}=...): tolerances need estimation='cp-full-rcl', "
+                    "'cpat-rcl' or 'cml'; the bootstrap test of 'pair-cpat' has no close-fit version.")
+            tol_d = tol_s = 0.0
+        else:
+            unit = 1.0
+            if delta_units == "width" and tol_d > 0:
+                simplest = next((mod for mod in ("global", "items", "thresholds", "bivector", "matrix")
+                                 if mod in pieces), None)
+                why = None
+                if int(m) < 2:
+                    why = "the maximum score is 1, so there is no category width"
+                elif simplest is None:
+                    why = "no candidate has shared thresholds to take the width from"
+                else:
+                    widths = np.diff(pieces[simplest]["b"].reshape(R, n_items, int(m)).mean(axis=(0, 1)))
+                    if (widths <= 0).any():
+                        why = (f"the thresholds are disordered (category widths {np.round(widths, 2).tolist()}), so "
+                               "there is no category width")
+                    else:
+                        unit = float(np.median(widths))
+                if why is not None:
+                    if delta is not None:
+                        raise ValueError(f"model_selection(delta_units='width'): {why} to scale delta by; use "
+                                         "delta_units='logits'.")
+                    warnings.warn(
+                        f"model_selection(): the default tolerance delta={tol_d:g} is in median category widths, and "
+                        f"{why}; steps adding item or threshold effects therefore have no tolerance. To use one, set delta "
+                        "in logits with delta_units='logits'. The stretch tolerance (stretch_delta) still applies.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+                    tol_d, unit = 0.0, np.nan
+        tol_on = close_route and (tol_d > 0 or tol_s > 0)
+        self.model_comparison_mfrm_info.update(
+            delta=tol_d if close_route else None,
+            delta_units=delta_units if close_route else None,
+            stretch_delta=tol_s if close_route else None,
+            median_width=unit if close_route and delta_units == "width" else None,
+        )
+        close_memo = {}
 
-            summary_rows = {
-                mod: (
-                    {"LL": ll[mod], "k": k_model[mod], "AIC": aic[mod]}
-                    if route == "cml"
-                    else {"CL": ll[mod], "k": k_model[mod], "Penalty": pen[mod], "AIC": aic[mod]}
-                )
-                for mod in active_models
-            }
-            summary_df = (
-                pd.DataFrame(summary_rows).T.sort_values("AIC").rename_axis("Model")
-            )
+        def close(small, large):
+            if (small, large) not in close_memo:
+                close_memo[small, large] = self._panel_close_fit(small, large, pieces, unit, tol_d, tol_s)
+            return close_memo[small, large]
 
-            active_set = set(active_models)
-            if aic_sig_test:
-                baseline = min(active_models, key=lambda mod: (k_model[mod], aic[mod]))
-                delta = aic[baseline] - aic[best_mod]
-                gate = None
-                if route == "composite" and best_mod != baseline and self._nested(baseline, best_mod):
-                    # the composite LR test of the baseline within the best model, at the tail probability
-                    # AIC's rule has with a likelihood: p is the relative likelihood that a likelihood ratio
-                    # with the same chi-square(df) tail probability would give
-                    r = self._composite_pair(baseline, best_mod, pieces)
-                    tail = r["p"]
-                    lr_equiv = float(chi2.isf(tail, r["df"])) if tail > 0 else np.inf
-                    delta = lr_equiv - 2 * r["df"]
-                    gate = {"composite LR": r["statistic"], "Scale": r["scale"],
-                            "df (Satterthwaite)": r["df_satterthwaite"], "df": r["df"], "tail p": float(tail)}
-                elif route == "composite" and best_mod != baseline:
-                    # not nested: the difference on the scale of a likelihood, dividing by the mean chi-square
-                    # weight of the directions the best model adds (its penalty over the baseline's per
-                    # extra free parameter)
-                    c = (pen[best_mod] - pen[baseline]) / max(k_model[best_mod] - k_model[baseline], 1)
-                    delta = delta / c if c > 0 else delta
-                aic_p = float(np.exp(-abs(delta) / 2))
-                preferred = best_mod if (delta > 0 and aic_p <= alpha) else baseline
-                preferred = self._walk_back_effect(preferred, active_set, min_effect)
-                self.model_comparison_mfrm_aic_baseline = baseline
-                self.model_comparison_mfrm_aic_gate = gate
-                self.model_comparison_mfrm_aic_p = aic_p
-                self.model_comparison_mfrm_aic_preferred = preferred
-                summary_df["ΔAIC"] = summary_df["AIC"] - aic[baseline]
-                self.model_comparison_mfrm_aic_summary = summary_df
+        if test in ("AIC", "BIC"):
+            if test == "AIC":
+                crit = {mod: 2 * pen[mod] - 2 * ll[mod] for mod in active_models}
             else:
-                preferred = self._walk_back_effect(best_mod, active_set, min_effect)
+                crit = {mod: pen[mod] * np.log(n_persons) - 2 * ll[mod] for mod in active_models}
+            active_set = set(active_models)
+            steps = {}
+
+            def decide(small, large):
+                """One step: the criterion prefers large (AIC with aic_relative_likelihood: small's relative
+                likelihood at most alpha) and, with tolerances, the close-fit test rejects."""
+                row = {f"Δ{test}": crit[small] - crit[large]}
+                d = crit[small] - crit[large]
+                if test == "AIC" and aic_relative_likelihood:
+                    if route == "composite" and self._nested(small, large):
+                        # the composite LR test of small within large at the tail probability AIC's rule has with
+                        # a likelihood: the relative likelihood a likelihood ratio with the same chi-square(df) tail
+                        # probability would give
+                        r = self._composite_pair(small, large, pieces)
+                        tail = r["p"]
+                        d = (float(chi2.isf(tail, r["df"])) if tail > 0 else np.inf) - 2 * r["df"]
+                        row["tail p"], row["df"] = float(tail), int(r["df"])
+                    elif route == "composite":
+                        c = (pen[large] - pen[small]) / max(k_model[large] - k_model[small], 1)
+                        d = d / c if c > 0 else d
+                    rel = float(np.exp(-max(d, 0.0) / 2))
+                    row["Relative likelihood"] = rel
+                    ok = bool(d > 0 and rel <= alpha)
+                else:
+                    ok = bool(d > 0)
+                if tol_on and large != "mixed" and self._nested(small, large):
+                    cf = close(small, large)
+                    row["Departure"], row["p-value (close fit)"] = cf["departure"], cf["p"]
+                    ok = ok and cf["p"] <= alpha
+                row["Kept"] = ok
+                steps[f"{small} > {large}"] = row
+                return ok
+
+            def kept(small, large):
+                if large is None or large not in active_set:
+                    return False
+                if small is None or small not in active_set:
+                    return True
+                key = f"{small} > {large}"
+                return steps[key]["Kept"] if key in steps else decide(small, large)
+
+            ladder_models = [mod for mod in active_models if mod != "mixed"]
+            preferred = self._panel_ladder(kept) if ladder_models else None
+            if preferred not in active_set:
+                # the ladder ends on a form not offered (candidate_models without the forms it passes through):
+                # the simplest candidate
+                preferred = min(ladder_models, key=lambda mod: (k_model[mod], crit[mod])) if ladder_models else None
+            if "mixed" in active_set:
+                preferred = "mixed" if preferred is None or decide(preferred, "mixed") else preferred
+            preferred = self._walk_back_effect(preferred, active_set, min_effect)
+            baseline = min(active_models, key=lambda mod: (k_model[mod], crit[mod]))
+            summary_df = pd.DataFrame(
+                {
+                    mod: (
+                        {"LL": ll[mod], "k": k_model[mod], test: crit[mod]}
+                        if route == "cml"
+                        else {"CL": ll[mod], "k": k_model[mod], "Penalty": pen[mod], test: crit[mod]}
+                    )
+                    for mod in active_models
+                }
+            ).T.sort_values(test).rename_axis("Model")
+            summary_df[f"Δ{test}"] = summary_df[test] - crit[baseline]
+            steps_df = pd.DataFrame(steps).T.rename_axis("Step")
+            if test == "AIC":
+                self.model_comparison_mfrm_aic = crit
                 self.model_comparison_mfrm_aic_preferred = preferred
                 self.model_comparison_mfrm_aic_summary = summary_df
-
-        elif test == "BIC":
-            bic = {
-                mod: pen[mod] * np.log(n_persons) - 2 * ll[mod] for mod in active_models
-            }
-            best_mod = min(bic, key=bic.__getitem__)
-            preferred = self._walk_back_effect(best_mod, set(active_models), min_effect)
-            self.model_comparison_mfrm_bic = bic
-            self.model_comparison_mfrm_bic_preferred = preferred
-            self.model_comparison_mfrm_bic_summary = (
-                pd.DataFrame(
-                    {
-                        mod: (
-                            {"LL": ll[mod], "k": k_model[mod], "BIC": bic[mod]}
-                            if route == "cml"
-                            else {"CL": ll[mod], "k": k_model[mod], "Penalty": pen[mod], "BIC": bic[mod]}
-                        )
-                        for mod in active_models
-                    }
-                )
-                .T.sort_values("BIC")
-                .rename_axis("Model")
-            )
+                self.model_comparison_mfrm_aic_steps = steps_df
+            else:
+                self.model_comparison_mfrm_bic = crit
+                self.model_comparison_mfrm_bic_preferred = preferred
+                self.model_comparison_mfrm_bic_summary = summary_df
+                self.model_comparison_mfrm_bic_steps = steps_df
 
         elif test == "LR":
             # Nested pairs: global < items, global < thresholds, global < bivector,
@@ -14958,8 +15912,13 @@ class MFRM(Rasch):
                     T, p_b, used = boot[(null_mod, alt_mod)]
                     row = {"Statistic": T, "Resamples": used, "p-value": p_b}
                 effect = self._model_effect(null_mod, alt_mod)
+                p_decide = row["p-value"]
+                if tol_on:
+                    cf = close(null_mod, alt_mod)
+                    row["Departure"], row["p-value (close fit)"] = cf["departure"], cf["p"]
+                    p_decide = cf["p"]
                 preferred = (
-                    alt_mod if (row["p-value"] <= alpha and effect >= min_effect) else null_mod
+                    alt_mod if (p_decide <= alpha and effect >= min_effect) else null_mod
                 )
                 lr_results[f"{null_mod} vs {alt_mod}"] = {**row, "Effect": effect, "Preferred": preferred}
 
@@ -14967,6 +15926,96 @@ class MFRM(Rasch):
             self.model_comparison_mfrm_lr_summary = pd.DataFrame(
                 lr_results
             ).T.rename_axis("Comparison")
+
+        if sampling is not None:
+            n_sub = (min(20 * R * (n_items - 1) * max(int(m) - 1, 1), 1500) if sampling == "dynamic"
+                     else sampling)
+            self._subsample_selection(n_sub, int(n_subsamples), test, active_models, est, alpha,
+                                      aic_relative_likelihood, min_effect, no_of_samples, seed, k_model,
+                                      dynamic=sampling == "dynamic")
+
+    def _subsample_selection(self, n, n_subsamples, test, candidates, estimation, alpha, aic_relative_likelihood,
+                             min_effect, no_of_samples, seed, k_model, dynamic=False):
+        """
+        model_selection(sampling=n or 'dynamic'): every candidate refitted on n persons drawn at random (each with
+        all their ratings; the candidates' calibration settings), and the comparison (test, no tolerance) made on
+        n_subsamples such subsamples. 'LR': a pair's larger model is preferred if more than half the subsamples
+        reject the smaller (and min_effect holds on all the data); AIC, BIC: the model chosen most often (ties to
+        fewer free parameters), walked back by min_effect on all the data. Subsamples whose fits fail are left out
+        (counted, and named in one warning). Sets model_comparison_mfrm_sampling and updates the decision.
+        """
+        persons = self.responses.index.get_level_values(1)
+        ids = pd.unique(persons)
+        N = len(ids)
+        rec = dict(n=int(n), n_subsamples=n_subsamples, test=test, dynamic=dynamic)
+        if n >= N:
+            rec.update(decision="full data (n is at least the number of persons)")
+            self.model_comparison_mfrm_sampling = rec
+            return
+        if seed is None:
+            seed = int(np.random.default_rng().integers(2**31 - 1))
+        rng = np.random.default_rng(seed)
+        named = self.facet_label != "facet element"
+        out, failed = [], []
+        for _ in _progress.track(range(n_subsamples), "Model selection: subsamples", unit="subsamples"):
+            pick = ids[np.sort(rng.choice(N, int(n), replace=False))]
+            sub_seed = int(rng.integers(2**31 - 1))
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")  # the full data have already been reported on
+                    sub = MFRM(self.responses[persons.isin(pick)], self.max_score, validate=False,
+                               facet=self.facet if named else None, facet_plural=self.facets if named else None)
+                    sub._se_correction_opt = getattr(self, "_se_correction_opt", "kauermann-carroll")
+                    for mod in candidates:
+                        sub.calibrate(model=mod, **self._calibrate_args_by_model[mod])
+                    sub.model_selection(test=test, candidate_models=list(candidates), estimation=estimation,
+                                        aic_relative_likelihood=aic_relative_likelihood, alpha=alpha, min_effect=0,
+                                        no_of_samples=no_of_samples, seed=sub_seed, delta=0, stretch_delta=0,
+                                        se_correction=sub._se_correction_opt)
+            except Exception as e:  # noqa: BLE001 -- a subsample can lose a facet element, item or category
+                failed.append(repr(e)[:200])
+                continue
+            if test == "LR":
+                out.append({k: float(v["p-value"]) for k, v in sub.model_comparison_mfrm_lr.items()})
+            else:
+                out.append(getattr(sub, f"model_comparison_mfrm_{test.lower()}_preferred"))
+        if not out:
+            raise ValueError(
+                f"model_selection(sampling=...): the fits failed on every subsample of {n} persons (first: "
+                f"{failed[0]}). Use a larger sample."
+            )
+        if failed:
+            warnings.warn(
+                f"model_selection(sampling=...): {len(failed)} of {n_subsamples} subsamples of {n} persons could not "
+                f"be fitted and are left out (first: {failed[0]}). A larger sample avoids this.",
+                UserWarning,
+                stacklevel=3,
+            )
+        rec.update(decision="subsamples", seed=seed, failed=len(failed))
+        if test == "LR":
+            res = self.model_comparison_mfrm_lr
+            rec["p"], rec["share_rejecting"] = {}, {}
+            for key, row in res.items():
+                small, large = key.split(" vs ")
+                ps = [o[key] for o in out if key in o]
+                share = float(np.mean(np.asarray(ps) <= alpha)) if ps else np.nan
+                rec["p"][key], rec["share_rejecting"][key] = ps, share
+                pref = large if (share > 0.5 and row["Effect"] >= min_effect) else small
+                res[key] = {**{k: v for k, v in row.items() if k != "Preferred"}, "Share rejecting": share,
+                            "Preferred": pref}
+            self.model_comparison_mfrm_lr_summary = pd.DataFrame(res).T.rename_axis("Comparison")
+        else:
+            lab = test.lower()
+            counts = pd.Series(out).value_counts()
+            top = counts[counts == counts.max()].index
+            choice = min(top, key=lambda mod: k_model.get(mod, np.inf))
+            choice = self._walk_back_effect(choice, set(candidates), min_effect)
+            shares = (counts / len(out)).to_dict()
+            rec.update(choices=list(out), shares=shares)
+            setattr(self, f"model_comparison_mfrm_{lab}_preferred", choice)
+            summ = getattr(self, f"model_comparison_mfrm_{lab}_summary")
+            summ["Subsample share"] = [shares.get(mod, 0.0) for mod in summ.index]
+        self.model_comparison_mfrm_sampling = rec
 
     def _rater_ll_from_sev(self, sev_rik, persons, responses_r, anchor=False):
         """
@@ -15011,12 +16060,13 @@ class MFRM(Rasch):
         return float(np.nansum(np.log(prob_obs)))
 
     @_progress.with_progress
+    @_se_correction_arg
     def per_rater_model_selection(
         self,
         anchors=None,
         test="AIC",
         candidate_models=None,
-        aic_sig_test=True,
+        aic_relative_likelihood=True,
         sampling="dynamic",
         alpha=0.05,
         min_effect=0,
@@ -15035,15 +16085,50 @@ class MFRM(Rasch):
         scheme="iterate",
         estimation=None,
         max_passes=10,
+        force_global_anchors=False,
+        delta=None,
+        delta_units="width",
+        stretch_delta=None,
+        delta_measure=None,
+        delta_max=None,
+        aic_sig_test=None,
+        global_ridge=None,
+        item_ridge=None,
+        threshold_ridge=None,
+        interaction_ridge=None,
+        stretch_ridge=None,
+        excluded_models=None,
+        se_correction=None,
     ):
         """
         Assign the simplest adequate facet element (e.g. rater) parameterisation to each facet element.
 
         With estimation='cp-full-rcl' (the default), 'cpat-rcl' or 'cml': each candidate representation of a facet
         element is a joint fit (calibrate(model='mixed')) in the anchors' frame, with the other facet elements held at
-        their current representations, compared by AIC or BIC (test='LR' is for 'pair-cpat' only); then the joint
-        refit with the chosen representations is stored (see scheme). The rest of this description applies to
-        estimation='pair-cpat'.
+        their current representations, compared by AIC, BIC or likelihood ratio tests (test='LR'); then the joint
+        refit with the chosen representations is stored (see scheme).
+
+        test='LR' with these estimations builds each facet element's representation up from 'global'. Each side
+        (items, thresholds) is at one of three levels: nothing, a stretch (pseudo_halo's item stretch, centrality's
+        threshold stretch) or a full set of effects (items, thresholds).
+          1. Each side with the other at nothing. A side is above nothing only if its stretch or its full set beats
+             nothing (global < pseudo_halo or global < items; global < centrality or global < thresholds); it is
+             then the full set if the full set beats the stretch, otherwise the stretch.
+          2. If both sides are at nothing, the two stretches together are tested (global < bistretch). If they beat
+             'global', each side is re-examined with the other side's stretch in the model, and if neither stretch is
+             needed given the other, the facet element takes bistretch (neither stretch beat 'global' alone).
+          3. Each side is re-examined in the same way with the other side at its current level, until neither
+             changes. A full set on one side beside a stretch on the other is fitted for these tests only and is
+             reported, fitted and used from then on as 'bivector'.
+          4. Item-by-threshold interactions: matrix against bivector; matrix if rejected.
+        An anchor that alone among the anchors lacks a part (item, threshold or interaction) defines that part's
+        reference, so its test of the part compares a model with itself. Whenever that happens it is tested against
+        the anchors' average instead, and the table's Note says so. Each test is the close-fit likelihood ratio test
+        described under delta and stretch_delta. test='AIC' and 'BIC' climb the same ladder and treat such an anchor
+        the same way: the criterion and the tolerance test of the part are both against the anchors' average.
+
+        The rest of this description applies to estimation='pair-cpat', whose LR selection works top-down because
+        its restricted representations are derived from the matrix fit, not fitted directly.
 
         Calibrates the matrix model once (full data), derives all restricted
         parameterisations as marginal means of each facet element's matrix parameters,
@@ -15074,13 +16159,14 @@ class MFRM(Rasch):
               thresholds winner  → thresholds vs centrality (df = m-2)
               items winner       → items vs pseudo_halo     (df = I-2)
               global winner      → global vs centrality AND global vs
-                                    pseudo_halo (df = 1 each); if either/
-                                    both beat global, that winner is
-                                    assigned, or (if both win) resolved via
-                                    a further global vs bistretch test
-                                    (df = 2), falling back to whichever
-                                    single axis had the stronger evidence
-                                    if bistretch itself isn't confirmed.
+                                    pseudo_halo (df = 1 each); if one beats
+                                    global, it is assigned; if both do,
+                                    global is ruled out and each is tested
+                                    within bistretch (df = 1 each):
+                                    bistretch if both are rejected, the one
+                                    not rejected if only one is, and if
+                                    neither is, whichever beat global with
+                                    the smaller p.
           A more complex model at each extra rung is kept only if it's both
           significant (p <= alpha) and clears min_effect.
 
@@ -15109,23 +16195,38 @@ class MFRM(Rasch):
             induce apparent non-uniformity in others. All facet elements (anchor and
             non-anchor) are tested; results are stored as
             anchor_facet_effects_mixed and anchor_rater_models.
-            With estimation='cp-full-rcl', 'cpat-rcl' or 'cml' the anchors define
-            the frame and are held on 'global', not selected: an anchor's
-            effects can only be read against the other anchors, which
-            check_anchor_homogeneity() tests. anchors may also be an anchor set
-            from check_anchor_homogeneity() (check.anchors), with cells cut.
+            With estimation='cp-full-rcl', 'cpat-rcl' or 'cml' the anchors are
+            selected like the other facet elements (unless force_global_anchors),
+            starting on 'global': in each part (item, threshold, interaction) the
+            anchors whose representation lacks it fix the instrument there, and
+            an anchor with the part is free in it, entering the frame through
+            its global effect only. anchors may also be an anchor set from
+            check_anchor_homogeneity() (check.anchors), with cells cut; an
+            anchor with cells cut is not selected: it has a free shift at each
+            cut cell and is reported under the representation its cuts imply
+            (threshold cuts only 'thresholds', item cuts only 'items', both
+            'bivector', any item-threshold cell 'matrix').
         test : {'AIC', 'BIC', 'LR'}, default 'AIC'
-            Model selection criterion. AIC and BIC pick the minimum across all
-            eight models directly. LR uses the top-down ladder (matrix→bivector,
-            then fork to items/thresholds/global) plus the extra targeted
-            stretch test described above, with significance level alpha.
+            Model selection criterion. AIC and BIC: with 'cp-full-rcl',
+            'cpat-rcl' or 'cml', built up from 'global' on LR's ladder
+            (above), each step keeping the larger representation only if the
+            criterion prefers it (AIC with aic_relative_likelihood: the
+            smaller's relative likelihood at most alpha) and, with tolerances,
+            the close-fit test rejects as with test='LR' (see delta); with
+            'pair-cpat', the minimum across all eight. LR, with significance
+            level alpha: built up
+            from 'global' with 'cp-full-rcl', 'cpat-rcl' or 'cml'; top-down
+            (matrix→bivector, then fork to items/thresholds/global, plus the
+            extra targeted stretch test) with 'pair-cpat'. Both are described
+            above.
         candidate_models : list/tuple of str, or None, default None
             Restrict the candidate models each facet element can be assigned instead
-            of the full family of eight. For AIC/BIC this is a direct filter
-            -- the minimum is taken only over the given models (any non-empty
-            subset works; aic_sig_test=True tests the winner against
-            whichever active model has the fewest free parameters, same as
-            model_selection() -- see aic_sig_test below). For LR, {'global', 'items', 'thresholds',
+            of the full family of eight. For AIC/BIC with 'pair-cpat' this is
+            a direct filter -- the minimum is taken only over the given models
+            (any non-empty subset works; aic_relative_likelihood=True tests the
+            winner against whichever active model has the fewest free
+            parameters -- see aic_relative_likelihood below); with the other
+            estimations the ladder skips steps to models not given. For LR, {'global', 'items', 'thresholds',
             'bivector'} must all be included -- they form the mandatory
             backbone the fork can't work without -- while 'matrix' and each
             of 'centrality'/'pseudo_halo'/'bistretch' are independently
@@ -15135,13 +16236,48 @@ class MFRM(Rasch):
             test, so the ladder stops one rung earlier along that branch.
             None (default) uses all eight models, exactly as before this
             parameter existed.
-        aic_sig_test : bool, default True
-            When test='AIC', prefer a model more complex than the baseline
+        excluded_models : list/tuple of str, or None, default None
+            The models to leave out of the full set of eight, as an
+            alternative to listing the rest in candidate_models (e.g.
+            excluded_models=['matrix']). Aliases ('threshold_stretch',
+            'item_stretch') are accepted. Passing both is an error unless
+            they give the same set of models.
+        aic_relative_likelihood : bool, default True
+            When test='AIC', each step of the ladder ('cp-full-rcl', 'cpat-rcl',
+            'cml') keeps the larger representation only if ΔAIC > 0 and the
+            smaller's relative likelihood, exp(-ΔAIC/2), is at or below alpha
+            (with 'cp-full-rcl' and 'cpat-rcl', composite likelihoods, ΔAIC is first divided by the larger's
+            effective number of parameters minus the smaller's, divided by the difference in free parameters: the
+            mean weight of the chi-square variables the composite likelihood ratio test is referred to). With
+            'pair-cpat':
+            prefer a model more complex than the baseline
             (whichever active model has the fewest free parameters, ties
             broken by lowest AIC -- 'global' whenever it is active, since it
             always has the fewest parameters of all eight models) only if
-            ΔAIC > 0 (vs baseline) AND p = exp(-ΔAIC/2) <= alpha. Prevents
-            spurious complexity at large n where ΔAIC differences are small.
+            ΔAIC > 0 (vs baseline) and the baseline's relative likelihood,
+            exp(-ΔAIC/2) (1 when the baseline has the lowest AIC), is at or
+            below alpha. If the lowest-AIC candidate fails, the candidate with
+            the next lowest AIC is checked against the baseline, and so on; the
+            baseline is kept only if none passes (with a likelihood, 'cml' or
+            'pair-cpat', only the lowest-AIC candidate can pass, since it has
+            the lowest relative likelihood of the baseline; with 'cp-full-rcl'
+            each candidate's ΔAIC is divided by its effective number of
+            parameters minus the baseline's, divided by the difference in free
+            parameters, so a simpler candidate can
+            pass where the lowest-AIC one fails). This is a likelihood ratio
+            test at level P(chi-square(d) > 2d + 2 ln(1/alpha)), d the
+            difference in free parameters: a more conservative test than
+            test='LR' (at alpha = 0.05, 0.0063 at d = 6 and 0.00095 at
+            d = 19). The table reports the relative likelihood and the level
+            ('Relative likelihood' and 'Test level'; with estimation=
+            'pair-cpat' and anchors, 'relative_likelihood_vs_baseline' and
+            'test_level').
+            The stricter level suits a likelihood calculated unconditionally,
+            whose likelihood ratio is inflated; with a conditional or
+            composite likelihood it favours the simpler model.
+        aic_sig_test : bool or None, default None
+            Deprecated name of aic_relative_likelihood (FutureWarning); if
+            given, its value is used.
         sampling : 'dynamic', int, or None, default 'dynamic'
             Per-facet-element subsampling for LL evaluation. 'dynamic' uses
             T = min(20*(I-1)*(m-1), 1500); an integer fixes T directly;
@@ -15156,10 +16292,15 @@ class MFRM(Rasch):
             seed=0 restores that exact prior behaviour.
         alpha : float, default 0.05
             Significance level. For LR: threshold for accepting a restriction.
-            For AIC with aic_sig_test=True: threshold for the relative likelihood.
+            For AIC with aic_relative_likelihood=True: threshold for the relative likelihood
+            (the test's level is lower; see aic_relative_likelihood).
         min_effect : float, default 0
             Minimum effect size (logits) required to retain a more complex model
-            at each step. The effect is the max absolute difference between the
+            at each step. It is the size guard where there is no close-fit test,
+            estimation='pair-cpat'; with 'cp-full-rcl', 'cpat-rcl' or 'cml', delta, delta_max and stretch_delta do
+            the same job with a test and are preferred (min_effect compares one estimate with the cut-off, so
+            effects near it are kept or dropped by sampling error, and it is in logits, not category widths).
+            The effect is the max absolute difference between the
             complex and simple model's facet_effect surfaces at that rung:
               mat→biv: max|interaction terms|
               biv→items: max|threshold shape λ_r·k|
@@ -15194,6 +16335,91 @@ class MFRM(Rasch):
             None uses the object's latest estimation, or 'cp-full-rcl'.
         max_passes : int, default 10
             scheme='iterate' only: maximum number of passes.
+        force_global_anchors : bool, default False
+            Hold the anchors on 'global' instead of selecting their representations. An anchor whose departure is
+            patterned then shows it as misfit (infit/outfit) instead of as an effect, so this is for when you want
+            the anchors to define the instrument in every part. Anchors start on 'global' either way, and anchors
+            with cells cut are not selected (see anchors); pattern-free anchors of an anchor set
+            (check_anchor_homogeneity) are selected either way. Without it, a sole anchor stays on 'global'; with several,
+            a part (item, threshold or interaction) that every anchor takes is fixed by the anchors' average.
+        delta : float or None, default None
+            'cp-full-rcl', 'cpat-rcl' or 'cml' only: the tolerance of the RMS departure (delta_measure 'overall' or
+            'either'). None: 0.1 (in delta_units, so 0.1 median category widths by default), with every test. Where the instrument has no usable category width (maximum score 1, or
+            disordered thresholds), the default delta and delta_max fall back to 0 (the plain likelihood ratio tests;
+            no tolerance for item and threshold effects with AIC / BIC) with a warning; set them in logits (delta_units='logits') to test against tolerances there. Above 0 with
+            test='AIC' or 'BIC', each step of the ladder also needs the close-fit test below to reject (the
+            table's 'Kept' columns give each step's decision). In simulations (8 raters, 3 of them anchors; 6-20
+            items, maximum scores 3-8; each other rater with one item or threshold shifted, and small departures
+            everywhere), with all tolerances at their defaults, raters with no shift were given a representation
+            beyond 'global' in 8% of cases with AIC and 7% with BIC (29% and 26% with the lowest criterion
+            followed by a step-down while the estimates are within the tolerances), and a shift of 0.35-0.5 widths
+            in 89% and 86% (98% and 90%). With test='LR' (and with AIC / BIC), the
+            tolerance of the close-fit ladder. Each rung
+            keeps the larger representation only if the facet element's departure from the smaller is significantly
+            larger than delta (p <= alpha), the departure measured as the root mean square, over the item x
+            threshold combinations, of the difference between its effects under the two, each weighted by
+            1 / (sampling variance of the larger representation's estimate). The test's distribution at a
+            departure of size delta is computed from the responses such a departure would give on average. 0: the plain likelihood ratio
+            test, whose null is a weighted sum of chi-square(1) variables (Kent, 1982) for 'cp-full-rcl' and
+            'cpat-rcl', chi-square for 'cml'. With large samples the plain test keeps departures too small to
+            matter, so most facet elements end on 'matrix'. The table gives each rung's p and its bias-corrected
+            departure estimate (Delta-hat, in delta_units). Rungs that add a single stretch use stretch_delta
+            instead.
+        stretch_delta : float, dict or None, default None
+            'cp-full-rcl', 'cpat-rcl' or 'cml' only (test='LR', or AIC / BIC as under delta). None: 0.1, with every test. One number for both stretches, or
+            {'items': x, 'thresholds': y} for separate item- and threshold-stretch tolerances (a key left out is
+            0): the same proportion can mean a different size of effect on each side, since item locations
+            usually spread less than thresholds. The tolerance of the rungs whose larger
+            representation adds a single stretch factor to the smaller (centrality > global and bistretch >
+            pseudo_halo add the threshold stretch; pseudo_halo > global and bistretch > centrality add the item
+            stretch). There the departure is the change in the added stretch factor between the two fits (|factor - 1|,
+            the factor relative to the frame: the anchors, or the average facet element without them), a proportion: 0.1 means the facet element stretches or shrinks its item locations (or
+            thresholds) by up to 10%. Their Delta-hat is in the same proportion. 0: the plain likelihood ratio
+            test.
+        delta_units : {'logits', 'width'}, default 'width'
+            The units of delta and Delta-hat: logits, or shares of the instrument's median category width (the
+            gaps between consecutive shared thresholds in the starting fit), so that one value means the same on
+            wide- and narrow-category instruments. With delta > 0, 'width' needs a maximum score of at least 2
+            and ordered thresholds; with delta = 0 and neither, Delta-hat is reported in logits. Also the units
+            of delta_max.
+        delta_measure : {'overall', 'largest', 'either'} or None, default None
+            'cp-full-rcl', 'cpat-rcl' or 'cml' only: how a departure is judged where a step adds a full set of item
+            (or threshold) effects. 'overall': the RMS departure against delta (inlier-sensitive: it accumulates a
+            departure spread over many items or thresholds). 'largest': the largest single deviation against delta_max
+            (outlier-sensitive): each item's (threshold's) effect is compared with the others' (their
+            information-weighted mean, or where the smaller representation has that side's stretch, their
+            weighted regression on the item locations or thresholds), divided by its standard error; the most
+            deviant is flagged and left out of the reference, and the rest are re-examined (purification), with
+            Holm's levels. test='LR': the close-fit p of |deviation| at size delta_max; the step's p is the first
+            look's smallest p times the number of items (thresholds) examined. 'either': the larger representation is
+            kept if either test rejects, each at alpha (the step's p is the smaller of the two). For a facet element
+            within both tolerances, a departure near one tolerance is well within the other (a departure cannot be
+            both spread over many items and concentrated on one), so in simulations testing both at alpha raised
+            the false rejections of raters at the tolerances by at most 0.013 over the RMS test alone. None: 'either',
+            with every test. The
+            table then also gives 'p overall', 'p largest', 'Max deviation' and 'Flagged' (the items or thresholds flagged)
+            for those steps. Steps that add a stretch (one factor), the interactions (matrix > bivector), or where
+            the reference would have no degree of freedom of its own (e.g. 3 thresholds against the threshold
+            stretch) use the RMS test at alpha.
+        delta_max : float or None, default None
+            The tolerance of the largest single deviation (delta_measure 'largest' or 'either'), in delta_units. None:
+            0.2, with every test. Keep it at about twice delta, whether the tolerances are
+            made stricter or looser: one of m items (thresholds) shifted by s gives an RMS departure of about
+            s / sqrt(m), so the RMS test alone already counts a single shift beyond about delta * sqrt(m) as beyond
+            tolerance, and the largest-deviation test adds sensitivity only where delta_max is below that (at 2:1,
+            from m = 4). A much larger ratio makes it redundant; a much smaller one flags single deviations barely
+            larger than the spread delta allows.
+        global_ridge, item_ridge, threshold_ridge, interaction_ridge, stretch_ridge : float or None, default None
+            'cp-full-rcl', 'cpat-rcl' and 'cml' only: the penalties of every candidate fit and of the joint refit,
+            as in calibrate(model='mixed'); None gives calibrate()'s defaults. The penalties pull a facet element's
+            effects towards simpler forms, most strongly for facet elements with few ratings, so they lower the
+            departures and Delta-hat for those facet elements; smaller values (0 where the fits converge) test
+            them with less of this pull.
+        se_correction : 'kauermann-carroll' or None, default None
+            'kauermann-carroll' applies the Kauermann-Carroll small-sample correction (as in std_errors()) to the
+            composite likelihood ratio and close-fit tests ('cp-full-rcl' and 'cpat-rcl'). It may help with very small
+            sample sizes, where its time cost is also small; with many persons and parameters it can take most of the
+            run time.
 
         Attributes set (anchors=None, or any anchors with 'cp-full-rcl', 'cpat-rcl' or 'cml')
         -------------------------------------------------------------------------------------
@@ -15221,8 +16447,9 @@ class MFRM(Rasch):
             from earlier anchors= calls survive later ones with different
             anchor sets. E.g. mfrm.per_rater_model_selection_runs[tuple(my_anchors_1)].table.
         """
+        aic_relative_likelihood = self._resolve_aic_sig_test(aic_relative_likelihood, aic_sig_test)
         models = self._candidate_models(
-            candidate_models, models, "per_rater_model_selection"
+            candidate_models, models, "per_rater_model_selection", excluded_models
         )
         n_items = self.no_of_items
         m = self.max_score
@@ -15249,7 +16476,7 @@ class MFRM(Rasch):
             if test == "LR" and not backbone.issubset(active_models):
                 raise ValueError(
                     f"For test='LR', candidate_models= must include the full backbone "
-                    f"{sorted(backbone)} -- the top-down fork can't work "
+                    f"{sorted(backbone)} -- the likelihood ratio ladder can't work "
                     f"without them. The other models are independently optional. "
                     f"AIC/BIC don't have this restriction."
                 )
@@ -15257,18 +16484,42 @@ class MFRM(Rasch):
             active_models, "per_rater_model_selection()"
         )
         est = estimation if estimation is not None else getattr(self, "estimation", "cp-full-rcl")
+        # tolerances left at None: the defaults with the proper fits (every test), off with 'pair-cpat'
+        proper = est in ("cml", "cp-full-rcl", "cpat-rcl")
+        tol_given = dict(delta=delta, delta_max=delta_max, stretch_delta=stretch_delta, delta_measure=delta_measure)
+        defaulted = frozenset(k for k, v in tol_given.items() if v is None) if proper else frozenset()
+        off = {"delta": 0.0, "delta_max": 0.0, "stretch_delta": 0.0, "delta_measure": "overall"}
+        tol = {k: (v if v is not None else (self._TOL_DEFAULTS[k] if proper else off[k])) for k, v in tol_given.items()}
+        delta, delta_max, stretch_delta, delta_measure = (tol["delta"], tol["delta_max"], tol["stretch_delta"],
+                                                          tol["delta_measure"])
+        ridges = dict(global_ridge=global_ridge, item_ridge=item_ridge, threshold_ridge=threshold_ridge,
+                      interaction_ridge=interaction_ridge, stretch_ridge=stretch_ridge)
+        given = [k for k, v in ridges.items() if v is not None]
+        if given and est not in ("cml", "cp-full-rcl", "cpat-rcl"):
+            raise ValueError(
+                f"per_rater_model_selection({', '.join(given)}=...) needs estimation='cp-full-rcl', 'cpat-rcl' or "
+                f"'cml'; got estimation={est!r}."
+            )
         if est in ("cml", "cp-full-rcl", "cpat-rcl"):
             if min_effect:
                 warnings.warn(
                     f"per_rater_model_selection(min_effect={min_effect}) applies to estimation='pair-cpat' only and is "
-                    f"ignored with estimation={est!r}, whose selection uses AIC or BIC with the significance test "
-                    "(aic_sig_test, alpha).",
+                    f"ignored with estimation={est!r}, where the tolerances delta, delta_max and stretch_delta set the "
+                    "smallest departure that counts.",
                     UserWarning,
                     stacklevel=3,
                 )
             return self._per_rater_selection_fitted(
-                anchors, test, sorted(active_models, key=self._MODELS.index), aic_sig_test, alpha, scheme, est,
-                max_passes, threshold_constant,
+                anchors, test, sorted(active_models, key=self._MODELS.index), aic_relative_likelihood, alpha, scheme, est,
+                max_passes, threshold_constant, force_global_anchors, delta, delta_units, ridges=ridges,
+                stretch_delta=stretch_delta, delta_measure=delta_measure, delta_max=delta_max,
+                defaulted=defaulted,
+            )
+        if delta or delta_max or any(_stretch_deltas(stretch_delta).values()) or delta_measure != "overall":
+            raise ValueError(
+                f"per_rater_model_selection(delta={delta}, stretch_delta={stretch_delta}, delta_max={delta_max}, "
+                f"delta_measure={delta_measure!r}) needs estimation='cp-full-rcl', 'cpat-rcl' or 'cml'; with "
+                "'pair-cpat' use min_effect."
             )
         matrix_allowed = "matrix" in active_models
         centrality_allowed = "centrality" in active_models
@@ -15403,6 +16654,8 @@ class MFRM(Rasch):
             eff_glb_cen = float(np.max(np.abs(sev_global - sev_centrality)))
             eff_glb_pha = float(np.max(np.abs(sev_global - sev_pseudo_halo)))
             eff_glb_bis = float(np.max(np.abs(sev_global - sev_bistretch)))
+            eff_cen_bis = float(np.max(np.abs(sev_centrality - sev_bistretch)))
+            eff_pha_bis = float(np.max(np.abs(sev_pseudo_halo - sev_bistretch)))
 
             def _ll(sev, mod):
                 return self._rater_ll_from_sev(sev, persons_r, responses_r, anchored)
@@ -15461,13 +16714,28 @@ class MFRM(Rasch):
                     }
                 rec.update({f"{test}_{mod}": v for mod, v in ic.items()})
                 best = min(ic, key=ic.get)
-                if test == "AIC" and aic_sig_test:
+                if test == "AIC" and aic_relative_likelihood:
                     baseline = min(active_models, key=lambda mod: (k_map[mod], ic[mod]))
-                    delta = ic[baseline] - ic[best]
-                    p_rel = float(np.exp(-abs(delta) / 2))
-                    rec["p_vs_baseline"] = p_rel
+
+                    def check(mod):
+                        delta = ic[baseline] - ic[mod]
+                        rel = float(np.exp(-max(delta, 0.0) / 2))
+                        d_test = k_map[mod] - k_map[baseline]
+                        lev = float(chi2.sf(2 * d_test + 2 * np.log(1 / alpha), d_test)) if d_test > 0 else np.nan
+                        return delta > 0 and rel <= alpha, rel, lev
+
+                    # step down through the models in AIC order until one passes against the baseline
+                    selected, (_, p_rel, lev) = baseline, check(best)
+                    for mod in sorted(ic, key=lambda mod: (ic[mod], k_map[mod])):
+                        if mod == baseline:
+                            break
+                        ok, r_m, l_m = check(mod)
+                        if ok:
+                            selected, p_rel, lev = mod, r_m, l_m
+                            break
+                    rec["relative_likelihood_vs_baseline"] = p_rel
+                    rec["test_level"] = lev
                     rec["baseline_model"] = baseline
-                    selected = best if (delta > 0 and p_rel <= alpha) else baseline
                 else:
                     selected = best
                 # Effect size walk-back: simplify one rung at a time if effect too small
@@ -15611,19 +16879,26 @@ class MFRM(Rasch):
                         rec.update({"LR_glb_vs_pha": lr_gh, "p_glb_vs_pha": p_gh})
                         pha_wins = p_gh <= alpha and eff_glb_pha >= min_effect
                     if cen_wins and pha_wins:
-                        # Both stretch axes independently beat global --
-                        # resolve via a further test against the combined
-                        # 3-param bistretch model, if it's offered.
+                        # Both stretch axes independently beat global, so global
+                        # is ruled out: each single stretch is tested within the
+                        # combined bistretch model (df 1 each), if it's offered.
+                        # centrality rejected there means the item stretch is
+                        # needed; pseudo_halo rejected, the threshold stretch.
                         if bistretch_allowed:
-                            lr_gb = max(0.0, -2.0 * (ll_glb - ll_bis))
-                            p_gb = float(chi2.sf(lr_gb, 2))
-                            rec.update({"LR_glb_vs_bis": lr_gb, "p_glb_vs_bis": p_gb})
-                            if p_gb <= alpha and eff_glb_bis >= min_effect:
+                            lr_cb = max(0.0, -2.0 * (ll_cen - ll_bis))
+                            lr_hb = max(0.0, -2.0 * (ll_pha - ll_bis))
+                            p_cb, p_hb = float(chi2.sf(lr_cb, 1)), float(chi2.sf(lr_hb, 1))
+                            rec.update({"LR_cen_vs_bis": lr_cb, "p_cen_vs_bis": p_cb,
+                                        "LR_pha_vs_bis": lr_hb, "p_pha_vs_bis": p_hb})
+                            need_item = p_cb <= alpha and eff_cen_bis >= min_effect
+                            need_thr = p_hb <= alpha and eff_pha_bis >= min_effect
+                            if need_item and need_thr:
                                 selected = "bistretch"
+                            elif need_item or need_thr:
+                                selected = "pseudo_halo" if need_item else "centrality"
                             else:
-                                # Combined model not itself confirmed --
-                                # fall back to whichever single axis had
-                                # the stronger evidence.
+                                # Either single stretch is enough -- whichever
+                                # beat global more clearly.
                                 selected = (
                                     "centrality" if p_gc <= p_gh else "pseudo_halo"
                                 )
@@ -15637,6 +16912,23 @@ class MFRM(Rasch):
                     elif pha_wins:
                         selected = "pseudo_halo"
                     # else: neither axis beats global -- stay "global"
+
+                if _PAIR_CPAT_OTHER_STRETCH and selected in ("centrality", "pseudo_halo") and bistretch_allowed \
+                        and "LR_cen_vs_bis" not in rec:
+                    # a single stretch reached (from thresholds or items, or from global): the other side's stretch
+                    # has not been tested beside it -- bistretch over it (df 1)
+                    if selected == "centrality":
+                        lr_cb = max(0.0, -2.0 * (ll_cen - ll_bis))
+                        p_cb = float(chi2.sf(lr_cb, 1))
+                        rec.update({"LR_cen_vs_bis": lr_cb, "p_cen_vs_bis": p_cb})
+                        if p_cb <= alpha and eff_cen_bis >= min_effect:
+                            selected = "bistretch"
+                    else:
+                        lr_hb = max(0.0, -2.0 * (ll_pha - ll_bis))
+                        p_hb = float(chi2.sf(lr_hb, 1))
+                        rec.update({"LR_pha_vs_bis": lr_hb, "p_pha_vs_bis": p_hb})
+                        if p_hb <= alpha and eff_pha_bis >= min_effect:
+                            selected = "bistretch"
 
             rec["selected_model"] = selected
             records[rater] = rec
@@ -15667,8 +16959,8 @@ class MFRM(Rasch):
                 )
             ]
             extra_cols = ic_cols + (
-                ["p_vs_baseline", "baseline_model"]
-                if test == "AIC" and aic_sig_test
+                ["relative_likelihood_vs_baseline", "test_level", "baseline_model"]
+                if test == "AIC" and aic_relative_likelihood
                 else []
             )
         else:
@@ -15689,8 +16981,10 @@ class MFRM(Rasch):
                 "p_glb_vs_cen",
                 "LR_glb_vs_pha",
                 "p_glb_vs_pha",
-                "LR_glb_vs_bis",
-                "p_glb_vs_bis",
+                "LR_cen_vs_bis",
+                "p_cen_vs_bis",
+                "LR_pha_vs_bis",
+                "p_pha_vs_bis",
             ]
         cols = ["selected_model"] + ll_cols + extra_cols
         if (
@@ -15703,14 +16997,22 @@ class MFRM(Rasch):
                 "glb_vs_items",
                 "itm_vs_pha",
                 "glb_vs_pha",
-                "p_vs_baseline",
+                "relative_likelihood_vs_baseline",
+                "test_level",
                 "baseline_model",
                 "selected_model",
             )
             cols = [c for c in cols if c.endswith(keep)]
         table = pd.DataFrame(records).T.rename_axis("Rater")
         table = table.reindex(columns=cols)
-        rater_models = table["selected_model"]
+        rater_models = table["selected_model"].copy()
+        if force_global_anchors and anchors is not None:
+            # the user's choice: the anchors are held on 'global' whatever their tests chose
+            spec = self._anchor_spec(anchors)
+            free = spec[2].pattern_free if spec[2] is not None else []
+            held = [a for a in spec[0] if a in rater_models.index and a not in free]
+            rater_models.loc[held] = "global"
+            table.loc[held, "selected_model"] = "global"
 
         # Build facet_effects_mixed in matrix format from assigned models
         mi = pd.MultiIndex.from_product(
@@ -15894,6 +17196,15 @@ class MFRM(Rasch):
             fits[a] = (cells, np.linalg.pinv(X) if ok else None)
         failed = [a for a in fits if fits[a][1] is None]
         short = {a: h for a, h in short.items() if a not in failed}
+        # a facet element whose remaining cells cannot support the additive fit still has a global effect: the mean
+        # over those cells. Its global effect is tested on that (with no DRF its group difference is zero whichever
+        # cells remain); it stays out of every pool, the other tests and the omnibus test, as before
+        level_only = set()
+        for a in failed:
+            cells = [(b, h) for b in range(nI) for h in range(Kc) if own[a][b, h]]
+            if cells:
+                fits[a] = (cells, np.full((1, len(cells)), 1.0 / len(cells)))
+                level_only.add(a)
 
         def short_counts(a):
             """(score, group, ratings) for each category next to facet element a's thresholds with no cells that
@@ -15995,34 +17306,51 @@ class MFRM(Rasch):
                 for Eg, Cg, where, _ in groups:
                     H = np.zeros((len(names), k, len(Eg)))
                     for x in range(len(names)):
-                        if x in failed or ("thresholds" in comps and x in short):
+                        if (x in failed and not (x in level_only and x == owner and list(comps) == ["severity"])) \
+                                or ("thresholds" in comps and x in short):
                             continue
                         H[x][:, where[x]] = np.vstack([functional(x, c, owner, project) for c in comps])
                     Hs.append(H)
                 (Hr, Hf), (Er, Cr), (Ef, Cf) = Hs, groups[0][:2], groups[1][:2]
                 D = np.einsum("xkn,n->xk", Hf, Ef) - np.einsum("xkn,n->xk", Hr, Er)
-                S = np.einsum("xkn,nm,yjm->xykj", Hf, Cf, Hf) + np.einsum("xkn,nm,yjm->xykj", Hr, Cr, Hr)
-                prepared[key] = dict(Hr=Hr, Hf=Hf, D=D, S=S, inv={})
+                Sf = np.einsum("xkn,nm,yjm->xykj", Hf, Cf, Hf)
+                Sr = np.einsum("xkn,nm,yjm->xykj", Hr, Cr, Hr)
+                prepared[key] = dict(Hr=Hr, Hf=Hf, D=D, Sf=Sf, Sr=Sr, inv={})
             return prepared[key]
+
+        n_persons = (focal_model.no_of_persons, ref_model.no_of_persons)
 
         def contrast(r, pool, comps, project=True, D=None):
             """r's focal minus reference difference on comps, less the pool's mean difference; its covariance
-            (the groups are independent) and that covariance's pseudo-inverse."""
+            (the groups are independent), that covariance's pseudo-inverse and rank, and the multivariate Welch
+            degrees of freedom nu (Nel and van der Merwe, 1986: each group's part of the covariance counted with
+            its own number of persons). Also the per-group covariances, for the per-item and per-category
+            Welch t-tests."""
             pr = prep(r, comps, project)
             D = pr["D"] if D is None else D
             P = list(pool)
             d = D[r] - D[P].mean(axis=0)
             key = frozenset(P)
             if key not in pr["inv"]:
-                S, n = pr["S"], len(P)
-                V = S[r, r] - (S[r, P].sum(axis=0) + S[P, r].sum(axis=0)) / n + S[np.ix_(P, P)].sum(axis=(0, 1)) / n**2
-                pr["inv"][key] = (V, np.linalg.pinv(V, hermitian=True))
-            V, Vinv = pr["inv"][key]
-            return d, V, Vinv
+                n = len(P)
 
-        def wald(d, Vinv):
+                def cov(S):
+                    return S[r, r] - (S[r, P].sum(axis=0) + S[P, r].sum(axis=0)) / n + S[np.ix_(P, P)].sum(axis=(0, 1)) / n**2
+
+                Vf, Vr = cov(pr["Sf"]), cov(pr["Sr"])
+                V = Vf + Vr
+                Vinv = np.linalg.pinv(V, hermitian=True)
+                q = int(np.linalg.matrix_rank(V, hermitian=True))
+                nu = _welch_df([Vf, Vr], n_persons) if q else np.nan
+                pr["inv"][key] = (V, Vinv, q, nu, Vf, Vr)
+            V, Vinv, q, nu, Vf, Vr = pr["inv"][key]
+            return d, V, Vinv, q, nu, Vf, Vr
+
+        def wald(d, Vinv, q, nu):
+            """T = d' V^+ d and its p from the multivariate Welch F reference, F = T (nu - q + 1) / (q nu) on
+            (q, nu - q + 1) df (_f_reference)."""
             T = float(d @ Vinv @ d)
-            return T, float(chi2.sf(T, len(d)))
+            return T, _f_reference(T, q, nu + 1)
 
         def trim(r, comps, Ds=None):
             """r's pool: the other tested facet elements, dropping one at a time those whose own difference
@@ -16036,8 +17364,9 @@ class MFRM(Rasch):
                     break
                 ps = {}
                 for q in cand:
-                    d, _, Vinv = contrast(q, [x for x in pool if x != q], comps, D=None if Ds is None else Ds[q])
-                    ps[q] = wald(d, Vinv)[1]
+                    d, _, Vinv, k, nu = contrast(q, [x for x in pool if x != q], comps,
+                                                 D=None if Ds is None else Ds[q])[:5]
+                    ps[q] = wald(d, Vinv, k, nu)[1]
                 worst = min(ps, key=ps.get)
                 if ps[worst] > wald_alpha:
                     break
@@ -16059,6 +17388,7 @@ class MFRM(Rasch):
             return common
 
         rng = np.random.default_rng(seed)
+        var_noise = np.random.default_rng(rng.integers(2**63))
         noise = []  # draws of each group's effects about zero, from its sandwich covariance (shared by the tests)
         for Eg, Cg, _, _ in groups:
             lam, U = np.linalg.eigh((Cg + Cg.T) / 2)
@@ -16087,8 +17417,13 @@ class MFRM(Rasch):
             for b in range(int(no_of_samples)):
                 Ds = {c: {o: v[b] for o, v in draws[c].items()} for c in comps}
                 pool_b = pool_for(r, comps, Ds)
-                d, _, Vinv = contrast(r, pool_b, comps, D=np.concatenate([Ds[c][r] for c in comps], axis=1))
-                exceed += wald(d, Vinv)[0] >= T
+                d, _, Vinv, q, nu = contrast(r, pool_b, comps, D=np.concatenate([Ds[c][r] for c in comps], axis=1))[:5]
+                # the draws hold the covariance fixed; nu / chi2(nu - q + 1) adds the noise of estimating it, so
+                # that with the pool fixed the draws' distribution is the multivariate Welch F reference
+                Tb = wald(d, Vinv, q, nu)[0]
+                if nu - q + 1 > 0:
+                    Tb *= nu / var_noise.chisquare(nu - q + 1)
+                exceed += Tb >= T
             return (1 + exceed) / (int(no_of_samples) + 1)
 
         def holm(p):
@@ -16125,13 +17460,19 @@ class MFRM(Rasch):
                 if axis in ("interaction", "overall") and "interaction" in components[reps[n]] and r not in inter:
                     comps = [c for c in comps if c != "interaction"] if axis == "overall" else []
                 if r in short and axis in ("thresholds", "interaction") and axis in components[reps[n]]:
-                    row.update({"T": np.nan, "df": np.nan, "p": np.nan, "Pool": 0,
+                    row.update({"T": np.nan, "df": np.nan, "Denominator df": np.nan, "p": np.nan, "Pool": 0,
                                 "Note": f"Not tested: {short_reason(r)}, so {n}'s {short_label(r)} cannot be "
                                         f"compared between the groups."})
                     rows[n] = row
                     continue
-                if r in failed or not comps:
-                    row.update({"T": np.nan, "df": np.nan, "p": np.nan, "Pool": 0,
+                if r in level_only and axis != "severity":
+                    row.update({"T": np.nan, "df": np.nan, "Denominator df": np.nan, "p": np.nan, "Pool": 0,
+                                "Note": f"not tested: too few cells left to estimate item and threshold effects "
+                                        f"({describe(notes[n])}); only the global effect is tested"})
+                    rows[n] = row
+                    continue
+                if (r in failed and r not in level_only) or not comps:
+                    row.update({"T": np.nan, "df": np.nan, "Denominator df": np.nan, "p": np.nan, "Pool": 0,
                                 "Note": f"not tested: {describe(notes[n])}" if r in failed else
                                 "too few cells left" if axis == "interaction" and reps[n] == "matrix" else
                                 (f"Thresholds left out: {short_reason(r)}; single component (the global effect test)."
@@ -16143,21 +17484,24 @@ class MFRM(Rasch):
                     continue
                 if not [q for q in range(len(names)) if q != r and q not in failed
                         and not ("thresholds" in comps and q in short)]:
-                    row.update({"T": np.nan, "df": np.nan, "p": np.nan, "Pool": 0,
+                    row.update({"T": np.nan, "df": np.nan, "Denominator df": np.nan, "p": np.nan, "Pool": 0,
                                 "Note": "not tested: no other facet element to compare with"})
                     rows[n] = row
                     continue
                 pool = pool_for(r, comps)
-                d, V, Vinv = contrast(r, pool, comps)
-                T, p = wald(d, Vinv)
+                d, V, Vinv, q, nu = contrast(r, pool, comps)[:5]
+                T, p = wald(d, Vinv, q, nu)
                 if no_of_samples:
                     p = mc_p(r, comps, pool, T)
                 note = describe(notes[n])
-                if r in short and axis == "severity":
+                if r in level_only:
+                    note = (f"Global effect only, as the mean over the {len(fits[r][0])} remaining cells (too few to "
+                            f"estimate item and threshold effects): {note}.")
+                elif r in short and axis == "severity":
                     note = f"Global effect tested without {short_label(r)}: {short_reason(r)}."
                 elif r in short and axis == "overall":
                     note = f"Thresholds left out: {short_reason(r)}."
-                row.update({"T": T, "df": len(d), "p": p, "Pool": len(pool), "Note": note})
+                row.update({"T": T, "df": q, "Denominator df": nu - q + 1, "p": p, "Pool": len(pool), "Note": note})
                 if axis == "severity":
                     row.update({"Difference": float(d[0]), "SE": float(np.sqrt(V[0, 0]))})
                     for lab, (Eg, _, where, _) in zip(("Reference", "Focal"), groups):
@@ -16169,16 +17513,20 @@ class MFRM(Rasch):
                         row["SE omega"] = float(np.sqrt(V[0, 0]))
                     # per item (its difference) and per bounded category (its width), on the full coordinates
                     if axis == "items":
-                        dd, VV, _ = contrast(r, pool, ["severity", "items"], project=False)
+                        dd, VV, *_, Vf, Vr = contrast(r, pool, ["severity", "items"], project=False)
                         L, labels = U_items, [str(it) for it in items]
                     else:
-                        dd, VV, _ = contrast(r, pool, ["thresholds"], project=False)
+                        dd, VV, *_, Vf, Vr = contrast(r, pool, ["thresholds"], project=False)
                         L, labels = D_w, [f"category {k}" for k in range(1, Kc)]
                     v, S = L @ dd, np.sqrt(np.clip(np.diag(L @ VV @ L.T), 0, None))
                     if axis == "thresholds":  # a width next to a category no one used: not tested
                         gone = absent[:-1] | absent[1:]
                         v, S = np.where(gone, np.nan, v), np.where(gone, np.nan, S)
-                    pe = 2 * norm.sf(np.abs(v / S))
+                    # Welch t: each group's variance counted with its own number of persons
+                    vf, vr = np.diag(L @ Vf @ L.T), np.diag(L @ Vr @ L.T)
+                    with np.errstate(invalid="ignore", divide="ignore"):
+                        nu_w = (vf + vr) ** 2 / (vf**2 / (n_persons[0] - 1) + vr**2 / (n_persons[1] - 1))
+                    pe = 2 * t_dist.sf(np.abs(v / S), nu_w)
                     ph = np.full(len(pe), np.nan)
                     ok = np.isfinite(pe)
                     ph[ok] = holm(pe[ok])
@@ -16187,7 +17535,7 @@ class MFRM(Rasch):
                 rows[n] = row
             tab = pd.DataFrame(rows).T
             tab.index.name = self.facet.capitalize()
-            for c in ("T", "df", "p", "Reference", "Focal", "Difference", "SE"):
+            for c in ("T", "df", "Denominator df", "p", "Reference", "Focal", "Difference", "SE"):
                 if c in tab:
                     tab[c] = tab[c].astype(float)
             tables[axis] = tab
@@ -16195,7 +17543,10 @@ class MFRM(Rasch):
         # warning
         pool = [q for q in range(len(names)) if q not in failed]
         while len(pool) > floor:
-            tests = {q: wald(*contrast(q, [x for x in pool if x != q], ["severity"])[::2])[1] for q in pool}
+            tests = {}
+            for q in pool:
+                d, _, Vinv, k, nu = contrast(q, [x for x in pool if x != q], ["severity"])[:5]
+                tests[q] = wald(d, Vinv, k, nu)[1]
             worst = min(tests, key=tests.get)
             if tests[worst] > wald_alpha:
                 break
@@ -16227,20 +17578,22 @@ class MFRM(Rasch):
         keep = lam > lam.max() * 1e-9
         z = U[:, keep].T @ d
         T, df = float(np.sum(z**2 / lam[keep])), int(keep.sum())
-        # Hotelling-type F reference (the chi-squared reference is liberal with many df), n = persons in both
-        # groups - 2
-        df2 = ref_model.no_of_persons + focal_model.no_of_persons - 2 - df + 1
+        # multivariate Welch F reference (Nel and van der Merwe, 1986; the chi-squared reference is liberal with
+        # many df): F = T (nu - df + 1) / (df nu) on (df, nu - df + 1)
+        Pk = U[:, keep]
+        nu = _welch_df([Pk.T @ Hf @ Cf @ Hf.T @ Pk, Pk.T @ Hr @ Cr @ Hr.T @ Pk], n_persons)
+        df2 = nu - df + 1
         F = T * df2 / (df * (df2 + df - 1)) if df2 > 0 else np.nan
         tables["omnibus"] = {"T": T, "df": df, "F": F, "Denominator df": df2,
                              "p": float(fdist.sf(F, df, df2)) if df2 > 0 else np.nan}
-        status = {n: (notes[n], a not in failed, short_counts(a) if a in short else None)
+        status = {n: (notes[n], "global" if a in level_only else a not in failed, short_counts(a) if a in short else None)
                   for a, n in enumerate(names)}
         return tables, status
 
     def _drf_mixed_warning(self, status, min_count):
         """One warning for drf_test(model='mixed') naming the facet elements whose tests left out cells (with
         fewer than min_count ratings in a category) or could not be run."""
-        reduced, weak, untested, short = [], [], [], []
+        reduced, weak, untested, short, level = [], [], [], [], []
         for focal, st in status.items():
             for n, (thin, tested, reason) in st.items():
                 if reason is not None:
@@ -16254,6 +17607,9 @@ class MFRM(Rasch):
                     for it, k, g, c in thin
                 )
                 label = f"{n} ({where})"
+                if tested == "global":
+                    level.append(n)  # the cells left out are listed in the tables' Note column
+                    continue
                 if not tested:
                     untested.append(label)
                     continue
@@ -16263,7 +17619,7 @@ class MFRM(Rasch):
                         cats.setdefault(k, set()).add(it)
                 many = [k for k, its in cats.items() if None in its or len(its) > len(self.responses.columns) / 2]
                 (weak if many else reduced).append(label)
-        if not (reduced or weak or untested or short):
+        if not (reduced or weak or untested or short or level):
             return
         msg = []
         if short:
@@ -16282,7 +17638,7 @@ class MFRM(Rasch):
                 + "see the Note columns of drf_table and drf_threshold_table. A lower min_category_count, or "
                   "collapsing the score category, would allow the threshold test."
             )
-        if reduced or weak or untested:
+        if reduced or weak or untested or level:
             msg.append(f"drf_test (decomposed tests): categories with fewer than min_category_count={min_count} "
                        f"ratings.")
         if reduced:
@@ -16292,10 +17648,14 @@ class MFRM(Rasch):
             msg.append(f"A category rarely used on most items for {', '.join(weak)}: the global effect and the "
                        f"neighbouring category widths are poorly estimated, and the tests may substantially lack power to detect "
                        f"real DRF.")
+        if level:
+            msg.append(f"Global effect only for {', '.join(level)}: too few ratings left to estimate item and threshold "
+                       f"effects, so the global effect is tested as the mean over the remaining cells, and the item, "
+                       f"threshold and interaction tests are not run; consider collapsing categories.")
         if untested:
             msg.append(f"Not tested: {', '.join(untested)}: too few ratings to estimate the global effect and category "
                        f"widths; consider collapsing categories or a simpler representation.")
-        if reduced or weak or untested:
+        if reduced or weak or untested or level:
             msg.append("See the 'Cells left out' and 'Note' columns of drf_table, drf_item_table and "
                        "drf_threshold_table.")
         warnings.warn(" ".join(msg), UserWarning, stacklevel=3)
@@ -16304,13 +17664,15 @@ class MFRM(Rasch):
     _MIXED_GENERALITY = ("matrix", "bivector", "bistretch", "items", "thresholds", "pseudo_halo", "centrality",
                          "global")
 
-    def _per_rater_selection_fitted(self, anchors, test, candidates, aic_sig_test, alpha, scheme, estimation,
-                                    max_passes, threshold_constant):
+    def _per_rater_selection_fitted(self, anchors, test, candidates, aic_relative_likelihood, alpha, scheme, estimation,
+                                    max_passes, threshold_constant, force_global_anchors=False, delta=0.0,
+                                    delta_units="width", ridges=None, _rungs=None, stretch_delta=0.0,
+                                    delta_measure="overall", delta_max=0.0, defaulted=frozenset()):
         """
         per_rater_model_selection() on proper fits ('cml', 'cp-full-rcl', 'cpat-rcl'): for each facet element, every candidate
         representation is a joint 'mixed' fit (calibrate(model='mixed')'s design, in the anchors' frame) with the
         other facet elements held at the scheme's representations, and the candidates are compared as
-        model_selection() compares models: test='AIC' (AIC; with aic_sig_test the AIC choice must beat the
+        model_selection() compares models: test='AIC' (AIC; with aic_relative_likelihood the AIC choice must beat the
         candidate with fewest parameters at alpha, p = exp(-dAIC / 2), the dAIC of the composite likelihood
         divided by the mean chi-square weight of the added directions) or 'BIC' (n = persons with non-extreme
         totals). scheme='iterate': start with every facet element on the most general candidate and update one
@@ -16318,13 +17680,30 @@ class MFRM(Rasch):
         'one-pass': each facet element with the others on the most general candidate. Then the joint refit
         calibrate(model='mixed', rater_models=<choices>, anchors=anchors).
         """
-        if test not in ("AIC", "BIC"):
+        if test not in ("AIC", "BIC", "LR"):
             raise ValueError(
-                f"per_rater_model_selection(test={test!r}) with estimation={estimation!r}: 'AIC' or 'BIC' (the "
-                f"likelihood ratio ladder is available with estimation='pair-cpat' only)."
+                f"per_rater_model_selection(test={test!r}) with estimation={estimation!r}: 'AIC', 'BIC' or 'LR'."
             )
+        delta = float(delta)
+        if delta < 0:
+            raise ValueError(f"delta must be >= 0, got {delta}.")
+        delta_max = float(delta_max)
+        if delta_max < 0:
+            raise ValueError(f"delta_max must be >= 0, got {delta_max}.")
+        if delta_measure not in ("overall", "largest", "either"):
+            raise ValueError(f"delta_measure must be 'overall', 'largest' or 'either', got {delta_measure!r}.")
+        if delta_units not in ("logits", "width"):
+            raise ValueError(f"delta_units must be 'logits' or 'width', got {delta_units!r}.")
+        sdelta = _stretch_deltas(stretch_delta)
+        # AIC / BIC: after the criterion's choice, step down while the departure is within the tolerances
+        gate_on = test != "LR" and (delta > 0 or delta_max > 0 or any(sdelta.values()))
         if scheme not in ("iterate", "one-pass"):
             raise ValueError(f"scheme must be 'iterate' or 'one-pass', got {scheme!r}.")
+        from scipy.linalg import null_space, orth
+
+        from raschpy import _rcl as _rcl_mod
+        from raschpy import _selection
+
         facets = list(self.facet_names)
         R = len(facets)
         given_anchors = anchors
@@ -16334,28 +17713,575 @@ class MFRM(Rasch):
             if unknown or not anchors:
                 raise ValueError(f"anchors must be a non-empty list of {self.facet_label} names; unknown: {unknown}.")
         anchor_idx = None if anchors is None else [facets.index(a) for a in anchors]
-        # the anchors define the frame, so they stay on 'global' and are not selected: an anchor's effects are read
-        # against the other anchors, which one-at-a-time selection can't do (check_anchor_homogeneity tests them)
-        held = set(anchor_idx or [])
+        # force_global_anchors (the user's choice): the anchors stay on 'global' and are not selected. Otherwise they
+        # are selected like the others, starting on 'global', except an anchor with cells cut (cuts need 'global')
+        cut_idx = {facets.index(a) for a in (anchor_set.cuts if anchor_set is not None else {}) if a in facets}
+        free_idx = {facets.index(a) for a in (anchor_set.pattern_free if anchor_set is not None else []) if a in facets}
+        held = (set(anchor_idx or []) - free_idx) if force_global_anchors else cut_idx
+
+        I_, K_ = self.no_of_items, int(self.max_score)
+
+        def allowed(r, models, pool=None):
+            """The candidates for facet element r (from pool, default candidates). A sole anchor stays on 'global'
+            (it is the frame). Otherwise every candidate, a part every anchor has being fixed by the anchors'
+            average; with cells cut, a candidate that leaves the cut shifts undefined is skipped (for any facet
+            element: one off the anchors on 'global' can be what fixes the instrument at a cut cell)."""
+            pool = candidates if pool is None else pool
+            if anchor_idx is None:
+                return list(pool)
+            if r in anchor_idx and len(anchor_idx) == 1:
+                return [m for m in pool if m == "global"]
+            if not cuts:
+                return list(pool)
+            ok = []
+            for m in pool:
+                trial = list(models)
+                trial[r] = m
+                try:
+                    _rcl_mod.MixedDesign(trial, I_, K_, anchors=anchor_idx, cuts=cuts)
+                except ValueError:
+                    continue
+                ok.append(m)
+            return ok
         X = self.responses
         totals = X.groupby(level=1).sum().sum(axis=1)
         maxes = X.notna().groupby(level=1).sum().sum(axis=1) * self.max_score
         n_persons = int(((totals > 0) & (totals < maxes)).sum())
-        ctx = self._mixed_context(estimation, threshold_constant, {})
+        ridges = {k: v for k, v in (ridges or {}).items() if v is not None}
+        ctx = self._mixed_context(estimation, threshold_constant, ridges)
         cache = {}
 
-        def criteria(models):
-            key = tuple(models)
+        def criteria(models, frame="part"):
+            key = (tuple(models), frame)
             if key not in cache:
-                design, fit, _ = self._mixed_fit_core(ctx, list(models), anchor_idx, cuts)
+                design, fit, _ = self._mixed_fit_core(ctx, list(models), anchor_idx, cuts, frame=frame)
                 cache[key] = dict(self._mixed_criteria(ctx, design, fit), converged=fit["converged"])
             return cache[key]
 
         general = next(m for m in self._MIXED_GENERALITY if m in candidates)
+        full, jcache = {}, {}
+
+        # each representation's item and threshold side: nothing ('0'), a stretch ('S') or a full set ('F'); the
+        # two hidden ones (a full set beside a stretch) are used only inside the build-up likelihood ratio ladder
+        side_levels = {"global": ("0", "0"), "pseudo_halo": ("S", "0"), "centrality": ("0", "S"),
+                       "bistretch": ("S", "S"), "items": ("F", "0"), "thresholds": ("0", "F"),
+                       "items_centrality": ("F", "S"), "thresholds_pseudo_halo": ("S", "F"), "bivector": ("F", "F")}
+
+        def stretch_added(small, large):
+            """The stretch factor(s) large adds to small when that is all it adds ('c': item stretch, 'd':
+            threshold stretch, one side going from nothing to a stretch, the other side unchanged; 'cd': both,
+            global < bistretch); otherwise None."""
+            if small not in side_levels or large not in side_levels:
+                return None
+            (i0, t0), (i1, t1) = side_levels[small], side_levels[large]
+            if (i0, i1) == ("0", "S") and t0 == t1:
+                return "c"
+            if (t0, t1) == ("0", "S") and i0 == i1:
+                return "d"
+            if (i0, i1, t0, t1) == ("0", "S", "0", "S"):
+                return "cd"
+            return None
+
+        def fitted(models, frame="part"):
+            """A joint fit with the matrices of its likelihood ratio tests: (design, fit, criteria, effects).
+            frame: MixedDesign's frame rule ('average': the anchors' average in every part)."""
+            key = (tuple(models), frame)
+            if key not in full:
+                design, fit, stored = self._mixed_fit_core(ctx, list(models), anchor_idx, cuts, frame=frame)
+                if estimation == "cml":
+                    # the conditional likelihood: sensitivity and variability both the information
+                    H = (fit["info"] + fit["info"].T) / 2
+                    crit = dict(ll=float(fit["ll"]), H=H, J=H, Jac=design.grid_jacobian(fit["theta"]))
+                else:
+                    crit = self._mixed_criteria(ctx, design, fit, matrices=True)
+                full[key] = (design, fit, crit, self._mixed_quantities(design, fit["theta"])["effects"], stored)
+            return full[key]
+
+        def exact_null(r, small, large, lam, b_hat, rms, var_r, size_fn=None):
+            """_selection.FittedCloseFitNull for the test of small within large for facet element r: the truths lie
+            between the two fits' grids (small's plus s times the difference); for each, both models are fitted to the
+            responses it would give on average (composite fits: the comparisons' expected counts given their
+            totals; CML: holding each person's raw score and answered virtual items), the shift is twice the
+            difference in their (composite) log-likelihoods, and the size is that of r's effects in the larger fit
+            minus the smaller, as for the data (or size_fn(small design, its theta, large design, its theta) where
+            given). None where this is not available (CML with
+            unused_categories='null')."""
+            if estimation == "cml" and ctx.get("null") is not None:
+                return None
+            dS, fS, _, _, sS = small
+            dL, fL, _, _, sL = large
+            gS, gL = dS.grid(fS["theta"]).ravel(), dL.grid(fL["theta"]).ravel()
+            warm = {}
+            if estimation == "cml":
+                from raschpy import _esf
+
+                Xv = ctx["Xv"]
+                if "prep" not in ctx:
+                    ctx["prep"] = _esf.prepare(Xv, [K_] * (R * I_))
+                    Xc = Xv[ctx["prep"].keep]
+                    ctx["obs_counts"] = np.stack([(Xc == k).sum(0) for k in range(K_ + 1)], axis=1)
+                prep = ctx["prep"]
+
+                def fit_to(T):
+                    P = _esf.conditional_moments(Xv, T.reshape(R * I_, K_), prepared=prep, probs=True)["P"]
+                    C = np.nansum(P[prep.keep], axis=0) - ctx["obs_counts"]
+                    lin = np.cumsum(C[:, ::-1], axis=1)[:, ::-1][:, 1:].ravel()
+                    out = []
+                    for name, d, f, st in (("S", dS, fS, sS), ("L", dL, fL, sL)):
+                        g = _rcl_mod.fit_cml_stretch(Xv, d, warm.get(name, f["theta"]), st["Q"], tol=1e-6,
+                                                     linear=lin, prep=prep, quiet=True)
+                        warm[name] = g["theta"]
+                        out.append((float(g["ll"]), g["theta"]))
+                    return out
+            else:
+                from scipy import sparse
+
+                D0 = sparse.csr_matrix(ctx["D0"])
+                n0 = ctx["t0"] + ctx["u0"]
+
+                def fit_to(T):
+                    te = n0 / (1.0 + np.exp(-(D0 @ T)))
+                    ue = n0 - te
+                    out = []
+                    for name, d, f, st in (("S", dS, fS, sS), ("L", dL, fL, sL)):
+                        g = _rcl_mod.fit_mixed_composite(d, D0, te, ue, st["Q"], warm.get(name, f["theta"]),
+                                                         tol=1e-8, fixed=st["fixed"])
+                        warm[name] = g["theta"]
+                        out.append((_selection._ll(D0, te, ue, d.grid(g["theta"]).ravel()), g["theta"]))
+                    return out
+
+            def expected_fit(T):
+                (llS, thS), (llL, thL) = fit_to(T)
+                if size_fn is not None:
+                    return max(2.0 * (llL - llS), 0.0), size_fn(dS, thS, dL, thL)
+                dep = (np.ravel(self._mixed_quantities(dL, thL)["effects"][r])
+                       - np.ravel(self._mixed_quantities(dS, thS)["effects"][r]))
+                return max(2.0 * (llL - llS), 0.0), self._departure_size(dep, var_r)
+
+            return _selection.FittedCloseFitNull(expected_fit, gS, gL - gS, rms, lam, b_hat**2)
+
+        # an anchor that alone lacks a part defines that part's reference, so its test of the part is empty: it is
+        # tested against the anchors' average instead (avg_retest), in every pass (_LONE_ANCHOR "always"). Keeping the
+        # smaller model during the passes and retesting only once they settle let the passes cycle (each anchor left
+        # alone without a part fell back to it), so they never settled and the retest never ran
+        avg_retest, lone_empty = {"on": False, "probe": False}, set()
+
+        def lone_part(r, small, large, others):
+            """Whether large adds nothing to small for anchor r in the anchors' frame: r alone among the anchors lacks
+            the part large adds, so it defines that part's reference and the two are the same model."""
+            if anchor_idx is None or r not in anchor_idx:
+                return False
+            mS, mL = list(others), list(others)
+            mS[r], mL[r] = small, large
+            cS, cL = fitted(mS)[2], fitted(mL)[2]
+            Cb = orth(_selection.lstsq(cL["Jac"], cS["Jac"]))
+            return Cb.shape[1] >= cL["H"].shape[0]
+
+        def lr_test(r, small, large, others, frame="part", with_max=True):
+            """The (close-fit) likelihood ratio test of small within large for facet element r, the others held:
+            LR = 2 (ll_large - ll_small), null a weighted sum of chi-square(1) (Kent, 1982; the large fit's H and J
+            over the directions large adds). Close-fit p and Delta-hat: the statistic's distribution when r's departure
+            (its effects in large minus small, information-weighted RMS in logits) has size delta, computed from the
+            responses such a departure would give on average (exact_null; the quadratic approximation where that is
+            not available). Large is kept if p <= alpha. Where large adds a single stretch to small (stretch_added),
+            the departure is instead |that stretch factor in large - in small| and delta is stretch_delta."""
+            key = stretch_added(small, large)
+            names = (small, large)
+            mS, mL = list(others), list(others)
+            mS[r], mL[r] = small, large
+            small, large = fitted(mS, frame), fitted(mL, frame)
+            dS, fS, cS, eS, _ = small
+            dL, fL, cL, eL, _ = large
+            JL = cL["Jac"]
+            Cb = orth(_selection.lstsq(JL, cS["Jac"]))
+            B = np.hstack([Cb, null_space(Cb.T)])
+            q0 = Cb.shape[1]
+            H, J = B.T @ cL["H"] @ B, B.T @ cL["J"] @ B
+            lr = max(2.0 * (cL["ll"] - cS["ll"]), 0.0)
+            Hinv = _selection._pinv_sym(H)
+            ps = slice(q0, H.shape[0])
+            if q0 >= H.shape[0]:
+                if frame == "part" and anchor_idx is not None and r in anchor_idx:
+                    lone_empty.add(r)
+                if frame == "part" and anchor_idx is not None and r in anchor_idx and avg_retest["on"]:
+                    # an anchor that alone lacks the part defines that part's reference, so with the part it is the
+                    # same model: test the part against the anchors' average instead
+                    out = lr_test(r, names[0], names[1], others, frame="average", with_max=with_max)
+                    return dict(out, frame="average")
+                # the frame leaves large nothing to add for r (e.g. the only facet element with a part, which the
+                # average facet element holds at zero): nothing to test, so the smaller is kept
+                return dict(p=1.0, delta_hat=np.nan, keep=False)
+            G = (Hinv @ J @ Hinv)[ps, ps]
+            A = _selection._pinv_sym(Hinv[ps, ps])
+            w, Q = np.linalg.eigh((G + G.T) / 2)
+            w = np.clip(w, 1e-300, None)
+            Gh, Ghi = Q @ np.diag(w**0.5) @ Q.T, Q @ np.diag(w**-0.5) @ Q.T
+            lam, U = np.linalg.eigh(Gh @ A @ Gh)
+            keep = lam > 1e-8 * lam.max()
+            lam, U = lam[keep], U[:, keep]
+            # the departure in large's tested coordinates, and its size: r's effects in large minus in small, RMS
+            # over the item x threshold cells
+            gap = _selection.lstsq(JL, (dL.grid(fL["theta"]) - dS.grid(fS["theta"])).ravel())
+            b_hat = U.T @ Ghi @ (B.T @ gap)[ps]
+            # the sampling variances of r's cells in the larger fit (its grid), for an information-weighted size
+            Hf = _selection._pinv_sym(cL["H"])
+            Gf = Hf @ cL["J"] @ Hf
+            var_grid = np.einsum("ij,jk,ik->i", JL, Gf, JL)
+            nc = np.size(eL[r])
+            var_r = var_grid[r * nc:(r + 1) * nc] if var_grid.size == len(eL) * nc else None
+            if key is None:
+                size_fn, d_logits, unit_r = None, delta_logits, unit
+                rms = self._departure_size(np.ravel(eL[r] - eS[r]), var_r)
+            else:
+                # the added stretch factor's change: a proportion, compared with stretch_delta
+                def size_fn(d_s, th_s, d_l, th_l):
+                    # one added stretch: its change; both ('cd', bistretch over global): the RMS of the two changes
+                    u_s, u_l = d_s.unpack(th_s), d_l.unpack(th_l)
+                    ch = [float(u_l[k][r] - (u_s[k][r] if k in u_s else 1.0)) for k in key]
+                    return float(np.sqrt(np.mean(np.square(ch))))
+
+                # the tolerance: the added stretch's own (item or threshold); both added: the RMS of the two
+                d_logits, unit_r = float(np.sqrt(np.mean([sdelta[k] ** 2 for k in key]))), 1.0
+                rms = size_fn(dS, fS["theta"], dL, fL["theta"])
+            exact = None
+            if rms > 0 and _EXACT_PER_RATER:
+                try:
+                    exact = exact_null(r, small, large, lam, b_hat, rms, var_r, size_fn)
+                except (np.linalg.LinAlgError, ValueError, FloatingPointError):
+                    exact = None
+            if exact is not None:
+                # the test's distribution at size delta from the responses a departure of that size would give on
+                # average (exact_null); Delta-hat: the size at which LR's expected excess over its null mean is the
+                # observed one. Where no truth along the observed direction has the size needed, the quadratic
+                # approximation below
+                try:
+                    p = exact.p(lr, d_logits) if d_logits > 0 else _selection.weighted_chi2_sf(lr, lam)
+                    d_hat = exact.delta_hat(lr)
+                except (np.linalg.LinAlgError, ValueError, FloatingPointError):
+                    exact = None
+            if exact is None:
+                b_u = b_hat / rms if rms > 0 else np.zeros_like(b_hat)
+                shift_u = float((lam * b_u**2).sum())
+                p = (_selection.nc_weighted_chi2_sf(lr, lam, (d_logits * b_u) ** 2) if d_logits > 0
+                     else _selection.weighted_chi2_sf(lr, lam))
+                excess = max(lr - lam.sum(), 0.0)
+                # bias-corrected RMS departure: LR's excess over its null mean, per unit of departure along b_u
+                d_hat = float(np.sqrt(excess / shift_u)) if shift_u > 0 else np.nan
+            out = dict(p=float(p), delta_hat=d_hat / unit_r, keep=p <= alpha)
+            if with_max and delta_measure != "overall":
+                # the largest single deviation (an item or threshold against the rest, purified), where the step
+                # adds a full set of item or threshold effects; elsewhere the RMS test alone at alpha
+                mx = max_part(r, names[0], names[1], large, Gf)
+                if mx is not None:
+                    p_eff = mx["p"] if delta_measure == "largest" else min(float(p), mx["p"])
+                    out.update(p=p_eff, keep=p_eff <= alpha, p_rms=float(p), p_max=mx["p"],
+                               max_dev=mx["max_dev"] / unit, flagged=mx["flagged"])
+            return out
+
+        def max_part(r, small, large_name, large, Gf, point=False):
+            """The largest single deviation of facet element r where large adds a full set of item (or threshold)
+            effects to small on one side: each item's (threshold's) effect in the large fit, its mean over the
+            thresholds (items), against the others' (their weighted mean; where small has that side's stretch,
+            the weighted regression of the others on the item locations / thresholds), divided by its standard error
+            from the large fit's sandwich covariance (CML: the inverse information). Purified: the most deviant is
+            flagged and left out of the reference, and the rest are re-examined, until none is flagged. Test
+            (point=False): the close-fit p of |deviation| at size delta_max, Holm's levels from alpha;
+            returns the first step's p times the number examined. Point (point=True, AIC / BIC): the noise-corrected
+            size sqrt(max(deviation^2 - SE^2, 0)) against delta_max. None where the step adds no full set on one
+            side (stretches, interactions), no deviation has a standard error, or the reference would have no
+            degree of freedom of its own (e.g. 3 thresholds where small has the threshold stretch)."""
+            from scipy.stats import norm
+
+            lv_s, lv_l = side_levels.get(small), side_levels.get(large_name)
+            if lv_s is None or lv_l is None:
+                return None
+            sides = [k for k in (0, 1) if lv_s[k] != lv_l[k]]
+            if len(sides) != 1 or lv_l[sides[0]] != "F":
+                return None
+            side = sides[0]
+            dL, fL = large[0], large[1]
+            th = np.asarray(fL["theta"], float)
+            if Gf.shape[0] != len(th):
+                return None
+            ck = (id(dL), r, side)
+            if ck not in jcache:
+                def elems(t):
+                    E = self._mixed_quantities(dL, t)["effects"][r]
+                    return E.mean(axis=0) if side == 1 else E.mean(axis=1)
+
+                q0 = self._mixed_quantities(dL, th)
+                Jv = np.empty((len(elems(th)), len(th)))
+                for k in range(len(th)):  # central differences: exact, the effects being at most quadratic
+                    e = np.zeros(len(th))
+                    e[k] = 1.0
+                    Jv[:, k] = (elems(th + e) - elems(th - e)) / 2.0
+                jcache[ck] = (elems(th), Jv, q0["thresholds"] if side == 1 else q0["items"])
+            v, Jv, base = jcache[ck]
+            Sig = Jv @ Gf @ Jv.T
+            m = len(v)
+            X = np.ones((m, 1)) if lv_s[side] == "0" else np.column_stack([np.ones(m), base])
+            labels = ([f"Threshold {k + 1}" for k in range(m)] if side == 1
+                      else [str(c) for c in self.responses.columns])
+            var = np.clip(np.diag(Sig), 1e-300, None)
+            tol = delta_max_logits
+            flagged, first = [], None
+            while True:
+                ref = [k for k in range(m) if k not in flagged]
+                cand = []
+                for k in ref:
+                    rest = [i for i in ref if i != k]
+                    if len(rest) < X.shape[1] + 1:
+                        # the reference needs a degree of freedom of its own: fitted exactly (e.g. a line through
+                        # two thresholds), it would attribute any departure to whichever element is left out
+                        continue
+                    XR = X[rest]
+                    A = XR.T / var[rest]
+                    L = np.linalg.pinv(A @ XR) @ A
+                    c = np.zeros(m)
+                    c[k] = 1.0
+                    c[rest] -= X[k] @ L
+                    dev, se2 = float(c @ v), float(c @ Sig @ c)
+                    if not (se2 > 1e-12 and np.isfinite(dev)):
+                        continue
+                    se = np.sqrt(se2)
+                    if point:
+                        stat = float(np.sqrt(max(dev**2 - se2, 0.0)))
+                    else:
+                        stat = float(norm.sf((abs(dev) - tol) / se) + norm.cdf((-abs(dev) - tol) / se))
+                    cand.append((k, dev, stat))
+                if not cand:
+                    break
+                k, dev, stat = (max(cand, key=lambda x: x[2]) if point else min(cand, key=lambda x: x[2]))
+                if first is None:
+                    first = dict(dev=dev, stat=stat, n=len(cand))
+                hit = stat > tol if point else stat <= alpha / len(cand)
+                if not hit:
+                    break
+                flagged.append(k)
+            if first is None:
+                return None
+            return dict(p=min(1.0, first["stat"] * first["n"]) if not point else np.nan,
+                        size=first["stat"] if point else np.nan, max_dev=abs(first["dev"]),
+                        flagged=[labels[k] for k in flagged])
+
+        def record(rec, small, large, t):
+            """A test's columns in the table: p and Delta-hat; with delta_measure 'largest' / 'either' where the
+            largest-deviation test applies, also the RMS test's p, that test's p and largest deviation, and the
+            items / thresholds it flagged."""
+            rec[f"p {large}>{small}"], rec[f"Delta-hat {large}>{small}"] = t["p"], t["delta_hat"]
+            if "p_max" in t:
+                rec[f"p overall {large}>{small}"], rec[f"p largest {large}>{small}"] = t["p_rms"], t["p_max"]
+                rec[f"Max deviation {large}>{small}"] = t["max_dev"]
+                rec[f"Flagged {large}>{small}"] = ", ".join(t["flagged"])
+
+        def note_average(rec, small, large):
+            """The Note for an anchor whose test of a part was made against the anchors' average (it alone lacked the
+            part, so it defined that part's reference): one line naming the parts."""
+            if large == "matrix":
+                parts = ["interaction"]
+            else:
+                (i0, t0), (i1, t1) = side_levels.get(small, ("?", "?")), side_levels.get(large, ("?", "?"))
+                parts = (["item"] if i0 != i1 else []) + (["threshold"] if t0 != t1 else [])
+            done = rec.setdefault("_avg_parts", [])
+            for q in parts:
+                if q not in done:
+                    done.append(q)
+            rec["Note"] = ("alone among the anchors without the " + " / ".join(f"{q} part" for q in done)
+                           + ", so tested against the anchors' average")
+
+        def choose_lr(r, others):
+            """The likelihood ratio ladder: matrix > bivector; bivector > items and > thresholds (both dropped:
+            global); then the stretch rung of the winner; for 'global', centrality > global and pseudo_halo >
+            global, and if both reject, bistretch > centrality and bistretch > pseudo_halo (as bivector > items and
+            > thresholds). Whenever the result is a single stretch (centrality or pseudo_halo, from any route), the
+            other side's stretch is then tested: bistretch > that stretch, so a side whose full set of effects was
+            dropped still has its stretch examined. A rung whose larger model is not a candidate (or one an anchor
+            may not take: a sole anchor, or a cut left undefined) keeps the smaller."""
+            cands = set(allowed(r, others))
+            rec = {}
+
+            def kept(small, large):
+                if large not in cands:
+                    return False
+                if small not in cands:
+                    return True
+                t = lr_test(r, small, large, others)
+                record(rec, small, large, t)
+                if t.get("frame") == "average":
+                    note_average(rec, small, large)
+                return t["keep"]
+
+            if kept("bivector", "matrix"):
+                return "matrix", rec
+            # bivector kept over items: the threshold part is needed; over thresholds: the item part is needed
+            need_thr, need_item = kept("items", "bivector"), kept("thresholds", "bivector")
+            win = ("bivector" if need_item and need_thr else "items" if need_item else "thresholds" if need_thr
+                   else "global")
+            stretch = dict(bivector="bistretch", thresholds="centrality", items="pseudo_halo")
+
+            def add_other_stretch(single):
+                """A single stretch reached: is the other side's stretch also needed (bistretch over it)?"""
+                return "bistretch" if kept(single, "bistretch") else single
+
+            if win in stretch:
+                # the stretch model nested in the winner: kept if the winner's extra freedom is not needed
+                if not kept(stretch[win], win):
+                    win = stretch[win]
+                    if win in ("centrality", "pseudo_halo"):
+                        # the other side's full set was dropped, but its stretch has not been examined
+                        win = add_other_stretch(win)
+                return win, rec
+            kc, kh = kept("global", "centrality"), kept("global", "pseudo_halo")
+            if kc and kh:
+                # both stretches beat 'global', so it is ruled out: each is then tested within 'bistretch' (as items
+                # and thresholds within bivector): centrality rejected there means the item stretch is needed,
+                # pseudo_halo rejected the threshold stretch
+                need_item_stretch = kept("centrality", "bistretch")
+                need_thr_stretch = kept("pseudo_halo", "bistretch")
+                if need_item_stretch and need_thr_stretch:
+                    return "bistretch", rec
+                if need_item_stretch or need_thr_stretch:
+                    return ("pseudo_halo" if need_item_stretch else "centrality"), rec
+                # either stretch alone is enough: the one that beat 'global' more clearly
+                return ("centrality" if rec.get("p centrality>global", 1) <= rec.get("p pseudo_halo>global", 1)
+                        else "pseudo_halo"), rec
+            if kc or kh:
+                # one stretch beat 'global': the other may still be needed alongside it
+                return add_other_stretch("centrality" if kc else "pseudo_halo"), rec
+            return "global", rec
+
+        def choose_lr_up(r, others, decide=None):
+            """The likelihood ratio ladder built up from 'global' (estimations that fit every candidate directly).
+            Each side (items, thresholds) is at one of three levels: nothing, a stretch, a full set. 1. Each side
+            with the other at nothing: on the item side items > pseudo_halo, pseudo_halo > global, items > global
+            (thresholds likewise with centrality); a side's level is nothing unless the stretch or the full set
+            beats nothing, then the full set if it beats the stretch, else the stretch. Both at nothing: bistretch > global, the two stretches together; kept -> each side re-examined
+            with the other's stretch in the model (both then at nothing: bistretch). 2. Each side re-examined the
+            same way with the other side at its current level, until neither changes (the two hidden
+            representations supply a full set beside a stretch). A hidden representation chosen becomes the free
+            'bivector', the smallest offered one containing it, which is reported, fitted and used below.
+            3. matrix > bivector (the interactions alone): rejected, matrix."""
+            cands = set(allowed(r, others))
+            if "bivector" in cands:
+                # the two hidden representations, checked like the offered ones (with cut cells, one can leave a
+                # cut shift undefined where 'bivector' does not)
+                cands |= set(allowed(r, others, ("items_centrality", "thresholds_pseudo_halo")))
+            rec, memo = {}, {}
+
+            def kept(small, large, level=alpha):
+                if large not in cands:
+                    return False
+                if small not in cands:
+                    return True
+                if decide is not None:
+                    # AIC / BIC up the same ladder (choose_ic_up): the step's decision itself
+                    if (small, large) not in memo:
+                        memo[small, large] = decide(small, large)
+                    return memo[small, large]
+                if (small, large) not in memo:
+                    t = lr_test(r, small, large, others)
+                    record(rec, small, large, t)
+                    if t.get("frame") == "average":
+                        note_average(rec, small, large)
+                    memo[small, large] = t["p"]
+                return memo[small, large] <= level
+
+            by_level = {v: k for k, v in side_levels.items()}
+
+            def level(side, other):
+                """A side's level with the other side held at other: the full set if it beats the stretch; else the
+                stretch if the stretch or the full set beats nothing; else nothing."""
+                ms = {lv: by_level[(lv, other) if side == 0 else (other, lv)] for lv in "0SF"}
+                # closed-testing order: first whether the side needs anything (the stretch or the full set beats
+                # nothing), then which level (the full set beats the stretch)
+                if not (kept(ms["0"], ms["S"]) or kept(ms["0"], ms["F"])):
+                    return "0"
+                return "F" if kept(ms["S"], ms["F"]) else "S"
+
+            def settle(lv):
+                for _ in range(4):
+                    new = [level(0, lv[1]), None]
+                    new[1] = level(1, new[0])
+                    if new == lv:
+                        break
+                    lv = new
+                return lv
+
+            lv = settle([level(0, "0"), level(1, "0")])
+            if lv == ["0", "0"] and kept("global", "bistretch"):
+                # the two stretches together beat 'global' although neither did with the other side empty (each
+                # hides the other): each side re-examined with the other's stretch in the model
+                start = [level(0, "S"), level(1, "S")]
+                if start == ["0", "0"]:
+                    # each dispensable given the other, yet the pair beats 'global' (neither alone did): bistretch,
+                    # the only model here shown to beat 'global'
+                    lv = ["S", "S"]
+                else:
+                    lv = settle(start)
+                    if lv == ["0", "0"]:
+                        lv = start
+            cur = by_level[tuple(lv)]
+            if cur in ("items_centrality", "thresholds_pseudo_halo"):
+                # a hidden representation is reported, fitted and tested further as the free 'bivector'
+                cur = "bivector"
+            # 3. the item-by-threshold interactions alone: matrix over bivector (not over the model chosen, which
+            # would pool every item and threshold effect left out with them)
+            if kept("bivector", "matrix"):
+                cur = "matrix"
+            return cur, rec
+
+        def choose_ic_up(r, others):
+            """AIC / BIC up choose_lr_up's ladder from 'global': each step keeps the larger representation if the
+            criterion prefers it (with test='AIC' and aic_relative_likelihood, the smaller's relative likelihood at
+            most alpha, as choose's check) and, with tolerances, its departure is beyond them (within)."""
+            crit, rows, steps, note = {}, {}, {}, {}
+
+            def ic(m, frame="part"):
+                if (m, frame) not in crit:
+                    models = list(others)
+                    models[r] = m
+                    v = rows[m, frame] = criteria(models, frame)
+                    crit[m, frame] = (2 * v["pen"] - 2 * v["ll"] if test == "AIC"
+                                      else v["pen"] * np.log(n_persons) - 2 * v["ll"])
+                return crit[m, frame]
+
+            def decide(small, large):
+                frame = "part"
+                if (avg_retest["on"] or avg_retest["probe"]) and lone_part(r, small, large, others):
+                    # r alone among the anchors lacks the part: in the anchors' frame the step compares a model with
+                    # itself. After the passes (avg_retest) the step is made against the anchors' average instead,
+                    # as for test='LR'
+                    lone_empty.add(r)
+                    if avg_retest["on"]:
+                        frame = "average"
+                        note_average(note, small, large)
+                cs, cl = ic(small, frame), ic(large, frame)
+                if test == "AIC" and aic_relative_likelihood:
+                    d = cs - cl
+                    if estimation in ("cp-full-rcl", "cpat-rcl"):  # composite likelihoods: rescale by the mean weight
+                        c = ((rows[large, frame]["pen"] - rows[small, frame]["pen"])
+                             / max(rows[large, frame]["k"] - rows[small, frame]["k"], 1))
+                        d = d / c if c > 0 else d
+                    ok = bool(d > 0 and np.exp(-d / 2) <= alpha)
+                else:
+                    ok = bool(cl < cs)
+                if ok and gate_on:
+                    ok = (bool(lr_test(r, small, large, others)["keep"]) if _IC_STEP == "test"
+                          else not within(r, small, large, others))
+                steps[f"{large}>{small}"] = ok
+                return ok
+
+            cur, _ = choose_lr_up(r, others, decide=decide)
+            # the criterion in the anchors' frame (against the anchors' average where only that was fitted: Note)
+            out = {f"{test} {m}": crit.get((m, "part"), crit.get((m, "average"), np.nan)) for m in candidates}
+            out.update({f"Kept {k}": v for k, v in steps.items()})
+            out.update(note)
+            return cur, out
 
         def choose(r, others):
             rows = {}
-            for m in candidates:
+            cands = allowed(r, others)
+            for m in cands:
                 models = list(others)
                 models[r] = m
                 rows[m] = criteria(models)
@@ -16363,49 +18289,257 @@ class MFRM(Rasch):
                 crit = {m: 2 * v["pen"] - 2 * v["ll"] for m, v in rows.items()}
             else:
                 crit = {m: v["pen"] * np.log(n_persons) - 2 * v["ll"] for m, v in rows.items()}
-            # ties (e.g. a sole anchor, whose effects the frame fixes at 0 whatever its representation) go to the
-            # simplest representation
+            # ties go to the simplest representation (a candidate an anchor may not take, a sole anchor's or one leaving
+            # a cut undefined, is not fitted: its column is NaN)
             simple = {m: k for k, m in enumerate(reversed(self._MIXED_GENERALITY))}
             low = min(crit.values())
-            tied = [m for m in candidates if crit[m] - low <= 1e-8 * max(1.0, abs(low))]
+            tied = [m for m in cands if crit[m] - low <= 1e-8 * max(1.0, abs(low))]
             best = min(tied, key=lambda m: (rows[m]["k"], simple[m]))
-            baseline = min(candidates, key=lambda m: (rows[m]["k"], simple[m]))
-            p = np.nan
+            baseline = min(cands, key=lambda m: (rows[m]["k"], simple[m]))
+            # the simpler model's relative likelihood: 1 when it has the lowest criterion itself
+            rel_lik, level = (1.0 if test == "AIC" and aic_relative_likelihood else np.nan), np.nan
             choice = best
-            if test == "AIC" and aic_sig_test and best != baseline:
-                delta = crit[baseline] - crit[best]
-                if estimation == "cp-full-rcl":
-                    c = (rows[best]["pen"] - rows[baseline]["pen"]) / max(rows[best]["k"] - rows[baseline]["k"], 1)
-                    delta = delta / c if c > 0 else delta
-                p = float(np.exp(-abs(delta) / 2))
-                choice = best if (delta > 0 and p <= alpha) else baseline
-            return choice, dict({f"{test} {m}": crit[m] for m in candidates}, Best=best, Baseline=baseline,
-                                **({"p": p} if test == "AIC" and aic_sig_test else {}))
+            if test == "AIC" and aic_relative_likelihood and best != baseline:
 
-        start = ["global" if r in held else general for r in range(R)]
+                def check(m):
+                    delta = crit[baseline] - crit[m]
+                    if estimation in ("cp-full-rcl", "cpat-rcl"):  # composite likelihoods: rescale by the mean weight
+                        c = (rows[m]["pen"] - rows[baseline]["pen"]) / max(rows[m]["k"] - rows[baseline]["k"], 1)
+                        delta = delta / c if c > 0 else delta
+                    rel = float(np.exp(-max(delta, 0.0) / 2))
+                    d_test = rows[m]["k"] - rows[baseline]["k"]
+                    lev = float(chi2.sf(2 * d_test + 2 * np.log(1 / alpha), d_test)) if d_test > 0 else np.nan
+                    return delta > 0 and rel <= alpha, rel, lev
+
+                # step down through the candidates in AIC order until one passes against the baseline; the
+                # recorded check is the chosen candidate's (the lowest-AIC candidate's when none passes)
+                choice, (_, rel_lik, level) = baseline, check(best)
+                for m in sorted((m for m in cands if np.isfinite(crit[m])),
+                                key=lambda m: (crit[m], rows[m]["k"], simple[m])):
+                    if m == baseline:
+                        break
+                    ok, r_m, l_m = check(m)
+                    if ok:
+                        choice, rel_lik, level = m, r_m, l_m
+                        break
+            gate_cols = {"Relative likelihood": rel_lik, "Test level": level} if test == "AIC" and aic_relative_likelihood else {}
+            out = dict({f"{test} {m}": crit.get(m, np.nan) for m in candidates}, Best=best, Baseline=baseline,
+                       **gate_cols)
+            if gate_on and choice != baseline:
+                start, choice = choice, step_down(r, others, choice, crit, cands)
+                if choice != start:
+                    out["Stepped down from"] = start
+                    # as test='LR' adds a stretch back after dropping a side: a stretch the step-down removed
+                    # with a whole side is restored if it lowers the criterion and is beyond stretch_delta
+                    low, choice = choice, step_up(r, others, choice, crit, cands)
+                    if choice != low:
+                        out["Stretch added to"] = low
+            return choice, out
+
+        order = {"0": 0, "S": 1, "F": 2}
+
+        def below(c, cands):
+            """The candidates one step simpler than c: bivector for matrix; otherwise those lower on one side
+            (items or thresholds) and equal on the other, and bistretch for bivector when neither form with a
+            full set on one side and a stretch on the other is a candidate (so the stretches stay reachable)."""
+            if c == "matrix":
+                return [m for m in cands if m == "bivector"]
+            lc = side_levels.get(c)
+            out = []
+            for m in cands:
+                lm = side_levels.get(m)
+                if m == c or lm is None or lc is None:
+                    continue
+                diff = [k for k in (0, 1) if lm[k] != lc[k]]
+                if len(diff) == 1 and order[lm[diff[0]]] < order[lc[diff[0]]]:
+                    out.append(m)
+            if (c == "bivector" and "bistretch" in cands
+                    and not any(m in cands for m in ("items_centrality", "thresholds_pseudo_halo"))):
+                out.append("bistretch")
+            return out
+
+        def within(r, small, large, others):
+            """AIC / BIC tolerance: is facet element r's departure from small to large within the tolerances?
+            RMS: Delta-hat (bias-corrected) at most delta (stretch_delta where large only adds a stretch); max:
+            the largest noise-corrected deviation at most delta_max; 'either': both within."""
+            t = lr_test(r, small, large, others, with_max=False)
+            key = stretch_added(small, large)
+            tol = (float(np.sqrt(np.mean([sdelta[k] ** 2 for k in key]))) if key is not None else delta)
+            dh = t["delta_hat"]
+            rms_in = not (np.isfinite(dh) and dh > tol)
+            if delta_measure == "overall":
+                return rms_in
+            mx = None
+            if key is None:
+                mL = list(others)
+                mL[r] = large
+                cL = fitted(mL)[2]
+                Hf = _selection._pinv_sym(cL["H"])
+                mx = max_part(r, small, large, fitted(mL), Hf @ cL["J"] @ Hf, point=True)
+            if mx is None:
+                return rms_in
+            max_in = not mx["flagged"]
+            return max_in if delta_measure == "largest" else (rms_in and max_in)
+
+        def step_up(r, others, c, crit, cands):
+            """From the step-down's choice c, add a stretch factor (a candidate that adds only stretches to c) while
+            one lowers the criterion and its departure is beyond the tolerance (stretch_delta), the lowest
+            criterion among those that do."""
+            for _ in range(3):
+                opts = [m for m in cands if stretch_added(c, m) is not None and np.isfinite(crit.get(m, np.nan))
+                        and crit[m] < crit[c] and not within(r, c, m, others)]
+                if not opts:
+                    return c
+                c = min(opts, key=lambda m: crit[m])
+            return c
+
+        def step_down(r, others, c, crit, cands):
+            """From the criterion's choice c, move to a candidate one step simpler whose departure is within the
+            tolerances (the lowest criterion among those that are), until none is."""
+            while True:
+                opts = [m for m in below(c, cands) if np.isfinite(crit.get(m, np.nan)) and within(r, m, c, others)]
+                if not opts:
+                    return c
+                c = min(opts, key=lambda m: crit[m])
+
+        start = ["global" if r in held or r in (anchor_idx or []) else general for r in range(R)]
         current = list(start)
+        # delta in logits: as given, or as a share of the instrument's median category width (the gaps between
+        # consecutive shared thresholds, in the starting fit)
+        unit, median_width = 1.0, np.nan
+        if delta_units == "width" and (test == "LR" or gate_on):
+            # with delta = delta_max = 0 a unit is only needed to report Delta-hat, so designs without usable widths
+            # report it in logits instead of raising. Without widths, default tolerances fall back to the plain tests
+            # (with a warning); tolerances the user set raise
+            K = int(self.max_score)
+            why = None
+            if K < 2:
+                why = "the maximum score is 1, so there is no category width"
+            else:
+                d0, f0 = fitted(start)[:2]
+                widths = np.diff(self._mixed_quantities(d0, f0["theta"])["thresholds"])
+                if (widths <= 0).any():
+                    why = (f"the thresholds are disordered (category widths {np.round(widths, 2).tolist()}), so there "
+                           "is no category width")
+                else:
+                    median_width = unit = float(np.median(widths))
+            if why is not None:
+                set_by_user = [k for k, v in (("delta", delta), ("delta_max", delta_max))
+                               if v > 0 and k not in defaulted]
+                if set_by_user:
+                    raise ValueError(f"delta_units='width': {why} to scale {' and '.join(set_by_user)} by; use "
+                                     "delta_units='logits'.")
+                if delta > 0 or delta_max > 0:
+                    warnings.warn(
+                        f"per_rater_model_selection(): the default tolerances delta={delta:g} and "
+                        f"delta_max={delta_max:g} are in median category widths, and {why}, so the tests of item and "
+                        "threshold effects have no tolerance (plain likelihood ratio tests, and with 'AIC' or 'BIC' "
+                        "the criterion alone, for them). To use tolerances, set delta and delta_max in logits with "
+                        "delta_units='logits'. The stretch "
+                        "tolerance (stretch_delta, a proportion) still applies.",
+                        UserWarning,
+                        stacklevel=4,
+                    )
+                    delta, delta_max = 0.0, 0.0
+                    if "delta_measure" in defaulted:
+                        delta_measure = "overall"
+                delta_units = "logits"
+        delta_logits, delta_max_logits = delta * unit, delta_max * unit
+        if _rungs is not None:
+            # research/testing hook: each given (smaller, larger) likelihood ratio test for every facet element not
+            # held, the others on the starting representations; returns the table, no selection or refit
+            out = {}
+            for r in range(R):
+                if r in held:
+                    continue
+                row = {}
+                for small, large in _rungs:
+                    t = lr_test(r, small, large, list(start))
+                    row[f"p {large}>{small}"], row[f"Delta-hat {large}>{small}"] = t["p"], t["delta_hat"]
+                out[facets[r]] = row
+            return pd.DataFrame(out).T.rename_axis(self.facet)
+        pick = ((choose_lr_up if _LR_ORDER == "up" else choose_lr) if test == "LR"
+                else (choose_ic_up if _IC_ORDER == "up" else choose))
         table, passes, changed = {}, 0, True
         for r in held:
-            table[facets[r]] = dict(Representation="global", Note="anchor (held on 'global')")
+            table[facets[r]] = dict(Representation="global", Note=(
+                "anchor (held on 'global': force_global_anchors)"))
+        def lone_anchor_retest(models):
+            """After the passes: each anchor whose test was empty because it alone lacked a part, retested with that
+            part against the anchors' average (test='LR', 'AIC' or 'BIC'). Returns whether any choice changed."""
+            if anchor_idx is None or (test != "LR" and pick is not choose_ic_up):
+                return False
+            moved = False
+            for r in sorted(anchor_idx):
+                if r in held:
+                    continue
+                lone_empty.clear()
+                avg_retest["probe"] = True
+                try:
+                    pick(r, models)  # the tests as they stand, to see whether one is empty for r
+                finally:
+                    avg_retest["probe"] = False
+                if r not in lone_empty:
+                    continue
+                avg_retest["on"] = True
+                try:
+                    choice, row = pick(r, models)
+                finally:
+                    avg_retest["on"] = False
+                row.pop("_avg_parts", None)
+                table[facets[r]] = dict(Representation=choice, **row)
+                if choice != models[r]:
+                    models[r], moved = choice, True
+            return moved
+
         if scheme == "one-pass":
             for r in range(R):
                 if r in held:
                     continue
-                choice, row = choose(r, list(start))
+                choice, row = pick(r, list(start))
+                row.pop("_avg_parts", None)
                 table[facets[r]] = dict(Representation=choice, **row)
             current = [table[fe]["Representation"] for fe in facets]
+            lone_anchor_retest(current)
             passes = 1
         else:
-            while changed and passes < max_passes:
-                passes += 1
-                changed = False
-                for r in range(R):
+            visit = list(range(R))
+            if _ANCHOR_ORDER == "worst_first" and anchor_idx is not None and len(anchor_idx) > 1:
+                # an anchor that departs pulls the shared item locations and thresholds towards itself while it is on
+                # 'global', so the others seem to depart; visited first, it takes its own effects before they are
+                # tested. Ranked by its likelihood ratio for 'matrix' over 'global', the others as at the start
+                lr0 = {}
+                for r in anchor_idx:
                     if r in held:
                         continue
-                    choice, row = choose(r, current)
-                    table[facets[r]] = dict(Representation=choice, **row)
-                    if choice != current[r]:
-                        current[r], changed = choice, True
+                    mL = list(start)
+                    mL[r] = "matrix"
+                    try:
+                        lr0[r] = 2.0 * (fitted(mL)[2]["ll"] - fitted(list(start))[2]["ll"])
+                    except Exception:  # e.g. a cut cell 'matrix' leaves undefined: rank it last
+                        lr0[r] = -np.inf
+                ranked = sorted(lr0, key=lambda r: -lr0[r])
+                visit = ranked + [r for r in range(R) if r not in lr0]
+            for _round in range(3):
+                while changed and passes < max_passes:
+                    passes += 1
+                    changed = False
+                    for r in visit:
+                        if r in held:
+                            continue
+                        lone_now = _LONE_ANCHOR == "always" and anchor_idx is not None and r in anchor_idx
+                        avg_retest["on"] = lone_now
+                        try:
+                            choice, row = pick(r, current)
+                        finally:
+                            avg_retest["on"] = False
+                        row.pop("_avg_parts", None)
+                        table[facets[r]] = dict(Representation=choice, **row)
+                        if choice != current[r]:
+                            current[r], changed = choice, True
+                if changed or not lone_anchor_retest(current):
+                    break
+                changed = True  # a lone anchor took the part: the others are reconsidered in the new frame
             if changed:
                 warnings.warn(
                     f"per_rater_model_selection(scheme='iterate'): the choices were still changing after "
@@ -16414,14 +18548,29 @@ class MFRM(Rasch):
                     stacklevel=3,
                 )
         self.calibrate(model="mixed", rater_models=dict(zip(facets, current)), anchors=given_anchors,
-                       estimation=estimation, threshold_constant=threshold_constant)
+                       estimation=estimation, threshold_constant=threshold_constant, **ridges)
+        for r in cut_idx:
+            # fitted on 'global' with a free shift at each cut cell: the representation its cuts imply
+            cells = ", ".join(str(lab) for _, lab in anchor_set.cuts[facets[r]])
+            table[facets[r]] = dict(Representation=self.rater_models[facets[r]],
+                                    Note=f"anchor with cells cut ({cells}); not selected")
         tab = pd.DataFrame({fe: table[fe] for fe in facets}).T.rename_axis(self.facet)
+        # tests involving the representations fitted for the ladder only (a full set on one side beside a
+        # stretch on the other) are not reported until those representations are surfaced
+        tab = tab.drop(columns=[c for c in tab.columns
+                                if any(h in c for h in ("items_centrality", "thresholds_pseudo_halo"))])
         self.per_rater_model_selection_table = tab
         self.per_rater_model_selection_counts = tab["Representation"].value_counts()
         self.per_rater_model_selection_info = dict(
             frame="average facet element (no anchors)" if anchors is None else f"anchors {anchors}",
             anchors=anchors, test=test, scheme=scheme, passes=passes, estimation=estimation,
-            fits=len(cache), converged_after_max_passes=not changed,
+            force_global_anchors=force_global_anchors, fits=len(cache) + len(full), ridges=dict(ridges),
+            converged_after_max_passes=not changed,
+            **({"delta": delta, "delta_units": delta_units, "median_category_width": median_width,
+                "delta_logits": delta_logits, "stretch_delta": stretch_delta,
+                "item_stretch_delta": sdelta["c"], "threshold_stretch_delta": sdelta["d"],
+                "delta_measure": delta_measure, "delta_max": delta_max,
+                "delta_max_logits": delta_max_logits} if test == "LR" or gate_on else {}),
         )
         runs = getattr(self, "per_rater_model_selection_runs", {})
         runs[None if anchors is None else tuple(anchors)] = types.SimpleNamespace(
@@ -16811,10 +18960,11 @@ class MFRM(Rasch):
         """
         if getattr(self, "_mixed_fit", False):
             # a joint fit from calibrate(model='mixed'): its frame is fixed when it is fitted
-            if anchors is not None and set(anchors) != set(self.anchors_mixed or self.facet_names):
+            names = self._anchor_spec(anchors)[0]
+            if names is not None and set(names) != set(self.anchors_mixed or self.facet_names):
                 raise ValueError(
                     f"model='mixed' was fitted with anchors={self.anchors_mixed}; the frame is part of the fit, so "
-                    f"refit with calibrate(model='mixed', rater_models=..., anchors={list(anchors)}) instead."
+                    f"refit with calibrate(model='mixed', rater_models=..., anchors={names}) instead."
                 )
             return
         if anchors is not None:
@@ -17331,8 +19481,8 @@ class MFRM(Rasch):
         if thr_se is not None:
             stats["SE"] = np.asarray(thr_se, dtype=float).round(dp)
         if interval is not None and thr_lo is None and thr_se is not None:
-            # no stored bounds (e.g. 'mixed'): the normal interval the stored bounds are
-            z = norm.ppf(0.5 + interval / 2)
+            # no stored bounds (e.g. 'mixed'): the t interval the stored bounds are
+            z = self._se_quantile(interval)
             thr_lo = np.asarray(thresholds, dtype=float) - z * np.asarray(thr_se, dtype=float)
             thr_hi = np.asarray(thresholds, dtype=float) + z * np.asarray(thr_se, dtype=float)
         if interval is not None and thr_lo is not None:
@@ -17452,12 +19602,16 @@ class MFRM(Rasch):
         (not the full, heavier fit_statistics()).
 
         Widths can be negative — a negative width at category k means
-        thresholds k and k+1 are disordered (category k is never the most
-        likely response at any person_location level). Prop disordered makes this
-        a continuous diagnostic rather than a single point-estimate
-        yes/no: the proportion of bootstrap resamples in which that
-        category's width was negative — reasonably read as the
-        probability that the true category is disordered.
+        thresholds k and k+1 are disordered (category k is never the
+        most likely response at any person_location level). Prop
+        disordered makes this a continuous diagnostic rather than a
+        single point-estimate yes/no: the proportion of bootstrap
+        resamples in which that category's width was negative —
+        reasonably read as the probability that the true category is
+        disordered. With analytic standard errors (no bootstrap
+        resamples) it is instead P(width < 0) from a t-distribution on
+        persons - 1 degrees of freedom centred on the estimate, with
+        scale the width's SE (the SE column).
 
         Parameters
         ----------
@@ -17578,11 +19732,13 @@ class MFRM(Rasch):
 
         bootstrap_dict = getattr(self, f"{prefix}cat_width_bootstrap_{model}", None)
         if bootstrap_dict is None:
-            # analytic SEs (sandwich): the normal-approximation probability that the width is negative
+            # analytic SEs: P(width < 0) from a t on persons - 1 around the estimate
             w = cat_widths.loc[cats].values.astype(float)
             se = np.array([cat_se_dict[k] for k in cats], dtype=float)
             stats["Prop disordered"] = np.where(
-                se > 0, norm.cdf(-w / np.where(se > 0, se, 1.0)), np.nan
+                se > 0,
+                t_dist.cdf(-w / np.where(se > 0, se, 1.0), max(int(self.no_of_persons) - 1, 1)),
+                np.nan,
             ).round(dp)
         else:
             stats["Prop disordered"] = np.array(
@@ -17967,7 +20123,7 @@ class MFRM(Rasch):
         anchors=None,
         full=False,
         zstd=False,
-        marginal=True,
+        marginal=None,
         alias=False,
         divergence_test=None,
         correction=None,
@@ -18033,9 +20189,11 @@ class MFRM(Rasch):
             If True, sets zstd=True, interval=0.95.
         zstd : bool, default False
             If True, includes Infit Z and Outfit Z columns.
-        marginal : bool, default True
-            For matrix model only: if True returns marginal twin-vector
+        marginal : bool or None, default None
+            For matrix model only: if True (or None) returns marginal twin-vector
             representation; if False returns full (item, threshold) cell table.
+            'mixed' always returns the full table (warning only if True is
+            passed).
         alias : bool, default False
             For centrality/pseudo_halo/bistretch only: if True, labels the
             primary table's parameter columns with their human-readable
@@ -18138,6 +20296,8 @@ class MFRM(Rasch):
         """
 
         model = self._MODEL_ALIASES.get(model, model)
+        marginal_given = marginal is not None
+        marginal = True if marginal is None else marginal
         if full:
             zstd = True
             interval = interval or 0.95
@@ -18648,8 +20808,9 @@ class MFRM(Rasch):
                 # sub-parameterisation per rater (self.rater_models), so
                 # there is no single restricted per-rater marginal to
                 # derive the way there is for matrix -- see known-issues
-                # #36. marginal is ignored here; always the full table.
-                if marginal:
+                # #36. marginal is ignored here; always the full table, with
+                # a warning only when marginal=True was passed.
+                if marginal and marginal_given:
                     warnings.warn(
                         "rater_stats_df(model='mixed') has no marginal=True "
                         "representation -- 'mixed' assigns a different "
@@ -22002,7 +24163,7 @@ class MFRM(Rasch):
 
         Facet-effect recovery has two modes. When model ==
         self.generating.model (the matched case), it uses model's
-        compact representation with proper bootstrap SEs (1 sub-vector for
+        compact representation with std_errors()' SEs (1 sub-vector for
         global/items/thresholds/matrix, 2 for bivector/centrality/
         pseudo_halo, 3 for bistretch -- see _rater_effect_subvectors; for
         'mixed', each representation's table, matched only when every
@@ -22071,7 +24232,11 @@ class MFRM(Rasch):
             (default) plots them combined on one axes (different colours,
             separate OLS/Huber fits); True plots them separately.
         alpha : float, default 0.05
-            Significance threshold for the per-parameter z-test.
+            Significance level for the per-parameter tests (Flagged/
+            Flagged_corrected). For items, thresholds, category widths and
+            facet elements: t = error / SE on persons - 1 degrees of freedom
+            (columns t and df), with the stored SE. For persons: z = error /
+            SE against the normal distribution (column z).
         correction : {'bh', 'bonferroni', None}, default 'bh'
             Multiple-comparison correction, applied within each parameter
             type's family of tests.
@@ -22159,6 +24324,9 @@ class MFRM(Rasch):
                 self.fit_statistics(model=model, interval=0.95)
 
         self.recovery = _SimParams()
+        # item-side rows (items, thresholds, widths, facet elements): t on persons - 1 (no small-sample correction of
+        # MFRM's sandwich is available)
+        df_items = max(int(self.no_of_persons) - 1, 1)
 
         # the sub-model's item locations / thresholds (anchored or not)
         est_items = self._items_for(model, anchor=anchor)
@@ -22169,6 +24337,7 @@ class MFRM(Rasch):
             alpha=alpha,
             correction=correction,
             divergence_tol=divergence_tol,
+            df=df_items,
         )
         self.recovery.items = _SimParams()
         self.recovery.items.table = items_table
@@ -22186,6 +24355,7 @@ class MFRM(Rasch):
             alpha=alpha,
             correction=correction,
             divergence_tol=divergence_tol,
+            df=df_items,
         )
         self.recovery.thresholds = _SimParams()
         self.recovery.thresholds.table = thresholds_table
@@ -22201,6 +24371,7 @@ class MFRM(Rasch):
             alpha=alpha,
             correction=correction,
             divergence_tol=divergence_tol,
+            df=df_items,
         )
         self.recovery.category_widths = _SimParams()
         self.recovery.category_widths.table = widths_table
@@ -22369,6 +24540,7 @@ class MFRM(Rasch):
                     alpha=alpha,
                     correction=correction,
                     divergence_tol=divergence_tol,
+                    df=df_items,
                 )
                 sub_tables[label] = _SimParams()
                 sub_tables[label].table = sub_table
@@ -22393,6 +24565,7 @@ class MFRM(Rasch):
                 alpha=alpha,
                 correction=correction,
                 divergence_tol=divergence_tol,
+                df=df_items,
             )
             self.recovery.raters.table = raters_table
             self.recovery.raters.summary = raters_summary

@@ -28,6 +28,54 @@ except ImportError:
 from sklearn.linear_model import HuberRegressor
 
 
+def _f_reference(W, q, n, ncp=0.0):
+    """
+    Upper-tail p-value of a Wald statistic W = d' V^+ d on q degrees of freedom whose covariance V is estimated
+    from the responses of n independent persons, from the F reference of Hotelling's T^2:
+    F = W (n - q) / (q (n - 1)) on (q, n - q), noncentral with noncentrality ncp when ncp > 0. For a comparison
+    of independent groups whose covariances may differ (V = V_1 + V_2), n = nu + 1 with nu the multivariate Welch
+    degrees of freedom of _welch_df. Returns 1 when n <= q (V cannot be estimated with q
+    dimensions from n persons).
+
+    The reference is exact only when the per-person contributions to d are multivariate normal and V is their
+    sample covariance (Hotelling's T^2). Here d is a function of estimates and V a sandwich (or bootstrap)
+    covariance, so the F reference is an approximation, not an exact test: it allows for the uncertainty of
+    estimating V from n persons, which a chi-square reference ignores (chi-square is its limit as n grows), but
+    the per-person contributions are neither normal nor exactly averaged.
+    """
+    W, q, n = float(W), int(q), float(n)
+    if q < 1:
+        return np.nan
+    d2 = n - q
+    if d2 <= 0:
+        return 1.0
+    F = W * d2 / (q * (n - 1))
+    if ncp > 0:
+        from scipy.stats import ncf
+
+        return float(ncf.sf(F, q, d2, ncp))
+    return float(f_dist.sf(F, q, d2))
+
+
+def _welch_df(covs, ns):
+    """
+    Nel & van der Merwe (1986) degrees of freedom nu for a Wald statistic comparing independent groups whose
+    estimates' covariances covs (each V_g, already the covariance of group g's estimates) come from n_g persons:
+    nu = [tr(S^2) + tr(S)^2] / sum_g [tr(V_g^2) + tr(V_g)^2] / (n_g - 1), S = sum_g V_g, on the support of S.
+    The F reference is then _f_reference(W, q, nu + 1), i.e. F = W (nu - q + 1) / (q nu) on (q, nu - q + 1).
+    With one parameter it is the Welch-Satterthwaite df; with equal covariances and sizes it is n_1 + n_2 - 2.
+    """
+    S = sum(covs)
+    w, Q = np.linalg.eigh((S + S.T) / 2)
+    P = Q[:, w > 1e-10 * w.max()]
+    S = P.T @ S @ P
+    den = sum(
+        (np.trace(G @ G) + np.trace(G) ** 2) / (n - 1)
+        for G, n in ((P.T @ V @ P, n) for V, n in zip(covs, ns))
+    )
+    return float((np.trace(S @ S) + np.trace(S) ** 2) / den)
+
+
 def _esf_lcw(b):
     """_esf.log_category_weights (imported when first needed)."""
     from raschpy import _esf
@@ -207,6 +255,42 @@ def _save_table(table, filename, file_format="csv"):
 
 COND_VAR_ZERO = 1e-10  # conditional variances below this are 0 (responses fixed by the total)
 MARTIN_LOF_SPARSE = 0.25  # share of score cells with < 5 persons above which the chi-square p is conservative
+
+
+_FIT_FIRST = (
+    "person", "person_estimates", "csem", "score_lookup", "score_lookup_table", "icc", "crcs",
+    "threshold_ccs", "iic", "tcc", "test_info", "test_csem", "wright_map",
+)
+_PERSONS_FIRST = ("class_intervals", "class_intervals_cats", "class_intervals_thresholds")
+_FIT_STATISTICS_FIRST = ("std_residuals_plot",)
+
+
+def _calibrate_on_demand(cls, fitted):
+    """
+    Wrap cls's results and plotting methods so that, like fit_statistics() and the stats tables,
+    they calibrate an uncalibrated object first (calibrate() with its defaults); the class-interval
+    methods also estimate persons, and std_residuals_plot() also computes the fit statistics, when
+    these are missing. fitted: the attribute a calibration sets.
+    """
+    import functools
+
+    def wrap(name, f):
+        @functools.wraps(f)
+        def method(self, *args, **kwargs):
+            if not hasattr(self, fitted):
+                self.calibrate()
+            if name in _PERSONS_FIRST and not hasattr(self, "persons"):
+                self.person_estimates()
+            if name in _FIT_STATISTICS_FIRST and not hasattr(self, "std_residual_df"):
+                self.fit_statistics()
+            return f(self, *args, **kwargs)
+
+        return method
+
+    for name in _FIT_FIRST + _PERSONS_FIRST + _FIT_STATISTICS_FIRST:
+        f = getattr(cls, name, None)
+        if f is not None:
+            setattr(cls, name, wrap(name, f))
 
 
 class Rasch:
@@ -1037,14 +1121,15 @@ class Rasch:
         eye = np.eye(S.shape[1])
         for start in range(0, N, chunk):
             sl = slice(start, min(start + chunk, N))
-            M = eye[None] - np.einsum("pa,npq,qb->nab", S, person_bread(sl), S)
+            M = eye[None] - S.T @ person_bread(sl) @ S  # S' B_n S for each person (batched matmul)
             lam, V = np.linalg.eigh((M + M.transpose(0, 2, 1)) / 2)
             good = np.isfinite(lam).all(axis=1) & (lam.min(axis=1) > 1e-8)
             if not good.any():
                 continue
             u = U[sl][good]
             y = u @ S  # S' u
-            z = np.einsum("nab,nb,ncb,nc->na", V[good], 1 / np.sqrt(lam[good]), V[good], y)
+            Vg = V[good]  # z = V diag(lam^-1/2) V' y for each person
+            z = (Vg @ ((Vg.transpose(0, 2, 1) @ y[:, :, None])[:, :, 0] / np.sqrt(lam[good]))[:, :, None])[:, :, 0]
             adj = z @ T.T + (u - (u @ Qk) @ Qk.T)
             block = out[sl]
             block[good] = np.where(np.isfinite(adj), adj, u)
@@ -1707,7 +1792,51 @@ class Rasch:
             "converged": converged,
         }
 
-    def _wald_anchor_selection(self, anchor, observed, se, alpha=0.05, min_anchors=6):
+    @staticmethod
+    def _anchor_wald_stats(d, Va, Vo, keep, n_a, n_o):
+        """
+        The anchor-selection Wald statistics, vectorised over draws (rows): d (draws x candidates) holds
+        anchor - observed for each candidate, Va and Vo the covariance matrices of the anchor and observed
+        values (Va zero for fixed anchors), keep (draws x candidates) the current anchor set.
+
+        tc is the precision-weighted mean of d over the kept candidates, weights w_j = 1 / (Va_jj + Vo_jj).
+        Each candidate's deviation d_i - tc has variance c'Va c + c'Vo c, c = e_i - a, a the weights
+        normalised over the kept candidates (for a kept candidate with diagonal V: v_i (1 - w_i / sum(w))).
+        t = deviation / SE; df = Welch-Satterthwaite from the two components and the persons n_a, n_o
+        behind them (n_o - 1 when the anchors are fixed; infinite, i.e. a normal reference, when n_o is None).
+
+        Returns tc (draws,), dev, se, t, df, p (each draws x candidates).
+        """
+        d = np.atleast_2d(d)
+        keep = np.atleast_2d(keep)
+        w = 1.0 / (np.diag(Va) + np.diag(Vo))
+        a = w * keep
+        a = a / a.sum(1, keepdims=True)
+        tc = (a * d).sum(1)
+        dev = d - tc[:, None]
+
+        def part(V):
+            aV = a @ V
+            return np.clip(np.diag(V)[None, :] - 2.0 * aV + (aV * a).sum(1)[:, None], 0.0, None)
+
+        vo = part(Vo)
+        va = part(Va) if np.any(Va) else np.zeros_like(vo)
+        var = va + vo
+        pos = var > 0
+        se = np.sqrt(var)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            t = np.where(pos, dev / np.where(pos, se, 1.0), 0.0)
+            if n_o is None:
+                df = np.full_like(var, np.inf)
+            elif n_a is None or not np.any(Va):
+                df = np.full_like(var, max(n_o - 1, 1))
+            else:
+                df = np.where(pos, var**2 / (va**2 / max(n_a - 1, 1) + vo**2 / max(n_o - 1, 1)), np.inf)
+        p = 2 * t_dist.sf(np.abs(t), df)
+        return tc, dev, se, t, df, p
+
+    def _wald_anchor_selection(self, anchor, observed, se, alpha=0.05, min_anchors=6, anchor_cov=None,
+                               observed_cov=None, n_anchor=None, n_observed=None):
         """
         Wald-test-based anchor-item selection: an alternative to
         _robust_anchor_selection() for deciding which supplied anchor
@@ -1715,25 +1844,21 @@ class Rasch:
 
         For each candidate anchor item, tests H0: this item's deviation
         from the current (precision-weighted) translation line is zero,
-        i.e. z_i = (anchor_i - (observed_i + tc)) / SE(observed_i), a
-        standard Wald test (anchor_i is treated as a fixed known
-        constant — no sampling error of its own — matching how anchor
-        values are used everywhere else in this package).
+        t_i = (anchor_i - (observed_i + tc)) / SE(deviation_i), referred
+        to a t-distribution. The deviation's variance counts the
+        observed value's error, the anchor value's error when the anchor
+        values are themselves estimates (anchor_cov: e.g. the reference
+        group's calibration in DIF purification), and the item's own
+        share of tc (see _anchor_wald_stats). Fixed anchor values
+        (anchor_cov=None, as in calibrate_anchor) carry no error.
 
         Uses sequential exclusion (recompute tc and re-test on the
-        current remaining set at each step), not a single pass against a
-        translation constant fixed from the full candidate set. This
-        matters for the same reason it does in MFRM's
-        check_anchor_homogeneity: tc is a precision-weighted MEAN, and is
-        therefore sensitive to outliers :a single severely off anchor
-        item can drag that mean far enough that other, genuinely fine
-        anchor items also fail the test — collateral flagging, not real
-        misfit ("artificial DIF" in Andrich's sense, here applied to
-        anchor selection rather than group DIF). _robust_anchor_selection
-        does not have this problem because it centres on the MEDIAN,
-        which one outlier barely moves; a mean-based translation constant
-        has no such protection, so this method re-centres on each
-        remaining subset instead.
+        current remaining set at each step, dropping the largest |t|),
+        not a single pass against a translation constant fixed from the
+        full candidate set: tc is a precision-weighted mean, so a single
+        severely off anchor item can drag it far enough that other,
+        genuinely fine anchor items also fail the test (collateral
+        flagging; "artificial DIF" in Andrich's sense).
 
         Parameters
         ----------
@@ -1743,38 +1868,48 @@ class Rasch:
             Freshly-calibrated values for the same items, indexed by item
             name. Only items present in both anchor and observed are used.
         se : pandas.Series
-            Bootstrap SE of `observed`, indexed by item name (same index
-            as observed). This is the one thing _robust_anchor_selection
-            does not need but this method does — it's a genuine
-            significance test, not a descriptive-statistics trim.
+            SE of `observed`, indexed by item name. Used for the
+            observed values' variances when observed_cov is None.
         alpha : float, default 0.05
-            Significance level for each item's Wald test.
+            Significance level for each item's test.
         min_anchors : int, default 6
-            Floor on the number of surviving items — same semantics as
-            _robust_anchor_selection: skip trimming entirely (with a
-            warning) if the initial common set is at or below this floor;
-            stop early (also with a warning) if trimming reaches this
-            floor before every remaining item clears alpha.
+            Floor on the number of surviving items: skip trimming
+            entirely (with a warning) if the initial common set is at or
+            below this floor; stop early (also with a warning) if
+            trimming reaches this floor before every remaining item
+            clears alpha.
+        anchor_cov, observed_cov : pandas.DataFrame or None
+            Covariance matrices of the anchor and observed values
+            (indexed by item name both ways). None for anchor_cov: fixed
+            anchor values; None for observed_cov: squared SEs on the
+            diagonal.
+        n_anchor, n_observed : int or None
+            Persons behind the anchor and observed values, for the
+            degrees of freedom: Welch-Satterthwaite when the anchor
+            values are estimates, n_observed - 1 when they are fixed. A
+            normal reference if n_observed is None.
 
         Returns
         -------
         dict — same shape as _robust_anchor_selection(), so callers can
         use either interchangeably:
             table : pandas.DataFrame
-                Anchor, Observed, SE, Deviation, z, p, Selected — indexed
-                by item name.
+                Anchor, Observed, SE, Deviation, SE (deviation), t, df,
+                p, Selected — indexed by item name. A dropped item's
+                Deviation to p are from the step at which it was dropped.
             selected_anchors, dropped_anchors : pandas.Index
             original_anchor_corr, original_anchor_sd_ratio : float
-                Descriptive only here (Pearson corr / SD ratio before
-                trimming) — not part of the stopping rule, unlike
-                _robust_anchor_selection, but kept for interface
-                consistency and comparability between the two methods.
+                Descriptive only (Pearson corr / SD ratio before
+                trimming), kept for comparability with
+                _robust_anchor_selection.
             anchor_corr, anchor_sd_ratio : float
                 Same, after trimming.
             tc : float
-                Precision-weighted translation constant,
-                sum(w_i*(anchor_i - observed_i)) / sum(w_i) over the
-                finally-selected items, w_i = 1/SE_i^2.
+                Precision-weighted translation constant over the
+                finally-selected items, weights 1 / (anchor variance +
+                observed variance).
+            weights : pandas.Series
+                Those weights, for every common item.
             converged : bool
                 True if every remaining item cleared alpha before
                 min_anchors was reached.
@@ -1793,32 +1928,38 @@ class Rasch:
                 "SE": se.loc[common],
             }
         )
+        n = len(common)
+        if observed_cov is not None and not set(common).issubset(observed_cov.index):
+            observed_cov = None
+        Vo = (observed_cov.loc[common, common].to_numpy(float) if observed_cov is not None
+              else np.diag(table["SE"].to_numpy(float) ** 2))
+        if anchor_cov is not None and not set(common).issubset(anchor_cov.index):
+            raise ValueError("anchor_cov does not cover every common item.")
+        Va = anchor_cov.loc[common, common].to_numpy(float) if anchor_cov is not None else np.zeros((n, n))
+        d = (table["Anchor"] - table["Observed"]).to_numpy(float)
+        weights = pd.Series(1.0 / (np.diag(Va) + np.diag(Vo)), index=common)
 
         original_anchor_corr = table["Anchor"].corr(table["Observed"])
         original_anchor_sd_ratio = table["Observed"].std() / table["Anchor"].std()
 
-        def _wald(current_index):
-            sub = table.loc[current_index]
-            w = 1.0 / sub["SE"] ** 2
-            tc = float((w * (sub["Anchor"] - sub["Observed"])).sum() / w.sum())
-            deviation = sub["Anchor"] - (sub["Observed"] + tc)
-            z = deviation / sub["SE"]
-            p = pd.Series(2 * (1 - norm.cdf(z.abs())), index=current_index)
-            return tc, deviation, z, p
+        def _wald(keep):
+            tc, dev, s, t, df, p = self._anchor_wald_stats(d, Va, Vo, keep, n_anchor, n_observed)
+            return float(tc[0]), dev[0], s[0], t[0], df[0], p[0]
 
-        if len(table) <= min_anchors:
+        stat_cols = ["Deviation", "SE (deviation)", "t", "df", "p"]
+        keep = np.ones(n, bool)
+        if n <= min_anchors:
             warnings.warn(
-                f"Only {len(table)} items have both an anchor and an "
+                f"Only {n} items have both an anchor and an "
                 f"observed value, at or below min_anchors={min_anchors}. "
                 f"Skipping Wald-based outlier trimming; all supplied anchor "
                 f"items will be used.",
                 UserWarning,
                 stacklevel=2,
             )
-            tc, deviation, z, p = _wald(table.index)
-            table["Deviation"] = deviation
-            table["z"] = z
-            table["p"] = p
+            tc, dev, s, t, df, p = _wald(keep)
+            for col, v in zip(stat_cols, (dev, s, t, df, p)):
+                table[col] = v
             table["Selected"] = True
             return {
                 "table": table,
@@ -1829,19 +1970,19 @@ class Rasch:
                 "anchor_corr": original_anchor_corr,
                 "anchor_sd_ratio": original_anchor_sd_ratio,
                 "tc": tc,
+                "weights": weights,
                 "converged": False,
             }
 
-        current = list(table.index)
         dropped_anchors = []
-        dropped_stats = {}  # item -> (deviation, z, p) at its removal step
+        dropped_stats = {}  # position -> statistics at its removal step
         converged = True
 
         while True:
-            tc, deviation, z, p = _wald(current)
-            if (p > alpha).all():
+            tc, dev, s, t, df, p = _wald(keep)
+            if (p[keep] > alpha).all():
                 break
-            if len(current) <= min_anchors:
+            if keep.sum() <= min_anchors:
                 converged = False
                 warnings.warn(
                     f"Wald-based anchor selection reached min_anchors="
@@ -1852,21 +1993,19 @@ class Rasch:
                     stacklevel=2,
                 )
                 break
-            worst = z.abs().idxmax()
-            dropped_anchors.append(worst)
-            dropped_stats[worst] = (deviation.loc[worst], z.loc[worst], p.loc[worst])
-            current.remove(worst)
+            worst = int(np.argmax(np.where(keep, np.abs(t), -1.0)))
+            dropped_anchors.append(common[worst])
+            dropped_stats[worst] = (dev[worst], s[worst], t[worst], df[worst], p[worst])
+            keep[worst] = False
 
-        selected_anchors = pd.Index(current)
-        table["Deviation"] = np.nan
-        table["z"] = np.nan
-        table["p"] = np.nan
-        table.loc[current, "Deviation"] = deviation
-        table.loc[current, "z"] = z
-        table.loc[current, "p"] = p
-        for item, (dev_i, z_i, p_i) in dropped_stats.items():
-            table.loc[item, ["Deviation", "z", "p"]] = [dev_i, z_i, p_i]
-        table["Selected"] = table.index.isin(selected_anchors)
+        for col in stat_cols:
+            table[col] = np.nan
+        for col, v in zip(stat_cols, (dev, s, t, df, p)):
+            table.loc[keep, col] = v[keep]
+        for pos, vals in dropped_stats.items():
+            table.iloc[pos, [table.columns.get_loc(c) for c in stat_cols]] = vals
+        selected_anchors = common[keep]
+        table["Selected"] = keep
 
         anchor_corr = table.loc[selected_anchors, "Anchor"].corr(
             table.loc[selected_anchors, "Observed"]
@@ -1885,8 +2024,39 @@ class Rasch:
             "anchor_corr": anchor_corr,
             "anchor_sd_ratio": anchor_sd_ratio,
             "tc": tc,
+            "weights": weights,
             "converged": converged,
         }
+
+    def _location_covariance(self):
+        """
+        Covariance matrix (pandas.DataFrame, indexed by item name both ways) of the item locations (PCM: central
+        locations) from the current standard errors: the analytic covariance for se_method 'sandwich'/'hessian',
+        else the covariance of the stored bootstrap resamples (rows with a non-finite value dropped), else None.
+        """
+        if getattr(self, "se_method", None) in ("sandwich", "hessian"):
+            if hasattr(self, "_central_covariance"):
+                return self._central_covariance()
+            cov = getattr(self, "se_covariance", None)
+            return cov["items"] if isinstance(cov, dict) else cov
+        boot = getattr(self, "central_bootstrap" if hasattr(self, "_central_covariance") else "item_bootstrap", None)
+        return self._boot_cov(boot)
+
+    @staticmethod
+    def _boot_cov(boot, cols=None):
+        """Covariance (DataFrame) of bootstrap resamples boot[cols], rows with a non-finite value dropped; None if
+        boot is None, lacks a column, or keeps fewer than 3 rows."""
+        if boot is None:
+            return None
+        cols = list(boot.columns) if cols is None else list(cols)
+        if not set(cols).issubset(boot.columns):
+            return None
+        X = boot[cols].to_numpy(float)
+        X = X[np.isfinite(X).all(1)]
+        if len(X) < 3:
+            return None
+        return pd.DataFrame(np.atleast_2d(np.cov(X.T)), index=cols, columns=cols)
+
 
     def _bootstrap_value_matrix(self, samples, attr, index):
         """
@@ -1938,32 +2108,30 @@ class Rasch:
                 msg = f"{msg} (in {count} of {n_units} leave-one-out purifications)"
             warnings.warn(msg, w.category, stacklevel=4)
 
-    @staticmethod
-    def _anchor_tc_draws(ref, foc, se, selection_method, corr_tol, sd_ratio_tol, min_anchors, wald_alpha):
+    @classmethod
+    def _anchor_tc_draws(cls, ref, foc, Va, Vo, n_a, n_o, selection_method, corr_tol, sd_ratio_tol, min_anchors,
+                         wald_alpha):
         """
         Translation constant for each draw (row) of the candidate anchors' reference values ref and focal values
         foc (draws x candidates), with the anchor selection redone in every draw: the same rules as
-        _wald_anchor_selection (sequential exclusion, precision weights 1 / se^2 from the observed focal SEs) and
+        _wald_anchor_selection (sequential exclusion on the t statistics of _anchor_wald_stats, from the
+        observed covariance matrices Va (reference) and Vo (focal) and person counts n_a, n_o) and
         _robust_anchor_selection (modified z-scores of the deviations, dropped until the correlation and SD ratio
         clear their tolerances), and the same min_anchors floor. Returns an array of length draws.
         """
         B, n = ref.shape
         keep = np.ones((B, n), bool)
         if selection_method == "wald":
-            w = np.broadcast_to(1.0 / np.asarray(se, float) ** 2, (B, n))
+            d = ref - foc
             if n > min_anchors:
-                zc = norm.isf(wald_alpha / 2)
                 for _ in range(n - min_anchors):
-                    ww = w * keep
-                    tc = (ww * (ref - foc)).sum(1) / ww.sum(1)
-                    z = np.where(keep, np.abs(ref - (foc + tc[:, None])) / se, -1.0)
-                    bad = (z > zc).any(1) & (keep.sum(1) > min_anchors)
+                    _, _, _, t, _, p = cls._anchor_wald_stats(d, Va, Vo, keep, n_a, n_o)
+                    bad = ((p <= wald_alpha) & keep).any(1) & (keep.sum(1) > min_anchors)
                     if not bad.any():
                         break
-                    rows = np.where(bad)[0]
-                    keep[rows, z.argmax(1)[bad]] = False
-            ww = w * keep
-            return (ww * (ref - foc)).sum(1) / ww.sum(1)
+                    worst = np.where(keep, np.abs(t), -1.0).argmax(1)
+                    keep[np.where(bad)[0], worst[bad]] = False
+            return cls._anchor_wald_stats(d, Va, Vo, keep, n_a, n_o)[0]
         # robust_z
         if n > min_anchors:
             dev = foc - ref
@@ -2040,6 +2208,8 @@ class Rasch:
         focal_boot=None,
         ref_cov=None,
         focal_cov=None,
+        n_ref=None,
+        n_focal=None,
     ):
         """
         Leave-one-out translation constant for each tested unit, and the two
@@ -2061,7 +2231,14 @@ class Rasch:
         - otherwise from that group's stored bootstrap resamples
           (ref_boot/focal_boot), as the variance of the unit's deviation
           from the anchor mean across resamples;
-        - otherwise from the independence formula sum(se_i^2)/n_anchors^2.
+        - otherwise from the independence formula sum(a_i^2 se_i^2).
+
+        With selection_method='wald' the anchors are selected on both
+        groups' errors: each group's covariance matrix (ref_cov/focal_cov,
+        else the covariance of its bootstrap resamples, else its squared
+        SEs on the diagonal) and person count (n_ref/n_focal, for the
+        Welch-Satterthwaite df of the t reference); see
+        _wald_anchor_selection.
 
         Returns
         -------
@@ -2075,6 +2252,18 @@ class Rasch:
             selection, for reporting only; not used for the values above.
         """
         idx = ref_col.index
+        # each group's covariance matrix of the units for the Wald selection: analytic, else bootstrap, else diagonal
+        sel_cov = {}
+        if selection_method == "wald":
+            for key, cov, boot, se_col in (("ref", ref_cov, ref_boot, ref_se_col),
+                                           ("focal", focal_cov, focal_boot, focal_se_col)):
+                if cov is not None and set(idx).issubset(cov.index):
+                    sel_cov[key] = cov.loc[idx, idx]
+                else:
+                    sel_cov[key] = self._boot_cov(boot, idx)
+                    if sel_cov[key] is None:
+                        sel_cov[key] = pd.DataFrame(np.diag(se_col.loc[idx].to_numpy(float) ** 2),
+                                                    index=idx, columns=idx)
         tc_per_unit = pd.Series(index=idx, dtype=float)
         ref_var_per_unit = pd.Series(index=idx, dtype=float)
         focal_var_per_unit = pd.Series(index=idx, dtype=float)
@@ -2094,10 +2283,14 @@ class Rasch:
                         focal_se_o,
                         alpha=wald_alpha,
                         min_anchors=min_anchors,
+                        anchor_cov=sel_cov["ref"],
+                        observed_cov=sel_cov["focal"],
+                        n_anchor=n_ref,
+                        n_observed=n_focal,
                     )
                     sel = ar["selected_anchors"]
                     tc_per_unit[r] = ar["tc"]
-                    w = 1.0 / focal_se_o.loc[sel] ** 2
+                    w = ar["weights"].loc[sel]
                 elif selection_method == "robust_z":
                     ar = self._robust_anchor_selection(
                         ref_o,
@@ -2156,9 +2349,10 @@ class Rasch:
                         Vsr = cov.loc[sel, r].values
                         store[r] = float(cov.loc[r, r] - 2.0 * a @ Vsr + a @ Vss @ a)
                 elif n_sel > 0:
+                    a = (w / w.sum()).reindex(sel).values if w is not None else np.full(n_sel, 1.0 / n_sel)
                     tc_var = float(
-                        (ref_se_o.loc[sel] ** 2 + focal_se_o.loc[sel] ** 2).sum()
-                    ) / (n_sel**2)
+                        (a**2 * (ref_se_o.loc[sel] ** 2 + focal_se_o.loc[sel] ** 2).values).sum()
+                    )
                     ref_var_per_unit[r] = ref_se_col.loc[r] ** 2
                     focal_var_per_unit[r] = focal_se_col.loc[r] ** 2 + tc_var
                 else:
@@ -2185,8 +2379,13 @@ class Rasch:
                             for u in cols
                         ])
                         F_d = F_d + shift
+                        if selection_method == "wald":
+                            Va_o = sel_cov["ref"].loc[others, others].to_numpy(float)
+                            Vo_o = sel_cov["focal"].loc[others, others].to_numpy(float)
+                        else:
+                            Va_o = Vo_o = None
                         tc_d = self._anchor_tc_draws(
-                            R_d[:, :-1], F_d[:, :-1], focal_se_o.values, selection_method,
+                            R_d[:, :-1], F_d[:, :-1], Va_o, Vo_o, n_ref, n_focal, selection_method,
                             corr_tol, sd_ratio_tol, min_anchors, wald_alpha,
                         )
                         v = float(np.var(F_d[:, -1] + tc_d - R_d[:, -1], ddof=1))
@@ -2204,6 +2403,10 @@ class Rasch:
                     focal_se_col,
                     alpha=wald_alpha,
                     min_anchors=min_anchors,
+                    anchor_cov=sel_cov["ref"],
+                    observed_cov=sel_cov["focal"],
+                    n_anchor=n_ref,
+                    n_observed=n_focal,
                 )
                 selected, anchor_table = ar_full["selected_anchors"], ar_full["table"]
             elif selection_method == "robust_z":
@@ -2299,12 +2502,15 @@ class Rasch:
                 self.std_errors(
                     no_of_samples=no_of_samples, seed=seed, **std_errors_kwargs
                 )
+            # the anchor values are fixed; the calibration's covariance and persons give the t statistics' SE and df
             result = self._wald_anchor_selection(
                 anchors,
                 self.items,
                 self.item_se,
                 alpha=wald_alpha,
                 min_anchors=min_anchors,
+                observed_cov=self._location_covariance(),
+                n_observed=self.no_of_persons,
             )
             tc = result["tc"]
             self.anchor_selection = result["table"]
@@ -2408,7 +2614,21 @@ class Rasch:
         else:
             self.anchor_plot = None
 
-    _SELECTION_DEPRECATED = ("likelihood", "sampling", "warm_corr", "tolerance", "max_iters", "ext_score_adjustment")
+    _SELECTION_DEPRECATED = ("likelihood", "warm_corr", "tolerance", "max_iters", "ext_score_adjustment")
+
+    @staticmethod
+    def _resolve_aic_sig_test(aic_relative_likelihood, aic_sig_test):
+        """aic_sig_test= is the v1.4.0 name of aic_relative_likelihood= (FutureWarning; its value is used)."""
+        if aic_sig_test is None:
+            return aic_relative_likelihood
+        warnings.warn(
+            "aic_sig_test is deprecated and will be removed; use aic_relative_likelihood (same "
+            "rule: the simpler model's relative likelihood compared with alpha, a likelihood ratio test at a level "
+            "below alpha).",
+            FutureWarning,
+            stacklevel=3,
+        )
+        return bool(aic_sig_test)
 
     @staticmethod
     def _warn_selection_deprecated(passed):
@@ -2433,7 +2653,121 @@ class Rasch:
         tau = np.asarray(rsm.thresholds, float)[-K:]
         return (d[:, None] + tau[None, :]).ravel()
 
-    def _run_rsm_pcm_selection(self, test, aic_sig_test, alpha, min_effect, no_of_samples, seed):
+    # sampling='power''s default delta, in shares of the median category width: the same as the close-fit tolerance
+    # default of MFRM.per_rater_model_selection (delta=0.1)
+    _POWER_DELTA_DEFAULT = 0.1
+
+    def _rsm_pcm_model_selection(self, test, aic_relative_likelihood, alpha, min_effect, no_of_samples, seed, delta,
+                                 delta_units, sampling, power_threshold, n_subsamples, ridge=None,
+                                 delta_measure="either"):
+        """model_selection()'s RSM-vs-PCM comparison with its arguments checked: the comparison on the full data
+        (_run_rsm_pcm_selection), then, with sampling=n, the likelihood ratio test refitted on random subsamples."""
+        if isinstance(sampling, str) and sampling == "auto":
+            sampling = None  # v1.4.0's default: subsampled only under the joint likelihood, which is no longer used
+        dynamic = isinstance(sampling, str) and sampling == "dynamic"
+        if dynamic:
+            # v1.4.0's subsample size, now with both models refitted on each subsample
+            from raschpy.rsm import RSM
+            m_max = (int(self.max_score) if isinstance(self, RSM)
+                     else int(np.nanmax(np.asarray(self.max_score_vector, float))))
+            sampling = int(min(20 * (len(self.item_names) - 1) * max(m_max - 1, 1), 1500))
+        elif isinstance(sampling, str):
+            if sampling != "power":
+                raise ValueError("sampling must be None, 'power', 'dynamic' or a whole number of persons.")
+        elif sampling is not None:
+            if isinstance(sampling, bool) or int(sampling) != sampling or sampling < 2:
+                raise ValueError("sampling must be None, 'power', 'dynamic' or a whole number of persons (at least 2).")
+            sampling = int(sampling)
+        if sampling is not None and test not in (None, "LR"):
+            raise ValueError("model_selection(sampling=...) applies to test='LR' only (the default test=None "
+                             "resolves to 'LR' when sampling is given).")
+        if test is None and sampling is not None:
+            test = "LR"
+        delta_default = delta is None
+        if delta is None:
+            # the close-fit tolerance with every test (0.1 median category widths); sampling=n refits the plain test
+            delta = 0.0 if isinstance(sampling, int) else self._POWER_DELTA_DEFAULT
+        if delta < 0 or min_effect < 0:
+            raise ValueError("delta and min_effect must be at least 0.")
+        if delta_measure not in ("overall", "largest", "either"):
+            raise ValueError("delta_measure must be 'overall', 'largest' or 'either'.")
+        if delta_units not in ("logits", "width"):
+            raise ValueError("delta_units must be 'logits' or 'width'.")
+        if sampling == "power" and not delta > 0:
+            raise ValueError("model_selection(sampling='power') needs delta > 0: the departure the study should "
+                             "detect.")
+        if isinstance(sampling, int) and delta > 0:
+            raise ValueError("model_selection(): delta (the close-fit test) cannot be combined with sampling=n; use "
+                             "one or the other.")
+        if not 0 < power_threshold < 1:
+            raise ValueError("power_threshold must be between 0 and 1.")
+        if int(n_subsamples) != n_subsamples or n_subsamples < 1:
+            raise ValueError("n_subsamples must be a whole number of at least 1.")
+        if ridge is not None and getattr(self, "estimation", None) not in ("cml", "cp-full-rcl", "cpat-rcl"):
+            raise ValueError(
+                "model_selection(ridge=...) needs estimates from estimation='cml', 'cp-full-rcl' or 'cpat-rcl'; "
+                f"these are from estimation={getattr(self, 'estimation', None)!r}."
+            )
+        self._run_rsm_pcm_selection(test, aic_relative_likelihood, alpha, min_effect, no_of_samples, seed,
+                                    delta=float(delta), delta_units=delta_units, sampling=sampling,
+                                    power_threshold=power_threshold, pcm_ridge=ridge, delta_measure=delta_measure,
+                                    delta_default=delta_default)
+        self.model_comparison_rsm_pcm_sampling = None
+        if isinstance(sampling, int):
+            self._subsample_rsm_pcm(sampling, int(n_subsamples), alpha, min_effect, no_of_samples, seed,
+                                    pcm_ridge=ridge)
+            self.model_comparison_rsm_pcm_sampling["dynamic"] = dynamic
+
+    def _subsample_rsm_pcm(self, n, n_subsamples, alpha, min_effect, no_of_samples, seed, pcm_ridge=None):
+        """sampling=n: the likelihood ratio test refitted on n persons drawn at random (both models, with the
+        object's calibration settings), n_subsamples times; PCM is preferred if more than half the subsamples reject
+        RSM (and min_effect holds on the full data). The seed is recorded so the draws can be repeated."""
+        from raschpy.rsm import RSM
+
+        names = list(self.item_names)
+        X = self.responses.loc[:, names]
+        N = len(X)
+        rec = dict(n=n, n_subsamples=n_subsamples)
+        s = self.model_comparison_rsm_pcm_lr_summary
+        if n >= N:
+            rec.update(decision="full data (n is at least the number of persons)")
+            self.model_comparison_rsm_pcm_sampling = rec
+            self.model_comparison_rsm_pcm_lr_summary = pd.concat(
+                [s.drop("Preferred"), pd.Series({"Subsample size": n, "Subsamples": 0}), s[["Preferred"]]]
+            ).rename(s.name)
+            return
+        if seed is None:
+            seed = int(np.random.default_rng().integers(2**31 - 1))
+        rng = np.random.default_rng(seed)
+        kw = self._calibration_kw()
+        is_rsm = isinstance(self, RSM)
+        ps = []
+        for _ in range(n_subsamples):
+            Z = X.iloc[np.sort(rng.choice(N, n, replace=False))]
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")  # the full data have already been reported on
+                m = (type(self)(Z, max_score=int(self.max_score)) if is_rsm
+                     else type(self)(Z, max_score_vector=self.max_score_vector.reindex(names)))
+                m.calibrate(**kw)
+                m._run_rsm_pcm_selection("LR", True, alpha, 0, no_of_samples, int(rng.integers(2**31 - 1)),
+                                         delta_units="logits", pcm_ridge=pcm_ridge)
+            ps.append(float(m.model_comparison_rsm_pcm_p))
+        share = float(np.mean(np.asarray(ps) <= alpha))
+        effect_ok = min_effect <= 0 or self.model_comparison_rsm_pcm_delta_hat >= min_effect
+        preferred = "PCM" if (share > 0.5 and effect_ok) else "RSM"
+        rec.update(decision="subsamples", seed=seed, p=ps, share_rejecting=share)
+        self.model_comparison_rsm_pcm_sampling = rec
+        self.model_comparison_rsm_pcm_lr_preferred = preferred
+        extra = {"Subsample size": n, "Subsamples": n_subsamples, "Share rejecting RSM": share, "Seed": seed}
+        if n_subsamples == 1:
+            extra["p-value (subsample)"] = ps[0]
+        self.model_comparison_rsm_pcm_lr_summary = pd.concat(
+            [s.drop("Preferred"), pd.Series(extra), pd.Series({"Preferred": preferred})]
+        ).rename(s.name)
+
+    def _run_rsm_pcm_selection(self, test, aic_relative_likelihood, alpha, min_effect, no_of_samples, seed,
+                               delta=0.0, delta_units="width", sampling=None, power_threshold=0.8, pcm_ridge=None,
+                               delta_measure="either", delta_default=False):
         """
         model_selection()'s RSM-vs-PCM comparison on the object's estimation (see RSM.model_selection):
         'cml' -> LR of the conditional log-likelihoods, the other model fitted by CML; 'cp-full-rcl' or 'cpat-rcl'
@@ -2463,10 +2797,21 @@ class Rasch:
             m.calibrate(**kw)
             return m
 
-        common = dict(test=test, aic_sig_test=aic_sig_test, alpha=alpha, min_effect=min_effect, X=X, K=K,
-                      estimation=est, n_persons=n_persons)
+        # pcm_ridge (model_selection(ridge=)): PCM fitted with that ridge for the comparison (a PCM object refitted
+        # with its own other settings; its estimates are unchanged)
+        if pcm_ridge is not None and not is_rsm:
+            refit = PCM(X, max_score_vector=Kv)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")  # the object's own fit has already reported on the data
+                refit.calibrate(**self._calibration_kw(ridge=pcm_ridge))
+        ridge_kw = {} if pcm_ridge is None else dict(ridge=pcm_ridge)
+        common = dict(test=test, aic_relative_likelihood=aic_relative_likelihood, alpha=alpha, min_effect=min_effect,
+                      X=X, K=K, estimation=est, n_persons=n_persons, delta=delta, delta_units=delta_units,
+                      sampling=sampling, power_threshold=power_threshold, delta_measure=delta_measure,
+                      delta_default=delta_default)
         if est == "cml":
-            rsm, pcm = (self, other(PCM, estimation="cml")) if is_rsm else (other(RSM, estimation="cml"), self)
+            rsm, pcm = ((self, other(PCM, estimation="cml", **ridge_kw)) if is_rsm
+                        else (other(RSM, estimation="cml"), self if pcm_ridge is None else refit))
             if list(rsm.item_names) != names or list(pcm.item_names) != names:
                 raise ValueError(
                     "model_selection() under CML needs CML estimates for every item in both RSM and PCM; items "
@@ -2478,7 +2823,8 @@ class Rasch:
                                                      ll_pcm=pcm.convergence["log_likelihood"]), **common)
             return
         if est in ("cp-full-rcl", "cpat-rcl"):
-            rsm, pcm = (self, other(PCM, estimation=est)) if is_rsm else (other(RSM, estimation=est), self)
+            rsm, pcm = ((self, other(PCM, estimation=est, **ridge_kw)) if is_rsm
+                        else (other(RSM, estimation=est), self if pcm_ridge is None else refit))
             self._compare_rsm_pcm(self._stacked(rsm=rsm, names=names, K=K), self._stacked(pcm=pcm, names=names),
                                   "composite", **common)
             return
@@ -2522,8 +2868,9 @@ class Rasch:
         self._compare_rsm_pcm(self._stacked(rsm=rsm, names=names, K=K), self._stacked(pcm=pcm, names=names),
                               "bootstrap", detail=dict(statistic=T, p=p, resamples=used), **common)
 
-    def _compare_rsm_pcm(self, b_rsm, b_pcm, route, test, aic_sig_test, alpha, min_effect, X, K, estimation,
-                         n_persons, detail=None):
+    def _compare_rsm_pcm(self, b_rsm, b_pcm, route, test, aic_relative_likelihood, alpha, min_effect, X, K, estimation,
+                         n_persons, detail=None, delta=0.0, delta_units="width", sampling=None, power_threshold=0.8,
+                         delta_measure="either", delta_default=False):
         """
         Set model_comparison_rsm_pcm_* from the comparison of route ('composite' or 'bootstrap', with its
         statistic and p in detail, or 'cml' with the log-likelihoods) at the stacked uncentred thresholds b_rsm
@@ -2582,57 +2929,260 @@ class Rasch:
             ll_rsm = ll_pcm = pen_rsm = pen_pcm = None
         self.model_comparison_rsm_pcm_info = info
         lab = {"cml": "LR test", "composite": "composite LR test", "bootstrap": "bootstrap test"}[route]
+
+        # the departure from RSM: PCM's thresholds minus RSM's (both centred) over the item x threshold combinations;
+        # its size is their root mean square weighted by 1 / (sampling variance of PCM's estimate) (_departure_size).
+        # The test's distribution at a given size is computed from the responses a departure of that size would give
+        # on average (_selection.CmlCloseFitNull, CompositeCloseFitNull); with a composite likelihood, the statistic is
+        # a weighted sum of chi-squares (Kent's weights lam, and the observed departure's shift per component b; see
+        # _selection.close_fit_parts) and the computed shift is spread over its components in proportion to b^2
+        b0c, b1c = np.asarray(b_rsm, float) - np.mean(b_rsm), np.asarray(b_pcm, float) - np.mean(b_pcm)
+        exact = cov = None  # cov: sampling covariance of PCM's centred thresholds (for the per-item test)
+        if route == "cml":
+            lam, b_obs, var, H = self._cml_close_fit_parts(X, K, b0c, b1c, hessian=True)
+            Bm = np.hstack(_selection.bases(I, K))
+            cov = Bm @ _selection._pinv_sym(H) @ Bm.T
+            q0 = (I - 1) + (K - 1)
+            exact = _selection.CmlCloseFitNull(X, K, b0c, b1c, lambda d, v=var: self._departure_size(d, v),
+                                               rsm_info=H[:q0, :q0])
+        elif route == "composite":
+            (lam, b_obs), var, cov = r["parts"], r["var_pcm"], r.get("cov_pcm")
+            if len(lam):
+                exact = _selection.CompositeCloseFitNull(X, K, b0c, b1c, lambda d, v=var: self._departure_size(d, v),
+                                                         lam, b_obs, cpat=estimation == "cpat-rcl")
+        else:
+            lam = b_obs = var = None
+        rms = self._departure_size(b1c - b0c, var)
+        if lam is None and delta_default:
+            delta = 0.0  # the default tolerance: the bootstrap test has no close-fit version
+        need_units = delta > 0 or min_effect > 0 or sampling == "power"
+        try:
+            unit, units = self._delta_unit(b0c, I, K, delta_units, need_units)
+        except ValueError as e:
+            if not (delta_default and min_effect <= 0 and sampling != "power"):
+                raise
+            warnings.warn(
+                f"model_selection(): the default tolerance delta={delta:g} is in median category widths, but "
+                f"{str(e).split(': ', 1)[1].split(';')[0]}, so the comparison has no tolerance (the plain test). To "
+                "use one, set delta in logits with delta_units='logits'.",
+                UserWarning,
+                stacklevel=4,
+            )
+            delta = 0.0
+            unit, units = self._delta_unit(b0c, I, K, delta_units, False)
+        delta_logits = delta * unit
+        b_u = None
+        if lam is None:
+            delta_hat = np.nan
+            if need_units:
+                raise ValueError(
+                    "model_selection(): delta, min_effect and sampling='power' need a likelihood or composite "
+                    f"likelihood; with estimation={estimation!r} and this method the comparison is a bootstrap test. "
+                    "Use estimation='cp-full-rcl' or 'cml'."
+                )
+        elif exact is not None:
+            # bias-corrected size: the size at which the statistic's expected excess over df equals the observed one
+            delta_hat = exact.delta_hat(stat) / unit
+        elif rms > 0 and len(lam):
+            b_u = b_obs / rms
+            shift = float((lam * b_u**2).sum())
+            # bias-corrected size: the statistic's excess over its null mean, per unit of departure along b_u
+            delta_hat = float(np.sqrt(max(stat - lam.sum(), 0.0) / shift)) / unit if shift > 0 else 0.0
+        else:
+            delta_hat = 0.0
+        # the pieces, for close-fit and power calculations at other values of delta (private)
+        self._rsm_pcm_close_fit_parts = dict(stat=stat, lam=lam, b_obs=b_obs, var=var, gap=b1c - b0c, unit=unit,
+                                             units=units, n_persons=n_persons, exact=exact, df=df)
+        effect_ok = min_effect <= 0 or (np.isfinite(delta_hat) and delta_hat >= min_effect)
+        self.model_comparison_rsm_pcm_delta_hat = delta_hat
+        self.model_comparison_rsm_pcm_delta_units = units
+        size_rows = {"Delta-hat": delta_hat, "Units": units}
+        # the close-fit test (every test, with a tolerance): RSM is rejected only if the departure is significantly
+        # larger than delta (in the observed departure's direction), overall and/or for any one item
+        self.model_comparison_rsm_pcm_close_fit_p = None
+        self.model_comparison_rsm_pcm_close_fit_p_item = None
+        self.model_comparison_rsm_pcm_item_close_fit = None
+        close_rows, p_close = {}, None
+        if delta_logits > 0 and sampling != "power" and lam is not None:
+            if exact is not None:
+                p_close = exact.p(stat, delta_logits)
+            elif b_u is not None:
+                p_close = _selection.nc_weighted_chi2_sf(stat, lam, (delta_logits * b_u) ** 2)
+            else:
+                p_close = float(p)
+            self.model_comparison_rsm_pcm_close_fit_p = p_close
+            close_rows = {"delta": delta, "p-value (close fit)": p_close}
+            if delta_measure != "overall" and cov is not None:
+                p_item, table = self._item_close_fit(b1c - b0c, cov, I, K, delta_logits, unit, names)
+                self.model_comparison_rsm_pcm_close_fit_p_item = p_item
+                self.model_comparison_rsm_pcm_item_close_fit = table
+                close_rows["p-value (close fit, per item)"] = p_item
+                p_close = p_item if delta_measure == "largest" else min(p_close, p_item)
+        close_ok = p_close is None or p_close <= alpha
+        if test is None:
+            # the default: AIC where there is a likelihood, the bootstrap test (the only test) otherwise
+            test = "LR" if route == "bootstrap" else "AIC"
+        self.model_comparison_rsm_pcm_test = test
         if test == "LR" or route == "bootstrap":
             if route == "bootstrap" and test != "LR":
                 raise ValueError(
                     f"model_selection(test={test!r}) needs a likelihood; with estimation={estimation!r} and this "
                     "method only the bootstrap test (test='LR') exists."
                 )
-            preferred = "PCM" if (p <= alpha and effect >= min_effect) else "RSM"
+            rows = {**extra, "p-value": p, **close_rows}
+            p_decide = p if p_close is None else p_close
+            self.model_comparison_rsm_pcm_power = None
+            preferred = "PCM" if (p_decide <= alpha and effect_ok) else "RSM"
+            if sampling == "power":
+                # the sample size at which the test would detect a departure of size delta, in the observed
+                # departure's direction, with probability power_threshold; with fewer persons than the data, the
+                # decision is the one such a study would most likely reach: PCM if, at the estimated departure, it
+                # would reject RSM with probability at least 0.5
+                if exact is not None:
+                    n_req = exact.sample_size(delta_logits, alpha, power_threshold, n_persons)
+                elif b_u is not None:
+                    n_req = _selection.power_sample_size(lam, b_u, delta_logits, alpha, power_threshold, n_persons)
+                else:
+                    n_req = np.inf
+                pw = dict(delta=delta, units=units, power_threshold=power_threshold, n=n_req, n_data=n_persons)
+                if n_req < n_persons:
+                    if not delta_hat > 0:
+                        proj = alpha
+                    elif exact is not None:
+                        proj = exact.power(delta_hat * unit, alpha, n_req / n_persons)
+                    elif b_u is not None:
+                        proj = _selection.close_fit_power(lam, b_u, delta_hat * unit, alpha, n_req / n_persons)
+                    else:
+                        proj = alpha
+                    preferred = "PCM" if (proj >= 0.5 and effect_ok) else "RSM"
+                    pw.update(decision="projected", projected_rejection=proj)
+                    rows.update({"delta": delta, "Power n": n_req, "Projected rejection probability": proj})
+                else:
+                    pw.update(decision="full data")
+                    rows.update({"delta": delta, "Power n": n_req if np.isfinite(n_req) else np.nan})
+                self.model_comparison_rsm_pcm_power = pw
             self.model_comparison_rsm_pcm_lr = stat
             self.model_comparison_rsm_pcm_df = df
             self.model_comparison_rsm_pcm_p = p
             self.model_comparison_rsm_pcm_lr_preferred = preferred
             self.model_comparison_rsm_pcm_lr_summary = pd.Series(
-                {**extra, "p-value": p, "Effect": effect, "Preferred": preferred}, name=f"RSM vs PCM {lab}"
+                {**rows, **size_rows, "Preferred": preferred}, name=f"RSM vs PCM {lab}"
             )
         elif test == "AIC":
             aic_pcm, aic_rsm = 2 * pen_pcm - 2 * ll_pcm, 2 * pen_rsm - 2 * ll_rsm
             self.model_comparison_rsm_pcm_aic = {"PCM": aic_pcm, "RSM": aic_rsm}
             row = {"PCM AIC": aic_pcm, "RSM AIC": aic_rsm}
-            if aic_sig_test:
-                delta = aic_rsm - aic_pcm
+            if aic_relative_likelihood:
+                d_aic = aic_rsm - aic_pcm
                 gate = None
-                if route == "composite" and delta > 0:
+                if route == "composite" and d_aic > 0:
                     # the composite LR test of RSM within PCM, at the tail probability AIC's rule has with a
                     # likelihood: p is the relative likelihood that a likelihood ratio with the same chi-square(df)
                     # tail probability would give (a composite likelihood has no fixed scale)
                     tail = r["p"]
-                    delta = (float(chi2_dist.isf(tail, df)) if tail > 0 else np.inf) - 2 * df
+                    d_aic = (float(chi2_dist.isf(tail, df)) if tail > 0 else np.inf) - 2 * df
                     gate = {"composite LR": stat, "df": df, "tail p": float(tail)}
-                aic_p = float(np.exp(-abs(delta) / 2))
-                preferred = "PCM" if (delta > 0 and aic_p <= alpha and effect >= min_effect) else "RSM"
-                self.model_comparison_rsm_pcm_aic_p = aic_p
+                rel_lik = float(np.exp(-max(d_aic, 0.0) / 2))
+                preferred = "PCM" if (d_aic > 0 and rel_lik <= alpha and close_ok and effect_ok) else "RSM"
+                # the rule is a likelihood ratio test of RSM within PCM at this level (stricter than alpha)
+                level = float(chi2_dist.sf(2 * df + 2 * np.log(1 / alpha), df))
+                self.model_comparison_rsm_pcm_aic_relative_likelihood = rel_lik
+                self.model_comparison_rsm_pcm_aic_p = rel_lik  # v1.4.0 name, kept as an alias
+                self.model_comparison_rsm_pcm_aic_level = level
                 self.model_comparison_rsm_pcm_aic_gate = gate
-                row["p-value"] = aic_p
+                row["Relative likelihood"] = rel_lik
+                row["Test level"] = level
             else:
-                preferred = "PCM" if (aic_pcm < aic_rsm and effect >= min_effect) else "RSM"
+                preferred = "PCM" if (aic_pcm < aic_rsm and close_ok and effect_ok) else "RSM"
             self.model_comparison_rsm_pcm_aic_preferred = preferred
             self.model_comparison_rsm_pcm_aic_summary = pd.Series(
-                {**row, "Effect": effect, "Preferred": preferred},
+                {**row, **close_rows, **size_rows, "Preferred": preferred},
                 name="RSM vs PCM AIC comparison" + (" (composite)" if route == "composite" else ""),
             )
         else:  # BIC
             lg = np.log(n_persons)
             bic_pcm = (pen_pcm if route == "composite" else k_pcm) * lg - 2 * ll_pcm
             bic_rsm = (pen_rsm if route == "composite" else k_rsm) * lg - 2 * ll_rsm
-            preferred = "PCM" if (bic_pcm < bic_rsm and effect >= min_effect) else "RSM"
+            preferred = "PCM" if (bic_pcm < bic_rsm and close_ok and effect_ok) else "RSM"
             self.model_comparison_rsm_pcm_bic = {"PCM": bic_pcm, "RSM": bic_rsm}
             self.model_comparison_rsm_pcm_bic_preferred = preferred
             self.model_comparison_rsm_pcm_bic_summary = pd.Series(
-                {"PCM BIC": bic_pcm, "RSM BIC": bic_rsm, "Effect": effect, "Preferred": preferred},
+                {"PCM BIC": bic_pcm, "RSM BIC": bic_rsm, **close_rows, **size_rows, "Preferred": preferred},
                 name="RSM vs PCM BIC comparison" + (" (composite)" if route == "composite" else ""),
             )
+
+    # how the departure's size weights the item x threshold combinations: 'information' (weights 1 / sampling
+    # variance of the larger model's estimates; the close-fit test holds its level only with these, 2026-11-16
+    # simulations) or 'none' (unweighted root mean square, for comparison)
+    _DELTA_WEIGHTS = "information"
+
+    def _departure_size(self, r, var):
+        """Size of a departure r (item x threshold cells): root mean square, unweighted or (_DELTA_WEIGHTS =
+        'information') weighted by the inverse sampling variances var of the larger model's estimates."""
+        r = np.asarray(r, float)
+        if self._DELTA_WEIGHTS == "information" and var is not None:
+            v = np.asarray(var, float)
+            w = np.where(v > 0, 1.0 / np.where(v > 0, v, 1.0), 0.0)
+            if w.sum() > 0:
+                return float(np.sqrt((w * r**2).sum() / w.sum()))
+        return float(np.sqrt(np.mean(r**2)))
+
+    def _item_close_fit(self, gap, cov, I, K, delta_logits, unit, names):
+        """The per-item close-fit test (delta_measure 'largest' or 'either'): for each item, its PCM thresholds minus
+        RSM's, centred on the item's own mean, sized as in _departure_size (in units), and a Wald statistic with
+        PCM's sampling covariance; under 'departure = delta' along the observed direction it is noncentral
+        chi-square(K - 1) with noncentrality W (delta / size)^2. Returns the Bonferroni p over items (the smallest
+        p times I, at most 1) and a table of each item's departure and p."""
+        from scipy.stats import ncx2
+
+        Pk = np.eye(K) - 1.0 / K
+        size, pv = [], []
+        for i in range(I):
+            sl = slice(i * K, (i + 1) * K)
+            c = Pk @ np.asarray(gap, float)[sl]
+            S = Pk @ cov[sl, sl] @ Pk
+            sz = self._departure_size(c, np.diag(S))
+            W = float(c @ np.linalg.pinv(S, rcond=1e-10) @ c)
+            pv.append(float(ncx2.sf(W, K - 1, W * (delta_logits / sz) ** 2)) if sz > 0 and K > 1 else 1.0)
+            size.append(sz / unit)
+        table = pd.DataFrame({"Departure": size, "p-value": pv}, index=pd.Index(names, name="Item"))
+        return float(min(1.0, I * min(pv))), table
+
+    @staticmethod
+    def _cml_close_fit_parts(X, K, b_rsm, b_pcm, hessian=False):
+        """close_fit_parts for the CML likelihood ratio test of RSM within PCM: PCM's conditional information at
+        its estimates (J = H), and the gap between the two fits, in the coordinates of _selection.bases."""
+        from raschpy import _esf, _selection
+
+        Xa = np.asarray(X, float)
+        I = Xa.shape[1]
+        _, _, Hs = _esf.cond_loglik(Xa, [b_pcm[i * K:(i + 1) * K] for i in range(I)], hessian=True)
+        A0, E = _selection.bases(I, K)
+        B = np.hstack([A0, E])
+        H = -(B.T @ Hs @ B)
+        gap = np.linalg.lstsq(B, b_pcm - b_rsm, rcond=None)[0]
+        var = np.einsum("ij,jk,ik->i", B, _selection._pinv_sym(H), B)  # PCM's (centred) threshold variances
+        out = (*_selection.close_fit_parts(H, H, A0.shape[1], gap), var)
+        return (*out, H) if hessian else out
+
+    @staticmethod
+    def _delta_unit(b_rsm, I, K, delta_units, needed):
+        """(logits per unit, units) for delta, min_effect and Delta-hat: 1 for 'logits'; for 'width', the median of
+        RSM's category widths (the gaps between consecutive shared thresholds). If the widths are unusable (maximum
+        score 1, or disordered thresholds), an error when a unit is needed, else logits."""
+        if delta_units not in ("logits", "width"):
+            raise ValueError("delta_units must be 'logits' or 'width'.")
+        if delta_units == "logits":
+            return 1.0, "logits"
+        tau = np.asarray(b_rsm, float).reshape(I, K)[0]
+        widths = np.diff(tau - tau.mean())
+        if K >= 2 and (widths > 0).all():
+            return float(np.median(widths)), "width"
+        if needed:
+            why = ("the maximum score is 1, so there are no category widths" if K < 2 else
+                   f"RSM's thresholds are disordered (category widths {np.round(widths, 2).tolist()})")
+            raise ValueError(f"delta_units='width': {why}; use delta_units='logits'.")
+        return 1.0, "logits"
 
     def _resolve_fix_anchors(self, fix_anchors):
         """calibrate_anchor(fix_anchors=): None means True for CML estimates, else False; True needs CML."""
@@ -2753,6 +3303,28 @@ class Rasch:
         if extra:
             fields.update(extra)
         self.calibrate_anchor_runs[key] = SimpleNamespace(**fields)
+
+    @staticmethod
+    def _dif_welch(welch):
+        """
+        dif_test()'s deprecated welch argument (SLM, PCM, RSM): None (the default) or True gives Welch's t-test,
+        False the normal (z) reference until the argument is removed; any value given raises a FutureWarning.
+        Returns the bool the Wald tests use.
+        """
+        if welch is None:
+            return True
+        warnings.warn(
+            "dif_test(welch=...) is deprecated and will be removed in a future version. The Wald tests now refer "
+            "their statistics to a t-distribution with Welch-Satterthwaite degrees of freedom, which is more "
+            "accurate than the normal distribution (z-test): it allows for estimating the standard errors from "
+            "the groups' persons, which the normal reference ignores. "
+            + ("welch=False still gives the normal (z) reference until then." if welch is False else
+               "welch=True is the default.")
+            + " Drop the argument to use the t reference.",
+            FutureWarning,
+            stacklevel=3,
+        )
+        return bool(welch)
 
     def _welch_satterthwaite(self, diff, se1, n1, se2, n2):
         """
@@ -2971,6 +3543,26 @@ class Rasch:
                 "estimators keep every item, their smoothing giving finite estimates)."
             )
 
+    # set by a caller for the fit it is about to run (global_fit()'s subsets, bootstrap resamples)
+    _KEEP_ON_REFIT = frozenset({"_pre_fit_attrs", "_cml_fixed_hessian", "_cml_unused_fit"})
+
+    def _clear_fit_results(self):
+        """
+        Before a refit (SLM, PCM, RSM calibrate()): remove what was derived from the previous fit --
+        standard errors, person estimates, fit statistics and their tables, anchored results, DIF,
+        model selection and the like. Methods compute these when they are missing and reuse them when
+        present, so without this a refit with other settings would keep reporting the previous fit's
+        values. They are recomputed on demand from the new fit. What the object held before its first
+        fit (the data and the constructor's settings) is kept. MFRM does the same per representation
+        (MFRM._clear_model_results).
+        """
+        if "_pre_fit_attrs" not in vars(self):
+            self._pre_fit_attrs = frozenset(vars(self))
+            return
+        for name in list(vars(self)):
+            if name not in self._pre_fit_attrs and name not in self._KEEP_ON_REFIT:
+                delattr(self, name)
+
     def _calibration_kw(self, **passed):
         """
         calibrate() arguments for refits of the object's data (bootstrap
@@ -3031,9 +3623,38 @@ class Rasch:
         """Standardised mean square: Wilson-Hilferty cube-root transformation with standard deviation q."""
         return (ms ** (1 / 3) - 1) * (3 / q) + q / 3
 
+    @staticmethod
+    def _restscore_rng(seed):
+        """Random generator for the item-restscore Monte Carlo draws: its own stream, reproducible from an integer
+        seed (distinct from the person p-values' stream); fresh entropy for None."""
+        if isinstance(seed, (int, np.integer)):
+            return np.random.default_rng([int(seed), 0x7E57])
+        return np.random.default_rng(seed)
+
+    def _restscore_table(self, g_obs, g_exp, g_se, sims, labels, p_method):
+        """
+        Item-restscore table (Kreiner): the observed gamma of each unit's score against its restscore, the gamma
+        of the expected table (sum over persons of P(X = k | total) at restscore total - k; descriptive), the
+        observed gamma's asymptotic SE (descriptive, as iarm's), and the conditional Monte Carlo test: sims holds
+        the gammas of datasets drawn from the model given each person's total at the fitted thresholds (no
+        refit); 'Simulated mean' and 'Simulated SD' are their mean and SD, z = (observed - simulated mean) /
+        simulated SD, p two-sided ('studentised': normal p of z; 'monte-carlo': the share of draws at least as
+        far from their mean), p (BH) Benjamini-Hochberg adjusted.
+        """
+        from raschpy import _esf
+
+        mu, sd, z, p = _esf.restscore_p(np.asarray(g_obs, float), sims, p_method)
+        tab = pd.DataFrame(
+            {"Observed gamma": g_obs, "Expected gamma": g_exp, "SE": g_se, "Simulated mean": mu,
+             "Simulated SD": sd, "z": z, "p": p},
+            index=labels,
+        )
+        tab["p (BH)"] = self._bh_correction(tab["p"].fillna(1.0)).where(tab["p"].notna())
+        return tab
+
     def _apply_conditional_fit(
         self, samples=1000, seed=None, bootstrap_samples=None, q1_groups=None,
-        q1_overall_samples=99, q1_overall_exceedances=10,
+        q1_overall_samples=99, q1_overall_exceedances=10, restscore_p_method="studentised",
     ):
         """
         fit_statistics(conditional=True): replace the expected scores, variances and fourth central moments
@@ -3046,14 +3667,16 @@ class Rasch:
         """
         from raschpy import _esf
 
+        if restscore_p_method not in ("studentised", "monte-carlo"):
+            raise ValueError(
+                f"restscore_p_method must be 'studentised' or 'monte-carlo', got {restscore_p_method!r}."
+            )
         names = list(self.item_names)
         X = np.array(self.responses.loc[:, names], dtype=np.float64)
         mom = _esf.conditional_moments(X, self._cml_threshold_list(names), tables=True)
         self._warn_conditional_unused(X, names)
-        sim_thr = None
-        self.conditional_null_fit = None
-        if bootstrap_samples or q1_overall_samples:
-            sim_thr, self.conditional_null_fit = self._conditional_null(names)
+        # the thresholds the simulations (restscore draws, bootstrap, overall Q1) are drawn at
+        sim_thr, self.conditional_null_fit = self._conditional_null(names)
         idx = self.residual_df.index
         pos = self.responses.index.get_indexer(idx)
         frame = lambda a: pd.DataFrame(a[pos], index=idx, columns=names)  # noqa: E731
@@ -3093,29 +3716,26 @@ class Rasch:
         if hasattr(self, "person_residual_corr"):
             self.person_residual_corr = std.corrwith(self.persons.loc[idx], axis=0)
         # item-restscore association (Kreiner): Goodman-Kruskal gamma of each item's score against its
-        # restscore, observed vs expected under the model (expected table: sum over persons of
-        # P(X_i = k | r) at restscore r - k), two-sided normal test with the observed gamma's SE
+        # restscore, tested against its conditional Monte Carlo distribution (see _restscore_table)
         obs_all = ~np.isnan(X)
         Xi = np.where(obs_all, X, 0).astype(int)
         tot = Xi.sum(1)
-        rows = []
+        g_obs, g_se, g_exp = [], [], []
         for i, item in enumerate(names):
             who = obs_all[:, i]
             observed = np.zeros_like(mom["tables"][i])
             np.add.at(observed, (Xi[who, i], tot[who] - Xi[who, i]), 1.0)
-            g_obs, se = _esf.gk_gamma(observed)
-            g_exp, _ = _esf.gk_gamma(mom["tables"][i])
-            z = (g_obs - g_exp) / se if se and se > 0 else np.nan
-            rows.append(
-                (g_obs, g_exp, se, 2 * norm.sf(abs(z)) if np.isfinite(z) else np.nan)
-            )
-        tab = pd.DataFrame(
-            rows, index=names, columns=["Observed gamma", "Expected gamma", "SE", "p"]
+            g, se = _esf.gk_gamma(observed)
+            g_obs.append(g)
+            g_se.append(se)
+            g_exp.append(_esf.gk_gamma(mom["tables"][i])[0])
+        Ks = [int(k) for k in self._cml_max_scores(names)]
+        sims = _esf.restscore_monte_carlo(
+            X, sim_thr, Ks, np.arange(len(names)), int(samples), self._restscore_rng(seed)
         )
-        tab["p (BH)"] = self._bh_correction(tab["p"].fillna(1.0)).where(
-            tab["p"].notna()
+        self.item_restscore_table = self._restscore_table(
+            g_obs, g_exp, g_se, sims, names, restscore_p_method
         )
-        self.item_restscore_table = tab
         # conditional item chi-square (Q1) on ability groups (or supplied groups)
         self._q1_labels = self._q1_group_labels(mom["V"], q1_groups)
         self._set_q1_tables(X, mom["E"], mom["V"], self._q1_labels, names)
@@ -3252,7 +3872,7 @@ class Rasch:
         ----------
         alpha : float, default 0.05
             Significance level for the Flagged column (on the BH-adjusted p-values).
-        p_method : {'permutation', 'monte-carlo', 'asymptotic'}, default 'permutation'
+        p_method : {'permutation', 'monte-carlo'}, default 'permutation'
             Within each stratum, item i's responses are exchangeable under the model, so the test
             refers gamma's numerator S = C - D (concordant minus discordant pairs) to its distribution
             under permutation of item i's responses within strata. 'permutation': z = S divided by the
@@ -3260,13 +3880,10 @@ class Rasch:
             over strata), normal p-value; no simulation, so p-values are not limited by a number of
             samples. 'monte-carlo': p = (1 + #{|simulated gamma| >= |observed|}) / (1 + samples) from
             samples within-stratum permutations (its smallest p-value, 1 / (1 + samples), limits the
-            BH-adjusted p-values when many pairs are tested). 'asymptotic': z = gamma / SE with the
-            asymptotic standard error of the partial gamma (Davis, 1967). In null simulations (10
-            items; SLM, PCM, RSM; N = 300 and 1,000; complete, two-booklet and 20% missing completely
-            at random; 300 datasets per cell) the per-pair rejection rate at 0.05 was 0.046-0.052 for
-            'permutation' (SD of z 0.99-1.01); 'asymptotic' gave 0.055-0.094 without scattered missing
-            responses (liberal at N = 300) and up to 0.32 with them (thin strata), so use it only with
-            large samples and few missingness patterns.
+            BH-adjusted p-values when many pairs are tested). In null simulations (10 items; SLM,
+            PCM, RSM; N = 300 and 1,000; complete, two-booklet and 20% missing completely at random;
+            300 datasets per cell) the per-pair rejection rate at 0.05 was 0.046-0.052 for
+            'permutation' (SD of z 0.99-1.01).
         samples : int, default 1000
             Permutations (p_method='monte-carlo').
         seed : int or None, default None
@@ -3283,10 +3900,8 @@ class Rasch:
         """
         from raschpy import _esf
 
-        if p_method not in ("permutation", "monte-carlo", "asymptotic"):
-            raise ValueError(
-                "p_method must be 'permutation', 'monte-carlo' or 'asymptotic'."
-            )
+        if p_method not in ("permutation", "monte-carlo"):
+            raise ValueError("p_method must be 'permutation' or 'monte-carlo'.")
         rng = np.random.default_rng(seed)
         names = list(self.item_names)
         X = np.array(self.responses.loc[:, names], dtype=np.float64)
@@ -3324,12 +3939,9 @@ class Rasch:
                 S = s_idx.max() + 1
                 T = np.zeros((S, Ks[i] + 1, Ks[j] + 1))
                 np.add.at(T, (s_idx, Xi[who, i], Xi[who, j]), 1.0)
-                g, se = _esf.partial_gk_gamma(T)
-                if p_method == "asymptotic":
-                    z = g / se if se and se > 0 else np.nan
-                else:
-                    C, D, var = _esf.stratified_kendall_s(T)
-                    z = (C - D) / np.sqrt(var) if var > 0 else np.nan
+                g = _esf.partial_gk_gamma(T)[0]
+                C, D, var = _esf.stratified_kendall_s(T)
+                z = (C - D) / np.sqrt(var) if var > 0 else np.nan
                 if p_method != "monte-carlo" or not np.isfinite(g):
                     p = 2 * norm.sf(abs(z)) if np.isfinite(z) else np.nan
                 else:
@@ -4242,7 +4854,8 @@ class Rasch:
 
     def _conditional_null(self, names):
         """
-        The thresholds the conditional fit bootstrap and item_q1_overall simulate from: the model fitted to
+        The thresholds the item-restscore draws, the conditional fit bootstrap and item_q1_overall simulate
+        from: the model fitted to
         the object's responses with estimation='cp-full-rcl' and its defaults (the most accurate estimate of
         the null distribution; the statistics and refits are still the object's), or the object's fit
         if it is a 'cp-full-rcl' or 'cml' fit. If that fit fails, or does not estimate every item and
@@ -4264,7 +4877,8 @@ class Rasch:
         ):
             return thr, "cp-full-rcl"
         warnings.warn(
-            "fit_statistics(conditional=True): the datasets for the bootstrap and the overall Q1 p-values "
+            "fit_statistics(conditional=True): the datasets for the item-restscore test, the bootstrap and the "
+            "overall Q1 p-values "
             "are simulated from the object's fit, as a 'cp-full-rcl' fit of these data does not estimate "
             "every item and category it does.",
             UserWarning,
@@ -4583,6 +5197,23 @@ class Rasch:
         sub-model, passed as attr).
         """
         return interval is not None and getattr(self, attr, None) != interval
+
+    def _se_quantile(self, interval):
+        """Multiplier of the analytic standard errors' confidence intervals, estimate +/- multiplier * SE: the
+        (1 + interval) / 2 quantile of the t-distribution on persons - 1 degrees of freedom (the SEs are estimated
+        from the persons' responses; as the tests on them). None if interval is None."""
+        if interval is None:
+            return None
+        return float(t_dist.ppf(0.5 + interval / 2, max(int(self.no_of_persons) - 1, 1)))
+
+    def _set_se_correction(self, se_correction, se_method):
+        """Validate std_errors(se_correction=) and record the correction applied: se_correction for the sandwich,
+        else None (the Hessian and the bootstrap take none)."""
+        if se_correction not in ("kauermann-carroll", None):
+            raise ValueError(f"se_correction must be 'kauermann-carroll' or None, got {se_correction!r}.")
+        self.se_correction = (
+            se_correction if se_method == "sandwich" else None
+        )
 
     def _resolve_se_method(self, se_method):
         """
@@ -5078,6 +5709,8 @@ class Rasch:
             focal_boot=focal_boot,
             ref_cov=ref_cov,
             focal_cov=focal_cov,
+            n_ref=ref_model.no_of_persons,
+            n_focal=focal_model.no_of_persons,
         )
 
         focal_shifted = focal_items + tc
@@ -5204,7 +5837,8 @@ class Rasch:
             index=common_items,
         )
         table.index.name = "Item"
-        if welch_df is not None:
+        if welch_df is not None:  # Welch t on Welch-Satterthwaite df
+            table = table.rename(columns={"z": "t"})
             table["df"] = welch_df
         if category_col is not None:
             table["Category"] = category_col
@@ -5221,6 +5855,7 @@ class Rasch:
         correction="bh",
         groups=None,
         divergence_tol=0.1,
+        df=None,
     ):
         """
         Build the per-parameter recovery table and summary table for one
@@ -5243,8 +5878,14 @@ class Rasch:
             item excluded by connectivity checks), not an error.
         se : pandas.Series or None, default None
             Standard errors matching estimated's values. None disables the
-            z/p/Flagged columns (left all-NaN/False) -- used for parameter
-            types with no available SE.
+            z (or t)/p/Flagged columns (left all-NaN/False) -- used for
+            parameter types with no available SE.
+        df : float or None, default None
+            Degrees of freedom of a t reference for error / SE (persons - 1
+            for item-side parameters, whose SEs are estimated from the
+            persons' responses): the statistic column is then 't', followed
+            by a 'df' column. None: a normal reference, column 'z' (person
+            rows).
         alpha : float, default 0.05
             Significance threshold for Flagged/Flagged_corrected.
         correction : {'bh', 'bonferroni', None}, default 'bh'
@@ -5268,8 +5909,8 @@ class Rasch:
         table : pandas.DataFrame
             One row per parameter (union of generating/estimated's
             indices), columns: generating, estimated, SE, error, abs_error,
-            z, p, p_corrected, Flagged, Flagged_corrected, and Group if
-            groups was given.
+            z (or t and df when df is given), p, p_corrected, Flagged,
+            Flagged_corrected, and Group if groups was given.
         summary : pandas.DataFrame
             One column 'Overall' (plus one per distinct group value, sorted,
             if groups was given). Rows: RMSE, MAE, bias, r, r_squared,
@@ -5285,7 +5926,10 @@ class Rasch:
         if se is not None:
             se = se.astype(float).reindex(idx)
             z = error / se
-            p = pd.Series(2 * (1 - norm.cdf(z.abs())), index=idx)
+            if df is None:
+                p = pd.Series(2 * norm.sf(z.abs()), index=idx)
+            else:
+                p = pd.Series(2 * t_dist.sf(z.abs(), df), index=idx)
         else:
             z = pd.Series(np.nan, index=idx)
             p = pd.Series(np.nan, index=idx)
@@ -5318,6 +5962,9 @@ class Rasch:
                 "Flagged_corrected": flagged_corrected,
             }
         )
+        if df is not None:
+            table = table.rename(columns={"z": "t"})
+            table.insert(table.columns.get_loc("t") + 1, "df", float(df))
         if groups is not None:
             table["Group"] = groups.reindex(idx)
 
@@ -6699,7 +7346,7 @@ class Rasch:
         method="wald",
         split=None,
         covariate=None,
-        welch=True,
+        welch=None,
         alpha=0.05,
         seed=None,
         split_prop=0.5,
@@ -6723,22 +7370,37 @@ class Rasch:
         Only parameters estimable in both groups are compared: thresholds
         next to a score category unused in either group, and (RSM) category
         widths that need a fallback estimator in either group, are excluded
-        and reported. With welch=True (default), W/df is referred to an F
-        distribution with denominator degrees of freedom from the smaller
-        group (the joint-test analogue of the Welch correction), otherwise W
-        to chi-square. The sandwich covariances use the Kauermann-Carroll
-        small-sample correction by default (se_correction): with few persons
-        per parameter, the uncorrected sandwich is too small and the test
-        liberal (PCM, about 300 persons per group: mean W/df 1.15, rejection
-        rate 7.8% at alpha = 0.05, 500 null datasets); corrected, 1.00 and
-        4.0%. On the same designs, the n/(n - p) correction overcorrected
-        random splits (1.8%) and Mancl-DeRouen the score split (2.8%). Across
-        SLM, RSM and PCM (N = 600 and 2,000; score, random and exogenous
-        splits) the corrected test's mean W/df was 0.98-1.05 and its
-        rejection rate 4-7%, except PCM with about 300 persons per group on
-        an exogenous split (10%: the spread of W/df, not its mean, exceeds
-        the F reference's with many parameters per person). Random
-        splits have essentially no power against misfit (both halves contain
+        and reported. W is referred to the multivariate Welch F reference of
+        Nel and van der Merwe (1986): F = W (nu - df + 1) / (df nu) on
+        (df, nu - df + 1), with nu = [tr(V^2) + tr(V)^2] / sum over the groups
+        of [tr(V_g^2) + tr(V_g)^2] / (n_g - 1), V = V_1 + V_2 and n_g the
+        group sizes. It allows for estimating each group's covariance from
+        its own persons, so the smaller group counts for more when the groups
+        differ in size; a chi-square reference (the large-sample limit)
+        ignores that and is liberal with many parameters per person, and the
+        pooled two-sample Hotelling reference (df from n_1 + n_2) is liberal
+        when the groups differ in size. With one parameter, nu is the
+        Welch-Satterthwaite df of dif_test. The F reference is an
+        approximation, not an exact F test: it is exact only when the
+        persons' contributions to d are multivariate normal and the
+        covariance is their sample covariance, whereas d here is a difference
+        of estimates and V a sandwich (or bootstrap) covariance. The sandwich
+        covariances use the Kauermann-Carroll small-sample correction by
+        default (se_correction): with few persons per parameter the
+        uncorrected sandwich is too small and the test liberal. In null
+        simulations (SLM, RSM and PCM; 12 items, maximum score 3 for RSM and
+        PCM; N = 200, 600 and 2,000; random and score splits, and an
+        exogenous split with groups of 30% and 70% of the persons; 500
+        datasets per design, 1,000 for PCM), the rejection rate at alpha =
+        0.05 was 2.4-7.3% with the correction (0.2-2.0% at alpha = 0.01) and
+        2.8-9.7% without it. The highest was PCM at N = 200 on the random
+        split (7.3%: about 100 persons per group for 35 parameters, where the
+        spread of W, not the reference's degrees of freedom, runs ahead of
+        the F reference). On the exogenous split, PCM at N = 200 (groups of
+        about 60 and 140) rejected 4.6%, against 16.9% with the pooled
+        two-sample Hotelling reference (df from n_1 + n_2) and 47.5% with
+        chi-square. Random splits have essentially no power against misfit
+        (both halves contain
         the same mix of persons), so they serve as a calibration check; power
         comes from splits correlated with the misfit -- the score split for
         discrimination differences, an exogenous variable for DIF.
@@ -6862,19 +7524,22 @@ class Rasch:
             give groups further apart in ability (a stronger contrast for
             discrimination differences) but fewer persons and more extreme
             targeting in each group.
-        welch : bool, default True
-            F reference with denominator degrees of freedom from the smaller
-            group (Wald only).
+        welch : bool or None, default None
+            Deprecated (FutureWarning; to be removed in a future version).
+            welch=True gives the previous reference, W/df on F(df, n_s - df)
+            with n_s the smaller group's size; None or False gives the
+            multivariate Welch F reference above, which is more accurate.
         alpha : float, default 0.05
             Significance level for the decision.
         seed : int or None, default None
             Seed for split='random'.
         se_correction : {'kauermann-carroll', None}, default 'kauermann-carroll'
             Small-sample correction of each group's sandwich covariance (Wald
-            only): each person's score contribution u_n is replaced by
-            (I - H_n)^(-1/2) u_n, H_n being the person's leverage (Kauermann &
-            Carroll, 2001; Bell & McCaffrey, 2002). Negligible with many
-            persons per parameter. None uses the uncorrected sandwich.
+            only; CML's too, unless se_method='hessian'): each person's score
+            contribution u_n is replaced by (I - H_n)^(-1/2) u_n, H_n being the
+            person's leverage (Kauermann & Carroll, 2001; Bell & McCaffrey,
+            2002), as in std_errors(). Negligible with many persons per
+            parameter. None uses the uncorrected sandwich.
         no_of_samples : int, default 500
             Wald: bootstrap resamples per group, used instead of the sandwich
             when the object was calibrated with method='cos', 'ls' or 'evm'
@@ -6977,11 +7642,24 @@ class Rasch:
                 p_method = "chi2"
             if p_method == "monte-carlo" and mc_exceedances is None:
                 mc_exceedances = 10  # chosen by default: stop early when clearly not significant
+        if welch is not None:
+            warnings.warn(
+                "global_fit(welch=...) is deprecated and will be removed in a future version. The Wald test "
+                "now refers its statistic to the multivariate Welch F reference (Nel and van der Merwe, 1986), "
+                "with denominator degrees of freedom from each group's covariance and size, which is more "
+                "accurate than the previous reference (welch=True: degrees of freedom from the smaller group "
+                "only) and than chi-square (which ignores that the covariances are estimated). "
+                + ("welch=True still gives the previous reference until then." if welch else
+                   "welch=False no longer gives chi-square; the F reference is used.")
+                + " Drop the argument to use the F reference.",
+                FutureWarning,
+                stacklevel=2,
+            )
         out = self._global_fit_run(
             method=method,
             split=split,
             covariate=covariate,
-            welch=welch,
+            welch=bool(welch),
             alpha=alpha,
             seed=seed,
             split_prop=split_prop,
@@ -7009,6 +7687,8 @@ class Rasch:
             details.append(f"p_method={p_method}")
         if method == "andersen" and unused_categories == "null":
             details.append("unused_categories=null")
+        if method == "wald" and welch:
+            details.append("welch=True")
         if not hasattr(self, "global_fit_results"):
             self.global_fit_results = {}
         self.global_fit_results[(method, "; ".join(details))] = (
@@ -7021,7 +7701,7 @@ class Rasch:
         method="wald",
         split=None,
         covariate=None,
-        welch=True,
+        welch=False,
         alpha=0.05,
         seed=None,
         split_prop=0.5,
@@ -7189,13 +7869,16 @@ class Rasch:
         S = C @ (V1 + V2)[np.ix_(idx, idx)] @ C.T
         W = float(d @ np.linalg.pinv(S, rcond=1e-10) @ d)
         df = int(np.linalg.matrix_rank(S, tol=1e-10 * np.abs(S).max()))
-        n_small = min(len(groups[n]) for n in names)
-        if welch:
-            ddf = max(n_small - df, 1)
+        if welch:  # deprecated previous reference (to be removed): df from the smaller group only
+            ddf = max(min(len(groups[n]) for n in names) - df, 1)
             p = float(f_dist.sf(W / df, df, ddf))
-        else:
-            ddf = None
-            p = float(chi2_dist.sf(W, df))
+        else:  # multivariate Welch (Nel & van der Merwe): each group's covariance from its own persons
+            sub = np.ix_(idx, idx)
+            nu = _welch_df(
+                [C @ V1[sub] @ C.T, C @ V2[sub] @ C.T], [len(groups[n]) for n in names]
+            )
+            ddf = nu - df + 1
+            p = _f_reference(W, df, nu + 1)
         se = np.sqrt(np.clip(np.diag(S), 0, None))
         kept_labels = [lab[i] for i in idx]
         self.global_fit_table = pd.DataFrame(
@@ -7213,8 +7896,7 @@ class Rasch:
         summary = {"method": method, "split": split, "statistic": W, "df": df}
         if split in ("score", "person_location"):
             summary["split_prop"] = split_prop
-        if welch:
-            summary["denominator df"] = ddf
+        summary["denominator df"] = ddf
         cml = getattr(self, "estimation", None) == "cml"
         cml_cov = (
             "hessian" if getattr(self, "se_method", None) == "hessian" else "sandwich"
@@ -7222,7 +7904,7 @@ class Rasch:
         summary["covariance"] = (
             "bootstrap" if boot else (cml_cov if cml else "sandwich")
         )
-        summary["se_correction"] = None if (boot or cml) else se_correction
+        summary["se_correction"] = None if (boot or (cml and cml_cov == "hessian")) else se_correction
         summary.update(
             {
                 "p-value": p,

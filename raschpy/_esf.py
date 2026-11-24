@@ -685,14 +685,19 @@ def person_scores(X, thresholds, prepared=None):
     return out
 
 
-def cml_sandwich(X, A, b, Ks, hessian=None, prepared=None, penalty=None):
+def cml_sandwich(X, A, b, Ks, hessian=None, prepared=None, penalty=None, small_sample=False, kc_scores=None,
+                 bread_inv=None):
     """
     Bread and meat of the sandwich covariance of CML estimates b = A @ theta, in theta's coordinates:
     (info, meat) with info = -A' H A (H the Hessian of cond_loglik at b, computed if not given) and meat =
     A' S' S A, S the persons' scores (person_scores, computed once per distinct response row). The covariance of theta is
     info^{-1} meat info^{-1}; under the model it agrees with info^{-1} (the Hessian covariance) in large
     samples, and it stays valid when the model does not hold for the persons' response patterns. With
-    penalty Q (the ridge of fit_cml), info is -A' H A + Q (the meat is unchanged).
+    penalty Q (the ridge of fit_cml), info is -A' H A + Q (the meat is unchanged). small_sample=True applies the
+    Kauermann-Carroll correction to the scores (kc_scores: Rasch._kc_scores), each person's bread being their
+    own conditional information -A' H_n A, which depends only on their total and the items they responded to
+    (cml_person_breads). bread_inv: the inverse of the bread for the leverages, where it is not info (a fit whose
+    bread has further terms, e.g. MFRM's stretch models; a pseudo-inverse where info is singular).
     """
     off = np.concatenate([[0], np.cumsum(Ks)])
     thr = [np.asarray(b[off[i] : off[i + 1]], float) for i in range(len(Ks))]
@@ -702,20 +707,48 @@ def cml_sandwich(X, A, b, Ks, hessian=None, prepared=None, penalty=None):
         hessian = cond_loglik(X, thr, hessian=True, prepared=prepared)[2]
     # persons with the same responses have the same scores: compute them once per distinct row
     rows, counts = np.unique(np.where(np.isnan(X), -1.0, X), axis=0, return_counts=True)
-    U = person_scores(np.where(rows < 0, np.nan, rows), thr) @ A
+    rows = np.where(rows < 0, np.nan, rows)
+    U = person_scores(rows, thr) @ A
     info = -(A.T @ hessian @ A)
     if penalty is not None:
         info = info + penalty
+    if small_sample:
+        U = kc_scores(U, cml_person_breads(rows, thr, A), np.linalg.inv(info) if bread_inv is None else bread_inv)
     return info, U.T @ (counts[:, None] * U)
 
 
-def cml_covariance(X, A, b, Ks, hessian=None, sandwich=False, penalty=None):
+def cml_person_breads(rows, thr, A):
+    """
+    For the Kauermann-Carroll correction of the CML sandwich: a function sl -> (n, q, q) array of the
+    persons' (rows[sl]) own conditional information -A' H_n A, H_n the Hessian of their conditional
+    log-likelihood at the thresholds thr. It depends only on the person's total and the items they responded
+    to, so it is computed exactly once per such group (cond_loglik on one of its rows) and cached.
+    """
+    rows = np.asarray(rows, float)
+    obs = ~np.isnan(rows)
+    keys = np.concatenate([obs, np.nansum(rows, axis=1)[:, None]], axis=1)
+    uk, first, group = np.unique(keys, axis=0, return_index=True, return_inverse=True)
+    group = np.asarray(group).ravel()
+    cache = {}
+
+    def bread(g):
+        if g not in cache:
+            H = cond_loglik(rows[first[g]][None, :], thr, hessian=True)[2]
+            cache[g] = -(A.T @ H @ A)
+        return cache[g]
+
+    return lambda sl: np.stack([bread(g) for g in group[sl]])
+
+
+def cml_covariance(X, A, b, Ks, hessian=None, sandwich=False, penalty=None, small_sample=False, kc_scores=None):
     """Covariance of the CML thresholds b = A @ theta: A (-A' H A)^{-1} A', H the Hessian of cond_loglik at b
-    (computed if not given); with sandwich=True, A B^{-1} M B^{-1} A' with (B, M) from cml_sandwich(). With
-    penalty Q (the ridge of fit_cml), -A' H A + Q replaces -A' H A in both.
+    (computed if not given); with sandwich=True, A B^{-1} M B^{-1} A' with (B, M) from cml_sandwich()
+    (small_sample=True: with the Kauermann-Carroll correction). With penalty Q (the ridge of fit_cml),
+    -A' H A + Q replaces -A' H A in both.
     """
     if sandwich:
-        info, meat = cml_sandwich(X, A, b, Ks, hessian=hessian, penalty=penalty)
+        info, meat = cml_sandwich(X, A, b, Ks, hessian=hessian, penalty=penalty, small_sample=small_sample,
+                                  kc_scores=kc_scores)
         Binv = np.linalg.inv(info)
         return A @ Binv @ meat @ Binv @ A.T
     if hessian is None:
@@ -1088,6 +1121,67 @@ def partial_gk_gamma_batch(tables):
     D = (below_left(x[:, :, :, ::-1]) * x[:, :, :, ::-1]).sum(axis=(1, 2, 3))
     with np.errstate(invalid="ignore", divide="ignore"):
         return np.where(C + D > 0, (C - D) / (C + D), np.nan)
+
+
+def restscore_gammas(Y, Ks, groups):
+    """
+    Item-restscore gamma for each group of columns of Y (persons x columns; NaN missing): the table of a
+    column's score against the person's total over the other columns they responded to, summed over the
+    group's columns, and its Goodman and Kruskal gamma. Ks: each column's maximum score; groups: an integer
+    group label per column (-1: in no group). Returns an array of one gamma per group (NaN without
+    concordant or discordant pairs).
+    """
+    Y = np.asarray(Y, float)
+    groups = np.asarray(groups)
+    obs = ~np.isnan(Y)
+    Yi = np.where(obs, Y, 0).astype(np.int64)
+    tot = Yi.sum(1)
+    G, K1, T1 = int(groups.max()) + 1, int(max(Ks)) + 1, int(sum(Ks)) + 1
+    T = np.zeros((G, K1, T1))
+    rr, cc = np.nonzero(obs & (groups[None, :] >= 0))
+    np.add.at(T, (groups[cc], Yi[rr, cc], tot[rr] - Yi[rr, cc]), 1.0)
+    return partial_gk_gamma_batch(T[:, None])
+
+
+def restscore_monte_carlo(X, thresholds, Ks, groups, samples, rng):
+    """
+    The item-restscore gammas (restscore_gammas) of samples datasets drawn from the Rasch model given each
+    person's total over the items they responded to (sample_given_totals: exact, free of the person
+    locations, at the given thresholds; no refit). Returns an array (samples, groups); with groups a list of
+    groupings (e.g. MFRM's items and facet elements), a list of such arrays from the same draws.
+    """
+    many = isinstance(groups, (list, tuple))
+    sets = list(groups) if many else [groups]
+    out = [[] for _ in sets]
+    for _ in range(samples):
+        Y = sample_given_totals(X, thresholds, rng)
+        for k, g in enumerate(sets):
+            out[k].append(restscore_gammas(Y, Ks, g))
+    out = [np.array(o).reshape(samples, -1) for o in out]
+    return out if many else out[0]
+
+
+def restscore_p(observed, sims, p_method="studentised"):
+    """
+    Two-sided p-values of observed item-restscore gammas against their conditional Monte Carlo draws sims
+    (samples x groups): 'studentised', z = (observed - mean) / SD of the draws, normal p-value (not limited
+    by the number of draws); 'monte-carlo', (1 + #{|draw - mean| >= |observed - mean|}) / (1 + draws).
+    Returns (mean, sd, z, p).
+    """
+    from scipy.stats import norm
+
+    sims = np.asarray(sims, float)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mu = np.nanmean(sims, 0)
+        sd = np.nanstd(sims, 0, ddof=1)
+        z = (np.asarray(observed, float) - mu) / sd
+    if p_method == "studentised":
+        p = np.where(np.isfinite(z), 2 * norm.sf(np.abs(z)), np.nan)
+    else:
+        n = np.isfinite(sims).sum(0)
+        exceed = (np.abs(sims - mu) >= np.abs(np.asarray(observed, float) - mu) - 1e-12).sum(0)
+        p = np.where(np.isfinite(observed) & (n > 0), (1 + exceed) / (1 + n), np.nan)
+    return mu, sd, z, p
 
 
 def stratified_kendall_s(tables):

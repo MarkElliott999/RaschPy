@@ -1,9 +1,9 @@
 from math import log, log10
 import warnings
-from scipy.stats import chi2, norm
+from scipy.stats import chi2, norm, t as t_dist
 
 from raschpy import _progress
-from raschpy.base import _disorder_flag
+from raschpy.base import _disorder_flag, _f_reference
 import numpy as np
 import pandas as pd
 
@@ -15,7 +15,7 @@ from matplotlib import cm as cmx
 import seaborn as sns
 import matplotlib.patheffects as path_effects
 
-from raschpy.base import Rasch, _BootstrapWarnings, _save_table
+from raschpy.base import Rasch, _BootstrapWarnings, _save_table, _calibrate_on_demand
 
 
 class RSM(Rasch):
@@ -722,7 +722,11 @@ class RSM(Rasch):
         if no_information:
             ok = np.isfinite(distances)
             distances[~ok] = distances[ok].mean() if ok.any() else 0.0
-            self._warn_no_information(no_information)
+            # a distance next to an unused category is described by the unused-category warning instead
+            unused_set = {j for j in range(K + 1) if counts[j] == 0}
+            told = [k for k in no_information if not unused_set & {k - 1, k, k + 1}]
+            if told:
+                self._warn_no_information(told)
         if thin:
             self._warn_thin_distances(
                 thin,
@@ -733,8 +737,9 @@ class RSM(Rasch):
                     else ""
                 ),
             )
-        if empty:
-            self._warn_empty_categories(empty)
+        unused = [j for j in range(K + 1) if counts[j] == 0]  # the middle ones (empty) and any at the bottom or top
+        if unused:
+            self._warn_empty_categories(unused)
 
         thresholds = np.concatenate([[0.0], np.cumsum(distances)])
         thresholds -= thresholds.mean()
@@ -790,7 +795,7 @@ class RSM(Rasch):
                 post = np.sqrt(np.clip(np.diag(Vw), 0, None))
                 T = _rcl.threshold_basis(K)
                 post_thr = np.sqrt(np.clip(np.diag(T @ Vw @ T.T), 0, None))
-        z = norm.ppf(0.5 + interval / 2) if interval is not None else None
+        z = self._se_quantile(interval)
         thr = self.thresholds.values.astype(float)
         widths = np.diff(thr)
         ws = pd.Series(self.cat_width_se, dtype=float).copy()
@@ -882,9 +887,10 @@ class RSM(Rasch):
         )
 
     def _warn_empty_categories(self, empty):
-        """One UserWarning for middle score categories with no responses: which thresholds cannot be estimated
-        separately, what sets them under the estimation in use (self._empty_warning_estimation, set by MFRM for its
-        pooled fit, else self.estimation), and what to do."""
+        """One UserWarning for score categories with no responses: for categories between used ones, which
+        thresholds cannot be estimated separately, what sets them under the estimation in use
+        (self._empty_warning_estimation, set by MFRM for its pooled fit, else self.estimation), and what to do; for
+        unused bottom or top categories, that the thresholds beyond the used range cannot be estimated at all."""
         # categories named by this warning (fit_statistics(conditional=True) does not repeat them)
         self._unused_warned = set(getattr(self, "_unused_warned", ())) | {int(j) for j in empty}
         est = getattr(self, "_empty_warning_estimation", None) or getattr(self, "estimation", None)
@@ -898,6 +904,41 @@ class RSM(Rasch):
             return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
 
         empty = sorted(int(j) for j in empty)
+        seen = [c for c in range(K + 1) if c not in set(empty)]
+        if len(seen) < 2:
+            return  # one score only: nothing to estimate, reported elsewhere
+        lo, hi = seen[0], seen[-1]
+        # unused categories below the lowest used score or above the highest: the thresholds beyond the used range
+        # have no data on them at all (the data fit them at -inf / +inf)
+        outer = ""
+        for cats, ths, side in (
+            ([j for j in empty if j < lo], [tau(k) for k in range(1, lo + 1)], "low"),
+            ([j for j in empty if j > hi], [tau(k) for k in range(hi + 1, K + 1)], "high"),
+        ):
+            if cats:
+                many = len(ths) > 1
+                outer += (
+                    f"Score categor{'ies' if len(cats) > 1 else 'y'} {listing([str(j) for j in cats])} "
+                    f"{'have' if len(cats) > 1 else 'has'} no responses, so threshold{'s' if many else ''} "
+                    f"{listing(ths)} cannot be estimated: the data are consistent with {'them' if many else 'it'} "
+                    f"being infinitely {side}. {'Their' if many else 'Its'} reported value{'s' if many else ''} "
+                    f"{'are' if many else 'is'} set by the estimation's smoothing or penalty rather than the "
+                    f"responses, and since the thresholds are centred to average zero, "
+                    f"{'they also move' if many else 'it also moves'} the other thresholds and the item locations' "
+                    f"reference point. "
+                )
+        remedy = " ".join(
+            s for s in (
+                f"If scores below {lo} are not genuine response options, subtract {lo} from every response and "
+                f"lower max_score to match." if lo > 0 else "",
+                f"If scores above {hi} are not genuine response options, set max_score={hi - lo}."
+                if hi < K else "",
+            ) if s
+        )
+        empty = [j for j in empty if lo < j < hi]
+        if not empty:
+            warnings.warn(outer + remedy, UserWarning, stacklevel=3)
+            return
         plural = len(empty) > 1
         # each run of adjacent empty categories a..b: only the sum of thresholds a to b + 1 can be estimated
         runs, run = [], [empty[0]]
@@ -912,15 +953,16 @@ class RSM(Rasch):
         thresholds = listing([t for g in groups for t in g])
         sums = [" + ".join(g) for g in groups]
         it, cat = ("them", "categories") if plural else ("it", "category")
-        used = [c for c in range(K + 1) if c not in set(empty)]
-        ends_only = used == [0, K]  # every threshold lies between the two used categories
+        used = seen
+        ends_only = used == [lo, hi]  # every threshold in the used range lies between the two used categories
         no_pairs = not any(b - a == 1 for a, b in zip(used, used[1:]))
         if ends_only:
             text = (
                 f"Score categor{'ies' if plural else 'y'} {listing([str(j) for j in empty])} "
-                f"{'have' if plural else 'has'} no responses, so only scores 0 and {K} are used, and none of the "
+                f"{'have' if plural else 'has'} no responses, so only scores {lo} and {hi} are used, and none of the "
                 f"thresholds ({thresholds}) can be estimated from the data: only their sum {sums[0]} affects the "
-                f"responses; this is fixed at 0 because the thresholds are centred. "
+                f"responses"
+                + ("; this is fixed at 0 because the thresholds are centred. " if (lo, hi) == (0, K) else ". ")
             )
         else:
             text = (
@@ -945,14 +987,14 @@ class RSM(Rasch):
             if name == "cp-full-rcl":
                 text += (
                     "With estimation='cp-full-rcl', category widths next to an unused category are set by a smoothing "
-                    "rule; simulations indicate that this also distorts other thresholds and rendered conditional fit "
+                    "rule; simulations indicate that this also distorts other thresholds and renders conditional fit "
                     "statistics and p-values unreliable. "
                 )
             else:
                 text += (
                     f"With estimation={name!r}, category widths next to an unused category are set by a smoothing "
                     f"rule, the same as with estimation='cp-full-rcl', for which simulations indicate that this also "
-                    f"distorts other thresholds and rendered conditional fit statistics and p-values unreliable. "
+                    f"distorts other thresholds and renders conditional fit statistics and p-values unreliable. "
                 )
             if no_pairs:
                 text += "Here, no pair of adjacent categories are both used, so item locations cannot be estimated either. "
@@ -974,8 +1016,11 @@ class RSM(Rasch):
                 f"collapse or rescore; otherwise, estimation='cml' with its default unused_categories='ridge' is "
                 f"recommended (in simulations, this recovered the item "
                 + ("locations" if ends_only else "and threshold locations")
-                + " with little bias)."
+                + " with little bias"
+                + ("; it needs the unused bottom or top categories removed first)." if outer else ").")
             )
+        if outer:
+            text = outer + text + " " + remedy
         warnings.warn(text, UserWarning, stacklevel=3)
 
     # ------------------------------------------------------------------
@@ -1230,10 +1275,11 @@ class RSM(Rasch):
             thresh_constant = 0.03
         else:
             thresh_constant = float(constant)
-        self.constant = item_constant
-        self.threshold_constant = thresh_constant
         if estimation is None:
             estimation = getattr(self, "estimation", "cp-full-rcl")
+        self._clear_fit_results()
+        self.constant = item_constant
+        self.threshold_constant = thresh_constant
         if estimation not in ("cp-full-rcl", "cpat-rcl", "pair-cpat", "cml"):
             raise ValueError(
                 f"estimation must be 'cp-full-rcl', 'cpat-rcl', 'pair-cpat', 'cml' or None, got {estimation!r}."
@@ -1623,10 +1669,10 @@ class RSM(Rasch):
                 mult[h], run = 1 + run, 0
         return mult
 
-    def _cml_covariance(self, full=False, sandwich=None):
+    def _cml_covariance(self, full=False, sandwich=None, small_sample=False):
         """Covariance of (item locations, category widths) for CML estimates, from the Hessian of the
-        conditional log-likelihood or the sandwich (sandwich=True; None follows se_method), in
-        _sandwich_covariance's layout."""
+        conditional log-likelihood or the sandwich (sandwich=True; None follows se_method; small_sample=True:
+        with the Kauermann-Carroll correction), in _sandwich_covariance's layout."""
         if sandwich is None:
             sandwich = getattr(self, "se_method", None) != "hessian"
         names = list(self.item_names)
@@ -1645,7 +1691,8 @@ class RSM(Rasch):
             H = _esf.cond_loglik(X, list(b.reshape(len(names), K)), hessian=True)[2]
         Q = getattr(self, "_cml_penalty", None)
         if sandwich:
-            info, meat = _esf.cml_sandwich(X, A, b, [K] * len(names), hessian=H, penalty=Q)
+            info, meat = _esf.cml_sandwich(X, A, b, [K] * len(names), hessian=H, penalty=Q,
+                                           small_sample=small_sample, kc_scores=self._kc_scores)
             Binv = np.linalg.inv(info)
             V = M @ Binv @ meat @ Binv @ M.T
         else:
@@ -1672,6 +1719,9 @@ class RSM(Rasch):
         counts = _rcl.pattern_counts(X, K)
         cat_counts = _rcl.category_counts(X, K)
         split = _rcl.empty_widths(cat_counts, K)
+        if not split and _rcl.empty_categories(cat_counts):
+            # unused bottom or top categories only: threshold_set(), which warns otherwise, is not run
+            self._warn_empty_categories(_rcl.empty_categories(cat_counts))
         rho = _rcl.width_ridges(counts[1], counts[2], K, exclude=split)
         x = X[0]
         observations = {
@@ -1803,10 +1853,10 @@ class RSM(Rasch):
         anchor_thresholds=None,
         alpha=0.05,
         correction="bh",
-        warm_corr=True,
-        tolerance=0.00001,
-        max_iters=100,
-        ext_score_adjustment=0.5,
+        warm_corr=None,
+        tolerance=None,
+        max_iters=None,
+        ext_score_adjustment=None,
         constant=None,
         threshold_constant=None,
         method="log-lik",
@@ -1843,38 +1893,33 @@ class RSM(Rasch):
         structure (e.g. the bank's category structure), this runs two
         checks of whether it's actually compatible with this dataset.
 
-        The first is an omnibus likelihood-ratio test: holding item
-        locations fixed at anchor_items, it compares the model fit (log-
-        likelihood, person locations re-estimated in each case) using this
-        dataset's freely-estimated thresholds (self.thresholds) against
-        using the given anchor_thresholds instead. (AIC/BIC don't apply
-        here: both candidates are point-values plugged into the exact same
-        threshold-vector-length model, so there's no genuine difference in
-        the number of model parameters to penalise for — only the LR
-        test's fixed-vs-free chi-squared framing is actually appropriate.)
-        Because person locations are re-estimated freely under each
-        candidate, this comparison is already invariant to any overall
-        shift in the threshold vector's level (a uniform shift is absorbed
-        exactly by the re-estimated person locations, the standard
-        Rasch θ/δ indeterminacy) — so despite operating on the raw
-        threshold vectors, it only ever detects genuine differences in
-        category *shape* (widths), never a harmless difference in
-        centring convention between this dataset and the anchor source.
-        A significantly worse fit under anchor_thresholds warns that the
-        rating-scale structures may not actually be shared, which would
+        Both compare category widths (consecutive threshold differences),
+        not raw threshold locations, so they detect differences in category
+        shape only, never a harmless difference in centring convention
+        between this dataset and the anchor source. The given widths are
+        fixed; the SEs and covariance are those of this dataset's estimated
+        widths: std_errors()' analytic covariance (the sandwich with its
+        se_correction, Kauermann-Carroll by default, or CML's), or the
+        covariance of the bootstrap resamples (std_errors() is
+        auto-triggered if not already computed).
+
+        The first is an omnibus Wald test of all widths at once:
+        W = d' V^+ d, d the differences between this dataset's widths and
+        the given ones, V their covariance matrix (analytic, else from the
+        bootstrap resamples), referred to the F reference of Hotelling's
+        T^2 on persons - 1 (F = W (n - q) / (q (n - 1)) on (q, n - q), q the
+        number of widths, n the persons). A significant result warns that
+        the rating-scale structures may not actually be shared, which would
         undermine a translation-only equating assumption.
 
-        The second is a per-category test, run alongside the omnibus one:
-        this dataset's bootstrap category widths (self.thresholds.diff(),
-        with SEs from cat_width_se — auto-triggers std_errors() if not
-        already computed) are compared directly against anchor_thresholds'
-        widths via a Wald z-test, one per category. Unlike the omnibus
-        test, this localises *which* category's shape differs, the same
-        way dif_test's category-width (DCF) test does across groups —
-        comparing raw threshold locations here would be the wrong quantity,
-        since a genuine difference in one category's width cascades
-        additively into every threshold location after it, smearing one
-        true effect across several per-category tests.
+        The second is a per-category test, one t test per width
+        (difference / SE on persons - 1 df). Unlike the omnibus test, this
+        localises *which* category's shape differs, the same way
+        dif_test's category-width (DCF) test does across groups; comparing
+        raw threshold locations would be the wrong quantity, since a
+        genuine difference in one category's width cascades additively
+        into every threshold location after it, smearing one true effect
+        across several per-category tests.
 
         By default (selection_method='robust_z'), the translation constant
         is computed via _robust_anchor_selection() (Iglewicz & Hoaglin
@@ -1903,9 +1948,13 @@ class RSM(Rasch):
             modified z-score / MAD-based iterative trim (corr_tol,
             sd_ratio_tol, min_anchors).
             'wald': _wald_anchor_selection() — a genuine significance test
-            per anchor item (z = (anchor - (observed + tc)) / SE(observed),
-            tc precision-weighted, sequential exclusion) rather than a
-            descriptive-statistics trim. Needs item SEs — auto-
+            per anchor item (t = (anchor - (observed + tc)) / SE, tc
+            precision-weighted, sequential exclusion) rather than a
+            descriptive-statistics trim. The anchor values are fixed, so
+            SE is that of the item's deviation from tc in this
+            calibration (its covariance matrix, the item's own share of
+            tc removed), and t is referred to a t-distribution on
+            persons - 1 degrees of freedom. Needs item SEs — auto-
             triggers std_errors() if not already computed. Uses wald_alpha
             and min_anchors, not corr_tol/sd_ratio_tol.
             'none': plain mean shift over every supplied anchor, no
@@ -1968,27 +2017,25 @@ class RSM(Rasch):
         anchor_thresholds : array-like or None, default None
             Externally-supplied reference threshold vector (length
             max_score), e.g. from the same bank the item anchors came from.
-            If supplied, runs the LR comparison described above and warns
-            if the two threshold structures are significantly different.
+            If supplied, runs the two width tests described above and
+            warns if the two threshold structures are significantly
+            different.
             If None, the threshold-structure check is skipped entirely
             (self.anchor_threshold_test is set to None).
         alpha : float, default 0.05
-            Significance level for both the omnibus likelihood-ratio test
-            (self.thresholds, freely estimated, df=max_score-1, vs
-            anchor_thresholds, fixed, df=0, chi-squared with
-            df=max_score-1) and the per-category Wald z-tests (compared
-            against the corrected p-value if correction is set, else the
-            raw p-value).
+            Significance level for both the omnibus Wald test and the
+            per-category t tests (compared against the corrected p-value
+            if correction is set, else the raw p-value).
         correction : {'bh', 'bonferroni', None}, default 'bh'
             Multiple-comparison correction across the per-category width
             tests only (mirrors dif_test's convention elsewhere in the
             package). None uses raw p-values, uncorrected. Not applied to
             the omnibus test, which is already a single test.
-        warm_corr, tolerance, max_iters, ext_score_adjustment :
-            Person-estimation kwargs, used only by the omnibus
-            anchor_thresholds comparison (person locations must be
-            re-estimated under each candidate threshold vector before the
-            log-likelihoods are comparable).
+        warm_corr, tolerance, max_iters, ext_score_adjustment : None
+            Deprecated and unused (FutureWarning if given; to be removed
+            in a future version): person-estimation settings of the
+            previous omnibus likelihood-ratio test, which the Wald test
+            above replaces.
         constant, method, matrix_power, log_lik_tol : floats
             Calibration kwargs, used only if calibrate is triggered, or if
             cat_width_se needs to be computed for the per-category test.
@@ -2028,8 +2075,9 @@ class RSM(Rasch):
         anchor_selection : pandas.DataFrame or None
             Per-item diagnostics from whichever selection method was used
             — Anchor, Observed, Deviation, Robust z, Selected
-            ('robust_z'), or Anchor, Observed, SE, Deviation, z, p,
-            Selected ('wald'). None if selection_method='none' or adj was
+            ('robust_z'), or Anchor, Observed, SE, Deviation,
+            SE (deviation), t, df, p, Selected ('wald'); a dropped item's
+            Deviation to p are from the step at which it was dropped. None if selection_method='none' or adj was
             supplied directly.
         anchor_selected_items, anchor_dropped_items : pandas.Index or None
             Items retained / excluded as outliers. None if
@@ -2049,14 +2097,18 @@ class RSM(Rasch):
             call. None if plot=False, selection_method='none', or adj was
             supplied directly (no selection table to plot in those cases).
         anchor_threshold_test : pandas.Series or None
-            Omnibus LR test: LL_estimated, LL_given, LR, df, p, and a
-            Flagged bool. None if anchor_thresholds was not supplied.
+            Omnibus Wald test of the widths: W, df (number of widths, q),
+            F, denominator df (persons - q), p, and a Flagged bool. None if
+            anchor_thresholds was not supplied.
         anchor_category_width_test : pandas.DataFrame or None
             Per-category Wald test, indexed by category: Estimate (this
-            dataset's bootstrap category width), Given (anchor_thresholds'
-            width at that category), Difference, SE (from cat_width_se), z,
-            p, p_corrected (if correction is set), and a Flagged bool. None
-            if anchor_thresholds was not supplied.
+            dataset's estimated category width), Given (anchor_thresholds'
+            width at that category), Difference, SE (cat_width_se),
+            t (Difference / SE),
+            df (persons - 1), p (t-distribution on
+            df; the given widths are fixed), p_corrected (if correction is
+            set), and a Flagged bool. None if anchor_thresholds was not
+            supplied.
         calibrate_anchor_runs : dict
             Every call's anchor_items/anchor_adj/anchor_summary/etc.,
             keyed by tuple(sorted(anchors.items())), so results from an
@@ -2122,56 +2174,20 @@ class RSM(Rasch):
                     anchor_thresholds, index=range(1, self.max_score + 1)
                 )
 
-            pe_kw = dict(
-                warm_corr=warm_corr,
-                tolerance=tolerance,
-                max_iters=max_iters,
-                ext_score_adjustment=ext_score_adjustment,
-            )
-            ll_estimated = self._threshold_structure_ll(self.thresholds, **pe_kw)
-            ll_given = self._threshold_structure_ll(anchor_thresholds, **pe_kw)
-            df = self.max_score - 1
-
-            # PAIR/CPAT are approximate (not exact MLE), so a small negative
-            # LR from sampling noise doesn't necessarily mean anything —
-            # floor at 0, same as andersen_lr_test does for the same reason.
-            # AIC/BIC don't apply here: both candidates are point-values in
-            # the exact same threshold-vector-length model, so there's no
-            # real difference in parameter count to penalise for — only the
-            # LR test's fixed-vs-free chi-squared framing is appropriate.
-            lr = max(0.0, 2 * (ll_estimated - ll_given))
-            p = float(chi2.sf(lr, df))
-            flagged = p <= alpha
-
-            self.anchor_threshold_test = pd.Series(
-                {
-                    "LL_estimated": ll_estimated,
-                    "LL_given": ll_given,
-                    "LR": lr,
-                    "df": df,
-                    "p": p,
-                    "Flagged": flagged,
-                },
-                name="Anchor threshold structure test",
-            )
-
-            if flagged:
+            unused = [k for k, v in dict(warm_corr=warm_corr, tolerance=tolerance, max_iters=max_iters,
+                                         ext_score_adjustment=ext_score_adjustment).items() if v is not None]
+            if unused:
                 warnings.warn(
-                    "anchor_thresholds differs substantially from this "
-                    "dataset's estimated threshold structure "
-                    "(LR test; see anchor_threshold_test). "
-                    "The rating-scale category structure may not actually "
-                    "be shared with the anchor source — translation-only "
-                    "equating via anchor_items assumes it is.",
-                    UserWarning,
+                    f"calibrate_anchor({', '.join(unused)}=...) is deprecated and has no effect: these set the "
+                    "person estimation of the previous likelihood-ratio test of anchor_thresholds, which a Wald test "
+                    "of the category widths replaces (the likelihood-ratio test rejected too often, increasingly so "
+                    "as the sample grew). The argument(s) will be removed in a future version.",
+                    FutureWarning,
                     stacklevel=2,
                 )
-
-            # Per-category test, alongside the omnibus one: compares category
-            # WIDTHS (consecutive threshold differences), not raw threshold
-            # locations, so a genuine difference in one category's shape
-            # doesn't cascade into a false signal at every category after it
-            # (the same reasoning as dif_test's category-width/DCF test).
+            # Both tests compare category WIDTHS (consecutive threshold differences), not raw threshold locations: a
+            # difference in one category's width would otherwise cascade into every threshold after it, and the
+            # centring of the two vectors does not matter.
             if not hasattr(self, "cat_width_se"):
                 self.std_errors(
                     no_of_samples=no_of_samples,
@@ -2187,18 +2203,68 @@ class RSM(Rasch):
             widths_estimated.index = range(1, self.max_score)
             widths_given = anchor_thresholds.diff().dropna()
             widths_given.index = range(1, self.max_score)
+            n_persons = int(self.no_of_persons)
 
+            # omnibus: W = d' V^+ d on the widths' covariance, Hotelling F reference on persons - 1 (the given widths
+            # are fixed)
+            # widths' covariance: std_errors()' analytic covariance (the sandwich with its se_correction, or CML's),
+            # else from the bootstrap resamples
+            d = (widths_estimated - widths_given).to_numpy(float)
+            cov = getattr(self, "se_covariance", None)
+            se_method = getattr(self, "se_method", None)
+            if se_method in ("sandwich", "hessian") and isinstance(cov, dict):
+                V = cov["cat_widths"].to_numpy(float)
+            else:
+                Vb = self._boot_cov(getattr(self, "cat_width_bootstrap", None))
+                V = (Vb.to_numpy(float) if Vb is not None
+                     else np.diag(self.cat_width_se.reindex(widths_estimated.index).to_numpy(float) ** 2))
+            ev, Q = np.linalg.eigh((V + V.T) / 2)
+            ok = ev > 1e-10 * max(ev.max(), 1e-300)
+            q = int(ok.sum())
+            W = float(((Q[:, ok].T @ d) ** 2 / ev[ok]).sum()) if q else 0.0
+            p = _f_reference(W, q, n_persons) if q else 1.0
+            flagged = p <= alpha
+
+            self.anchor_threshold_test = pd.Series(
+                {
+                    "W": W,
+                    "df": q,
+                    "F": W * (n_persons - q) / (q * (n_persons - 1)) if q and n_persons > q else np.nan,
+                    "denominator df": n_persons - q,
+                    "p": p,
+                    "Flagged": flagged,
+                },
+                name="Anchor threshold structure test",
+            )
+
+            if flagged:
+                warnings.warn(
+                    "anchor_thresholds differs substantially from this "
+                    "dataset's estimated category widths "
+                    "(Wald test; see anchor_threshold_test). "
+                    "The rating-scale category structure may not actually "
+                    "be shared with the anchor source — translation-only "
+                    "equating via anchor_items assumes it is.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+
+            # per category: the given widths are fixed, so t = difference / SE on persons - 1 df (the SEs are
+            # estimated from this calibration's persons; the normal reference is its large-sample limit)
             width_diff = widths_estimated - widths_given
-            z = width_diff / self.cat_width_se
-            p_width = 2 * (1 - norm.cdf(np.abs(z)))
+            width_se = pd.Series(np.sqrt(np.clip(np.diag(V), 0, None)), index=widths_estimated.index)
+            t_width = width_diff / width_se
+            df_width = max(n_persons - 1, 1)
+            p_width = 2 * t_dist.sf(np.abs(t_width), df_width)
 
             table = pd.DataFrame(
                 {
                     "Estimate": widths_estimated,
                     "Given": widths_given,
                     "Difference": width_diff,
-                    "SE": self.cat_width_se,
-                    "z": z,
+                    "SE": width_se,
+                    "t": t_width,
+                    "df": df_width,
                     "p": p_width,
                 }
             )
@@ -2349,8 +2415,8 @@ class RSM(Rasch):
         sum over persons of their score outer products (see _rcl).
         """
         if getattr(self, "estimation", "pair-cpat") == "cml":
-            # Hessian or sandwich covariance, per se_method (no small-sample correction applies)
-            return self._cml_covariance(full=full)
+            # Hessian or sandwich covariance, per se_method (small_sample: the sandwich's correction)
+            return self._cml_covariance(full=full, small_sample=small_sample)
         if getattr(self, "estimation", "pair-cpat") in ("cp-full-rcl", "cpat-rcl"):
             return self._rcl_sandwich_covariance(full=full, small_sample=small_sample)
         K = self.max_score
@@ -2460,9 +2526,10 @@ class RSM(Rasch):
         return Vout[:I, :I], Vout[I:, I:]
 
     def _sandwich_std_errors(self, interval):
-        """Set the std_errors() attributes from the sandwich covariance."""
+        """Set the std_errors() attributes from the analytic covariance (sandwich, with self.se_correction, or
+        CML's)."""
         K = self.max_score
-        V_items, V_widths = self._sandwich_covariance()
+        V_items, V_widths = self._sandwich_covariance(small_sample=getattr(self, "se_correction", None) is not None)
         cols = self.responses.columns
         M = np.vstack([np.zeros(K - 1), np.tril(np.ones((K - 1, K - 1)))])
         M = M - M.mean(axis=0)  # thresholds = centred cumulative widths
@@ -2478,7 +2545,7 @@ class RSM(Rasch):
         )
         self.item_bootstrap = self.threshold_bootstrap = self.cat_width_bootstrap = None
         if interval is not None:
-            z = norm.ppf(0.5 + interval / 2)
+            z = self._se_quantile(interval)
             items = self.items.reindex(cols)
             self.item_low, self.item_high = (
                 items - z * self.item_se,
@@ -2515,6 +2582,7 @@ class RSM(Rasch):
         seed=None,
         se_method=None,
         no_data_se="posterior",
+        se_correction="kauermann-carroll",
     ):
         """
         Estimate standard errors for item locations, thresholds and category widths.
@@ -2571,7 +2639,9 @@ class RSM(Rasch):
             inverse, times the sum over persons of the outer products of
             their conditional scores, times that inverse), which stays valid
             when the model does not hold. With 'sandwich' or 'hessian',
-            confidence intervals are estimate +/- z * SE, and the bootstrap
+            confidence intervals are estimate +/- t * SE (t the
+            (1 + interval) / 2 quantile of the t-distribution on persons - 1
+            degrees of freedom), and the bootstrap
             attributes are None.
 
         no_data_se : {'posterior', 'nan'}, default 'posterior'
@@ -2584,11 +2654,29 @@ class RSM(Rasch):
             from the information including the ridge, the spread it allows
             (tests on them are conservative); 'nan' gives NaN (left out of
             confidence intervals and tests). A UserWarning names them.
+        se_correction : {'kauermann-carroll', None}, default 'kauermann-carroll'
+            Small-sample correction of the sandwich standard errors (CML
+            included). The sandwich builds the variance from each
+            person's contribution to the estimating equations at the
+            estimates, and the estimates are chosen to make those
+            contributions sum to zero, so in small samples it understates the
+            variance, just as a standard deviation computed with divisor N
+            understates the population SD. 'kauermann-carroll' (Kauermann and
+            Carroll, 2001) scales each person's contribution up by their
+            leverage, the pull they have on the estimates; for a mean it is
+            exactly the N - 1 divisor. Like N / (N - 1), it makes little
+            difference in large samples; it matters most for parameters that
+            few persons inform (a sparse score category). None gives the
+            uncorrected sandwich. Hessian and bootstrap standard errors take no
+            correction.
 
         Attributes set
         --------------
         se_method : str
             'sandwich' or 'bootstrap', the method actually used.
+        se_correction : str or None
+            The small-sample correction applied (None for CML, the
+            bootstrap or se_correction=None).
         item_se : pandas.Series
             SE for each item location.
         threshold_se : numpy.ndarray
@@ -2656,6 +2744,7 @@ class RSM(Rasch):
                     stacklevel=2,
                 )
         self.se_method = se_method
+        self._set_se_correction(se_correction, se_method)
         if no_data_se not in ("posterior", "nan"):
             raise ValueError(f"no_data_se must be 'posterior' or 'nan', got {no_data_se!r}.")
         if se_method in ("sandwich", "hessian"):
@@ -3480,6 +3569,7 @@ class RSM(Rasch):
         seed=None,
         conditional=False,
         conditional_samples=1000,
+        restscore_p_method="studentised",
         bootstrap_samples=None,
         q1_groups=None,
         q1_overall_samples=99,
@@ -3551,7 +3641,28 @@ class RSM(Rasch):
 
         conditional_samples : int, default 1000
             conditional=True only: Monte Carlo samples for each person's
-            conditional p-value (person_conditional_p).
+            conditional p-value (person_conditional_p) and for the
+            item-restscore test (item_restscore_table).
+
+        restscore_p_method : {'studentised', 'monte-carlo'}, default 'studentised'
+            conditional=True only: the item-restscore test refers each item's
+            observed gamma to its distribution in conditional_samples
+            datasets drawn from the model given each person's total over the
+            items they responded to (exact and free of the person locations,
+            at the fitted thresholds; no refit). 'studentised': z = (observed
+            - mean of the draws) / their SD, normal p-value (not limited by
+            the number of draws, which matters for the BH adjustment over
+            many items); 'monte-carlo': the share of draws at least as far
+            from their mean as the observed gamma, (1 + count) / (1 +
+            draws). In null simulations (SLM, PCM, RSM; 12 items; N = 50 to
+            1,000; 300 datasets each; 500 draws) both rejected 3.6-5.7% at
+            0.05 ('studentised' 3.8-5.5%, SD of z 0.97-1.03); the earlier
+            test (observed minus expected-table gamma over the observed
+            gamma's asymptotic SE, normal p) rejected 6.6-7.4% at N = 50 and
+            2.4-3.1% at N = 300 and above. The thresholds are not
+            re-estimated in each draw, which leaves the test slightly
+            conservative (3.6-4.9% at N = 300); bootstrap_samples adds p-values
+            from draws that are refitted.
 
         bootstrap_samples : int or None, default None
             conditional=True only: if set (e.g. 1000; at least 400
@@ -3627,10 +3738,13 @@ class RSM(Rasch):
         item_restscore_table : pandas.DataFrame
             conditional=True only: item-restscore association (Kreiner):
             Goodman-Kruskal gamma of each item's score against its restscore
-            (the total over the person's other items), observed and expected
-            under the model (from P(X_i = k | total)), the observed gamma's
-            asymptotic SE, and the two-sided p-value of the difference
-            ('p', and BH-adjusted 'p (BH)'). Every person who responded to the
+            (the total over the person's other items): Observed gamma,
+            Expected gamma (of the expected table, from P(X_i = k | total);
+            descriptive), SE (the observed gamma's asymptotic SE; descriptive),
+            Simulated mean and Simulated SD (of the gamma in the conditional
+            Monte Carlo draws), z ((observed - simulated mean) / simulated
+            SD), p (two-sided, per restscore_p_method) and p (BH)
+            (Benjamini-Hochberg adjusted). Every person who responded to the
             item is included.
         item_fit_bootstrap : pandas.DataFrame or None
             bootstrap_samples only: for infit and outfit, the observed mean
@@ -4088,6 +4202,7 @@ class RSM(Rasch):
         if conditional:
             self._apply_conditional_fit(
                 samples=conditional_samples,
+                restscore_p_method=restscore_p_method,
                 seed=seed,
                 bootstrap_samples=bootstrap_samples,
                 q1_groups=q1_groups,
@@ -4483,7 +4598,7 @@ class RSM(Rasch):
         wald_alpha=0.05,
         test="wald",
         omnibus=True,
-        welch=False,
+        welch=None,
         size_adjust=False,
         reference_n=100,
         dcf_cap=80000,
@@ -4595,9 +4710,13 @@ class RSM(Rasch):
             Only affects the item-location component — threshold-structure
             DIF is never purified/shifted.
             'wald': _wald_anchor_selection() — per-item significance test
-            (z = (reference - (focal + tc)) / SE(focal), tc precision-
-            weighted, sequential exclusion) using the bootstrap SEs this
-            method computes anyway. Uses wald_alpha and min_anchors.
+            (t = (reference - (focal + tc)) / SE, tc precision-weighted,
+            sequential exclusion). SE counts both groups' errors in the
+            item's deviation from tc (each group's covariance matrix, or
+            its bootstrap resamples, the item's own share of tc removed),
+            and t is referred to a t-distribution with Welch-Satterthwaite
+            degrees of freedom from the two groups' person counts. Uses
+            wald_alpha and min_anchors.
             'robust_z': _robust_anchor_selection() — Iglewicz & Hoaglin
             modified z-score / MAD-based iterative trim (corr_tol,
             sd_ratio_tol, min_anchors) — no significance test, purely
@@ -4648,19 +4767,19 @@ class RSM(Rasch):
             each common item, the shared thresholds kept common
             (df = common items - 1), which involves no person
             locations.
-        welch : bool, default False
-            If True, every Wald test here (item-location AND threshold-
-            structure) becomes a Welch's t-test: the statistic is
-            unchanged (diff / combined SE) but its p-value is computed
-            against a t-distribution with Welch-Satterthwaite degrees of
-            freedom (using each group's person count) instead of a
-            normal distribution — more conservative than a z-test when
-            group sizes are small, unequal, or the two SEs differ
-            substantially. Adds a 'df' column to both dif_table and
-            threshold_dif_table. Does not affect the LR test or omnibus
-            (already exact chi-squared tests) or _wald_anchor_selection (a
-            one-sample comparison against a fixed anchor value, not the
-            two-independent-samples case Welch's t-test addresses).
+        welch : bool or None, default None
+            Deprecated (FutureWarning; to be removed in a future version).
+            Every Wald test here (item location and threshold structure) is
+            Welch's t-test: the statistic diff / combined SE referred to a
+            t-distribution with Welch-Satterthwaite degrees of freedom (from
+            each group's SE and person count, in the 'df' columns of
+            dif_table and threshold_dif_table), which allows for estimating
+            the SEs from the groups' persons. welch=False still gives the
+            normal (z) reference, the t-test's large-sample limit and less
+            accurate, until the argument is removed. Does not affect
+            the LR tests or the omnibus test (likelihood ratios, not
+            z/t-based) or the anchor selection (which always uses a t
+            reference; see selection_method).
         size_adjust : bool, default False
             If True, rescales each group's SE (item location AND
             threshold — same scope as welch, unlike category below) to
@@ -4675,7 +4794,7 @@ class RSM(Rasch):
             dynamic cap on its own CPAT total_weight (dcf_cap), applied
             only above the cap. Each group's SE is rescaled
             independently, then combined as usual. Applied to the
-            Wald/Welch test, the category tests, and (if welch=True) the
+            Wald/Welch test, the category tests, and (unless welch=False) the
             Welch-Satterthwaite df, which then also uses the adjusted n
             rather than each group's actual n, for internal consistency.
         reference_n : int, default 100
@@ -4791,11 +4910,11 @@ class RSM(Rasch):
             One row per (item, focal group) pair. Columns: 'Group'
             (focal group value), 'Reference' / 'Focal' / 'Focal (purified)'
             (item location estimates), 'Difference' (purified focal -
-            reference), 'SE', 'z', 'p', 'p (corrected)', 'Selected' (used
+            reference), 'SE', 't', 'p', 'p (corrected)', 'Selected' (used
             to define the purified scale), 'Flagged' (Wald p and logit-
-            difference thresholds both met). If welch=True, also 'df'
-            (Welch-Satterthwaite), and 'p'/'p (corrected)' are t-based
-            rather than normal-based ('z' is unchanged either way). If
+            difference thresholds both met), 'df' (Welch-Satterthwaite):
+            't' is Difference / SE, a Welch t-statistic on df ('z', with
+            normal p and no 'df', under the deprecated welch=False). If
             test is 'lr' or 'both', also: 'LR', 'p_LR', 'p_LR (corrected)',
             'Flagged_LR'. If category=True, also 'Category' ('A', 'B+',
             'B-', 'C+', or 'C-').
@@ -4811,10 +4930,9 @@ class RSM(Rasch):
             between threshold k and k+1 (1..max_score-1, one fewer than
             the number of thresholds). Columns: 'Group', 'Category',
             'Reference' / 'Focal' (category widths), 'Difference', 'SE'
-            (from cat_width_se), 'z', 'p', 'p (corrected)', 'Flagged'.
-            Corrected independently of dif_table. If welch=True, also 'df'
-            (Welch-Satterthwaite), and 'p'/'p (corrected)' are t-based
-            rather than normal-based.
+            (from cat_width_se), 't', 'p', 'p (corrected)', 'Flagged', 'df'
+            (Welch-Satterthwaite; 't' on df, as in dif_table). Corrected
+            independently of dif_table.
         dif_reference : the reference group value.
         dif_covariate : the covariate column name used.
         dif_reference_model : RSM
@@ -4840,6 +4958,7 @@ class RSM(Rasch):
         """
         from raschpy.rsm import RSM
 
+        welch = self._dif_welch(welch)
         self._dif_validate(
             correction,
             selection_method,
@@ -5148,7 +5267,8 @@ class RSM(Rasch):
                 },
                 index=thr_index,
             )
-            if welch:
+            if welch:  # Welch t on Welch-Satterthwaite df
+                threshold_table = threshold_table.rename(columns={"z": "t"})
                 threshold_table["df"] = thr_welch_df
 
             all_item_rows.append(item_table)
@@ -5183,8 +5303,8 @@ class RSM(Rasch):
     @_progress.with_progress
     def model_selection(
         self,
-        test="LR",
-        aic_sig_test=True,
+        test=None,
+        aic_relative_likelihood=True,
         alpha=0.05,
         min_effect=0,
         no_of_samples=199,
@@ -5199,6 +5319,13 @@ class RSM(Rasch):
         method="log-lik",
         log_lik_tol=0.000001,
         seed=None,
+        delta=None,
+        delta_units="width",
+        delta_measure="either",
+        power_threshold=0.8,
+        n_subsamples=1,
+        aic_sig_test=None,
+        ridge=None,
     ):
         """
         Compare RSM against PCM by a likelihood ratio test, AIC or BIC, with the estimation the object was
@@ -5244,30 +5371,88 @@ class RSM(Rasch):
 
         Parameters
         ----------
-        test : {'LR', 'AIC', 'BIC'}, default 'LR'
-            Decision rule. 'LR': PCM is preferred when the test above rejects RSM at alpha. In simulations under
-            'cp-full-rcl' (RSM data, and PCM data whose item thresholds deviate from shared ones with SD 0.2 or
-            0.4 logits; 10 or 20 items, maximum score 3 or 4, complete or 20% missing; 400 datasets of each kind
-            at each of 200, 500 and 1,000 persons), the lowest proportion of datasets for which the rule chose
-            the generating model was 0.485 / 0.885 / 0.945 for 'LR', against 0.142 / 0.585 / 0.958 for 'AIC'
-            with aic_sig_test=False and 0.020 / 0.362 / 0.895 with aic_sig_test=True. 'LR' chooses PCM for
-            about alpha of RSM datasets (0.040-0.055 here).
-        aic_sig_test : bool, default True
+        test : {None, 'AIC', 'LR', 'BIC'}, default None
+            Decision rule. None: 'AIC', or 'LR' when only the bootstrap test exists (PAIR's 'cos', 'ls' and
+            'evm') or sampling is given; model_comparison_rsm_pcm_test records the test used. 'AIC' (with
+            aic_relative_likelihood) and 'BIC': PCM is preferred only if the criterion prefers it and, with a
+            tolerance (delta, default 0.1 median category widths), the close-fit test rejects RSM. 'LR': PCM is preferred when the test above (the close-fit test, with a
+            tolerance) rejects RSM at alpha. Without a tolerance every rule chooses PCM for departures too small
+            to matter once the sample is large. In simulations ('cp-full-rcl'; 10 items with maximum score 3,
+            20 with 5; 300 / 1,000 / 5,000 persons; 100 datasets each), RSM data were disturbed in a way neither
+            model represents: item discriminations varying (log-SD 0.1 or 0.2), noise on each response's
+            category log-odds (SD 0.1 or 0.2), or two dimensions correlated 0.9 or 0.8. Over these, the plain LR
+            test chose PCM in up to 0.18 / 0.88 / 1.00 of datasets, AIC in up to 0.03 / 0.04 / 1.00 (with the
+            relative-likelihood check 0.02 / 0.01 / 1.00), and AIC with the default tolerance in up to
+            0.01 / 0.01 / 0.60. The 0.60 is at 5,000 persons with discrimination log-SD 0.2 and 20 items, where
+            the most departing item's estimated departure from RSM had a median of 0.17 widths, beyond the
+            tolerance. BIC chose RSM in every one of these datasets.
+        aic_relative_likelihood : bool, default True
             With test='AIC': PCM is preferred only if its AIC is lower and the relative likelihood of RSM,
-            p = exp(-|AIC_RSM - AIC_PCM| / 2), is at or below alpha. With a likelihood ('cml') this is a likelihood
-            ratio test of RSM within PCM at level P(chi-square(d) > 2d + 2 ln(1/alpha)), d = (I - 1)(K - 1). A
-            composite likelihood has no fixed scale, so for 'cp-full-rcl', 'cpat-rcl' and PAIR's 'log-lik' the test
-            is made at that level on the composite LR's reference (the weighted chi-square above, d its tested
-            directions), and p is the relative likelihood that a likelihood ratio with the same chi-square(d) tail
-            probability would give (model_comparison_rsm_pcm_aic_gate holds the test).
+            exp(-(AIC_RSM - AIC_PCM) / 2) (1 when RSM's AIC is the lower), is at or below alpha. With a likelihood ('cml') this is a likelihood
+            ratio test of RSM within PCM at level P(chi-square(d) > 2d + 2 ln(1/alpha)), d = (I - 1)(K - 1). The
+            level is below alpha and falls as d grows: at alpha = 0.05 it is 0.0063 at d = 6, 0.00095 at d = 19
+            and 2.2e-6 at d = 57. So the rule is a more conservative test than test='LR', and the relative
+            likelihood is not a p-value. A composite likelihood has no fixed scale, so for 'cp-full-rcl',
+            'cpat-rcl' and PAIR's 'log-lik' the test is made at that level on the composite LR's reference (the
+            weighted chi-square above, d its tested directions), and the relative likelihood reported is the one
+            a likelihood ratio with the same chi-square(d) tail probability would give
+            (model_comparison_rsm_pcm_aic_gate holds the test). The summary reports the relative likelihood and
+            the level ('Relative likelihood', 'Test level').
+            The stricter level suits a likelihood calculated unconditionally (jointly with person estimates,
+            as in v1.4.0), whose likelihood ratio is inflated; with the conditional and composite likelihoods
+            used here, whose likelihood ratio tests hold their level, it gives a more conservative test that
+            favours the simpler model (RSM).
+        aic_sig_test : bool or None, default None
+            Deprecated name of aic_relative_likelihood (FutureWarning); if given, its value is used.
+        ridge : 'minimise_bias', float or None, default None
+            estimation='cml', 'cp-full-rcl' or 'cpat-rcl': PCM's ridge for this comparison (PCM.calibrate's
+            ridge=, a penalty pulling each item's threshold pattern towards the mean pattern). None: PCM.calibrate's default ('minimise_bias').
+            Given, PCM is fitted with it for the comparison only. A smaller ridge (0: plain CML or composite
+            likelihood) pulls PCM's thresholds less towards RSM's form, most of all with few persons.
         alpha : float, default 0.05
             Significance level for the LR test and the AIC relative-likelihood test.
         min_effect : float, default 0
-            Minimum effect (logits) needed to prefer PCM, in addition to the test: the largest absolute
-            difference between an item's centred PCM thresholds and RSM's shared thresholds. 0 disables.
+            Smallest estimated departure of PCM from RSM, in delta_units, needed to prefer PCM, in addition to the
+            test: Delta-hat, the overall departure (delta_measure='overall') corrected for sampling error (the size at
+            which the likelihood ratio statistic's expected excess over its null mean equals the observed one;
+            model_comparison_rsm_pcm_delta_hat). 0 disables. It compares one estimate with the cut-off, so effects
+            near it are kept or dropped by sampling error; delta does the same job with a test and is preferred.
+            Needs a likelihood or composite likelihood: a ValueError with the bootstrap test.
         no_of_samples : int, default 199
             Simulated datasets for the bootstrap test (PAIR's 'cos', 'ls' and 'evm').
-        sampling, likelihood, warm_corr, tolerance, max_iters, ext_score_adjustment
+        delta : float or None, default None
+            The tolerance, the size of departure from RSM treated as negligible (in delta_units), with every
+            test. With delta > 0 the close-fit test decides (test='LR') or must also reject RSM (AIC, BIC): its
+            null hypothesis is that the departure is at most delta, and PCM is preferred only if the data show it
+            is larger (delta_measure says which departures are tested). None: 0.1 (0 with sampling=n or
+            'dynamic', which refit the plain test, and with the bootstrap test, which has no close-fit version). Where RSM's
+            category widths are unusable (maximum score 1, or disordered thresholds), the default falls back to
+            0 with a warning; set delta in logits (delta_units='logits') there. 0: the plain test.
+        delta_units : {'width', 'logits'}, default 'width'
+            Units of delta, min_effect and Delta-hat: median category widths of RSM's shared thresholds, or logits.
+        delta_measure : {'either', 'overall', 'largest'}, default 'either'
+            Which close-fit tests decide when delta > 0. 'overall': the departure's root mean square over every
+            item and threshold (PCM's centred thresholds minus RSM's, each weighted by 1 / its sampling
+            variance). 'largest': whether any one item departs: the same root mean square for each item, its thresholds centred
+            on their own mean, combined over items by Bonferroni (the smallest item p-value times the number of
+            items); it finds a single deviant item that the overall measure averages away. 'either': PCM is
+            preferred if either test rejects RSM. In simulations ('cp-full-rcl'; 10 or 20 items, maximum score 3
+            or 5; 300, 1,000 or 5,000 persons; delta = 0.1 widths), 'either' chose PCM for at most 0.01 of RSM
+            datasets, none where one item departed by exactly delta, and 0.04 / 0.14 / 0.52 at 300 / 1,000 /
+            5,000 persons where every item departed by delta on average (at 5,000, the items whose own departure
+            exceeds delta are found); it found one item departing by 0.5 widths in 0.74 / 1.00 / 1.00 of datasets
+            ('overall': 0.20 / 0.44 / 0.62). The per-item test is not made with sampling='power' or the bootstrap test.
+        sampling : None, 'power', 'dynamic' or int, default None
+            test='LR'. None: the test on all the data. 'power': the decision a study just large enough to detect
+            a departure of delta with probability power_threshold would most likely reach (needs delta > 0).
+            An int n: the test refitted on n persons drawn at random, n_subsamples times; PCM is preferred if
+            more than half the subsamples reject RSM. 'dynamic': sampling=n with v1.4.0's subsample size,
+            n = min(20 (I - 1) (m - 1), 1500) (I items, maximum score m). 'auto' (v1.4.0's default) means None.
+        power_threshold : float, default 0.8
+            sampling='power': the power the study size is set for.
+        n_subsamples : int, default 1
+            sampling=n: the number of subsamples.
+        likelihood, warm_corr, tolerance, max_iters, ext_score_adjustment
             Deprecated and ignored (FutureWarning): the comparison follows the object's estimation and needs no
             person estimates.
         constant, threshold_constant, method, log_lik_tol
@@ -5277,17 +5462,29 @@ class RSM(Rasch):
 
         Attributes set
         --------------
-        model_comparison_rsm_pcm_effect : the effect (see min_effect).
+        model_comparison_rsm_pcm_effect : the largest absolute difference (logits) between an item's centred PCM
+            thresholds and RSM's (reported only; min_effect uses model_comparison_rsm_pcm_delta_hat).
+        model_comparison_rsm_pcm_delta_hat : Delta-hat (see min_effect), in model_comparison_rsm_pcm_delta_units;
+            NaN with the bootstrap test.
         model_comparison_rsm_pcm_info : dict: the test used ('cml', 'composite' or 'bootstrap'), the estimation,
             and, for the composite test, the range of its chi-square weights.
         model_comparison_rsm_pcm_lr, _df, _p, _lr_preferred, _lr_summary : test results (test='LR').
-        model_comparison_rsm_pcm_aic, _aic_preferred, _aic_summary, _aic_p : AIC results.
+        model_comparison_rsm_pcm_close_fit_p, _close_fit_p_item : the overall and per-item close-fit p-values
+            (delta > 0; None otherwise).
+        model_comparison_rsm_pcm_item_close_fit : pandas.DataFrame: each item's departure from RSM (Departure,
+            in delta_units) and its own close-fit p-value before the Bonferroni step (delta > 0 and
+            delta_measure 'largest' or 'either'; None otherwise).
+        model_comparison_rsm_pcm_aic, _aic_preferred, _aic_summary : AIC results.
+        model_comparison_rsm_pcm_aic_relative_likelihood, _aic_level : the relative likelihood of RSM and the
+            level of the test (aic_relative_likelihood=True); _aic_p is the v1.4.0 name of the relative likelihood.
         model_comparison_rsm_pcm_bic, _bic_preferred, _bic_summary : BIC results.
+        model_comparison_rsm_pcm_test : the test used (test=None resolved).
         """
-        if test not in ("LR", "AIC", "BIC"):
-            raise ValueError("test must be 'LR', 'AIC', or 'BIC'")
+        aic_relative_likelihood = self._resolve_aic_sig_test(aic_relative_likelihood, aic_sig_test)
+        if test not in (None, "LR", "AIC", "BIC"):
+            raise ValueError("test must be None, 'LR', 'AIC', or 'BIC'")
         self._warn_selection_deprecated(
-            [n for n, v in (("sampling", sampling), ("likelihood", likelihood), ("warm_corr", warm_corr),
+            [n for n, v in (("likelihood", likelihood), ("warm_corr", warm_corr),
                             ("tolerance", tolerance), ("max_iters", max_iters),
                             ("ext_score_adjustment", ext_score_adjustment)) if v is not None]
         )
@@ -5298,7 +5495,9 @@ class RSM(Rasch):
                 method=method,
                 log_lik_tol=log_lik_tol,
             )
-        self._run_rsm_pcm_selection(test, aic_sig_test, alpha, min_effect, no_of_samples, seed)
+        self._rsm_pcm_model_selection(test, aic_relative_likelihood, alpha, min_effect, no_of_samples, seed, delta,
+                                      delta_units, sampling, power_threshold, n_subsamples, ridge=ridge,
+                                      delta_measure=delta_measure)
 
     def res_corr_analysis(
         self,
@@ -5740,12 +5939,16 @@ class RSM(Rasch):
         fit_statistics()).
 
         Widths can be negative — a negative width at category k means
-        thresholds k and k+1 are disordered (category k is never the most
-        likely response at any person location). Prop disordered makes this
-        a continuous diagnostic rather than a single point-estimate
-        yes/no: the proportion of bootstrap resamples in which that
-        category's width was negative — reasonably read as the
-        probability that the true category is disordered.
+        thresholds k and k+1 are disordered (category k is never the
+        most likely response at any person location). Prop disordered
+        makes this a continuous diagnostic rather than a single
+        point-estimate yes/no: the proportion of bootstrap resamples
+        in which that category's width was negative — reasonably read
+        as the probability that the true category is disordered. With
+        analytic standard errors (no bootstrap resamples) it is
+        instead P(width < 0) from a t-distribution on persons - 1
+        degrees of freedom centred on the estimate, with scale the
+        width's SE (the SE column).
 
         Parameters
         ----------
@@ -5784,8 +5987,9 @@ class RSM(Rasch):
             it): such a category is never the most probable, the extreme
             case of disordered categories), and
             Prop disordered — the bootstrap proportion of resamples with a
-            negative width, reasonably read as the probability that the
-            true category is disordered. Useful for interpreting
+            negative width (with analytic SEs, the t probability of a
+            negative width, as above), reasonably read as the probability
+            that the true category is disordered. Useful for interpreting
             Disordered in both directions: a True that's only weakly
             supported (Prop disordered close to 0.5) vs. robust, or a
             False that's nonetheless uncertain (Prop disordered not
@@ -5832,8 +6036,10 @@ class RSM(Rasch):
         stats["Disordered"] = _disorder_flag(cat_widths.values)
         if getattr(self, "cat_width_bootstrap", None) is not None:
             prop = (self.cat_width_bootstrap < 0).mean(axis=0).values
-        else:  # sandwich SEs: normal-approximation probability of a negative width
-            prop = norm.cdf(-cat_widths.values / self.cat_width_se.values)
+        else:
+            # analytic SEs: P(width < 0) from a t on persons - 1 around the estimate
+            se = np.asarray(self.cat_width_se, float)
+            prop = t_dist.cdf(-cat_widths.values / se, max(int(self.no_of_persons) - 1, 1))
         stats["Prop disordered"] = prop.round(dp)
         self.category_stats = stats
         _save_table(self.category_stats, filename, file_format)
@@ -8313,8 +8519,11 @@ class RSM(Rasch):
             (only item locations translate), so thresholds/category_widths
             and person recovery are unaffected by this flag either way.
         alpha : float, default 0.05
-            Significance threshold for the per-parameter z-test
-            (Flagged/Flagged_corrected).
+            Significance level for the per-parameter tests (Flagged/
+            Flagged_corrected). For items, thresholds and category widths: t = error / SE on
+            persons - 1 degrees of freedom (columns t and df), with the SEs
+            of std_errors(). For persons: z = error / SE against the normal
+            distribution (column z).
         correction : {'bh', 'bonferroni', None}, default 'bh'
             Multiple-comparison correction, applied within each parameter
             type's family of tests (matches dif_test's convention).
@@ -8334,8 +8543,8 @@ class RSM(Rasch):
             Results are stored in self.recovery, not returned directly --
             a namespace with .items/.persons/.thresholds/.category_widths,
             each holding .table (a per-parameter DataFrame: generating,
-            estimated, SE, error, abs_error, z, p, p_corrected, Flagged,
-            Flagged_corrected) and .summary (a DataFrame, column
+            estimated, SE, error, abs_error, t and df (persons: z), p,
+            p_corrected, Flagged, Flagged_corrected) and .summary (a DataFrame, column
             'Overall': RMSE, MAE, bias, r, r_squared, SD_ratio, OLS_slope,
             OLS_intercept, Huber_slope, Huber_intercept, Divergence_flag,
             Prop_flagged). Also sets
@@ -8407,6 +8616,8 @@ class RSM(Rasch):
             self.fit_statistics(interval=0.95)
 
         self.recovery = _SimParams()
+        # item-side rows: t on persons - 1
+        df_items = max(int(self.no_of_persons) - 1, 1)
 
         est_items = self.anchor_items if anchor else self.items
         items_table, items_summary = self._parameter_recovery_table(
@@ -8416,6 +8627,7 @@ class RSM(Rasch):
             alpha=alpha,
             correction=correction,
             divergence_tol=divergence_tol,
+            df=df_items,
         )
         self.recovery.items = _SimParams()
         self.recovery.items.table = items_table
@@ -8442,7 +8654,8 @@ class RSM(Rasch):
         gen_widths = est_widths = None
         if gen_thresholds is not None:
             threshold_se = pd.Series(
-                self.threshold_se, index=range(1, self.max_score + 1)
+                self.threshold_se,
+                index=range(1, self.max_score + 1),
             )
             thresholds_table, thresholds_summary = self._parameter_recovery_table(
                 gen_thresholds,
@@ -8451,6 +8664,7 @@ class RSM(Rasch):
                 alpha=alpha,
                 correction=correction,
                 divergence_tol=divergence_tol,
+                df=df_items,
             )
             self.recovery.thresholds = _SimParams()
             self.recovery.thresholds.table = thresholds_table
@@ -8465,6 +8679,7 @@ class RSM(Rasch):
                 alpha=alpha,
                 correction=correction,
                 divergence_tol=divergence_tol,
+                df=df_items,
             )
             self.recovery.category_widths = _SimParams()
             self.recovery.category_widths.table = widths_table
@@ -8524,3 +8739,6 @@ class RSM(Rasch):
             self._recovery_plot(pseudo_estimate, self.persons, "persons", **plot_kwargs)
 
         return None
+
+
+_calibrate_on_demand(RSM, "thresholds")

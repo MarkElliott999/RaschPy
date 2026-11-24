@@ -12,7 +12,7 @@ from matplotlib import cm as cmx
 import seaborn as sns
 import matplotlib.patheffects as path_effects
 
-from raschpy.base import Rasch, _BootstrapWarnings, _save_table
+from raschpy.base import Rasch, _BootstrapWarnings, _save_table, _calibrate_on_demand
 from raschpy import _esf, _rcl
 
 
@@ -462,6 +462,7 @@ class SLM(Rasch):
                 raise ValueError(
                     f"estimation='cp-full-rcl' is method='log-lik' for SLM; got method={method!r}."
                 )
+        self._clear_fit_results()
         # arguments as passed, for refits (see _calibration_kw)
         self._calibrate_args = dict(
             constant=constant,
@@ -615,9 +616,10 @@ class SLM(Rasch):
                 stacklevel=3,
             )
 
-    def _cml_covariance(self, sandwich=None):
+    def _cml_covariance(self, sandwich=None, small_sample=False):
         """Covariance of the CML item locations from the Hessian of the conditional log-likelihood, or the
-        sandwich (sandwich=True; None follows se_method)."""
+        sandwich (sandwich=True; None follows se_method; small_sample=True: with the Kauermann-Carroll
+        correction)."""
         if sandwich is None:
             sandwich = getattr(self, "se_method", None) != "hessian"
         names = list(self.item_names)
@@ -631,6 +633,8 @@ class SLM(Rasch):
             hessian=getattr(self, "_cml_hessian", None),
             sandwich=sandwich,
             penalty=getattr(self, "_cml_penalty", None),
+            small_sample=small_sample,
+            kc_scores=self._kc_scores,
         )
 
     def _cml_anchor_design(self, fixed):
@@ -710,9 +714,13 @@ class SLM(Rasch):
             modified z-score / MAD-based iterative trim (corr_tol,
             sd_ratio_tol, min_anchors).
             'wald': _wald_anchor_selection() — a genuine significance test
-            per anchor item (z = (anchor - (observed + tc)) / SE(observed),
-            tc precision-weighted, sequential exclusion) rather than a
-            descriptive-statistics trim. Needs item SEs — auto-
+            per anchor item (t = (anchor - (observed + tc)) / SE, tc
+            precision-weighted, sequential exclusion) rather than a
+            descriptive-statistics trim. The anchor values are fixed, so
+            SE is that of the item's deviation from tc in this
+            calibration (its covariance matrix, the item's own share of
+            tc removed), and t is referred to a t-distribution on
+            persons - 1 degrees of freedom. Needs item SEs — auto-
             triggers std_errors() if not already computed. Uses wald_alpha
             and min_anchors, not corr_tol/sd_ratio_tol.
             'none': plain mean shift over every supplied anchor, no
@@ -807,8 +815,9 @@ class SLM(Rasch):
         anchor_selection : pandas.DataFrame or None
             Per-item diagnostics from whichever selection method was used
             — Anchor, Observed, Deviation, Robust z, Selected
-            ('robust_z'), or Anchor, Observed, SE, Deviation, z, p,
-            Selected ('wald'). None if selection_method='none' or adj was
+            ('robust_z'), or Anchor, Observed, SE, Deviation,
+            SE (deviation), t, df, p, Selected ('wald'); a dropped item's
+            Deviation to p are from the step at which it was dropped. None if selection_method='none' or adj was
             supplied directly.
         anchor_selected_items, anchor_dropped_items : pandas.Index or None
             Items retained / excluded as outliers. None if
@@ -922,6 +931,7 @@ class SLM(Rasch):
         seed=None,
         se_method=None,
         no_data_se="posterior",
+        se_correction="kauermann-carroll",
     ):
         """
         Estimate standard errors for item location estimates.
@@ -957,8 +967,10 @@ class SLM(Rasch):
         ----------
         interval : float or None, default None
             Confidence interval width, e.g. 0.95 for 95% CI. If None,
-            only standard errors are computed. If provided, lower and
-            upper percentile bounds are also stored.
+            only standard errors are computed. If provided, the bounds are
+            also stored: estimate -/+ t SE (t on persons - 1 degrees of
+            freedom) for the sandwich and Hessian, the bootstrap percentiles
+            for the bootstrap.
         no_of_samples : int, default 500
             Number of bootstrap resamples. More samples give more stable
             SE estimates at the cost of computation time.
@@ -971,7 +983,9 @@ class SLM(Rasch):
             reproducible standard errors; None (default) draws fresh entropy.
         se_method : {None, 'sandwich', 'bootstrap', 'hessian'}, default None
             Standard error method; see above. With 'sandwich' or 'hessian',
-            confidence intervals are estimate +/- z * SE, and the bootstrap
+            confidence intervals are estimate +/- t * SE (t the
+            (1 + interval) / 2 quantile of the t-distribution on persons - 1
+            degrees of freedom), and the bootstrap
             attributes are None.
 
         no_data_se : {'posterior', 'nan'}, default 'posterior'
@@ -984,21 +998,39 @@ class SLM(Rasch):
             them may be missed. 'nan': NaN, so they are left out of confidence
             intervals and tests (DIF in them cannot be found). A UserWarning
             names them.
+        se_correction : {'kauermann-carroll', None}, default 'kauermann-carroll'
+            Small-sample correction of the sandwich standard errors (CML
+            included). The sandwich builds the variance from each
+            person's contribution to the estimating equations at the
+            estimates, and the estimates are chosen to make those
+            contributions sum to zero, so in small samples it understates the
+            variance, just as a standard deviation computed with divisor N
+            understates the population SD. 'kauermann-carroll' (Kauermann and
+            Carroll, 2001) scales each person's contribution up by their
+            leverage, the pull they have on the estimates; for a mean it is
+            exactly the N - 1 divisor. Like N / (N - 1), it makes little
+            difference in large samples; it matters most for parameters that
+            few persons inform (a sparse score category). None gives the
+            uncorrected sandwich. Hessian and bootstrap standard errors take no
+            correction.
 
         Attributes set
         --------------
         se_method : str
             The method used.
+        se_correction : str or None
+            The small-sample correction applied (None for CML, the
+            bootstrap or se_correction=None).
         se_covariance : pandas.DataFrame or None
             Covariance of the item locations ('sandwich' and 'hessian' only).
         item_se : pandas.Series
             Standard error for each item location, indexed by item name.
         item_low : pandas.Series or None
-            Lower percentile bound of the bootstrap CI for each item,
-            or None if interval is None.
+            Lower bound of the interval for each item (see interval), or
+            None if interval is None.
         item_high : pandas.Series or None
-            Upper percentile bound of the bootstrap CI for each item,
-            or None if interval is None.
+            Upper bound of the interval for each item (see interval), or
+            None if interval is None.
         item_bootstrap : pandas.DataFrame
             Full matrix of bootstrap item location estimates, shape
             (no_of_samples, no_of_items), with items as columns and
@@ -1021,19 +1053,20 @@ class SLM(Rasch):
             self.calibrate(**cal_kw)
         se_method = self._resolve_se_method(se_method)
         self.se_method = se_method
+        self._set_se_correction(se_correction, se_method)
         if no_data_se not in ("posterior", "nan"):
             raise ValueError(f"no_data_se must be 'posterior' or 'nan', got {no_data_se!r}.")
         if se_method in ("sandwich", "hessian"):
             V = (
-                self._cml_covariance()
+                self._cml_covariance(small_sample=self.se_correction is not None)
                 if getattr(self, "estimation", None) == "cml"
-                else self._sandwich_covariance()
+                else self._sandwich_covariance(small_sample=self.se_correction is not None)
             )
             names = list(self.item_names)
             self.se_covariance = pd.DataFrame(V, index=names, columns=names)
             self.item_se = pd.Series(np.sqrt(np.clip(np.diag(V), 0, None)), index=names)
             if interval is not None:
-                z = norm.ppf(0.5 + interval / 2)
+                z = self._se_quantile(interval)
                 est = self.items.reindex(names)
                 self.item_low, self.item_high = (
                     est - z * self.item_se,
@@ -1141,7 +1174,7 @@ class SLM(Rasch):
             V = self._cml_covariance(sandwich=False)
             names = list(self.item_names)
             se = pd.Series(np.sqrt(np.clip(np.diag(V), 0, None)), index=names)
-        z = norm.ppf(0.5 + interval / 2) if interval is not None else None
+        z = self._se_quantile(interval)
         for item in rd:
             v = se[item] if no_data_se == "posterior" else np.nan
             self.item_se.loc[item] = v
@@ -1885,6 +1918,7 @@ class SLM(Rasch):
         seed=None,
         conditional=False,
         conditional_samples=1000,
+        restscore_p_method="studentised",
         bootstrap_samples=None,
         q1_groups=None,
         q1_overall_samples=99,
@@ -1956,7 +1990,28 @@ class SLM(Rasch):
 
         conditional_samples : int, default 1000
             conditional=True only: Monte Carlo samples for each person's
-            conditional p-value (person_conditional_p).
+            conditional p-value (person_conditional_p) and for the
+            item-restscore test (item_restscore_table).
+
+        restscore_p_method : {'studentised', 'monte-carlo'}, default 'studentised'
+            conditional=True only: the item-restscore test refers each item's
+            observed gamma to its distribution in conditional_samples
+            datasets drawn from the model given each person's total over the
+            items they responded to (exact and free of the person locations,
+            at the fitted thresholds; no refit). 'studentised': z = (observed
+            - mean of the draws) / their SD, normal p-value (not limited by
+            the number of draws, which matters for the BH adjustment over
+            many items); 'monte-carlo': the share of draws at least as far
+            from their mean as the observed gamma, (1 + count) / (1 +
+            draws). In null simulations (SLM, PCM, RSM; 12 items; N = 50 to
+            1,000; 300 datasets each; 500 draws) both rejected 3.6-5.7% at
+            0.05 ('studentised' 3.8-5.5%, SD of z 0.97-1.03); the earlier
+            test (observed minus expected-table gamma over the observed
+            gamma's asymptotic SE, normal p) rejected 6.6-7.4% at N = 50 and
+            2.4-3.1% at N = 300 and above. The thresholds are not
+            re-estimated in each draw, which leaves the test slightly
+            conservative (3.6-4.9% at N = 300); bootstrap_samples adds p-values
+            from draws that are refitted.
 
         bootstrap_samples : int or None, default None
             conditional=True only: if set (e.g. 1000; at least 400
@@ -2032,10 +2087,13 @@ class SLM(Rasch):
         item_restscore_table : pandas.DataFrame
             conditional=True only: item-restscore association (Kreiner):
             Goodman-Kruskal gamma of each item's score against its restscore
-            (the total over the person's other items), observed and expected
-            under the model (from P(X_i = k | total)), the observed gamma's
-            asymptotic SE, and the two-sided p-value of the difference
-            ('p', and BH-adjusted 'p (BH)'). Every person who responded to the
+            (the total over the person's other items): Observed gamma,
+            Expected gamma (of the expected table, from P(X_i = k | total);
+            descriptive), SE (the observed gamma's asymptotic SE; descriptive),
+            Simulated mean and Simulated SD (of the gamma in the conditional
+            Monte Carlo draws), z ((observed - simulated mean) / simulated
+            SD), p (two-sided, per restscore_p_method) and p (BH)
+            (Benjamini-Hochberg adjusted). Every person who responded to the
             item is included.
         item_fit_bootstrap : pandas.DataFrame or None
             bootstrap_samples only: for infit and outfit, the observed mean
@@ -2323,6 +2381,7 @@ class SLM(Rasch):
         if conditional:
             self._apply_conditional_fit(
                 samples=conditional_samples,
+                restscore_p_method=restscore_p_method,
                 seed=seed,
                 bootstrap_samples=bootstrap_samples,
                 q1_groups=q1_groups,
@@ -2395,9 +2454,8 @@ class SLM(Rasch):
         if not covariance:
             V = None
         elif getattr(m, "estimation", "pair") == "cml":
-            V = (
-                m._cml_covariance()
-            )  # sandwich or Hessian, as the object: no small-sample correction applies
+            # sandwich (with the small-sample correction) or Hessian, as the object
+            V = m._cml_covariance(small_sample=small_sample)
         else:
             V = m._sandwich_covariance(small_sample=small_sample)
         return names, est - est.mean(), V, ok, [np.arange(len(names))]
@@ -2613,7 +2671,7 @@ class SLM(Rasch):
         wald_alpha=0.05,
         test="wald",
         omnibus=True,
-        welch=False,
+        welch=None,
         size_adjust=False,
         reference_n=100,
         correction="bh",
@@ -2711,9 +2769,13 @@ class SLM(Rasch):
             the largest group is used.
         selection_method : {'wald', 'robust_z', 'none'}, default 'wald'
             'wald': _wald_anchor_selection() — per-item significance test
-            (z = (reference - (focal + tc)) / SE(focal), tc precision-
-            weighted, sequential exclusion) using the bootstrap SEs this
-            method computes anyway. Uses wald_alpha and min_anchors.
+            (t = (reference - (focal + tc)) / SE, tc precision-weighted,
+            sequential exclusion). SE counts both groups' errors in the
+            item's deviation from tc (each group's covariance matrix, or
+            its bootstrap resamples, the item's own share of tc removed),
+            and t is referred to a t-distribution with Welch-Satterthwaite
+            degrees of freedom from the two groups' person counts. Uses
+            wald_alpha and min_anchors.
             'robust_z': _robust_anchor_selection() — Iglewicz & Hoaglin
             modified z-score / MAD-based iterative trim (corr_tol,
             sd_ratio_tol, min_anchors) — no significance test, purely
@@ -2763,19 +2825,18 @@ class SLM(Rasch):
             the pooled fit plus a focal-group location shift on
             each common item (df = common items - 1), which
             involves no person locations.
-        welch : bool, default False
-            If True, the Wald test (test='wald' or 'both') becomes a
-            Welch's t-test: the statistic is unchanged (diff / combined
-            SE) but its p-value is computed against a t-distribution with
-            Welch-Satterthwaite degrees of freedom (using each group's
-            person count) instead of a normal distribution — more
-            conservative than a z-test when group sizes are small,
-            unequal, or the two SEs differ substantially. Adds a 'df'
-            column to dif_table. Does not affect the LR test or omnibus
-            (already exact chi-squared tests, not z/t-based) or
-            _wald_anchor_selection (a one-sample comparison against a
-            fixed anchor value, not the two-independent-samples case
-            Welch's t-test addresses).
+        welch : bool or None, default None
+            Deprecated (FutureWarning; to be removed in a future version).
+            The Wald test (test='wald' or 'both') is Welch's t-test: the
+            statistic diff / combined SE referred to a t-distribution with
+            Welch-Satterthwaite degrees of freedom (from each group's SE
+            and person count, in dif_table's 'df' column), which allows for
+            estimating the SEs from the groups' persons. welch=False still
+            gives the normal (z) reference, the t-test's large-sample limit
+            and less accurate, until the argument is removed. Does not
+            affect the LR tests or the omnibus test (likelihood
+            ratios, not z/t-based) or the anchor selection (which always
+            uses a t reference; see selection_method).
         size_adjust : bool, default False
             If True, rescales each group's item SE to what it would be at
             a standard reference sample size (Tristán, 2006, Rasch
@@ -2787,7 +2848,7 @@ class SLM(Rasch):
             that group's person count, then combined as usual — so
             unequal reference/focal group sizes are put on equal footing
             too, not just corrected for extremity. Applied to the Wald/
-            Welch test, the category tests, and (if welch=True) the
+            Welch test, the category tests, and (unless welch=False) the
             Welch-Satterthwaite df, which then also uses reference_n
             rather than each group's actual n, for internal consistency —
             everything behaves as if the data had been collected at
@@ -2883,11 +2944,11 @@ class SLM(Rasch):
             One row per (item, focal group) pair. Columns: 'Group'
             (focal group value), 'Reference' / 'Focal' / 'Focal (purified)'
             (item location estimates), 'Difference' (purified focal -
-            reference), 'SE', 'z', 'p', 'p (corrected)', 'Selected' (used
+            reference), 'SE', 't', 'p', 'p (corrected)', 'Selected' (used
             to define the purified scale), 'Flagged' (Wald p and logit-
-            difference thresholds both met). If welch=True, also 'df'
-            (Welch-Satterthwaite), and 'p'/'p (corrected)' are t-based
-            rather than normal-based ('z' is unchanged either way). If
+            difference thresholds both met), 'df' (Welch-Satterthwaite):
+            't' is Difference / SE, a Welch t-statistic on df ('z', with
+            normal p and no 'df', under the deprecated welch=False). If
             test is 'lr' or 'both', also: 'LR', 'p_LR', 'p_LR (corrected)',
             'Flagged_LR'. If category=True, also 'Category' ('A', 'B+',
             'B-', 'C+', or 'C-').
@@ -2920,6 +2981,7 @@ class SLM(Rasch):
         """
         from raschpy.slm import SLM
 
+        welch = self._dif_welch(welch)
         self._dif_validate(
             correction, selection_method, test, category_thresholds, reference_n
         )
@@ -5814,8 +5876,11 @@ class SLM(Rasch):
             machinery, so person recovery is unaffected by this flag
             either way.
         alpha : float, default 0.05
-            Significance threshold for the per-parameter z-test
-            (Flagged/Flagged_corrected).
+            Significance level for the per-parameter tests (Flagged/
+            Flagged_corrected). For items: t = error / SE on
+            persons - 1 degrees of freedom (columns t and df), with the SEs
+            of std_errors(). For persons: z = error / SE against the normal
+            distribution (column z).
         correction : {'bh', 'bonferroni', None}, default 'bh'
             Multiple-comparison correction, applied within each parameter
             type's family of tests (matches dif_test's convention).
@@ -5835,7 +5900,8 @@ class SLM(Rasch):
             Results are stored in self.recovery, not returned directly --
             a namespace with .items/.persons, each holding .table (a
             per-parameter DataFrame: generating, estimated, SE, error,
-            abs_error, z, p, p_corrected, Flagged, Flagged_corrected) and
+            abs_error, t and df (persons: z), p, p_corrected, Flagged,
+            Flagged_corrected) and
             .summary (a DataFrame, column 'Overall': RMSE, MAE, bias, r,
             r_squared, SD_ratio, OLS_slope, OLS_intercept, Huber_slope,
             Huber_intercept, Divergence_flag, Prop_flagged). Also sets
@@ -5896,6 +5962,7 @@ class SLM(Rasch):
             self.fit_statistics(interval=0.95)
 
         self.recovery = _SimParams()
+        # item rows: t on persons - 1
 
         est_items = self.anchor_items if anchor else self.items
         items_table, items_summary = self._parameter_recovery_table(
@@ -5905,6 +5972,7 @@ class SLM(Rasch):
             alpha=alpha,
             correction=correction,
             divergence_tol=divergence_tol,
+            df=max(int(self.no_of_persons) - 1, 1),
         )
         self.recovery.items = _SimParams()
         self.recovery.items.table = items_table
@@ -5949,3 +6017,6 @@ class SLM(Rasch):
             self._recovery_plot(pseudo_estimate, self.persons, "persons", **plot_kwargs)
 
         return None
+
+
+_calibrate_on_demand(SLM, "items")

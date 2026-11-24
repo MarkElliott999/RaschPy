@@ -9,17 +9,15 @@ _RaschPy_ has a parent class `Rasch` for analysis, with the following child clas
 - `MFRM` for the many-facet Rasch model (rating scale model formulation) (Linacre 1994), including extended rater representations (Elliott and Buttery 2022a, Elliott 2025), with eight rater parameterisations (global, items, thresholds, bivector, matrix, centrality/threshold stretch, pseudo_halo/item stretch and bistretch formulations) — centrality and pseudo_halo are restricted forms of thresholds/items respectively (Jin & Wang 2018-style rater centrality/extremity, and an item-difficulty-compression model), with two parameters each; bistretch is a restricted form of bivector with three parameters combining both stretch axes at once.
 
 ## Analysis
-To analyse data, create an object in the appropriate class, passing a pandas DataFrame of response data as an argument along with other arguments relevant to the chosen Rasch model, such as the maximum score for `RSM` or `MFRM`, or a vector of maximum scores for `PCM`. At the time of writing, the `RSM` and `MFRM` classes only support a single response group (i.e. all items must have the same threshold structure), and the `MFRM` class only supports one additional facet for rater effects. Parameter estimation uses variants of PAIR (Choppin 1968, 1985), the eigenvector method (Garner & Engelhard 2002, 2009) and CPAT (Elliott & Buttery 2022a, 2022b), and conditional maximum likelihood (Andersen 1970; `calibrate(estimation='cml')`, all four classes).
+To analyse data, create an object in the appropriate class, passing a pandas DataFrame of response data as an argument along with other arguments relevant to the chosen Rasch model, such as the maximum score for `RSM` or `MFRM`, or a vector of maximum scores for `PCM`. At the time of writing, the `RSM` and `MFRM` classes only support a single response group (i.e. all items must have the same threshold structure), and the `MFRM` class only supports one additional facet for rater effects. Parameter estimation uses variants of PAIR (Choppin 1968, 1985), the eigenvector method (Garner & Engelhard 2002, 2009) and CPAT (Elliott & Buttery 2022a, 2022b) including conditional pairwise regularised composite likelihood, and conditional maximum likelihood (Andersen 1970; `calibrate(estimation='cml')`, which may be regularised).
 
-**Estimation for `RSM` and `MFRM`.** By default (`estimation='cp-full-rcl'`), item locations, category widths and (for `MFRM`) rater parameters are estimated jointly by regularised composite likelihood (RCL): every pair of response patterns (k, l) and (k−1, l+1) on two items (or two raters) with the same total is a comparison in which the person cancels, and all of them are fitted at once, with additive smoothing on CPAT's comparisons and ridge penalties on the rater parameters, by Newton–Raphson. In simulation (194 random `RSM` designs; 155 random `MFRM` `global` designs), median threshold RMSE was on a par with conditional maximum likelihood for `RSM` (paired ratio 1.02) and better than TAM's MML for `MFRM` (0.88), with facet element effects on a par (1.01) and lighter error tails than either. `estimation='cpat-rcl'` restricts the fit to CPAT's comparisons (the v1.4.0 development default). This removes the compression of item locations and thresholds that pooling comparisons over raters causes in the extended `MFRM` parameterisations. `estimation='pair-cpat'` runs the published separate stages instead (items, then thresholds, then raters; v1.3 behaviour, apart from an adjusted `MFRM` threshold stage): its point estimates are faster to compute on very large designs, but less accurate in the extended parameterisations, and its `MFRM` standard errors come from the bootstrap rather than the analytic sandwich. The `MFRM` penalties can be set with `ridge=` (default 0.3, rater parameters of the non-stretch models), `interaction_ridge=` (default 3, the `matrix` model's interactions, shrinking it towards `bivector`) and `stretch_ridge=` (default 1, on `omega − 1` in the stretch models).
+**Estimation for `RSM` and `MFRM`.** By default (`estimation='cp-full-rcl'`), item locations, category widths and (for `MFRM`) rater parameters are estimated jointly by regularised composite likelihood (RCL): every pair of response patterns (k, l) and (k−1, l+1) on two items (or two raters) with the same total is a comparison in which the person cancels, and all of them are fitted at once, with additive smoothing on CPAT's comparisons and ridge penalties on the rater parameters, by Newton–Raphson. In simulation (194 random `RSM` designs; 155 random `MFRM` `global` designs), median threshold RMSE was on a par with conditional maximum likelihood for `RSM` (paired ratio 1.02) and better than TAM's MML for `MFRM` (0.88), with facet element effects on a par (1.01) and lighter error tails than either. `estimation='cpat-rcl'` restricts the fit to CPAT's comparisons (the v1.4.0 development default). This removes the compression of item locations and thresholds that pooling comparisons over raters causes in the extended `MFRM` parameterisations. `estimation='pair-cpat'` runs the published separate stages instead (items, then thresholds, then raters; v1.3 behaviour, apart from an adjusted `MFRM` threshold stage): its point estimates are faster to compute on very large designs, but less accurate in the extended parameterisations, and its `MFRM` standard errors come from the bootstrap rather than the analytic sandwich. The `MFRM` penalties can be set with `global_ridge=` (default 0.75, each rater's global effect), `item_ridge=` and `threshold_ridge=` (each rater's item and threshold effects; the defaults depend on the model, e.g. 0.405 for `'items'`, 0.192 for `'thresholds'` and 0.288 for `'bivector'`), `interaction_ridge=` (default 7, the `matrix` model's interactions, shrinking it towards `bivector`) and `stretch_ridge=` (default 2, on `omega − 1` in the stretch models). `ridge=`, v1.4.0's penalty, is deprecated.
 
 Slow steps (CML fits, bootstraps, Monte Carlo p-values, model selection) show a one-line progress counter when they are expected to take more than 10 seconds; `progress=False` turns it off, `progress=True` always shows it.
 
 Each model follows the same workflow: instantiate → calibrate → fit statistics → output tables → plots. All major results are stored as attributes on the model object after each step. The stats-table methods (`item_stats_df()`, `person_stats_df()` etc.) also return their table, and take `filename=` to save it at the same time, e.g. `slm.item_stats_df(full=True, filename='slm_item_stats')`.
 
 `calibrate()` uses simulation-tuned additive-smoothing constants by default. On `SLM` the default is data-adaptive, `min(1, 0.548 · I^(−0.2 · log10 N))` for `N` persons and `I` items; on `PCM` it is `0.1 · N^0.15 · (1 − missing)^0.75 · K^−1.4` for maximum score `K`, applied per item pair as `(K_a · K_b)^−0.7` when maximum scores differ. `robust=` has been removed from `SLM` and `PCM` (it had no effect since 1.4.0). For sparse or heavily-missing data on `MFRM` with `estimation='pair-cpat'`, pass `robust=True` for a data-adaptive smoothing rule (it does not apply to the RCL methods). On any class, set `constant=` (and, for `RSM`/`MFRM`, `threshold_constant=`) to override the default directly.
-
-> **Known issue (v1.4.0, fix planned for 1.4.1):** results computed earlier (standard errors, fit statistics, person estimates) are not refreshed if you recalibrate the same object with different settings. When changing calibration settings, create a new model object. See `CHANGELOG.md` for the full list of known issues.
 
 ## Examples
 
@@ -95,7 +93,7 @@ slm.save_stats('slm_results', format='xlsx')
 ```python
 # Convert raw scores to person location estimates
 slm.score_lookup_table()
-print(slm.score_lookup)   # pandas Series indexed by raw score
+print(slm.score_table)    # pandas Series indexed by raw score
 
 # By default, missing responses are excluded from person estimates.
 # To include them, treated as incorrect rather than missing:
@@ -126,7 +124,7 @@ print(pcm.item_stats)                  # Central item locations
 
 pcm.threshold_stats_df(full=True)
 print(pcm.threshold_stats_uncentred)   # Uncentred threshold estimates
-print(pcm.threshold_stats_centred)     # Centred threshold offsets
+print(pcm.threshold_stats)             # Centred threshold offsets
 
 pcm.icc(items='Item_1', obs=True)             # Expected score curve
 pcm.crcs(item='Item_1', obs='all')           # Category Response Curves
@@ -135,7 +133,7 @@ pcm.tcc(obs=True)
 pcm.wright_map(item_strip=True, distribution_markers=True)  # Person-item map, with item category strips
 
 pcm.score_lookup_table()
-print(pcm.score_lookup)   # pandas Series indexed by raw score
+print(pcm.score_table)    # pandas Series indexed by raw score
 
 pcm.save_stats('pcm_results', format='xlsx')
 ```
@@ -172,7 +170,7 @@ rsm.tcc(obs=True)
 rsm.wright_map(item_strip=True, distribution_markers=True)  # Person-item map, with item category strips
 
 rsm.score_lookup_table()
-print(rsm.score_lookup)   # pandas Series indexed by raw score
+print(rsm.score_table)    # pandas Series indexed by raw score
 
 rsm.save_stats('rsm_results', format='xlsx')
 ```
@@ -194,7 +192,7 @@ Polytomous data with multiple raters. Data must be a DataFrame with a `(Rater, P
 | `'pseudo_halo'` (alias `'item_stretch'`) | 2 parameters per rater (shift + item-difficulty-stretch), a restricted form of `'items'` |
 | `'bistretch'` | 3 parameters per rater (shift + item-stretch + threshold-stretch), a restricted form of `'bivector'` |
 
-`'threshold_stretch'`/`'item_stretch'` are exact synonyms for `'centrality'`/`'pseudo_halo'` — same model, same estimation, just an axis-based name matching `'items'`/`'thresholds'` and `'bistretch'`'s own naming. They work everywhere a model name is accepted: as the `model=`/`candidate_models=` value (e.g. `mfrm.calibrate(model='threshold_stretch')`, `mfrm.model_selection(candidate_models=['global', 'item_stretch'])`), and as the method-name suffix (e.g. `mfrm.calibrate_threshold_stretch()`, `mfrm.item_stats_df_item_stretch()`) for every method family that has a `_centrality`/`_pseudo_halo` variant. Attributes are still stored under the canonical `_centrality`/`_pseudo_halo` names (e.g. `mfrm.lambda_centrality`) regardless of which spelling was used to calibrate.
+`'threshold_stretch'`/`'item_stretch'` are exact synonyms for `'centrality'`/`'pseudo_halo'` — same model, same estimation, just an axis-based name matching `'items'`/`'thresholds'` and `'bistretch'`'s naming. They work everywhere a model name is accepted: as the `model=`/`candidate_models=` value (e.g. `mfrm.calibrate(model='threshold_stretch')`, `mfrm.model_selection(candidate_models=['global', 'item_stretch'])`), and as the method-name suffix (e.g. `mfrm.calibrate_threshold_stretch()`, `mfrm.item_stats_df_item_stretch()`) for every method family that has a `_centrality`/`_pseudo_halo` variant. Attributes are still stored under the canonical `_centrality`/`_pseudo_halo` names (e.g. `mfrm.lambda_centrality`) regardless of which spelling was used to calibrate.
 
 ```python
 from raschpy import MFRM
@@ -279,7 +277,7 @@ mfrm.save_stats(model='bivector', filename='mfrm_bivector_results', format='xlsx
 
 For `centrality`, `omega_r > 1` spreads the reference thresholds apart for that rater ("central" — a larger person-location gap is needed to traverse to a more extreme category); conversely, `0 < omega_r < 1` compresses thresholds ("extreme"); `omega_r == 1` is neutral (Jin & Wang 2018). For `pseudo_halo`, `omega_r < 1` compresses the spread of reference item locations toward zero (the pseudo-halo signature — the rater effectively ignores/reduces differences in items locations, increasing the likelihood of a flat score profile as in the halo effect but without requiring local item dependence, hence the name `pseudo_halo`); `omega_r > 1` exaggerates real item-difficulty differences instead. Both stretch parameters can in principle take zero or negative values, representing a disordered situation for the reference facet – this is flagged via `UserWarning` but not clipped).
 
-`lambda_r`/`omega_r` are recovered per rater via a robust regression of the rater's full operational vector model values against the reference item/threshold values, controlled by `calibrate(..., regression='huber')` (default) or `regression='theil-sen'`. `'huber'` is an M-estimator that downweights, rather than discards, points with large residuals by switching from a loss function of squared error to one of MAE beyond a threshold; `'theil-sen'` is the median of pairwise slopes. If `'huber'`'s underlying M-estimator fit fails to converge for a given rater — not observed in testing — that rater automatically falls back to `'theil-sen'` with a `UserWarning` naming it; the rest of the raters are unaffected.
+With `estimation='pair-cpat'`, `lambda_r`/`omega_r` are recovered per rater via a robust regression of the rater's full operational vector model values against the reference item/threshold values, controlled by `calibrate(..., regression='huber')` (default) or `regression='theil-sen'`. `'huber'` is an M-estimator that downweights, rather than discards, points with large residuals by switching from a loss function of squared error to one of MAE beyond a threshold; `'theil-sen'` is the median of pairwise slopes. If `'huber'`'s underlying M-estimator fit fails to converge for a given rater — not observed in testing — that rater automatically falls back to `'theil-sen'` with a `UserWarning` naming it; the rest of the raters are unaffected. With `'cp-full-rcl'`, `'cpat-rcl'` or `'cml'`, they are estimated in the joint fit, and the regression gives only their starting values.
 
 ```python
 mfrm.calibrate(model='centrality')
@@ -300,7 +298,7 @@ mfrm.wright_map_centrality(facet_labels=True, show_stretch=True)   # + omega (th
 mfrm.wright_map_pseudo_halo(facet_labels=True, show_stretch=True)  # + omega (item-stretch) panel
 ```
 
-`rater_stats_df()` for these two models returns the two model parameters (with bootstrap SEs and, if `full=True`, 95% CIs) as the primary `rater_stats_{model}` table, rather than the full reconstructed vector. A single call also stores that reconstructed vector separately, as `rater_stats_{model}_full_vector`:
+`rater_stats_df()` for these two models returns the two model parameters (with SEs and, if `full=True`, 95% CIs) as the primary `rater_stats_{model}` table, rather than the full reconstructed vector. A single call also stores that reconstructed vector separately, as `rater_stats_{model}_full_vector`:
 
 ```python
 mfrm.rater_stats_df(model='centrality', full=True)
@@ -331,16 +329,16 @@ mfrm.rater_stats_df(model='centrality', full=True, divergence_test='wald')
 print(mfrm.rater_stats_centrality_full_vector['Threshold 1'])  # now has a 'Flagged' column too
 ```
 
-`'wald'` uses the standard normal distribution; `'t'` uses a t-distribution with `no_of_samples - 1` degrees of freedom. The two agree once `no_of_samples` is a few hundred.
+`'wald'` uses the standard normal distribution; `'t'` uses a t-distribution with `no_of_samples - 1` degrees of freedom, or the number of persons − 1 when the standard errors come from the stacked sandwich. The two agree once that number is a few hundred.
 
-`full=True` gives two more ways to see which elements were flagged, alongside the `'Flagged items'`/`'Flagged categories'` count still shown in the primary table: one plain True/False column per item and/or threshold is added to the primary table itself, directly after that count, for scanning flagged status across all elements at a glance – and `rater_stats_{model}_full_vector` separately gets a per-element `'Flagged'` column added to each item/threshold's own `Estimate`/`SE`/CI block, for the same information alongside that element's own detail:
+`full=True` gives two more ways to see which elements were flagged, alongside the `'Flagged items'`/`'Flagged categories'` count still shown in the primary table: one plain True/False column per item and/or threshold is added to the primary table itself, directly after that count, for scanning flagged status across all elements at a glance – and `rater_stats_{model}_full_vector` separately gets a per-element `'Flagged'` column added to each item/threshold's `Estimate`/`SE`/CI block, for the same information alongside that element's own detail:
 
 ```python
 mfrm.rater_stats_df(model='pseudo_halo', full=True, divergence_test='wald')
 print(mfrm.rater_stats_pseudo_halo['Item_1'])  # 'Flagged' column, True/False per rater
 ```
 
-Pass `correction='bh'` to apply Benjamini-Hochberg FDR correction within each rater's own family of tests (the rater's items or thresholds, not pooled across raters); default `correction=None` compares raw p-values against `alpha` (default `0.05`) directly. Pass `plot=True` to also build and store `mfrm.fit_plot_{model}` (e.g. `mfrm.fit_plot_pseudo_halo`) – a scatter of the free vector model's estimates against the stretch model's reconstruction, flagged elements in a different colour, in the style of `mfrm.anchor_plot`.
+Pass `correction='bh'` to apply Benjamini-Hochberg FDR correction within each rater's family of tests (the rater's items or thresholds, not pooled across raters); default `correction=None` compares raw p-values against `alpha` (default `0.05`) directly. Pass `plot=True` to also build and store `mfrm.fit_plot_{model}` (e.g. `mfrm.fit_plot_pseudo_halo`) – a scatter of the free vector model's estimates against the stretch model's reconstruction, flagged elements in a different colour, in the style of `mfrm.anchor_plot`.
 
 Since, as described above, `pseudo_halo` tests compression of item locations under an otherwise locally-independent response process, rather than classic halo effect's usual mechanism (elevated local item interdependence), pair `omega_pseudo_halo` with a per-rater residual-correlation to check for full halo effect:
 
@@ -349,7 +347,7 @@ mfrm.item_res_corr_analysis_pseudo_halo()
 print(mfrm.item_residual_correlations_pseudo_halo)
 ```
 
-A rater near the group's typical residual-correlation level with `omega_r < 1` more plausibly reflects genuine compressed-perception pseudo_halo; a rater whose residual correlation is a clear outlier above the group more plausibly reflects true local-dependence halo effect, fairly independently of that rater's own `omega_r`. Note that since there is often LID due to rating scale interdependence, as opposed to rater behaviour, and it is not possible to disentangle these two effects, this is a comparative diagnostic across raters rather than an absolute one.
+A rater near the group's typical residual-correlation level with `omega_r < 1` more plausibly reflects genuine compressed-perception pseudo_halo; a rater whose residual correlation is a clear outlier above the group more plausibly reflects true local-dependence halo effect, fairly independently of that rater's `omega_r`. Note that since there is often LID due to rating scale interdependence, as opposed to rater behaviour, and it is not possible to disentangle these two effects, this is a comparative diagnostic across raters rather than an absolute one.
 
 Both models also have dedicated simulation classes for genuine parameter recovery checks:
 
@@ -421,16 +419,16 @@ print(mfrm.lambda_bistretch, mfrm.omega_items_bistretch, mfrm.omega_thresholds_b
 
 ### Model comparison — RSM vs PCM threshold structure
 
-RSM constrains every item to share the same threshold structure; PCM lets each item have its own. Since RSM is nested within PCM, `model_selection()` compares them directly (requires uniform max scores across items), by default with a likelihood ratio test at `alpha=0.05` (`test='LR'`; `'AIC'` and `'BIC'` are also available). The other model is fitted with the object's own estimation, and the test follows it: a CML likelihood ratio test for `estimation='cml'`; a composite likelihood ratio test for `'cp-full-rcl'` and PAIR's `'log-lik'` method; and, for PAIR's `'cos'`, `'ls'` and `'evm'` methods and RSM's `'cpat-rcl'`, which have no likelihood, a parametric bootstrap comparing the two fitted models' thresholds:
+RSM constrains every item to share the same threshold structure; PCM lets each item have its own. Since RSM is nested within PCM, `model_selection()` compares them directly (requires uniform max scores across items), by default with AIC (`test='AIC'`, guarded by the relative likelihood of RSM, `aic_relative_likelihood`); `'LR'` (a likelihood ratio test at `alpha=0.05`) and `'BIC'` are also available. The other model is fitted with the object's estimation, and the comparison follows it: the conditional likelihood for `estimation='cml'`; the composite likelihood for `'cp-full-rcl'` and PAIR's `'log-lik'` method; and, for PAIR's `'cos'`, `'ls'` and `'evm'` methods and RSM's `'cpat-rcl'`, which have no likelihood, a parametric bootstrap comparing the two fitted models' thresholds (`test='LR'`, the default there and when `sampling=` is given):
 
 ```python
 rsm.model_selection()
-print(rsm.model_comparison_rsm_pcm_lr_summary)    # statistic, df, p-value, preferred model
-print(rsm.model_comparison_rsm_pcm_lr_preferred)  # 'RSM' or 'PCM'
+print(rsm.model_comparison_rsm_pcm_aic_summary)    # AIC comparison table
+print(rsm.model_comparison_rsm_pcm_aic_preferred)  # 'RSM' or 'PCM'
 
-# Equivalently from the PCM side, here with AIC
-pcm.model_selection(test='AIC')
-print(pcm.model_comparison_rsm_pcm_aic_summary)
+# Equivalently from the PCM side (all items with the same maximum score), here with a likelihood ratio test
+pcm.model_selection(test='LR')
+print(pcm.model_comparison_rsm_pcm_lr_summary)     # statistic, df, p-value, preferred model
 ```
 
 ---
@@ -454,7 +452,7 @@ mfrm.model_selection(test='LR', candidate_models=['bivector', 'bistretch'])
 
 **Mixed model: per-rater parameterisation assignment**
 
-Rather than forcing every rater into the same parameterisation, `per_rater_model_selection()` assigns each rater the simplest adequate structure according to the chosen criterion individually. With `'cp-full-rcl'` (the default), `'cpat-rcl'` or `'cml'`, each candidate is a joint fit of all raters, each on its own representation (`calibrate(model='mixed')`), compared by AIC (the default, guarded by a significance test against the simplest active baseline, `aic_sig_test`) or BIC. With `estimation='pair-cpat'` and `test='LR'`, it instead runs a top-down ladder (matrix → bivector → items/thresholds → global), then one extra targeted stretch test depending on which of those five wins: `bivector` winner → tested against `bistretch`; `thresholds` winner → tested against `centrality`; `items` winner → tested against `pseudo_halo`; `global` winner → tested against both `centrality` and `pseudo_halo`, resolved via a further `bistretch` test if both beat `global`. Either way, the assigned model can be any of all eight parameterisations, not just the original five. Pass a list to `candidate_models=` to restrict which parameterisations are considered — for AIC/BIC this may be any subset; for LR, `{'global', 'items', 'thresholds', 'bivector'}` must be included since LR is strictly a test for nested models, while `'matrix'` and each stretch model are independently toggleable:
+Rather than forcing every rater into the same parameterisation, `per_rater_model_selection()` assigns each rater the simplest adequate structure according to the chosen criterion, one by one. With `'cp-full-rcl'` (the default), `'cpat-rcl'` or `'cml'`, each candidate is a joint fit of all raters, each on its own representation (`calibrate(model='mixed')`), compared by AIC (the default, guarded by the relative likelihood of the simplest active baseline, `aic_relative_likelihood`) or BIC. With `estimation='pair-cpat'` and `test='LR'`, it instead runs a top-down ladder (matrix → bivector → items/thresholds → global), then one extra targeted stretch test depending on which of those five wins: `bivector` winner → tested against `bistretch`; `thresholds` winner → tested against `centrality`; `items` winner → tested against `pseudo_halo`; `global` winner → tested against both `centrality` and `pseudo_halo`, resolved via a further `bistretch` test if both beat `global`. Either way, the assigned model can be any of all eight parameterisations, not just the original five. Pass a list to `candidate_models=` to restrict which parameterisations are considered — for AIC/BIC this may be any subset; for LR, `{'global', 'items', 'thresholds', 'bivector'}` must be included since LR is strictly a test for nested models, while `'matrix'` and each stretch model are independently toggleable:
 
 ```python
 mfrm.per_rater_model_selection(test='AIC')
@@ -476,7 +474,7 @@ print(mfrm.facet_effects_mixed)
 mfrm.per_rater_model_selection(test='LR', estimation='pair-cpat', candidate_models=['global', 'items', 'thresholds', 'bivector'])
 ```
 
-Which parameterisation describes a rater depends on the frame of reference: by default each rater is compared with the average rater, so pass `anchors=` (a set of raters known to be well behaved) to compare with them instead. The anchors themselves are held on `global` (with `'cp-full-rcl'`, `'cpat-rcl'` or `'cml'`): whether they agree with each other is tested by `check_anchor_homogeneity()` (below). Where the design makes two parameterisations the same model (e.g. `centrality` and `thresholds` when `max_score=2`), both `model_selection()` and `per_rater_model_selection()` leave the later one out, with a warning; for dichotomous data only `global`, `items` and `pseudo_halo` are compared. With `estimation='pair-cpat'`, `min_effect` is optional and a matter of taste: the tests alone classify well in simulation, and 0.43 and 0.64 mirror the ETS DIF category boundaries if a practical-importance gate is wanted.
+Which parameterisation describes a rater depends on the frame of reference: by default each rater is compared with the average rater, so pass `anchors=` (a set of raters believed to be reliable and well behaved) to compare with them instead. With `'cp-full-rcl'`, `'cpat-rcl'` or `'cml'` the anchors start on `global` and are selected like the other raters (`force_global_anchors=True` holds them there); whether they agree with each other is tested by `check_anchor_homogeneity()` (below). Where the design makes two parameterisations the same model (e.g. `centrality` and `thresholds` when `max_score=2`), both `model_selection()` and `per_rater_model_selection()` leave the later one out, with a warning; for dichotomous data only `global`, `items` and `pseudo_halo` are compared. With `estimation='pair-cpat'`, `min_effect` is optional and a matter of taste: the tests alone classify well in simulation, and 0.43 and 0.64 mirror the ETS DIF category boundaries if a practical-importance gate is wanted.
 
 ---
 
@@ -507,7 +505,7 @@ print(pcm.item_q1_table)             # conditional item chi-square Q1 (van den W
 print(pcm.item_q1_overall)           # overall Q1, Monte Carlo p
 print(pcm.q3_bootstrap)              # Q3 with simulated cutoffs; also residual_contrast_bootstrap
 
-pcm.global_fit(method='andersen')       # Andersen (1973); per-item follow-up in global_fit_item_table
+pcm.global_fit(method='andersen')       # Andersen (1973); per-item follow-up in global_fit_item_table and global_fit_obsexp (Glas 1988)
 pcm.global_fit(method='martin-lof')        # Martin-Löf (1973); p_method='monte-carlo' for sparse score tables
 pcm.local_dependence_gamma()               # partial gamma tests of local dependence (Kreiner & Christensen 2004)
 pcm.targeting()                            # targeting, expected precision and reliabilities (Kreiner & Christensen 2013)
@@ -543,12 +541,12 @@ print(slm.global_fit_summary)   # statistic, df, p-value, decision
 print(slm.global_fit_table)     # per-parameter differences, SEs and z
 ```
 
-On `MFRM`, `global_fit()` runs Andersen's test (the only method offered there) for any of the 8 rater parameterisations calibrated with `estimation='cp-full-rcl'` (the default), with a Monte Carlo p-value; for `global`, `items`, `thresholds`, `bivector` and `matrix` it also gives each group's observed and expected scores by item, by rater and by rater and item:
+On `MFRM`, `global_fit()` runs Andersen's test (the only method offered there) for any of the 8 rater parameterisations or `'mixed'`, calibrated with `estimation='cp-full-rcl'` (the default), `'cpat-rcl'` or `'cml'`, with a Monte Carlo p-value; for `global`, `items`, `thresholds`, `bivector` and `matrix` it also gives each group's observed and expected scores by item, by rater and by rater and item:
 
 ```python
 mfrm.global_fit(model='global', covariate='Gender')
 print(mfrm.global_fit_summary)  # statistic, df, Monte Carlo p-value, decision
-print(mfrm.global_fit_obsexp)   # per item and group: observed and expected mean score, z
+print(mfrm.global_fit_obsexp)   # per item and group: observed and expected mean score, z allowing for the estimated item parameters (Glas 1988)
 ```
 
 `dif_test()` is available on all four model classes, including `MFRM`. `dif_test()`, `drf_test()` and `global_fit()` calibrate each group with the object's `calibrate()` settings, and each group on the items its persons responded to; only items (and, for `MFRM`, raters) shared by both groups are compared. (`andersen_lr_test()` is deprecated, on every model class; use `global_fit(method='andersen')`.)
@@ -694,18 +692,18 @@ print(mfrm.anchor_raters_global)             # Anchored rater global effects
 
 **Checking the anchor set**
 
-The anchors' average defines the zero point, so anchoring is only as good as the anchors' agreement with each other, both in global effect and in their pattern over items and thresholds. With `'cp-full-rcl'`, `'cpat-rcl'` or `'cml'`, `check_anchor_homogeneity()` tests this on the anchors' responses only: an overall test, a screen of each anchor against the rest, a cell-by-cell search (an item, a threshold or an item-threshold pair) for where a deviant anchor differs, and a global effect screen. It changes nothing: it returns a check object listing suggested adjustments (cut an anchor at a cell, or drop it), each with its shift in logits, standard error, z, p and pull on the zero point; each action returns a new check on the adjusted set, with a log of every change:
+The anchors' average defines the zero point, so anchoring is only as good as the anchors' agreement with each other, both in global effect and in their pattern over items and thresholds. With `'cp-full-rcl'`, `'cpat-rcl'` or `'cml'`, `check_anchor_homogeneity()` tests this on the anchors' responses only, in two steps: it finds the largest set of anchors whose global effects agree (each within `delta`, 0.1 median category widths by default, of the others' mean), and within that set runs `per_rater_model_selection()`'s tests on the set's responses, each anchor against the others, so the check and the selection judge an anchor's pattern the same way. An anchor left out of the set is suggested for dropping; an anchor that differs in pattern anchors through its global effect only, its pattern estimated freely. It changes nothing: it returns a check object listing the suggestions, and each action returns a new check on the adjusted set, with a log of every change:
 
 ```python
 check = mfrm.check_anchor_homogeneity(anchors=['Rater_1', 'Rater_2', 'Rater_3', 'Rater_4', 'Rater_5'])
-print(check)                                   # overall test, screens, suggested adjustments
+print(check)                                   # overall test, global effects, pattern, suggestions
 
-check2 = check.cut('Rater_2', 'Threshold 4').drop('Rater_4')   # or check.apply_suggested()
-mfrm.per_rater_model_selection(anchors=check2.anchors)        # anchors with cut cells; also calibrate(model='mixed', anchors=...)
-print(mfrm.anchor_cuts_mixed)                  # each cut anchor's own shift at its cut cell
+check2 = check.apply_suggested()               # or check.drop('Rater_4'), check.free_pattern('Rater_2'), ...
+mfrm.per_rater_model_selection(anchors=check2.anchors)   # selects a pattern for pattern-free anchors
+mfrm.calibrate(model='mixed', anchors=check2.anchors, rater_models=mfrm.rater_models)
 ```
 
-`min_effect=` sets the smallest shift worth acting on, `split_alpha=True` (the default) keeps the chance of changing an anchor when all agree near `alpha`, and `action='cells'` or `'drop'` applies the suggestions automatically. With `estimation='pair-cpat'` (or `rater_homogeneity_test='cochran'`), the earlier test compares each anchor's mean effect in one representation (Cochran's Q with bootstrap standard errors):
+If several sets tie as the largest agreeing in global effect, a warning lists them and `check.apply_suggested(choice=k)` applies the k-th. `min_effect=` sets the smallest effect worth acting on, and `action='apply'` returns the check on the suggested set. To anchor on the anchors' mean with no check, pass a plain list of anchors to `calibrate_anchor()` or `calibrate(anchors=)`. With `estimation='pair-cpat'` (or `rater_homogeneity_test='cochran'`), the earlier test compares each anchor's mean effect in one representation (Cochran's Q with bootstrap standard errors):
 
 ```python
 mfrm.check_anchor_homogeneity(model='global', anchors=anchors, rater_homogeneity_test='cochran')
@@ -742,6 +740,8 @@ Garner, M., & Engelhard, G. (2002). An eigenvector method for estimating item pa
 Garner, M., & Engelhard, G. (2009). Using paired comparison matrices to estimate parameters of the partial credit Rasch measurement model for rater-mediated assessments. _Journal of Applied Measurement_, _10_(1), 30–41.
 
 Glas, C. A. W. (1988). The derivation of some tests for the Rasch model from the multinomial distribution. _Psychometrika_, _53_(4), 525–546.
+
+Huber, P. J. (1967). The behavior of maximum likelihood estimates under nonstandard conditions. In L. M. Le Cam & J. Neyman (Eds.), _Proceedings of the Fifth Berkeley Symposium on Mathematical Statistics and Probability_ (Vol. 1, pp. 221–233). University of California Press.
 
 Jin, K.-Y., & Wang, W.-C. (2018). A new facets model for rater's centrality/extremity response style. _Journal of Educational Measurement_, _55_(4), 543–563.
 

@@ -229,7 +229,7 @@ def test_mfrm_global_fit_frozen_values():
     m = _mfrm_exo()
     s = m.global_fit(seed=3)
     assert s["model"] == "global" and s["split"] == "score" and s["p_method"] == "monte-carlo"
-    frozen = dict(lr=54.16305056462079, adjusted=9.68999259736208, p_chi2=0.07784316729970246,
+    frozen = dict(lr=54.16305056462079, adjusted=9.59431958792878, p_chi2=0.08069172696856913,
                   p=0.5882352941176471, used=17, df=10)
     got = dict(lr=s["composite LR"], adjusted=s["adjusted composite LR"], p_chi2=s["p-value (chi-square)"],
                p=s["p-value"], used=s["Monte Carlo samples"], df=s["df"])
@@ -281,3 +281,71 @@ def test_mfrm_global_fit_not_comparable_and_deprecated():
             warnings.simplefilter("ignore", UserWarning)
             s = m.andersen_lr_test_global(split_by="random")
     assert s["split"] == "random"
+
+
+def test_mfrm_global_fit_cml_conditional_lr():
+    """Under estimation='cml': the conditional LR of the group and pooled CML refits, with the composite
+    route's df; the chi-square p-value is the default, penalised (the default ridges) or not, without a warning;
+    'monte-carlo' is offered; with every penalty at 0, each log-likelihood is the fit's own."""
+    m = _mfrm_exo()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        df_composite = m.global_fit(covariate="G", p_method="chi2")["df"]
+        m.calibrate(estimation="cml")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        s = m.global_fit(covariate="G")
+    assert s["estimation"] == "cml" and s["penalised"] and s["p_method"] == "chi2"
+    assert s["df"] == df_composite and s["p-value"] == s["p-value (chi-square)"]
+    ll = s["log-likelihoods"]
+    assert s["statistic"] == pytest.approx(2 * (ll["g0"] + ll["g1"] - ll["pooled"]))
+    assert m.global_fit_obsexp["z"].notna().all() and m.global_fit_obsexp_cells.shape[0] == 4 * I * 2
+    mc = m.global_fit(covariate="G", seed=1, no_of_samples=19, p_method="monte-carlo")
+    assert mc["p_method"] == "monte-carlo" and mc["statistic"] == s["statistic"] and 0 < mc["p-value"] <= 1
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m.calibrate(estimation="cml", global_ridge=0, item_ridge=0, threshold_ridge=0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        s = m.global_fit(covariate="G")
+    assert not s["penalised"] and s["p_method"] == "chi2" and s["df"] == df_composite
+    for name, g in m.global_fit_groups.items():
+        assert s["log-likelihoods"][name] == pytest.approx(g.convergence["log_likelihood"], rel=1e-8)
+
+
+def test_mfrm_global_fit_cml_dif_rejects():
+    m = _mfrm_exo(dif=0.6)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m.calibrate(estimation="cml")
+        s = m.global_fit(covariate="G", seed=1, no_of_samples=99)
+    assert s["p-value"] <= 0.05 and s["reject"]
+    assert m.global_fit_obsexp["z"].abs().idxmax()[0] == m.responses.columns[0]
+
+
+@pytest.mark.parametrize("model", ["centrality", "mixed"])
+def test_mfrm_global_fit_cml_and_cpat_rcl_other_models(model):
+    m = _mfrm_exo()
+    kw = {"rater_models": ["global", "items", "thresholds", "centrality"]} if model == "mixed" else {}
+    for est in ("cml", "cpat-rcl"):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            m.calibrate(model=model, estimation=est, **kw)
+            s = m.global_fit(model=model, covariate="G", p_method="chi2")
+        assert s["estimation"] == est and np.isfinite(s["statistic"]) and s["df"] > 0
+        assert m.global_fit_obsexp is None
+
+
+def test_mfrm_global_fit_cpat_rcl_and_pair_cpat():
+    m = _mfrm_exo()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m.calibrate(estimation="cpat-rcl")
+        s = m.global_fit(covariate="G", seed=1, no_of_samples=19)
+    assert s["estimation"] == "cpat-rcl" and s["p_method"] == "monte-carlo" and "adjusted composite LR" in s
+    assert m.global_fit_obsexp is not None
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m.calibrate(estimation="pair-cpat")
+    with pytest.raises(ValueError, match="do not maximise a likelihood"):
+        m.global_fit(covariate="G")

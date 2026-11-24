@@ -45,8 +45,9 @@ raschpy/
                        tables print them
   _anchor_check.py    AnchorCheck: check_anchor_homogeneity()'s joint-fit
                        check of an anchor set on the anchors' responses only
-                       (overall test, pattern screen, Wald loop over cells,
-                       global effect screen, refinement; see "Anchor sets" below)
+                       (overall test; global-effect subset search; pattern
+                       step = per_rater_model_selection's tests on the
+                       suggested set; see "Anchor sets" below)
   _selection.py       RSM-vs-PCM model_selection(): composite likelihood
                        ratio test (exact weighted chi-square tail), AIC and
                        BIC penalties for a composite likelihood, PAIR's
@@ -341,17 +342,18 @@ current list).
 
 **Anchor sets.** In a joint mixed fit, each kind of rater effect sums to zero over
 the anchors that have it. An anchor's representation can therefore only be read
-against the other anchors, so `per_rater_model_selection()` holds anchors on
-`'global'` (with `'cp-full-rcl'`, `'cpat-rcl'`, `'cml'`) and whether they agree is
-`check_anchor_homogeneity()`'s job (`_anchor_check.AnchorCheck`, the default for
-those estimations; the earlier single-representation Cochran test,
-`_check_anchor_homogeneity_single`, stays for `'pair-cpat'` and as an option). The
-check uses only the anchors' responses: an overall test (items, thresholds,
-global effect); a pattern screen (each anchor's representation chosen against the rest,
-BH across anchors), with a Wald loop cutting single cells of the worst anchor; a
-global effect screen on the adjusted set (after the pattern stage, because a one-cell
-shift also moves an anchor's global effect); and a refinement against the final anchors.
-`split_alpha=True` runs the screens at alpha/2. Its suggestions are an
+against the other anchors. With `'cp-full-rcl'`, `'cpat-rcl'` and `'cml'`, `per_rater_model_selection()` starts the
+anchors on `'global'` and selects them like the other raters (`force_global_anchors=True` holds them there); a part
+every anchor takes is fixed by the anchors' average. Whether the anchors agree is `check_anchor_homogeneity()`'s job
+(`_anchor_check.AnchorCheck`, the default for those estimations; the earlier single-representation Cochran test,
+`_check_anchor_homogeneity_single`, stays for `'pair-cpat'` and as an option). The check uses only the anchors'
+responses: an overall test (items, thresholds, global effect), reported only; a global-effect step (every subset,
+largest first, each member's global effect within `delta` of the others' mean, close-fit noncentral t, BH; the
+largest agreeing set suggested); and a pattern step, `per_rater_model_selection(scheme='one-pass')` run on the
+suggested set's responses with the set as anchors (`AnchorCheck._selection`), an anchor selected off `'global'` being
+marked pattern-free. Anchors with cut cells stay on `'global'` in the selection, so they keep the information-weighted
+close-fit RMS test over their cells not cut (`_pattern_test`). `delta` is in median category widths of the fit of
+every rater anchored on the set tested (`_panel_widths`). Its suggestions are an
 `_anchors.AnchorSet`, which `calibrate(model='mixed', anchors=)` and
 `per_rater_model_selection(anchors=)` accept: a cut cell becomes a free shift for
 that anchor in `MixedDesign` (`cuts=`, anchors on `'global'` only), with the zero

@@ -2370,3 +2370,49 @@ class MFRM_Sim_Bistretch(MFRM_Sim):
         raise AttributeError(
             f"{type(self).__name__!r} object has no attribute {name!r}"
         )
+
+
+class MFRM_Sim_Mixed(MFRM_Sim):
+    """
+    MFRM simulation -- each facet element (e.g. rater) on its own representation.
+
+    Convenience subclass of MFRM_Sim with model='mixed' fixed: every facet
+    element is generated under one of the eight representations ('global',
+    'items', 'thresholds', 'bivector', 'matrix', 'centrality', 'pseudo_halo',
+    'bistretch'), sharing the item locations and thresholds. global_range is
+    MFRM_Sim's facet_range under the name the stretch classes use: the spread
+    of the facet elements' global effects. See MFRM_Sim for rater_models,
+    candidate_models, proportions, the other ranges, anchors and the
+    attributes set.
+    """
+
+    def __init__(
+        self,
+        no_of_items,
+        no_of_persons,
+        max_score,
+        no_of_facet_elements,
+        rater_models=None,
+        candidate_models=None,
+        proportions=None,
+        global_range=2,
+        **kw,
+    ):
+        """Convenience wrapper: MFRM_Sim with model='mixed' fixed. See MFRM_Sim for full documentation."""
+        if "facet_range" in kw:
+            raise ValueError("MFRM_Sim_Mixed takes global_range=, not facet_range=.")
+        if "model" in kw:
+            raise ValueError("MFRM_Sim_Mixed fixes model='mixed'; use MFRM_Sim for other representations.")
+        super().__init__(
+            no_of_items,
+            no_of_persons,
+            no_of_facet_elements=no_of_facet_elements,
+            max_score=max_score,
+            model="mixed",
+            facet_range=global_range,
+            rater_models=rater_models,
+            candidate_models=candidate_models,
+            proportions=proportions,
+            **kw,
+        )
+        self.global_range = global_range

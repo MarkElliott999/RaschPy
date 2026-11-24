@@ -280,6 +280,23 @@ def test_rater_stats_df_mixed_has_per_rater_columns():
     assert m.rater_stats_mixed[(f"{item0}, Threshold 1", "Estimate")].dtype == float
 
 
+def test_rater_stats_df_mixed_warns_only_for_explicit_marginal():
+    """'mixed' has no marginal table: the default call returns the full table without a warning;
+    marginal=True still warns, and 'matrix' keeps its marginal table by default."""
+    _, m = _make_mfrm(no_of_raters=5, seed=16)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        m.rater_stats_df(model="mixed", full=True)
+    full = m.rater_stats_mixed.copy()
+    with pytest.warns(UserWarning, match="no marginal=True"):
+        m.rater_stats_df(model="mixed", full=True, marginal=True)
+    assert m.rater_stats_mixed.equals(full)
+    m.rater_stats_df(model="matrix")
+    default = m.rater_stats_matrix.copy()
+    m.rater_stats_df(model="matrix", marginal=True)
+    assert m.rater_stats_matrix.equals(default)
+
+
 @pytest.mark.parametrize("kind", ["slm", "rsm", "pcm", "mfrm"])
 def test_warm_extreme_scores_finite_and_adjustment_free(kind):
     """
@@ -389,6 +406,27 @@ def test_rsm_empty_middle_category_warns_and_stays_finite():
     assert np.isfinite(th).all()
     # distance 1-2 does not touch category 3 (touches 0,1,2)
     assert abs((th[1] - th[0]) - (full.thresholds.values[1] - full.thresholds.values[0])) < 0.5
+
+
+@pytest.mark.parametrize("cats, side, ths", [((5,), "high", "τ₅"), ((4, 5), "high", "τ₄ and τ₅"),
+                                              ((0,), "low", "τ₁")])
+def test_unused_bottom_or_top_category_warns(cats, side, ths):
+    """An unused bottom or top category (no middle one empty): RSM and MFRM warn that the thresholds beyond the
+    used range cannot be estimated, and say how to rescore."""
+    import numpy as np
+    import pandas as pd
+    sim = _rsm_sim(no_of_items=8, no_of_persons=600, max_score=5, seed=34)
+    lo, hi = min(c for c in range(6) if c not in cats), max(c for c in range(6) if c not in cats)
+    d = sim.responses.clip(lo, hi)
+    pattern = rf"(?s)no responses, so thresholds? {ths} cannot be estimated.*infinitely {side}"
+    with pytest.warns(UserWarning, match=pattern):
+        rp.RSM(d, max_score=5, validate=False).calibrate()
+    stacked = pd.concat({f"Rater_{r}": d for r in (1, 2)})
+    with pytest.warns(UserWarning, match=pattern):
+        rp.MFRM(stacked, max_score=5, validate=False).calibrate(model="global")
+    fix = (f"subtract {lo} from every response" if side == "low" else f"set max_score={hi - lo}")
+    with pytest.warns(UserWarning, match=fix):
+        rp.RSM(d, max_score=5, validate=False).calibrate()
 
 
 def test_rsm_empty_category_collapsed_width_fallback():
@@ -758,7 +796,9 @@ def test_mfrm_rcl_sandwich_standard_errors():
     for attr in ("item_se_bistretch", "rater_se_bistretch", "omega_items_se_bistretch"):
         ratio = np.asarray(getattr(m, attr), float) / np.asarray(getattr(b, attr), float)
         assert 0.85 < np.nanmedian(ratio) < 1.15
-    assert np.allclose(m.item_high_bistretch - m.item_low_bistretch, 2 * 1.959964 * m.item_se_bistretch)
+    from scipy.stats import t as t_dist  # intervals: estimate +/- t (persons - 1) SE
+    tq = t_dist.ppf(0.975, m.no_of_persons - 1)
+    assert np.allclose(m.item_high_bistretch - m.item_low_bistretch, 2 * tq * m.item_se_bistretch)
     assert set(m.stretch_param_cov_bistretch) == {"lambda_omega_items", "lambda_omega_thresholds",
                                                   "omega_items_omega_thresholds"}
     with warnings.catch_warnings():
@@ -1482,3 +1522,319 @@ def test_non_cml_refit_drops_the_cml_notes():
         assert hasattr(m, "cml_unused_categories")
         m.calibrate(estimation="pair-cpat")
         assert not hasattr(m, "cml_unused_categories") and not hasattr(m, "cml_dropped_responses")
+
+
+def _gfit_pcm():
+    from raschpy.simulation import PCM_Sim
+
+    I = 8
+    r = PCM_Sim(no_of_items=I, no_of_persons=240, max_score_vector=[3] * I,
+                manual_items=list(np.linspace(-1.2, 1.2, I)), manual_thresholds=[[-0.8, 0.0, 0.8]] * I,
+                seed=11).responses
+    m = rp.PCM(r, max_score_vector=[3] * I, validate=False)
+    m.calibrate()
+    return m
+
+
+def test_pcm_rcl_global_fit_applies_kauermann_carroll():
+    """PCM 'cp-full-rcl' global_fit ignored se_correction (its RCL sandwich had no Kauermann-Carroll path) while
+    the summary reported 'kauermann-carroll'. The per-person breads must sum (with the ridge) to the information."""
+    from raschpy import _rcl
+
+    m = _gfit_pcm()
+    assert m.estimation == "cp-full-rcl"
+    names, st = list(m.item_names), m._rcl_state
+    Ks = [int(k) for k in m.max_score_vector.reindex(names)]
+    X = np.array(m.responses.loc[:, names], float)
+    B = _rcl.pcm_person_bread(X, Ks, st["b"], st.get("cpat", False)).sum(0)
+    Pb = (m._ridge_penalty(Ks, m.ridge, group_widths=m.RCL_RIDGE_GROUP_WIDTHS,
+                           two_used=m._two_categories_used(names)) if m.ridge > 0 else 0.0)
+    np.testing.assert_allclose(st["A"].T @ (B + Pb) @ st["A"], st["info"], atol=1e-8)
+    v0, v1 = (np.diag(m._rcl_covariance(small_sample=s)[0]) for s in (False, True))
+    assert np.all(v1 > v0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        w_kc = m.global_fit(split="random", seed=1)["statistic"]
+        w_none = m.global_fit(split="random", seed=1, se_correction=None)["statistic"]
+    assert w_kc < w_none
+
+
+def test_global_fit_f_reference_and_welch_deprecated():
+    """global_fit's Wald test uses the multivariate Welch F reference (Nel and van der Merwe, 1986) from the two
+    groups' covariances and sizes; welch= warns, and welch=True gives the previous smaller-group reference."""
+    from scipy.stats import f
+
+    m = _gfit_pcm()
+    m.exogenous = pd.DataFrame({"g": np.where(np.arange(len(m.responses)) % 10 < 3, "a", "b")},
+                               index=m.responses.index)
+    rec, orig = [], type(m)._global_fit_params
+
+    def spy(mm, *a, **k):
+        out = orig(mm, *a, **k)
+        rec.append(out)
+        return out
+
+    m._global_fit_params = spy
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        s = m.global_fit(covariate="g").copy()
+    (lab, e1, V1, ok1, blk), (_, e2, V2, ok2, _) = rec[-2:]
+    assert lab == rec[-1][0]
+    idx = np.flatnonzero(ok1 & ok2)
+    C = np.eye(len(idx)) - 1.0 / len(idx)
+    A, B = C @ V1[np.ix_(idx, idx)] @ C.T, C @ V2[np.ix_(idx, idx)] @ C.T
+    n1, n2 = s["group sizes"].values()
+    w, Q = np.linalg.eigh(A + B)
+    P = Q[:, w > 1e-10 * w.max()]
+    A, B = P.T @ A @ P, P.T @ B @ P
+    S = A + B
+    nu = (np.trace(S @ S) + np.trace(S) ** 2) / sum(
+        (np.trace(G @ G) + np.trace(G) ** 2) / (n - 1) for G, n in ((A, n1), (B, n2)))
+    q, W = s["df"], s["statistic"]
+    assert q == P.shape[1]
+    np.testing.assert_allclose(s["denominator df"], nu - q + 1, rtol=1e-10)
+    np.testing.assert_allclose(s["p-value"], f.sf(W * (nu - q + 1) / (q * nu), q, nu - q + 1), rtol=1e-10)
+    assert nu < n1 + n2 - 2  # unequal groups (30/70): fewer df than the pooled two-sample form
+    with pytest.warns(FutureWarning, match="welch"):
+        t = m.global_fit(covariate="g", welch=False)
+    assert t["p-value"] == s["p-value"]
+    with pytest.warns(FutureWarning, match="welch"):  # deprecated previous reference: df from the smaller group
+        t = m.global_fit(covariate="g", welch=True)
+    n_s = min(n1, n2)
+    assert t["statistic"] == W and t["denominator df"] == n_s - q
+    np.testing.assert_allclose(t["p-value"], f.sf(W / q, q, n_s - q), rtol=1e-12)
+
+
+def test_dif_welch_deprecated_t_default():
+    """dif_test's Wald tests default to Welch's t (df column, p from t); welch= warns, welch=False gives z."""
+    from scipy.stats import norm, t as t_dist
+    from raschpy.simulation import SLM_Sim
+
+    X = SLM_Sim(no_of_items=8, no_of_persons=240, manual_items=list(np.linspace(-1.2, 1.2, 8)), seed=4).responses
+    exo = pd.DataFrame({"G": ["a"] * 120 + ["b"] * 120}, index=X.index)
+    m = rp.SLM(X, exogenous=exo, validate=False)
+    m.calibrate()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)
+        m.dif_test("G", reference="a", omnibus=False)
+    d = m.dif_table.copy()
+    np.testing.assert_allclose(d["p"], 2 * t_dist.sf(np.abs(d["t"]), d["df"]), rtol=1e-12)
+    with pytest.warns(FutureWarning, match="welch"):
+        m.dif_test("G", reference="a", omnibus=False, welch=False)
+    assert "df" not in m.dif_table
+    np.testing.assert_allclose(m.dif_table["p"], 2 * norm.sf(np.abs(d["t"])), rtol=1e-12)
+    with pytest.warns(FutureWarning, match="welch"):
+        m.dif_test("G", reference="a", omnibus=False, welch=True)
+    np.testing.assert_allclose(m.dif_table["p"], d["p"], rtol=1e-12)
+
+
+def test_wald_anchor_selection_uses_both_groups_and_t():
+    """Anchor selection (DIF purification): each deviation's SE counts both groups' covariances and the item's
+    own share of tc, the reference is t with Welch-Satterthwaite df, and swapping the groups gives the same
+    selection (the previous rule used the focal SEs only, so it depended on which group was the reference)."""
+    import numpy as np
+    import pandas as pd
+    from raschpy.base import Rasch
+
+    rng = np.random.default_rng(7)
+    n = 10
+    names = [f"I{i}" for i in range(n)]
+    A, B = rng.normal(size=(n, n)), rng.normal(size=(n, n))
+    Vr = pd.DataFrame(A @ A.T / 40 + np.eye(n) * 0.01, index=names, columns=names)
+    Vf = pd.DataFrame(B @ B.T / 15 + np.eye(n) * 0.01, index=names, columns=names)
+    ref = pd.Series(rng.normal(size=n), index=names)
+    foc = ref + rng.normal(scale=0.3, size=n)
+    foc.iloc[0] += 2.0
+    se_f, se_r = pd.Series(np.sqrt(np.diag(Vf)), index=names), pd.Series(np.sqrt(np.diag(Vr)), index=names)
+    m = Rasch.__new__(Rasch)
+    a = m._wald_anchor_selection(ref, foc, se_f, alpha=0.05, min_anchors=2, anchor_cov=Vr, observed_cov=Vf,
+                                 n_anchor=400, n_observed=150)
+    b = m._wald_anchor_selection(foc, ref, se_r, alpha=0.05, min_anchors=2, anchor_cov=Vf, observed_cov=Vr,
+                                 n_anchor=150, n_observed=400)
+    assert list(a["table"]["Selected"]) == list(b["table"]["Selected"])
+    assert "I0" in a["dropped_anchors"]
+    np.testing.assert_allclose(a["table"]["t"], -b["table"]["t"], rtol=1e-10)
+    # the selected items' SEs and df from the formula
+    keep = a["table"]["Selected"].to_numpy()
+    w = 1 / (np.diag(Vr) + np.diag(Vf))
+    wk = w * keep / (w * keep).sum()
+    for i in np.where(keep)[0]:
+        c = np.eye(n)[i] - wk
+        vr, vf = c @ Vr.values @ c, c @ Vf.values @ c
+        assert np.isclose(a["table"]["SE (deviation)"].iloc[i] ** 2, vr + vf)
+        assert np.isclose(a["table"]["df"].iloc[i], (vr + vf) ** 2 / (vr**2 / 399 + vf**2 / 149))
+    # fixed anchors (calibrate_anchor): no anchor variance, t on n_observed - 1
+    c = m._wald_anchor_selection(ref, foc, se_f, alpha=0.05, min_anchors=2, observed_cov=Vf, n_observed=150)
+    assert (c["table"]["df"].dropna() == 149).all()
+
+
+def test_rsm_anchor_category_width_test_uses_t():
+    """RSM calibrate_anchor(anchor_thresholds=...): the per-category width test refers Difference / SE to a
+    t-distribution on persons - 1 df (the given widths are fixed), and the omnibus test is a Wald F; both use the
+    Kauermann-Carroll corrected sandwich covariance."""
+    import warnings
+    import numpy as np
+    import pandas as pd
+    from scipy import stats
+    import raschpy as rp
+    from raschpy.simulation import RSM_Sim
+
+    X = RSM_Sim(no_of_items=8, no_of_persons=40, max_score=3, manual_items=list(np.linspace(-1, 1, 8)),
+                manual_thresholds=[-0.8, 0.0, 0.8], seed=11).responses
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m = rp.RSM(X, max_score=3, validate=False)
+        m.calibrate()
+        m.calibrate_anchor(pd.Series(np.linspace(-1, 1, 8), index=X.columns),
+                           anchor_thresholds=pd.Series([-0.8, 0.0, 0.8]), selection_method="none", plot=False)
+    t = m.anchor_category_width_test
+    assert (t["df"] == 39).all()
+    np.testing.assert_allclose(t["t"], t["Difference"] / t["SE"])
+    np.testing.assert_allclose(t["p"], 2 * stats.t.sf(np.abs(t["t"]), 39))
+    # omnibus: W = d' V^-1 d on the widths' covariance, Hotelling F on persons - 1
+    o = m.anchor_threshold_test
+    d = t["Difference"].to_numpy(float)
+    # Kauermann-Carroll corrected sandwich (as global_fit's default)
+    V = (np.asarray(m._sandwich_covariance(small_sample=True)[1], float) if m.se_method == "sandwich"
+         else np.cov(m.cat_width_bootstrap.to_numpy(float).T))
+    np.testing.assert_allclose(t["SE"], np.sqrt(np.diag(V)))
+    W = float(d @ np.linalg.solve(V, d))
+    assert o["df"] == 2 and o["denominator df"] == 38
+    assert np.isclose(o["W"], W)
+    assert np.isclose(o["F"], W * 38 / (2 * 39))
+    assert np.isclose(o["p"], stats.f.sf(W * 38 / (2 * 39), 2, 38))
+    # the previous LR test's person-estimation arguments are deprecated
+    import pytest
+    with pytest.warns(FutureWarning, match="deprecated and has no effect"):
+        m.calibrate_anchor(pd.Series(np.linspace(-1, 1, 8), index=X.columns),
+                           anchor_thresholds=pd.Series([-0.8, 0.0, 0.8]), selection_method="none", plot=False,
+                           max_iters=50)
+
+
+def test_pcm_anchor_threshold_tests_are_wald_f():
+    """PCM calibrate_anchor(anchor_thresholds=...): per-item and aggregate Wald tests of the category widths,
+    W = d' V^-1 d from the threshold covariance, Hotelling F on persons - 1; the given offsets' centring does not
+    matter (widths)."""
+    import warnings
+    import numpy as np
+    import pandas as pd
+    from scipy import stats
+    import raschpy as rp
+    from raschpy.simulation import PCM_Sim
+
+    I, n = 6, 60
+    X = PCM_Sim(no_of_items=I, no_of_persons=n, max_score_vector=[3] * I, manual_items=list(np.linspace(-1, 1, I)),
+                manual_thresholds=[[-0.8, 0.0, 0.8]] * I, seed=5).responses
+    cols = list(X.columns)
+    given = {cols[0]: [-0.8, 0.0, 0.8], cols[1]: [-0.5, 0.5, 1.5]}  # second: shifted offsets, same widths 1, 1
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m = rp.PCM(X, max_score_vector=[3] * I, validate=False)
+        m.calibrate()
+        m.calibrate_anchor(pd.Series(np.linspace(-1, 1, I), index=cols), anchor_thresholds=given,
+                           selection_method="none", plot=False)
+    t, agg = m.anchor_threshold_test, m.anchor_threshold_test_aggregate
+    D = np.zeros((4, 6)); D[0:2, 0:3] = np.diff(np.eye(3), axis=0); D[2:4, 3:6] = np.diff(np.eye(3), axis=0)
+    labels = [(c, k) for c in cols[:2] for k in (1, 2, 3)]
+    if m.se_method in ("sandwich", "hessian"):
+        Vt = pd.DataFrame(m._threshold_covariance(small_sample=True)[0], index=m.se_covariance.index,
+                          columns=m.se_covariance.columns)
+        V = D @ Vt.loc[labels, labels].to_numpy(float) @ D.T
+    else:
+        Xb = np.array([np.concatenate([np.diff(S.loc[c].values[:3].astype(float)) for c in cols[:2]])
+                       for S in m.bootstrap_sample_thresholds.values()])
+        V = np.cov(Xb.T)
+    est = np.concatenate([np.diff(m.thresholds_uncentred.loc[c].values[:3].astype(float)) for c in cols[:2]])
+    d = est - np.array([0.8, 0.8, 1.0, 1.0])
+    W = float(d @ np.linalg.solve(V, d))
+    assert agg["df"] == 4 and agg["denominator df"] == n - 4
+    assert np.isclose(agg["W"], W)
+    assert np.isclose(agg["p"], stats.f.sf(W * (n - 4) / (4 * (n - 1)), 4, n - 4))
+    Wi = float(d[:2] @ np.linalg.solve(V[:2, :2], d[:2]))
+    assert np.isclose(t.loc[cols[0], "W"], Wi) and t.loc[cols[0], "df"] == 2
+    assert np.isclose(t.loc[cols[0], "p"], stats.f.sf(Wi * (n - 2) / (2 * (n - 1)), 2, n - 2))
+
+
+def test_item_restscore_conditional_monte_carlo():
+    """fit_statistics(conditional=True): the item-restscore test refers the observed gamma to its distribution in
+    datasets drawn given each person's total (studentised by default; raw Monte Carlo p as an option)."""
+    import warnings
+    import numpy as np
+    import pandas as pd
+    import pytest
+    from scipy import stats
+    import raschpy as rp
+    from raschpy import _esf
+    from raschpy.simulation import PCM_Sim
+
+    X = PCM_Sim(no_of_items=8, no_of_persons=200, max_score_vector=[2] * 8, manual_items=list(np.linspace(-1, 1, 8)),
+                manual_thresholds=[[-0.5, 0.5]] * 8, seed=9).responses
+    X.iloc[::5, 1] = np.nan
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m = rp.PCM(X, max_score_vector=[2] * 8)
+        m.calibrate()
+        m.fit_statistics(conditional=True, se=False, conditional_samples=200, seed=3)
+    t = m.item_restscore_table
+    names = list(m.item_names)
+    Xa = np.array(m.responses.loc[:, names], float)
+    np.testing.assert_allclose(t["Observed gamma"], _esf.restscore_gammas(Xa, [2] * 8, np.arange(8)), atol=1e-12)
+    np.testing.assert_allclose(t["z"], (t["Observed gamma"] - t["Simulated mean"]) / t["Simulated SD"])
+    np.testing.assert_allclose(t["p"], 2 * stats.norm.sf(np.abs(t["z"])))
+    # the draws are at the null fit's thresholds, reproducible from the seed
+    rng = m._restscore_rng(3)
+    sims = _esf.restscore_monte_carlo(Xa, m._conditional_null(names)[0], [2] * 8, np.arange(8), 200, rng)
+    np.testing.assert_allclose(t["Simulated mean"], sims.mean(0))
+    np.testing.assert_allclose(t["Simulated SD"], sims.std(0, ddof=1))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m.fit_statistics(conditional=True, se=False, conditional_samples=200, seed=3, restscore_p_method="monte-carlo")
+    dev = np.abs(sims - sims.mean(0))
+    p_mc = (1 + (dev >= np.abs(t["Observed gamma"].values - sims.mean(0)) - 1e-12).sum(0)) / 201
+    np.testing.assert_allclose(m.item_restscore_table["p"], p_mc)
+    with pytest.raises(ValueError, match="restscore_p_method"):
+        m.fit_statistics(conditional=True, se=False, restscore_p_method="asymptotic")
+
+
+def test_reported_ses_are_kc_and_tests_use_t():
+    """F audit 2026-11-15: std_errors() reports the sandwich with the Kauermann-Carroll small-sample correction by
+    default (se_correction=None: uncorrected), with t intervals on persons - 1; recovery_stats() refers item-side
+    error / SE to t on persons - 1 with those SEs (persons stay z), and category_stats_df()'s Prop disordered with
+    analytic SEs is the t probability of a negative width."""
+    from scipy import stats
+    from raschpy.simulation import RSM_Sim, PCM_Sim
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = rp.RSM(RSM_Sim(no_of_items=8, no_of_persons=60, max_score=3, seed=4))
+        r.calibrate()
+        r.std_errors(interval=0.95)
+        r.recovery_stats(plot=False)
+        cs = r.category_stats_df()
+    n = r.no_of_persons
+    assert r.se_correction == "kauermann-carroll"
+    Vi, Vw = r._sandwich_covariance(small_sample=True)
+    np.testing.assert_allclose(r.item_se.values, np.sqrt(np.diag(Vi)))
+    np.testing.assert_allclose(r.cat_width_se.values, np.sqrt(np.diag(Vw)))
+    q = stats.t.ppf(0.975, n - 1)
+    np.testing.assert_allclose(r.item_high - r.items.reindex(r.item_se.index), q * r.item_se)
+    t = r.recovery.items.table.loc[r.item_names]
+    np.testing.assert_allclose(t["SE"], r.item_se.loc[r.item_names])
+    assert (t["df"] == n - 1).all()
+    np.testing.assert_allclose(t["p"], 2 * stats.t.sf(np.abs(t["error"] / t["SE"]), n - 1))
+    assert "z" in r.recovery.persons.table and "df" not in r.recovery.persons.table
+    widths = np.diff(r.thresholds.values)
+    np.testing.assert_allclose(cs["Prop disordered"], stats.t.cdf(-widths / np.sqrt(np.diag(Vw)), n - 1).round(3))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r.std_errors(se_correction=None)
+    assert r.se_correction is None
+    np.testing.assert_allclose(r.item_se.values, np.sqrt(np.diag(r._sandwich_covariance()[0])))
+    with pytest.raises(ValueError, match="se_correction"):
+        r.std_errors(se_correction="mancl-derouen")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        pm = rp.PCM(PCM_Sim(no_of_items=6, no_of_persons=60, max_score_vector=[3] * 6, seed=4))
+        pm.calibrate()
+        pm.std_errors()
+    Vt, _ = pm._threshold_covariance(small_sample=True)
+    np.testing.assert_allclose(pm.se_covariance.to_numpy(), Vt)

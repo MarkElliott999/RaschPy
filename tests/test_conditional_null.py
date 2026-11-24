@@ -37,8 +37,8 @@ def _fit(df, cls=rp.PCM, **cal):
 
 
 def _conditional(m, record=False, **kw):
-    kw = dict(dict(se=False, conditional=True, bootstrap_samples=5, q1_overall_samples=5, seed=1,
-                   progress=False), **kw)
+    kw = dict(dict(se=False, conditional=True, conditional_samples=5, bootstrap_samples=5, q1_overall_samples=5,
+                   seed=1, progress=False), **kw)
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         m.fit_statistics(**kw)
@@ -61,7 +61,7 @@ def test_simulated_from_cp_full_rcl_fit(cls, est, monkeypatch):
     monkeypatch.setattr(_esf, "sample_given_totals", spy)
     _conditional(m)
     assert m.conditional_null_fit == "cp-full-rcl" and m.item_fit_bootstrap_info["null_fit"] == "cp-full-rcl"
-    assert len(used) == 10  # 5 bootstrap + 5 overall Q1 datasets
+    assert len(used) == 15  # 5 item-restscore draws + 5 bootstrap + 5 overall Q1 datasets
     for thr in used:
         for a, b in zip(thr, target):
             np.testing.assert_allclose(a, b, rtol=1e-10)
@@ -94,8 +94,10 @@ def test_fallback_to_own_fit(monkeypatch):
         raise ValueError("no fit")
 
     monkeypatch.setattr(rp.PCM, "_global_fit_subset", fail)
-    msgs = _conditional(m, bootstrap_samples=None, q1_overall_samples=None)
-    assert m.conditional_null_fit is None and not msgs  # nothing simulated, no null fit made
+    with pytest.warns(UserWarning, match="simulated from the object's fit"):
+        m.fit_statistics(se=False, conditional=True, conditional_samples=5, bootstrap_samples=None,
+                         q1_overall_samples=None, seed=1, progress=False)
+    assert m.conditional_null_fit == "own"  # the item-restscore draws always simulate
     with pytest.warns(UserWarning, match="simulated from the object's fit"):
         assert m._conditional_null(list(m.item_names))[1] == "own"
 

@@ -56,31 +56,54 @@ class AnchorSet:
     An anchor set: the anchors (facet element names), the cells cut for each ({anchor: [(kind, label), ...]};
     kinds 'item', 'threshold', 'cell'), the anchors as first given (original) and the log of every change
     (a list of dicts: action, facet element, cell, source 'suggested' or 'user', and the estimates behind a
-    suggested change). Immutable: drop / cut / restore return a new AnchorSet.
+    suggested change). pattern_free: anchors that anchor through their global effect only, their pattern over items
+    and thresholds estimated freely (check_anchor_homogeneity suggests this for an anchor agreeing with the others in
+    global effect but not in pattern); in calibrate(model='mixed', anchors=) give them a representation with a
+    pattern in rater_models (per_rater_model_selection(anchors=) selects one). Immutable: drop / cut / restore /
+    free_pattern / hold_pattern return a new AnchorSet.
     """
 
-    def __init__(self, anchors, cuts=None, original=None, log=None):
+    def __init__(self, anchors, cuts=None, original=None, log=None, pattern_free=None):
         self.anchors = list(anchors)
         self.cuts = {a: list(c) for a, c in (cuts or {}).items() if c}
         self.original = list(anchors) if original is None else list(original)
         self.log = list(log or [])
+        self.pattern_free = [a for a in (pattern_free or []) if a in self.anchors]
 
     @property
     def adjusted(self):
         """Whether the set differs from the anchors as first given."""
-        return set(self.anchors) != set(self.original) or bool(self.cuts)
+        return set(self.anchors) != set(self.original) or bool(self.cuts) or bool(self.pattern_free)
 
-    def _copy(self, anchors=None, cuts=None, entry=None):
+    def _copy(self, anchors=None, cuts=None, entry=None, pattern_free=None):
         return AnchorSet(self.anchors if anchors is None else anchors,
                          self.cuts if cuts is None else cuts, self.original,
-                         self.log + ([entry] if entry else []))
+                         self.log + ([entry] if entry else []),
+                         self.pattern_free if pattern_free is None else pattern_free)
+
+    def free_pattern(self, anchor, source="user", **evidence):
+        """The anchor anchors through its global effect only, its pattern over items and thresholds free."""
+        if anchor not in self.anchors:
+            raise ValueError(f"{anchor!r} is not in the anchor set {self.anchors}.")
+        if anchor in self.pattern_free:
+            raise ValueError(f"{anchor!r}'s pattern is already free.")
+        return self._copy(pattern_free=self.pattern_free + [anchor],
+                          entry=dict(action="free pattern", anchor=anchor, cell=None, source=source, **evidence))
+
+    def hold_pattern(self, anchor, source="user"):
+        """Undo free_pattern: the anchor's pattern is held with the other anchors' again."""
+        if anchor not in self.pattern_free:
+            raise ValueError(f"{anchor!r}'s pattern is not free.")
+        return self._copy(pattern_free=[a for a in self.pattern_free if a != anchor],
+                          entry=dict(action="hold pattern", anchor=anchor, cell=None, source=source))
 
     def drop(self, anchor, source="user", **evidence):
         if anchor not in self.anchors:
             raise ValueError(f"{anchor!r} is not in the anchor set {self.anchors}.")
         cuts = {a: c for a, c in self.cuts.items() if a != anchor}
         return self._copy([a for a in self.anchors if a != anchor], cuts,
-                          dict(action="drop", anchor=anchor, cell=None, source=source, **evidence))
+                          dict(action="drop", anchor=anchor, cell=None, source=source, **evidence),
+                          [a for a in self.pattern_free if a != anchor])
 
     def cut(self, anchor, cell, items, K, source="user", **evidence):
         if anchor not in self.anchors:
@@ -143,4 +166,5 @@ class AnchorSet:
         cut = "; ".join(f"{a}: {', '.join(str(l) for _, l in c)}" for a, c in self.cuts.items())
         dropped = [a for a in self.original if a not in self.anchors]
         return (f"AnchorSet(anchors={self.anchors}" + (f", cut: {cut}" if cut else "")
+                + (f", pattern free: {self.pattern_free}" if self.pattern_free else "")
                 + (f", dropped: {dropped}" if dropped else "") + ")")

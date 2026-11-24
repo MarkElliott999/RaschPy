@@ -2,4 +2,7 @@
 LR statistic,14.672342915717309
 df,14.0
 p-value,0.40091296443716673
-Effect,0.6823156147268215
+delta,0.1
+p-value (close fit),0.9999922851717608
+"p-value (close fit, per item)",1.0
+Delta-hat,0.013575388312880451

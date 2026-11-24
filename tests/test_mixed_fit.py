@@ -123,9 +123,30 @@ def test_per_rater_selection_on_fits_in_the_anchors_frame(scheme):
     assert m.per_rater_model_selection_info["frame"] == "anchors ['Rater_2', 'Rater_3']"
     n = rp.MFRM(s.responses, max_score=K, validate=False)
     n.calibrate(model="mixed", estimation="cp-full-rcl",
-                selection=dict(scheme=scheme, candidate_models=["global", "items", "thresholds", "bivector"]))
+                selection=dict(scheme=scheme, candidate_models=["global", "items", "thresholds", "bivector"],
+                               delta=0.0, delta_max=0.0, stretch_delta=0.0, delta_measure="overall"))
+    # tolerances off: the default ones can step C or D (B's effects show there at a third of the size) to global
     assert n.rater_models.tolist() == ["items", "items", "items"]
     assert n.per_rater_model_selection_info["frame"] == "average facet element (no anchors)"
+
+
+@pytest.mark.parametrize("test", ["AIC", "BIC", "LR"])
+def test_per_rater_selection_retests_an_anchor_alone_without_a_part(test):
+    """Anchors B and C with opposite item effects, A with none: once B takes items, C alone lacks the item part, so
+    its test against the frame is empty; it is tested against the anchors' average in every pass, so the passes
+    settle at once on the generating representations (retesting only after the passes let them cycle to
+    max_passes, and A was judged against C alone and given items)."""
+    import pandas as pd
+
+    e = pd.Series([0.6, -0.3, 0.0, 0.3, -0.6], index=[f"Item_{i}" for i in range(1, I + 1)])
+    s = MFRM_Sim(I, 1500, 3, K, model="mixed", rater_models={"Rater_1": ("global", 0.0), "Rater_2": ("items", e),
+                 "Rater_3": ("items", -e)}, anchors=["Rater_2", "Rater_3"], seed=1)
+    m = rp.MFRM(s.responses, max_score=K, validate=False)
+    tab = m.per_rater_model_selection(anchors=["Rater_2", "Rater_3"], estimation="cp-full-rcl", test=test,
+                                      candidate_models=["global", "items", "thresholds", "bivector"])
+    assert tab["Representation"].tolist() == ["global", "items", "items"]
+    assert m.per_rater_model_selection_info["passes"] <= 3
+    assert "anchors' average" in str(tab.loc["Rater_3", "Note"])
 
 
 def test_mixed_downstream_matches_the_single_fit():
@@ -246,7 +267,7 @@ def test_mixed_drf_tests_global_effect_when_a_category_is_sparse_in_one_group():
     m.calibrate(model="mixed", rater_models=models, anchors=["Rater_1"])
     with pytest.warns(UserWarning, match=r"Rater_4 \(score 3: 2 ratings in group focal\) and Rater_6 .* gave fewer "
                                          r"than min_category_count = 5 ratings in a score category in one group"):
-        m.drf_test("grp", model="mixed", reference="ref", p_method="chi2")
+        m.drf_test("grp", model="mixed", reference="ref", p_method="f")
     reason = "gave 2 ratings of 3 in group focal (fewer than min_category_count = 5)"
     sev, thr, it, ov = m.drf_table, m.drf_threshold_table, m.drf_item_table, m.drf_overall_table
     assert sev["p"].notna().all()
@@ -258,6 +279,35 @@ def test_mixed_drf_tests_global_effect_when_a_category_is_sparse_in_one_group():
     assert ov.loc["Rater_6", "df"] == 5 and ov.loc["Rater_6", "Note"] == f"Thresholds left out: Rater_6 {reason}."
     assert ov.loc["Rater_4", "Note"].startswith("Thresholds left out: Rater_4") and np.isnan(ov.loc["Rater_4", "p"])
     assert 0 < m.drf_omnibus_table.loc["focal", "p"] <= 1
+
+
+def test_mixed_drf_tests_global_effect_only_when_the_additive_fit_fails():
+    """A matrix rater that gives 1 on every item but Item_1: too few cells remain to estimate its item and
+    threshold effects, so its global effect is tested as the mean over the remaining cells, its other tests are not
+    run, it stays out of the other raters' pools and the omnibus test, and one warning names it."""
+    models = ["global", "items", "thresholds", "bivector", "matrix"]
+    base = MFRM_Sim(5, 10, 5, 3, model="mixed", rater_models=models, anchors=["Rater_1"], neutral_anchors=True,
+                    seed=5)
+    kw = dict(manual_items=base.native_items.to_numpy(), manual_thresholds=base.native_thresholds.to_numpy())
+    m = _two_groups(dict(base.rater_params), kw, 300, (1, 2))
+    resp = m.responses.copy()
+    rows = resp.index.get_level_values(0) == "Rater_5"
+    x = resp.loc[rows].copy()
+    for it in ["Item_2", "Item_3", "Item_4", "Item_5"]:
+        x[it] = 1.0
+    resp.loc[rows] = x
+    m = rp.MFRM(resp, max_score=3, validate=False, exogenous=m.exogenous)
+    m.calibrate(model="mixed", rater_models=models, anchors=["Rater_1"])
+    with pytest.warns(UserWarning, match=r"Global effect only for Rater_5: too few ratings left"):
+        m.drf_test("grp", model="mixed", reference="ref", p_method="f")
+    sev = m.drf_table
+    assert sev["p"].notna().all() and sev.loc["Rater_5", "df"] == 1
+    assert sev.loc["Rater_5", "Note"].startswith("Global effect only, as the mean over the 3 remaining cells")
+    assert (sev.drop("Rater_5")["Pool"] <= 3).all()  # Rater_5 is in no other rater's pool
+    for t in (m.drf_item_table, m.drf_threshold_table):
+        assert np.isnan(t.loc["Rater_5", "p"])
+    assert m.drf_item_table.loc["Rater_5", "Note"].startswith("not tested: too few cells left")
+
 
 
 @pytest.mark.parametrize("model", ["items", "matrix", "bistretch"])
@@ -289,9 +339,9 @@ def test_drf_on_a_single_representation_matches_mixed(model):
 
 
 def test_drf_p_method():
-    """p_method='chi2' gives the chi-squared p-values with the pool held fixed; 'monte-carlo' needs draws."""
+    """p_method='f' gives the F p-values with the pool held fixed; 'monte-carlo' needs draws."""
     import pandas as pd
-    from scipy.stats import chi2
+    from scipy.stats import f as fdist
 
     s1 = MFRM_Sim(I, 200, R, K, model="mixed", rater_models=["items"] * R, seed=3)
     s2 = MFRM_Sim(I, 200, R, K, model="mixed", rater_models=["items"] * R, seed=4)
@@ -302,13 +352,42 @@ def test_drf_p_method():
     exo = pd.DataFrame({"grp": pd.Series(["focal" if str(p).startswith("F") else "ref" for p in P], index=P)})
     m = rp.MFRM(resp, max_score=K, validate=False, exogenous=exo)
     m.calibrate(model="items")
-    m.drf_test("grp", model="items", reference="ref", p_method="chi2")
+    m.drf_test("grp", model="items", reference="ref", p_method="f")
     t = m.drf_item_table
-    np.testing.assert_allclose(t["p"].astype(float), chi2.sf(t["T"].astype(float), t["df"].astype(float)))
-    with pytest.raises(ValueError, match="p_method='chi2'"):
+    T, q, d2 = (t[c].astype(float) for c in ("T", "df", "Denominator df"))
+    nu = d2 + q - 1
+    np.testing.assert_allclose(t["p"].astype(float), fdist.sf(T * d2 / (q * nu), q, d2))
+    assert (d2 > 0).all() and (nu < 400).all()  # nu below both groups' persons - 2
+    with pytest.raises(ValueError, match="p_method='f'"):
         m.drf_test("grp", model="items", reference="ref", no_of_samples=0)
     with pytest.raises(ValueError, match="p_method must be"):
         m.drf_test("grp", model="items", reference="ref", p_method="exact")
+
+
+def test_drf_monte_carlo_matches_f_with_pool_fixed():
+    """With the pool held fixed (min_anchors = every other facet element, so nothing is trimmed), the Monte Carlo
+    draws, each multiplied by nu / chi2(nu - df + 1) for the noise in estimating the covariance, follow the
+    multivariate Welch F reference, so the Monte Carlo p-values match p_method='f' up to simulation error; the
+    chi-squared p-values (no allowance for that noise) do not, at 12 persons per group."""
+    import pandas as pd
+    from scipy.stats import chi2
+
+    n, draws = 12, 10000
+    s = MFRM_Sim(I, 2 * n, R, K, model="thresholds", seed=11)
+    P = s.responses.index.get_level_values(1).unique()
+    exo = pd.DataFrame({"grp": pd.Series(["ref"] * n + ["focal"] * n, index=P)})
+    m = rp.MFRM(s.responses, max_score=K, validate=False, exogenous=exo)
+    m.calibrate(model="thresholds")
+    kw = dict(model="thresholds", reference="ref", min_anchors=R - 1, min_category_count=None)
+    m.drf_test("grp", p_method="f", **kw)
+    t = m.drf_overall_table
+    pf = t["p"].astype(float).to_numpy()
+    pc = chi2.sf(t["T"].astype(float), t["df"].astype(float))
+    m.drf_test("grp", p_method="monte-carlo", no_of_samples=draws, seed=2, **kw)
+    pm = m.drf_overall_table["p"].astype(float).to_numpy()
+    tol = 4 * np.sqrt(pf * (1 - pf) / draws)
+    assert (np.abs(pm - pf) < tol).all(), (pm.round(3), pf.round(3))
+    assert (np.abs(pm - pc) > tol).any(), (pm.round(3), pc.round(3))
 
 
 @pytest.mark.parametrize("model, df", [("global", R - 1), ("items", R * I - I), ("bistretch", 3 * R - 3)])
@@ -328,11 +407,13 @@ def test_drf_omnibus_every_model(model, df):
     exo = pd.DataFrame({"grp": pd.Series(["focal" if str(p).startswith("F") else "ref" for p in P], index=P)})
     m = rp.MFRM(resp, max_score=K, validate=False, exogenous=exo)
     m.calibrate(model=model)
-    m.drf_test("grp", model=model, reference="ref", p_method="chi2", min_category_count=None)
+    m.drf_test("grp", model=model, reference="ref", p_method="f", min_category_count=None)
     om = m.drf_omnibus_table
     assert om.loc["focal", "df"] == df and 0 < om.loc["focal", "p"] <= 1
-    # Hotelling-type F reference: denominator df = persons in both groups - 2 - df + 1
-    assert om.loc["focal", "Denominator df"] == 600 - 2 - df + 1
+    # multivariate Welch F reference: denominator df = nu - df + 1, nu at most persons in both groups - 2 (its
+    # value with equal covariances and group sizes)
+    nu = om.loc["focal", "Denominator df"] + df - 1
+    assert 0.9 * 598 < nu <= 598 + 1e-6
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -440,7 +521,7 @@ def test_drf_leaves_out_thresholds_next_to_a_category_no_one_used(kind, df):
     m = rp.MFRM(X, max_score=4, validate=False, exogenous=exo)
     m.calibrate(model="mixed", rater_models=["thresholds", "bivector", "items", "matrix", "global", "centrality"],
                 anchors=["Rater_5"])
-    m.drf_test("grp", model="mixed", reference="ref", p_method="chi2")
+    m.drf_test("grp", model="mixed", reference="ref", p_method="f")
     t = m.drf_threshold_table
     assert m.drf_table["p"].notna().all()
     assert t.loc[["Rater_1", "Rater_2", "Rater_4"], "df"].tolist() == [df] * 3
@@ -521,7 +602,7 @@ def test_unused_categories_null_mixed_downstream():
     assert np.isnan(m.threshold_se_mixed[2]) and np.isnan(m.rater_params_se_mixed["Rater_1"][2])
     assert np.isnan(m.rater_params_se_mixed["Rater_2"]["threshold_effects"][2])
     assert np.isfinite(m.rater_params_se_mixed["Rater_1"][[1, 3, 4]]).all()
-    m.drf_test("grp", model="mixed", reference="ref", p_method="chi2")
+    m.drf_test("grp", model="mixed", reference="ref", p_method="f")
     assert m.drf_table["p"].notna().all() and m.drf_threshold_table.loc["Rater_1", "df"] == 1
 
 
@@ -592,3 +673,22 @@ def test_stats_tables_take_the_fits_own_anchors():
         getattr(m, f)(model="mixed", anchors=anchors)
     with pytest.raises(ValueError):
         m.rater_stats_df(model="mixed", anchors=list(m.facet_names[1:3]))
+
+
+def test_anchor_std_errors_on_a_joint_mixed_fit():
+    """anchor_std_errors(model='mixed') on a calibrate(model='mixed') fit returns the fit's standard errors under the
+    anchor_ names (the fit is already in its anchors' frame) and raises for other anchors. Before the fix it sent
+    the joint fit down the single-representation sandwich route and raised KeyError: 'sm'."""
+    sim = MFRM_Sim(6, 300, 5, 3, model="items", seed=5)
+    anchors = ["Rater_1", "Rater_2"]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m = rp.MFRM(sim.responses, max_score=3, validate=False)
+        m.calibrate(model="mixed", rater_models=["global", "items", "global", "items", "global"], anchors=anchors)
+        m.std_errors(model="mixed", interval=0.95)
+        m.anchor_std_errors(model="mixed", anchors=anchors)
+    np.testing.assert_allclose(np.asarray(m.anchor_item_se_mixed, float), np.asarray(m.item_se_mixed, float))
+    np.testing.assert_allclose(np.asarray(m.anchor_rater_se_mixed, float), np.asarray(m.rater_se_mixed, float))
+    assert m.anchor_item_low_mixed is not None
+    with pytest.raises(ValueError, match="frame is part of the fit"):
+        m.anchor_std_errors(model="mixed", anchors=["Rater_3", "Rater_4"])

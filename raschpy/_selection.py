@@ -38,6 +38,19 @@ def bases(I, K):
     return A0, np.kron(Zi, Zk)
 
 
+def lstsq(A, B):
+    """Minimum-norm least-squares solution of A X = B, as numpy.linalg.lstsq(A, B, rcond=None)[0]. LAPACK's SVD-based
+    solver (gelsd) occasionally fails to converge on finite, ill-conditioned Jacobians; the solution is then taken
+    from the complete orthogonal factorisation (gelsy), which gives the same minimum-norm solution at the same rank
+    cut-off."""
+    try:
+        return np.linalg.lstsq(A, B, rcond=None)[0]
+    except np.linalg.LinAlgError:
+        from scipy.linalg import lstsq as _sp_lstsq
+        A = np.asarray(A, dtype=float)
+        return _sp_lstsq(A, B, cond=np.finfo(float).eps * max(A.shape), lapack_driver="gelsy")[0]
+
+
 def _pinv_sym(M, tol=1e-8):
     w, Q = np.linalg.eigh((M + M.T) / 2)
     k = w > tol * max(w.max(), 1e-300)
@@ -71,6 +84,12 @@ def composite_lr(X, K, b_rsm, b_pcm, cpat=False):
     r = composite_lr_core(2.0 * (ll1 - ll0), H1, J1, q0)
     H0, J0 = sens_var(b0, A0)
     r.update(cl_rsm=ll0, cl_pcm=ll1, penalty_rsm=penalty(H0, J0), penalty_pcm=penalty(H1, J1))
+    r["parts"] = close_fit_parts(H1, J1, q0, np.linalg.lstsq(B, b1 - b0, rcond=None)[0])
+    Hi = _pinv_sym(H1)
+    r["cov_pcm"] = B @ Hi @ J1 @ Hi @ B.T  # sandwich covariance of PCM's (centred) thresholds (per-item close fit)
+    # sampling variances of PCM's (centred) thresholds: the sandwich variances, at least the inverse-information
+    # ones (a category very few persons use leaves the sandwich's person-score variability near zero)
+    r["var_pcm"] = np.maximum(np.einsum("ij,jk,ik->i", B, Hi @ J1 @ Hi, B), np.einsum("ij,jk,ik->i", B, Hi, B))
     return r
 
 
@@ -175,6 +194,39 @@ def weighted_chi2_sf(x, weights):
     return _imhof_sf(x, w)[0]
 
 
+def nc_weighted_chi2_sf(x, weights, nc):
+    """
+    P(sum_j w_j (z_j + b_j)^2 > x), z_j standard normal, for positive weights w and non-centralities nc_j = b_j^2:
+    the close-fit tail of a weighted chi-square. With every nc_j = 0, weighted_chi2_sf; one weight or equal weights,
+    the non-central chi-square; otherwise Imhof's (1961) inversion with non-centrality, theta(u) = sum (arctan(w u) +
+    nc w u / (1 + w^2 u^2)) / 2 - x u / 2, rho(u) = prod (1 + w^2 u^2)^(1/4) exp(sum nc w^2 u^2 / (2 (1 + w^2
+    u^2))) (absolute accuracy about 1e-10).
+    """
+    from scipy.integrate import quad
+    from scipy.stats import ncx2
+
+    w, nc = np.asarray(weights, float), np.asarray(nc, float)
+    if not (nc > 0).any():
+        return weighted_chi2_sf(x, w)
+    if x <= 0:
+        return 1.0
+    s = w.max()
+    x, w = x / s, w / s
+    if len(w) == 1 or w.max() <= w.min() * (1 + 1e-12):
+        return float(ncx2.sf(x / w[0], len(w), nc.sum()))
+
+    def f(u):
+        wu = w * u
+        th = 0.5 * (np.arctan(wu) + nc * wu / (1 + wu**2)).sum() - 0.5 * x * u
+        lr = 0.25 * np.log1p(wu**2).sum() + 0.5 * (nc * wu**2 / (1 + wu**2)).sum()
+        return np.sin(th) / (u * np.exp(lr))
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # quad's IntegrationWarning
+        v, _ = quad(f, 0, np.inf, epsabs=1e-13, limit=2000)
+    return float(min(max(0.5 + v / np.pi, 0.0), 1.0))
+
+
 def composite_lr_core(diff, H, J, q0):
     """
     Composite LR test of a smaller model within a larger one, from twice the composite log-likelihood difference
@@ -202,6 +254,75 @@ def composite_lr_core(diff, H, J, q0):
         weight_min=float(lam.min()),
         weight_max=float(lam.max()),
     )
+
+
+def close_fit_parts(H, J, q0, gap):
+    """
+    The local (quadratic) pieces of a likelihood ratio test of a smaller model within a larger one, for close-fit
+    tests and power. H and J are the larger model's sensitivity and variability in coordinates whose first q0 are
+    the smaller model's directions (for a full likelihood J = H); gap holds the coordinates of the larger model's
+    estimates minus the smaller's. Under the null, LR is approximately sum_j lam_j z_j^2 (Kent, 1982: lam the
+    eigenvalues of (H^-1)_pp^-1 (H^-1 J H^-1)_pp, as composite_lr_core); if the true departure is c times the
+    observed one, LR is approximately sum_j lam_j (z_j + c b_j)^2. Returns (lam, b) over the tested directions the
+    data inform. For a full likelihood every lam_j = 1 and sum b_j^2 is the Wald non-centrality of the gap.
+    """
+    Hinv = _pinv_sym(H)
+    ps = slice(q0, H.shape[0])
+    G = (Hinv @ J @ Hinv)[ps, ps]
+    A = _pinv_sym(Hinv[ps, ps])
+    w, Q = np.linalg.eigh((G + G.T) / 2)
+    k = w > 1e-10 * max(w.max(), 1e-300)
+    Qk, wk = Q[:, k], w[k]
+    Gh = Qk @ np.diag(wk**0.5) @ Qk.T
+    Ghi = Qk @ np.diag(wk**-0.5) @ Qk.T
+    lam, U = np.linalg.eigh(Gh @ A @ Gh)
+    keep = lam > 1e-8 * max(lam.max(), 1e-300)
+    lam, U = lam[keep], U[:, keep]
+    b = U.T @ Ghi @ np.asarray(gap, float)[ps]
+    return lam, b
+
+
+def weighted_chi2_isf(alpha, weights):
+    """The upper alpha point of sum_j w_j chi-square(1) (the inverse of weighted_chi2_sf)."""
+    from scipy.optimize import brentq
+
+    w = np.asarray(weights, float)
+    if len(w) == 1 or w.max() <= w.min() * (1 + 1e-12):
+        return float(w[0] * chi2.isf(alpha, len(w)))
+    hi = float(w.max() * chi2.isf(alpha, len(w)))  # the sum is at most max(w) chi-square(d)
+    return float(brentq(lambda x: weighted_chi2_sf(x, w) - alpha, 0.0, hi, xtol=1e-10 * hi, rtol=1e-12))
+
+
+def close_fit_power(lam, b, scale, alpha, ratio=1.0):
+    """
+    P(the likelihood ratio test rejects at alpha) when the departure is scale times the observed one and the
+    sample is ratio times the observed one: the non-centralities (scale b_j)^2 grow in proportion to the sample.
+    """
+    crit = weighted_chi2_isf(alpha, lam)
+    return nc_weighted_chi2_sf(crit, lam, ratio * (scale * np.asarray(b, float)) ** 2)
+
+
+def power_sample_size(lam, b, scale, alpha, power, n_obs):
+    """
+    The smallest sample size n (in the units of n_obs, the sample the pieces come from) at which the test rejects
+    with probability at least power when the departure is scale times the observed one; np.inf if there is no
+    departure to detect.
+    """
+    from scipy.optimize import brentq
+
+    b = np.asarray(b, float)
+    if not (scale > 0 and (b**2).sum() > 0):
+        return np.inf
+    f = lambda n: close_fit_power(lam, b, scale, alpha, n / n_obs) - power
+    hi = float(n_obs)
+    while f(hi) < 0:
+        hi *= 2
+        if hi > 1e12:
+            return np.inf
+    lo = 1.0
+    if f(lo) >= 0:
+        return 1
+    return int(np.ceil(brentq(f, lo, hi, xtol=0.25)))
 
 
 def bt_restricted_fit(mat, A, tol=1e-10, max_iter=200):
@@ -368,3 +489,281 @@ def thin_categories(X, K):
     rho = _rcl.width_ridges(counts[1], counts[2], K) if K - 1 >= 2 else np.zeros(K - 1)  # (W, Nn, Dd, V)
     thin = [k + 1 for k in np.nonzero(rho)[0]]
     return thin, unused
+
+
+class _ExactCloseFitNull:
+    """
+    The distribution of a likelihood ratio (or composite likelihood ratio) statistic for RSM within PCM when the true
+    departure from RSM has a given size, for close-fit tests, the bias-corrected departure size and power-based
+    sample sizes; subclasses supply _expected_fit.
+
+    For a hypothetical PCM truth T, the statistic is approximately sum_j lam_j (z_j + beta_j)^2 (z standard normal;
+    lam Kent's weights, all 1 for a full likelihood), and its expected excess over sum(lam) is the shift
+    2 [E(T) - max over RSM thresholds b of E(b)], E(b) the (composite) log-likelihood of b averaged over the responses
+    T would give the same persons, holding what the likelihood conditions on (_expected_fit computes it exactly). T is
+    the best PCM fit to its own expected responses, so no PCM fit is needed. The shift is spread over the components
+    in proportion to shape (beta_j^2 = shift shape_j, sum lam shape = 1). T = b_rsm + s u, u the observed departure
+    (PCM's centred thresholds minus RSM's) divided by its size, s set so that the size (size_fn) of T's departure from
+    its RSM fit is delta. The shift is proportional to the number of persons at the same mix.
+    """
+
+    def _setup(self, K, b_rsm, b_pcm, size_fn, lam, shape):
+        self.K = int(K)
+        self.a = np.asarray(b_rsm, float) - np.mean(b_rsm)
+        gap = (np.asarray(b_pcm, float) - np.mean(b_pcm)) - self.a
+        self.I = len(self.a) // self.K
+        self.size_fn = size_fn
+        size = float(size_fn(gap))
+        self._observed_size = size
+        self.u = gap / size if size > 0 else None
+        self.A0 = bases(self.I, self.K)[0]
+        self._init_null(lam, shape)
+
+    def _init_null(self, lam, shape):
+        self.lam = np.asarray(lam, float)
+        shape = np.asarray(shape, float)
+        tot = float((self.lam * shape).sum())
+        self.shape = shape / tot if tot > 0 else np.full(len(self.lam), 1.0 / self.lam.sum())
+        self._nc, self._scale = {}, {}
+        self._ratio = 1.0  # size of T's departure from its RSM fit / s, carried between calls
+
+    def _at_scale(self, s):
+        """(size of the departure from RSM, shift) for the truth T = b_rsm + s u (cached)."""
+        key = round(float(s), 12)
+        if key not in self._scale:
+            nc, dep = self._expected_fit(self.a + s * self.u)
+            self._scale[key] = (float(self.size_fn(dep)), nc)
+        return self._scale[key]
+
+    def _solve_scale(self, f, s0, tol):
+        """Root in s of f(size, shift) (increasing in s; |f| < tol accepted), by secant steps from s0 with a
+        bracketing fallback."""
+        from scipy.optimize import brentq
+
+        g = lambda s: f(*self._at_scale(s))
+        s1, g1 = s0, g(s0)
+        if abs(g1) < tol:
+            return s1
+        s2 = s1 * (1 - g1) if abs(g1) < 0.5 else s1 * (1.25 if g1 < 0 else 0.8)
+        g2 = g(s2)
+        for _ in range(8):
+            if abs(g2) < tol or g2 == g1:
+                return s2
+            s3 = s2 - g2 * (s2 - s1) / (g2 - g1)
+            if not np.isfinite(s3) or s3 <= 0:
+                break
+            s1, g1, s2, g2 = s2, g2, s3, g(s3)
+        lo, hi = min(s1, s2), max(s1, s2)
+        # bounded: along some directions the size never falls below (or never reaches) the target, and each step is
+        # a full expected fit; the caller then falls back to the quadratic approximation
+        for _ in range(30):
+            if g(lo) <= 0:
+                break
+            lo /= 2
+        else:
+            raise ValueError("close-fit null: no scale gives a departure this small along the observed direction")
+        for _ in range(30):
+            if g(hi) >= 0:
+                break
+            hi *= 2
+        else:
+            raise ValueError("close-fit null: no scale gives a departure this large along the observed direction")
+        return brentq(g, lo, hi, xtol=tol * hi, maxiter=60)
+
+    def nc(self, delta):
+        """Shift (the statistic's expected excess over sum(lam)) at departure size delta (logits), for the data's
+        persons."""
+        if self.u is None or delta <= 0:
+            return 0.0
+        key = round(float(delta), 12)
+        if key not in self._nc:
+            # the departure's size is close to proportional to s: relative error in it, solved by secant steps
+            s = self._solve_scale(lambda size, nc: size / delta - 1, delta / self._ratio, 1e-3)
+            size, nc = self._at_scale(s)
+            self._ratio = size / s
+            self._nc[key] = nc
+        return self._nc[key]
+
+    def p(self, stat, delta):
+        """Close-fit p-value: P(statistic >= stat) when the departure's size is delta."""
+        return nc_weighted_chi2_sf(stat, self.lam, self.nc(delta) * self.shape)
+
+    def delta_hat(self, stat):
+        """Bias-corrected departure size (logits): the size whose shift equals stat - sum(lam) (0 if not positive)."""
+        target = stat - float(self.lam.sum())
+        if self.u is None or target <= 0:
+            return 0.0
+        # sqrt(shift) is close to linear in s; first guess from one evaluation at the observed size
+        size1, nc1 = self._at_scale(self._observed_size)
+        s0 = self._observed_size * np.sqrt(target / nc1) if nc1 > 0 else self._observed_size
+        s = self._solve_scale(lambda size, nc: np.sqrt(nc / target) - 1, s0, 1e-4)
+        size, _ = self._at_scale(s)
+        self._ratio = size / s
+        return size
+
+    def power(self, delta, alpha, ratio=1.0):
+        """P(the test of RSM at alpha rejects) when the size is delta and the sample is ratio times the data's."""
+        crit = weighted_chi2_isf(alpha, self.lam)
+        return nc_weighted_chi2_sf(crit, self.lam, ratio * self.nc(delta) * self.shape)
+
+    def sample_size(self, delta, alpha, power, n_obs):
+        """Smallest sample size (in the units of n_obs) with power at least power at size delta; inf if none."""
+        from scipy.optimize import brentq
+
+        if self.nc(delta) <= 0:
+            return np.inf
+        f = lambda r: self.power(delta, alpha, r) - power
+        if f(0.0) >= 0:
+            return 0.0
+        hi = 1.0
+        while f(hi) < 0:
+            hi *= 2
+        return float(n_obs * brentq(f, 0.0, hi, xtol=1e-8))
+
+
+class CmlCloseFitNull(_ExactCloseFitNull):
+    """
+    _ExactCloseFitNull for the CML likelihood ratio test (df (I - 1)(K - 1), every weight 1). E(b) holds each person's
+    answered items and raw score: E(b) = cond_loglik(X, b) - sum_{i,h} D[i, h] b[i, h], D[i, h] = sum_{k >= h}
+    (expected - observed count of category k of item i), over the persons who contribute.
+
+    X: responses (persons x items, NaN missing); K: thresholds per item; b_rsm, b_pcm: stacked uncentred thresholds
+    (item by item) of the two CML fits; size_fn: departure (stacked) -> size in logits; rsm_info: RSM's conditional
+    information in the coordinates of bases(I, K)[0] (e.g. from PCM's Hessian), used as a fixed Newton matrix in the
+    RSM fits to the expected responses (computed once at b_rsm when None).
+    """
+
+    def __init__(self, X, K, b_rsm, b_pcm, size_fn, rsm_info=None):
+        self.X = np.asarray(X, float)
+        I = self.X.shape[1]
+        df = (I - 1) * (int(K) - 1)
+        self._setup(K, b_rsm, b_pcm, size_fn, np.ones(df), np.ones(df))
+        self.Ks = np.full(self.I, self.K)
+        self.prep = _esf.prepare(self.X, self.Ks)
+        Xc = self.X[self.prep.keep]
+        self.obs_counts = np.zeros((self.I, self.K + 1))
+        for k in range(self.K + 1):
+            self.obs_counts[:, k] = (Xc == k).sum(0)
+        if rsm_info is None:
+            Hs = _esf.cond_loglik(self.X, self.a.reshape(self.I, self.K), hessian=True, prepared=self.prep)[2]
+            rsm_info = -(self.A0.T @ Hs @ self.A0)
+        self.rsm_info = rsm_info
+
+    def _expected_fit(self, T):
+        """(shift, T's departure from its RSM fit) for the truth T (stacked)."""
+        I, K = self.I, self.K
+        P = _esf.conditional_moments(self.X, T.reshape(I, K), prepared=self.prep, probs=True)["P"]
+        exp_counts = np.nansum(P[self.prep.keep], axis=0)
+        C = exp_counts - self.obs_counts
+        D = np.cumsum(C[:, ::-1], axis=1)[:, ::-1][:, 1:].reshape(-1)
+
+        def E(b):
+            ll, g, _ = _esf.cond_loglik(self.X, b.reshape(I, K), prepared=self.prep)
+            return ll - D @ b, g - D
+
+        e_T = E(T)[0]
+        A0, M = self.A0, self.rsm_info
+        th = getattr(self, "_last_theta", None)
+        if th is None:
+            th = np.linalg.lstsq(A0, self.a, rcond=None)[0]
+        e, g = E(A0 @ th)
+        hessian_used = False
+        for it in range(200):
+            # chord steps with the fixed information matrix M; one exact Hessian if they stall
+            step = np.linalg.solve(M, A0.T @ g)
+            t = 1.0
+            while True:
+                e_new, g_new = E(A0 @ (th + t * step))
+                if e_new >= e - 1e-12 * abs(e) or t < 1e-3:
+                    break
+                t /= 2
+            th, e, g = th + t * step, e_new, g_new
+            if np.max(np.abs(t * step)) < 1e-7:
+                break
+            if it == 30 and not hessian_used:
+                Hs = _esf.cond_loglik(self.X, (A0 @ th).reshape(I, K), hessian=True, prepared=self.prep)[2]
+                M, hessian_used = -(A0.T @ Hs @ A0), True
+        self._last_theta = th
+        return max(2.0 * (e_T - e), 0.0), T - A0 @ th
+
+
+class CompositeCloseFitNull(_ExactCloseFitNull):
+    """
+    _ExactCloseFitNull for the composite likelihood ratio test of RSM within PCM ('cp-full-rcl', or CPAT's patterns
+    with cpat=True, 'cpat-rcl'). E(b) holds, for each item pair, the number of persons with each pair total: the
+    expected count of (x_i, x_j) = (a, s - a) is N_ijs P_T(a | s), P_T(a | s) proportional to the two items' category
+    weights; the comparisons are built from these counts as from observed ones (_rcl.pcm_comparisons_from_counts).
+    lam and b_obs: Kent's weights and the observed departure's shift per component (close_fit_parts); the shift is
+    spread over the components in proportion to b_obs^2.
+    """
+
+    def __init__(self, X, K, b_rsm, b_pcm, size_fn, lam, b_obs, cpat=False):
+        self._setup(K, b_rsm, b_pcm, size_fn, lam, np.asarray(b_obs, float) ** 2)
+        self.cpat = cpat
+        self.Ks = [self.K] * self.I
+        C = _rcl.pair_counts(X, self.Ks)
+        K1 = self.K + 1
+        C4 = C.reshape(self.I, K1, self.I, K1)
+        # N[i, j, s]: persons answering both items with pair total s
+        self.N = np.zeros((self.I, self.I, 2 * self.K + 1))
+        for a in range(K1):
+            for b in range(K1):
+                self.N[:, :, a + b] += C4[:, a, :, b]
+
+    def _expected_fit(self, T):
+        """(shift, T's departure from its RSM fit) for the truth T (stacked)."""
+        I, K, K1 = self.I, self.K, self.K + 1
+        LE = np.concatenate([np.zeros((I, 1)), -np.cumsum(T.reshape(I, K), 1)], 1)
+        W = LE[:, None, :, None] + LE[None, :, None, :]  # (i, j, a, b) log weights
+        aa, bb = np.meshgrid(np.arange(K1), np.arange(K1), indexing="ij")
+        tot = aa + bb
+        Ce = np.zeros((I, K1, I, K1))
+        for s in range(2 * K + 1):
+            m = tot == s
+            w = np.where(m[None, None], W, -np.inf)
+            w = w - w.max(axis=(2, 3), keepdims=True)
+            pw = np.exp(w)
+            pw /= pw.sum(axis=(2, 3), keepdims=True)
+            Ce += (self.N[:, :, s][:, :, None, None] * pw).transpose(0, 2, 1, 3)
+        D, t, u = _rcl.pcm_comparisons_from_counts(Ce.reshape(I * K1, I * K1), self.Ks, self.cpat)
+        ll_T = _ll(D, t, u, T)
+        A0 = self.A0
+        th = getattr(self, "_last_theta", None)
+        if th is None:
+            th = np.linalg.lstsq(A0, self.a, rcond=None)[0]
+        ll = _ll(D, t, u, A0 @ th)
+        for _ in range(100):
+            b = A0 @ th
+            sg = 1.0 / (1.0 + np.exp(-(D @ b)))
+            g = A0.T @ (D.T @ (t - (t + u) * sg))
+            step = np.linalg.solve(A0.T @ _info(D, t, u, b) @ A0, g)
+            st = 1.0
+            while True:
+                ll_new = _ll(D, t, u, A0 @ (th + st * step))
+                if ll_new >= ll - 1e-12 * abs(ll) or st < 1e-3:
+                    break
+                st /= 2
+            th, ll = th + st * step, ll_new
+            if np.max(np.abs(st * step)) < 1e-9:
+                break
+        self._last_theta = th
+        return max(2.0 * (ll_T - ll), 0.0), T - A0 @ th
+
+
+class FittedCloseFitNull(_ExactCloseFitNull):
+    """
+    _ExactCloseFitNull with the expected-response fits supplied by the caller (e.g. MFRM's per-facet-element
+    likelihood ratio tests): expected_fit(T) returns (shift, size) for the truth T = a + s u, u = gap / its observed
+    size (observed_size), size measured as the caller measures the observed departure.
+    """
+
+    def __init__(self, expected_fit, a, gap, observed_size, lam, shape):
+        self._fit = expected_fit
+        self.a = np.asarray(a, float)
+        self._observed_size = float(observed_size)
+        self.u = np.asarray(gap, float) / observed_size if observed_size > 0 else None
+        self.size_fn = float
+        self._init_null(lam, shape)
+
+    def _expected_fit(self, T):
+        return self._fit(T)

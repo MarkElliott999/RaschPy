@@ -1268,6 +1268,131 @@ def full_person_grid_bread(b, X, K, sl, drop_widths=(), empty=()):
     return Hb.reshape(n, I * K, I * K)
 
 
+def person_comparison_terms(R, I, K, drop_widths=(), empty=None):
+    """The comparisons a person's ratings enter in the composite likelihood (any number of facet elements), as
+    arrays over terms: first and second cell (facet element x item, flattened r * I + i), the two category pairs
+    (alpha1, beta1) and (alpha2, beta2) whose indicators give the person's weight in the term, e = 1(x_first =
+    alpha1, x_second = beta1) + 1(x_first = alpha2, x_second = beta2), and the grid entries (flattened (r, i, k))
+    of the logit gx - gy. empty=None: CPAT's patterns ('cpat-rcl', person_grid_scores); else the full pattern set
+    with these empty categories ('cp-full-rcl', full_person_grid_scores). Pairs of cells are those of the scores:
+    the items of one facet element, and the facet elements of one item.
+    """
+    drop_widths = set(drop_widths)
+    within = [(r * I + i, r * I + j) for r in range(R) for i in range(I) for j in range(i + 1, I)]
+    between = [(r * I + i, q * I + i) for i in range(I) for r in range(R) for q in range(r + 1, R)]
+    rows = []  # (first, second, a1, b1, a2, b2, thr of second, thr of first)
+    if empty is None:
+        for f, sc in within + between:
+            for c in range(K):
+                rows.append((f, sc, c + 1, c, c, c + 1, c, c))
+        for f, sc in within:
+            for kk in range(K - 1):
+                if kk in drop_widths:
+                    continue
+                k = kk + 1
+                for a, bcell in ((f, sc), (sc, f)):
+                    rows.append((a, bcell, k, k, k - 1, k + 1, kk + 1, kk))
+    else:
+        for a, bb, d in _full_patterns(K, drop_widths, empty):
+            for f, sc in within + between:
+                rows.append((f, sc, a, bb, a - 1, bb + 1, bb, a - 1))
+    if not rows:
+        z = np.zeros(0, int)
+        return dict(first=z, second=z, a1=z, b1=z, a2=z, b2=z, gx=z, gy=z)
+    t = np.asarray(rows, dtype=int)
+    return dict(first=t[:, 0], second=t[:, 1], a1=t[:, 2], b1=t[:, 3], a2=t[:, 4], b2=t[:, 5],
+                gx=t[:, 1] * K + t[:, 6], gy=t[:, 0] * K + t[:, 7])
+
+
+def kc_grid_scores(U, b, X, K, J, bread_inv, drop_widths=(), empty=None, chunk=2000):
+    """
+    Kauermann-Carroll (2001) correction of the composite-likelihood scores U (persons x p, in the coordinates
+    whose grid Jacobian is J (R I K x p)) of an RCL fit with any number of facet elements: each person's score u_n
+    becomes (I - H_n)^(-1/2) u_n, H_n = B_n B^+, as Rasch._kc_scores, with B_n = J' (sum over the person's
+    comparisons of e w (delta_x - delta_y)(delta_x - delta_y)') J their contribution to the unpenalised information
+    (w = s (1 - s) at the grid b (R, I, K); for a grid not linear in the coordinates, the Gauss-Newton part, the
+    usual choice). The inverse square root is taken from the eigendecomposition of S' B_n S (S S' = bread_inv),
+    whose eigenvalues are those of H_n. X (R, P, I); bread_inv the pseudo-inverse of the penalised bread
+    in the same coordinates; empty as person_comparison_terms. Persons with the same ratings are computed once. A
+    person whose I - H_n is near-singular keeps their score.
+    """
+    U = np.asarray(U, dtype=float)
+    R, P, I = X.shape
+    J = np.asarray(J.todense() if hasattr(J, "todense") else J, dtype=float)
+    terms = person_comparison_terms(R, I, K, drop_widths, empty)
+    if not len(terms["gx"]):
+        return U.copy()
+    A = np.asarray(bread_inv, dtype=float)
+    w_e, Q = np.linalg.eigh((A + A.T) / 2)
+    keep = w_e > 1e-10 * max(w_e.max(), 1e-300)
+    Qk = Q[:, keep]
+    S, T = Qk * np.sqrt(w_e[keep]), Qk / np.sqrt(w_e[keep])
+    bf = np.asarray(b, dtype=float).ravel()
+    s = _sig(bf[terms["gx"]] - bf[terms["gy"]])
+    w = s * (1 - s)
+    JS = J @ S  # (grid, p_eff)
+    gx, gy = terms["gx"], terms["gy"]
+    SdJ = JS[gx] - JS[gy]  # (terms, p_eff): S' (J_x - J_y) for each term
+    Xp = np.transpose(X, (1, 0, 2)).reshape(P, R * I)
+    rows, inv = np.unique(np.where(np.isnan(Xp), -1.0, Xp), axis=0, return_inverse=True)
+    inv = np.asarray(inv).ravel()
+    groups = np.split(np.argsort(inv, kind="stable"), np.cumsum(np.bincount(inv, minlength=len(rows)))[:-1])
+    out = U.copy()
+    f, sc = terms["first"], terms["second"]
+    pe = SdJ.shape[1]
+    D2 = None
+    if pe * pe * len(w) <= 2e7:  # every term's outer product, so each person's S' B_n S is one matrix product
+        D2 = (SdJ[:, :, None] * SdJ[:, None, :]).reshape(len(w), pe * pe)
+    chunk = max(1, min(chunk, int(5e6 // (pe * pe))))  # bounds the stack of S' B_n S matrices
+    for start in range(0, len(rows), chunk):
+        Xr = rows[start: start + chunk]
+        E = ((Xr[:, f] == terms["a1"]) & (Xr[:, sc] == terms["b1"])).astype(float) + (
+            (Xr[:, f] == terms["a2"]) & (Xr[:, sc] == terms["b2"])
+        )
+        Ew = E * w
+        if D2 is not None:
+            M = (Ew @ D2).reshape(-1, pe, pe)
+        else:
+            M = np.empty((Xr.shape[0], pe, pe))
+            for g in range(Xr.shape[0]):
+                nz = np.nonzero(Ew[g])[0]
+                cells, loc = np.unique(np.concatenate([gx[nz], gy[nz]]), return_inverse=True)
+                if len(nz) <= len(cells):  # few comparisons: sum their outer products directly
+                    C = SdJ[nz] * np.sqrt(Ew[g, nz])[:, None]
+                    M[g] = C.T @ C
+                else:
+                    # many comparisons: through the grid cells they touch, S'B_nS = (JS)' L (JS), with L the
+                    # person's weighted comparison Laplacian over those cells, L (JS) = D' (w (JS_x - JS_y))
+                    # for the comparisons' incidence matrix D (+1 at x, -1 at y)
+                    m = len(nz)
+                    D = sparse.csr_matrix(
+                        (np.r_[np.ones(m), -np.ones(m)], (np.r_[np.arange(m), np.arange(m)], loc)),
+                        shape=(m, len(cells)),
+                    )
+                    M[g] = JS[cells].T @ (D.T @ (SdJ[nz] * Ew[g, nz][:, None]))
+        M = (M + np.transpose(M, (0, 2, 1))) / 2
+        lam_all, V_all = np.linalg.eigh(M)  # S' B_n S = V diag(lam) V'; lam are the eigenvalues of H_n
+        lam_all = np.clip(lam_all, 0.0, None)
+        ok = np.isfinite(lam_all).all(1) & (lam_all.max(1) < 1 - 1e-8) & (lam_all.max(1) > 0)
+        gs = np.nonzero(ok)[0]
+        if not len(gs):
+            continue
+        members = np.concatenate([groups[start + g] for g in gs])
+        gi = np.repeat(np.arange(len(gs)), [len(groups[start + g]) for g in gs])
+        fac = (1 - lam_all[gs]) ** -0.5 - 1
+        V = V_all[gs]
+        blk = max(1, int(5e6 // (pe * pe)))
+        for i0 in range(0, len(members), blk):
+            mb, gb = members[i0: i0 + blk], gi[i0: i0 + blk]
+            u = U[mb]
+            y = u @ S
+            Vb = V[gb]
+            z = y + np.einsum("nij,nj->ni", Vb, np.einsum("nji,nj->ni", Vb, y) * fac[gb])
+            adj = z @ T.T + (u - (u @ Qk) @ Qk.T)
+            out[mb] = np.where(np.isfinite(adj), adj, u)
+    return out
+
+
 def warn_unidentified(stacklevel=3):
     """Warn that some estimates are not identified, so their standard errors are NaN."""
     warnings.warn(
@@ -1324,7 +1449,7 @@ def cell_sandwich(cm, theta, info, X, K, small_sample=False, kc_scores=None):
     """Sandwich covariance of the free cell-model parameters theta: bread = negative penalised Hessian at the
     estimate, meat = sum over persons of their score outer products. Returns (V, free, null) with V over the free
     coordinates and null a basis of the directions the bread does not identify (see null_directions()).
-    small_sample=True applies the Kauermann-Carroll correction (single facet element only).
+    small_sample=True applies the Kauermann-Carroll correction (kc_grid_scores; kc_scores is not used).
     """
     st = cell_state(cm, theta, info)
     J, negH, free, drop = st["J"], st["negH"], st["free"], st["drop_widths"]
@@ -1339,13 +1464,7 @@ def cell_sandwich(cm, theta, info, X, K, small_sample=False, kc_scores=None):
     Bf = negH[np.ix_(free, free)]
     A = np.linalg.pinv(Bf)
     if small_sample:
-        Jf = J[:, free]
-        bread = (
-            (lambda sl: person_grid_bread(b, X, K, sl, drop))
-            if empty is None
-            else (lambda sl: full_person_grid_bread(b, X, K, sl, drop, empty))
-        )
-        U = kc_scores(U, lambda sl: np.einsum("ap,nab,bq->npq", Jf, bread(sl), Jf), A)
+        U = kc_grid_scores(U, b, X, K, J[:, free], A, drop, empty)
     return A @ (U.T @ U) @ A.T, free, null_directions(Bf)
 
 
@@ -1557,21 +1676,27 @@ class StretchDesign:
         return self.M.T @ (S + S.T) @ self.M
 
 
-def fit_cml_stretch(X, design, theta0, Q, tol=1e-7, max_iter=200):
+def fit_cml_stretch(X, design, theta0, Q, tol=1e-7, max_iter=200, linear=None, prep=None, quiet=False):
     """Penalised CML for a stretch model: maximise cond_loglik(X, grid) - theta' Q theta / 2 by Newton-Raphson
     on the exact Hessian (grid Jacobian term plus the bilinear term), with step halving; a gradient step where
     the penalised information is not positive definite. X: persons x (facet element, item) virtual items.
+    linear (flat grid vector): maximise cond_loglik(X, grid) - linear . grid - theta' Q theta / 2 instead (the
+    conditional log-likelihood averaged over other responses with the same raw scores; ll then includes the
+    linear term). prep: _esf.prepare(X, ...) if already computed; quiet: no progress reporting.
     Returns dict(theta, b, ll, objective, converged, iterations, max_gradient, info (negative penalised
     Hessian), hessian (of cond_loglik in the grid))."""
     from raschpy import _esf
 
     R, I, K = design.R, design.I, design.K
-    prep = _esf.prepare(X, [K] * (R * I))
+    if prep is None:
+        prep = _esf.prepare(X, [K] * (R * I))
 
     def evaluate(theta):
         b = design.grid(theta)
         ll, g, H = _esf.cond_loglik(X, list(b.reshape(R * I, K)), hessian=True, prepared=prep)
         g, H = np.nan_to_num(g), np.nan_to_num(H)  # unused-category markers (inf) have no derivatives
+        if linear is not None:
+            ll, g = ll - float(linear @ b.ravel()), g - linear
         J = design.grid_jacobian(theta)
         gt = J.T @ g - Q @ theta
         F = J.T @ H @ J - Q  # without the bilinear term: negative definite where the data and penalty inform theta
@@ -1583,7 +1708,7 @@ def fit_cml_stretch(X, design, theta0, Q, tol=1e-7, max_iter=200):
     theta = np.asarray(theta0, float).copy()
     ll, obj, g, info, H, fisher = evaluate(theta)
     converged, it = False, 0
-    rep = _progress.Reporter("CML fit", unit="iterations").__enter__()
+    rep = None if quiet else _progress.Reporter("CML fit", unit="iterations").__enter__()
     for it in range(1, max_iter + 1):
         try:
             ev = np.linalg.eigvalsh(info)
@@ -1606,11 +1731,13 @@ def fit_cml_stretch(X, design, theta0, Q, tol=1e-7, max_iter=200):
         d_grid = design.grid(new) - design.grid(theta)
         change = np.max(np.abs(d_grid[np.isfinite(d_grid)]), initial=0.0)
         theta, (ll, obj, g, info, H, fisher) = new, out
-        rep.update(note=f"largest change {change:.2g}")
+        if rep is not None:
+            rep.update(note=f"largest change {change:.2g}")
         if change < tol:
             converged = True
             break
-    rep.close()
+    if rep is not None:
+        rep.close()
     return dict(theta=theta, b=design.grid(theta).ravel(), ll=ll, objective=obj, converged=converged,
                 iterations=it, max_gradient=float(np.abs(g).max()), info=info, hessian=H)
 
@@ -1639,10 +1766,11 @@ def stretch_grid_jacobian(sm, theta):
     return Jn.reshape(R * I * K, sm.p_nat)
 
 
-def stretch_sandwich(sm, theta, X, K, fixed=(), drop_widths=()):
+def stretch_sandwich(sm, theta, X, K, fixed=(), drop_widths=(), small_sample=False):
     """Sandwich covariance of the free stretch-model parameters theta (fixed: theta indices held fixed). Bread =
     negative penalised Hessian at the estimate, meat = sum over persons of their score outer products.
-    Returns (V, free, null) with V over the free coordinates and null as in cell_sandwich().
+    Returns (V, free, null) with V over the free coordinates and null as in cell_sandwich(). small_sample=True
+    applies the Kauermann-Carroll correction (kc_grid_scores).
     """
     free = np.ones(sm.p, bool)
     free[list(fixed)] = False
@@ -1661,6 +1789,8 @@ def stretch_sandwich(sm, theta, X, K, fixed=(), drop_widths=()):
     U = G.reshape(G.shape[0], -1) @ J
     Bf = -sm.evaluate(theta)["H"][np.ix_(free, free)]
     A = np.linalg.pinv(Bf)
+    if small_sample:
+        U = kc_grid_scores(U, b, X, K, J, A, drop_widths, sm.full_empty)
     return A @ (U.T @ U) @ A.T, free, null_directions(Bf)
 
 
@@ -1678,16 +1808,28 @@ def pcm_comparisons(X, Ks, cpat=False):
     thresholds; comparisons with t + u = 0 are left out. cpat=True keeps CPAT's patterns only ('cpat-rcl'):
     |b - (a - 1)| <= 1, the same threshold on the two items (odd pair totals) or adjacent ones (even totals).
     """
+    return pcm_comparisons_from_counts(pair_counts(X, Ks), Ks, cpat)
+
+
+def pair_counts(X, Ks):
+    """C[(i, a), (j, b)] = number of persons with x_i = a and x_j = b (rows and columns stacked item by item,
+    categories 0..K_i)."""
     X = np.asarray(X, float)
     Ks = [int(k) for k in Ks]
-    off = np.concatenate([[0], np.cumsum(Ks)]).astype(int)
     coff = np.concatenate([[0], np.cumsum([k + 1 for k in Ks])]).astype(int)
     Z = np.zeros((X.shape[0], coff[-1]))
     for i, K in enumerate(Ks):
         x = X[:, i]
         obs = ~np.isnan(x)
         Z[np.flatnonzero(obs), coff[i] + x[obs].astype(int)] = 1.0
-    C = Z.T @ Z  # C[(i, a), (j, b)] = #(x_i = a, x_j = b)
+    return Z.T @ Z
+
+
+def pcm_comparisons_from_counts(C, Ks, cpat=False):
+    """pcm_comparisons' (D, t, u) from the pair counts C (pair_counts); C may hold expected counts."""
+    Ks = [int(k) for k in Ks]
+    off = np.concatenate([[0], np.cumsum(Ks)]).astype(int)
+    coff = np.concatenate([[0], np.cumsum([k + 1 for k in Ks])]).astype(int)
     xs, ys, ts, us = [], [], [], []
     for i in range(len(Ks)):
         for j in range(i + 1, len(Ks)):
@@ -1796,14 +1938,51 @@ def pcm_person_scores(X, Ks, b, cpat=False):
     return S
 
 
-def pcm_sandwich(X, Ks, b, info, A, cpat=False):
+def pcm_person_bread(X, Ks, b, cpat=False):
+    """Each person's contribution to the negative Hessian of the composite log-likelihood of pcm_comparisons()
+    (same cpat) with respect to the stacked uncentred thresholds b, (n_persons, sum Ks, sum Ks): the sum over the
+    person's comparisons of s (1 - s) d d', d = e_j - e_i the comparison's threshold contrast."""
+    X = np.asarray(X, float)
+    Ks = [int(k) for k in Ks]
+    off = np.concatenate([[0], np.cumsum(Ks)]).astype(int)
+    p, n = int(off[-1]), X.shape[0]
+    rows = np.arange(n)
+    R_, J_, I_, V_ = [], [], [], []
+    for i in range(len(Ks)):
+        for j in range(i + 1, len(Ks)):
+            ok = ~np.isnan(X[:, i]) & ~np.isnan(X[:, j])
+            r = rows[ok]
+            a, c = X[ok, i].astype(int), X[ok, j].astype(int)
+            for m, pj, pi in (
+                ((a >= 1) & (c <= Ks[j] - 1) & ((np.abs(c - (a - 1)) <= 1) if cpat else True),
+                 off[j] + c, off[i] + a - 1),
+                ((a + 1 <= Ks[i]) & (c >= 1) & ((np.abs((c - 1) - a) <= 1) if cpat else True),
+                 off[j] + c - 1, off[i] + a),
+            ):
+                m = np.broadcast_to(m, a.shape)
+                pj_, pi_ = pj[m], pi[m]
+                s = 1.0 / (1.0 + np.exp(-(b[pj_] - b[pi_])))
+                R_.append(r[m]); J_.append(pj_); I_.append(pi_); V_.append(s * (1 - s))
+    r, pj, pi, v = (np.concatenate(x) for x in (R_, J_, I_, V_))
+    base = r * (p * p)
+    idx = np.concatenate([base + pj * p + pj, base + pi * p + pi, base + pj * p + pi, base + pi * p + pj])
+    w = np.concatenate([v, v, -v, -v])
+    return np.bincount(idx, weights=w, minlength=n * p * p).reshape(n, p, p)
+
+
+def pcm_sandwich(X, Ks, b, info, A, cpat=False, small_sample=False, kc_scores=None):
     """Sandwich (Godambe) covariance of the PCM RCL thresholds b = A theta: A info^{-1} M info^{-1} A', info the
     negative Hessian of the (penalised) objective from fit_pcm(), M the sum over persons of the outer products of
-    their scores (pcm_person_scores, once per distinct response row)."""
+    their scores (pcm_person_scores, once per distinct response row). small_sample=True applies the
+    Kauermann-Carroll correction to the scores (kc_scores: Rasch._kc_scores), with each person's bread from
+    pcm_person_bread."""
     rows, counts = np.unique(np.where(np.isnan(X), -1.0, X), axis=0, return_counts=True)
-    U = pcm_person_scores(np.where(rows < 0, np.nan, rows), Ks, b, cpat) @ A
-    M = U.T @ (counts[:, None] * U)
+    rows = np.where(rows < 0, np.nan, rows)
+    U = pcm_person_scores(rows, Ks, b, cpat) @ A
     Binv = np.linalg.inv(info)
+    if small_sample:
+        U = kc_scores(U, lambda sl: A.T @ pcm_person_bread(rows[sl], Ks, b, cpat) @ A, Binv)
+    M = U.T @ (counts[:, None] * U)
     return A @ Binv @ M @ Binv @ A.T
 
 
@@ -1811,10 +1990,28 @@ def pcm_sandwich(X, Ks, b, info, A, cpat=False):
 # 'mixed': each facet element on its own representation
 # ----------------------------------------------------------------------------------------------------------------
 
-_MIXED_ITEM_EFFECTS = ("items", "bivector", "matrix")
-_MIXED_THRESHOLD_EFFECTS = ("thresholds", "bivector", "matrix")
-_MIXED_ITEM_STRETCH = ("pseudo_halo", "bistretch")
-_MIXED_THRESHOLD_STRETCH = ("centrality", "bistretch")
+# two internal representations, used only inside per_rater_model_selection(test='LR') and never reported: a full
+# set of effects on one side beside a stretch on the other (item effects + threshold stretch, threshold effects +
+# item stretch)
+_MIXED_HIDDEN = {"items_centrality": "items", "thresholds_pseudo_halo": "thresholds"}
+_MIXED_ITEM_EFFECTS = ("items", "bivector", "matrix", "items_centrality")
+_MIXED_THRESHOLD_EFFECTS = ("thresholds", "bivector", "matrix", "thresholds_pseudo_halo")
+_MIXED_ITEM_STRETCH = ("pseudo_halo", "bistretch", "thresholds_pseudo_halo")
+_MIXED_THRESHOLD_STRETCH = ("centrality", "bistretch", "items_centrality")
+
+
+def cut_representation(kinds):
+    """The representation an anchor's cuts imply, from the kinds of its cut cells ('item', 'threshold', 'cell'):
+    item cuts only -> 'items', threshold cuts only -> 'thresholds', both -> 'bivector' (item and threshold shifts
+    add), any item x threshold cell -> 'matrix'."""
+    kinds = set(kinds)
+    if "cell" in kinds:
+        return "matrix"
+    if kinds == {"item"}:
+        return "items"
+    if kinds == {"threshold"}:
+        return "thresholds"
+    return "bivector"
 
 
 class MixedDesign:
@@ -1826,8 +2023,12 @@ class MixedDesign:
     with A (item effects; items / bivector / matrix) summing to 0 over items within each facet element, T
     (threshold effects; thresholds / bivector / matrix) summing to 0 over thresholds, E (interactions; matrix)
     summing to 0 over both, and omegaI / omegaT the stretch multipliers (pseudo_halo, bistretch / centrality,
-    bistretch; 1 for the others). The frame: the anchors' average deviation from the instrument (delta_i + tau_h)
-    is zero in every part -- sum over the anchors of lambda, of A_ri + (c_r - 1) delta_i for each item, of
+    bistretch; 1 for the others). The frame (frame='part', the default): the anchors' global effects sum to zero,
+    and in each part (item: A and omegaI; threshold: T and omegaT; interaction: E) the anchors whose
+    representation lacks that part (e.g. those on 'global') agree with the instrument there by definition, so the
+    anchors with the part are free in it. Where every anchor has the part (and always with frame='average', an
+    anchor without it counting as zero), the anchors' average deviation from the instrument (delta_i + tau_h)
+    is zero in that part -- sum over the anchors of lambda, of A_ri + (c_r - 1) delta_i for each item, of
     T_rh + (d_r - 1) tau_h for each threshold, and of E. c_r = omegaI_r for the item-stretch facet elements and 1
     for the others, except that when an anchor has item effects, the first such anchor carries the anchors'
     item stretch, c = 1 - sum over the anchor item-stretch facet elements of (omegaI - 1), which keeps the item
@@ -1844,12 +2045,32 @@ class MixedDesign:
     average and its global effect lambda is defined by its uncut cells (natural parameters phi = [..., S]).
     """
 
-    def __init__(self, models, I, K, anchors=None, weights=None, cuts=None):
+    def __init__(self, models, I, K, anchors=None, weights=None, cuts=None, frame="part"):
         self.models = list(models)
         R = self.R = len(self.models)
         self.I, self.K = I, K
         S = list(range(R)) if anchors is None else sorted(int(a) for a in anchors)
         self.anchors = S
+        if frame not in ("part", "average"):
+            raise ValueError(f"frame must be 'part' or 'average', got {frame!r}.")
+        self.frame = frame
+        # frame='part': in each part (item, threshold, interaction), the anchors whose representation lacks it
+        # (e.g. those on 'global') agree with the instrument there by definition, so they fix it, and the anchors
+        # with that part are free in it (they enter the frame through their global effect only); only when every
+        # anchor has the part is it the anchors' average. frame='average': the anchors' average in every part, an
+        # anchor without the part counting as zero (a lone anchor with the part is then held at zero).
+        carriers = dict(
+            item=set(_MIXED_ITEM_EFFECTS) | set(_MIXED_ITEM_STRETCH),
+            threshold=set(_MIXED_THRESHOLD_EFFECTS) | set(_MIXED_THRESHOLD_STRETCH),
+            interaction={"matrix"},
+        )
+        self.part_free = {
+            # an anchor has the part and another lacks it
+            part: frame == "part" and any(self.models[r] not in reps for r in S)
+            and any(self.models[r] in reps for r in S)
+            for part, reps in carriers.items()
+        }
+        S_part = {part: ([] if free else S) for part, free in self.part_free.items()}
         sel = np.zeros(R)
         sel[S] = 1.0
         NI, NK = zero_sum_basis(I), zero_sum_basis(K)
@@ -1868,8 +2089,8 @@ class MixedDesign:
             B[row_off : row_off + basis.shape[0]] = basis
             blocks.append((name, B))
 
-        def effects(raters, inner, n):
-            """Basis over (R, n): per facet element in raters inner's space, the anchors' sum zero."""
+        def effects(raters, inner, n, S):
+            """Basis over (R, n): per facet element in raters inner's space, the sum over anchors S zero."""
             if not raters:
                 return np.zeros((R * n, 0))
             E = np.zeros((R, len(raters)))
@@ -1887,13 +2108,13 @@ class MixedDesign:
         rA = [r for r, m in enumerate(self.models) if m in _MIXED_ITEM_EFFECTS]
         rT = [r for r, m in enumerate(self.models) if m in _MIXED_THRESHOLD_EFFECTS]
         rE = [r for r, m in enumerate(self.models) if m == "matrix"]
-        add("A", effects(rA, NI, I), oA)
-        add("T", effects(rT, NK, K), oTr)
-        add("E", effects(rE, np.kron(NI, NK), I * K), oE)
+        add("A", effects(rA, NI, I, S_part["item"]), oA)
+        add("T", effects(rT, NK, K, S_part["threshold"]), oTr)
+        add("E", effects(rE, np.kron(NI, NK), I * K, S_part["interaction"]), oE)
         self.Cm = {}
-        for name, stretch, free, o in (
-            ("omegaI", _MIXED_ITEM_STRETCH, rA, oI),
-            ("omegaT", _MIXED_THRESHOLD_STRETCH, rT, oW),
+        for name, stretch, free, o, S in (
+            ("omegaI", _MIXED_ITEM_STRETCH, rA, oI, S_part["item"]),
+            ("omegaT", _MIXED_THRESHOLD_STRETCH, rT, oW, S_part["threshold"]),
         ):
             rs = [r for r, m in enumerate(self.models) if m in stretch]
             Cm = np.zeros((R, R))
@@ -1913,8 +2134,14 @@ class MixedDesign:
                 basis = Er
             self.Cm[name] = Cm
             add(name, basis, o)
-        self.cut_cells, Sg = self._cut_cells(cuts, S, R, I, K)
+        self.cut_cells, Sg = self._cut_cells(cuts, self.anchors, R, I, K)
         self.oS, self.Sg = oW + R, Sg
+        # the representation each facet element is reported under: an anchor with cells cut is fitted on 'global'
+        # with a free shift at each cut cell, which is the representation its cuts imply with the uncut parts
+        # held at its global effect
+        self.reported = list(self.models)
+        for r in {c[0] for c in self.cut_cells}:
+            self.reported[r] = cut_representation(c[1] for c in self.cut_cells if c[0] == r)
         if self.cut_cells:
             # the shifts at cut cells are free (no anchor constraint), after the stretch multipliers
             self.p_nat = self.oS + len(self.cut_cells)
@@ -1930,15 +2157,18 @@ class MixedDesign:
         self.p = self.M.shape[1]
         self.tau_cols = self.slices["tau"]
         self.phi0 = np.zeros(self.p_nat)
-        self.phi0[oI:] = 1.0
+        self.phi0[oI : oW + R] = 1.0  # the stretch multipliers; the cut cells' shifts (after them) start at 0
+        if self.cut_cells and any(self.part_free.values()):
+            self._check_cuts_identified()
         w = weights or {}
         P = np.zeros(self.p_nat)
         for r, m in enumerate(self.models):
             P[oL + r] = w.get("global", 0.0)
+            mw = _MIXED_HIDDEN.get(m, m)  # a hidden representation takes its full-set side's ridge
             if m in _MIXED_ITEM_EFFECTS:
-                P[oA + r * I : oA + (r + 1) * I] = w.get("item", {}).get(m, 0.0) * K
+                P[oA + r * I : oA + (r + 1) * I] = w.get("item", {}).get(mw, 0.0) * K
             if m in _MIXED_THRESHOLD_EFFECTS:
-                P[oTr + r * K : oTr + (r + 1) * K] = w.get("threshold", {}).get(m, 0.0) * I
+                P[oTr + r * K : oTr + (r + 1) * K] = w.get("threshold", {}).get(mw, 0.0) * I
             if m == "matrix":
                 P[oE + r * I * K : oE + (r + 1) * I * K] = w.get("interaction", 0.0)
             if m in _MIXED_ITEM_STRETCH:
@@ -1983,15 +2213,40 @@ class MixedDesign:
                     f"cuts: anchor {r} has every {'item' if len(items) == I else 'threshold'} cut, so it no longer "
                     "anchors anything; drop it from the anchors instead."
                 )
-        freed = Sg.sum(axis=3) > 0
-        held = (~freed[S]).any(axis=0)  # some anchor still defines the zero point at each cell
-        if not held.all():
-            i, h = np.argwhere(~held)[0]
-            raise ValueError(
-                f"cuts: every anchor is cut at item {i}, threshold {h + 1}, so the zero point there is undefined; "
-                "at least one anchor must remain at every cell."
-            )
+        if not cells:
+            return cells, Sg.reshape(R * I * K, 0)
+        if not any(self.part_free.values()):
+            # the anchors' average in every part: some anchor must remain at each cell to define the zero point
+            freed = Sg.sum(axis=3) > 0
+            held = (~freed[S]).any(axis=0)
+            if not held.all():
+                i, h = np.argwhere(~held)[0]
+                raise ValueError(
+                    f"cuts: every anchor is cut at item {i}, threshold {h + 1}, so the zero point there is undefined; "
+                    "at least one anchor must remain at every cell."
+                )
+        # (frame='part' with an anchor free in some part: the anchors that fix each part are checked once the design
+        # is built, _check_cuts_identified)
         return cells, Sg.reshape(R * I * K, len(cells))
+
+    def _check_cuts_identified(self):
+        """frame='part' with cuts: the instrument is fixed in each part by the anchors without it, so whether a cut
+        cell's shift is identified depends on the representations; it is if the grid's Jacobian has full rank (at a
+        generic point, so that the stretch coefficients' directions are not degenerate)."""
+        theta = np.random.default_rng(0).normal(0.0, 0.3, self.p)
+        J = self.grid_jacobian(theta)
+        null = null_directions(J.T @ J)
+        if null.size == 0:
+            return
+        load = np.abs(null[self.slices["S"]]).max(axis=1) if null.ndim > 1 else np.abs(null[self.slices["S"]])
+        bad = [self.cut_cells[n] for n in np.flatnonzero(load > 1e-6)]
+        what = "; ".join(f"anchor {r} at " + (f"item {ix[0]}" if kind == "item" else f"threshold {ix[0] + 1}"
+                                               if kind == "threshold" else f"item {ix[0]}, threshold {ix[1] + 1}")
+                         for r, kind, *ix in bad)
+        raise ValueError(
+            f"cuts: no remaining anchor fixes the instrument at the cut cells ({what}), so their shifts are undefined "
+            "with these representations; an anchor without that part (e.g. on 'global') must remain uncut there."
+        )
 
     def unpack(self, theta):
         """Natural parameters: delta, tau, lam, A, T, E, omegaI, omegaT and the coefficients c, d on delta, tau."""
@@ -2018,34 +2273,43 @@ class MixedDesign:
             + (self.Sg @ u["S"]).reshape(R, I, K)
         )
 
+    def _jacobian_parts(self):
+        """The pieces of grid_jacobian that do not depend on theta, computed once: the constant part (global, item,
+        threshold and interaction effects and cut-cell shifts, each entering the grid with coefficient 1), the rows
+        of M for delta and tau (entering times c_r and d_r), and the stretch multipliers' rows of M mapped through
+        Cm (entering times delta_i and tau_h)."""
+        parts = self.__dict__.get("_jparts")
+        if parts is None:
+            R, I, K, p, M = self.R, self.I, self.K, self.p, self.M
+            oD, oT, oL, oA, oTr, oE, oI, oW = self.off
+            J0 = (M[oL : oL + R][:, None, None, :] + M[oA:oTr].reshape(R, I, 1, p)
+                  + M[oTr:oE].reshape(R, 1, K, p) + M[oE:oI].reshape(R, I, K, p)).reshape(R * I * K, p)
+            if self.Sg.shape[1]:
+                J0 = J0 + self.Sg @ M[self.oS:]
+            parts = self._jparts = (J0, M[oD : oD + I], M[oT : oT + K], self.Cm["omegaI"] @ M[oI:oW],
+                                    self.Cm["omegaT"] @ M[oW : oW + R])
+        return parts
+
     def grid_jacobian(self, theta):
-        """(R*I*K, p) d grid / d theta at theta."""
+        """(R*I*K, p) d grid / d theta at theta: d b[r, i, h] = d lambda_r + c_r d delta_i + delta_i d c_r
+        + d_r d tau_h + tau_h d d_r + d A_ri + d T_rh + d E_rih (+ d S), each d phi = M d theta."""
         u = self.unpack(theta)
         R, I, K = self.R, self.I, self.K
-        oD, oT, oL, oA, oTr, oE, oI, oW = self.off
-        r, i, h = np.meshgrid(np.arange(R), np.arange(I), np.arange(K), indexing="ij")
-        Jn = np.zeros((R, I, K, self.p_nat))
-        Jn[r, i, h, oD + i] = u["c"][r]
-        Jn[r, i, h, oT + h] = u["d"][r]
-        Jn[r, i, h, oL + r] = 1.0
-        Jn[r, i, h, oA + r * I + i] = 1.0
-        Jn[r, i, h, oTr + r * K + h] = 1.0
-        Jn[r, i, h, oE + (r * I + i) * K + h] = 1.0
-        Jn[..., oI:oW] = self.Cm["omegaI"][:, None, None, :] * u["delta"][None, :, None, None]
-        Jn[..., oW : oW + R] = self.Cm["omegaT"][:, None, None, :] * u["tau"][None, None, :, None]
-        Jn = Jn.reshape(R * I * K, self.p_nat)
-        Jn[:, self.oS:] = self.Sg
-        return Jn @ self.M
+        J0, MD, MT, CI, CT = self._jacobian_parts()
+        Jv = (u["c"][:, None, None, None] * MD[None, :, None, :] + u["d"][:, None, None, None] * MT[None, None, :, :]
+              + u["delta"][None, :, None, None] * CI[:, None, None, :]
+              + u["tau"][None, None, :, None] * CT[:, None, None, :])
+        return J0 + Jv.reshape(R * I * K, self.p)
 
     def bilinear_hessian(self, theta, G):
         """The second-derivative term of the bilinear grid, given the gradient G (R, I, K) of the
-        log-likelihood in the grid: M' (S + S') M."""
+        log-likelihood in the grid: M' (S + S') M, where S is zero except two blocks (delta against omegaI and tau
+        against omegaT), so only those blocks' rows of M enter."""
         oD, oT, oL, oA, oTr, oE, oI, oW = self.off
-        I, K = self.I, self.K
-        S = np.zeros((self.p_nat, self.p_nat))
-        S[oD : oD + I, oI:oW] = G.sum(axis=2).T @ self.Cm["omegaI"]
-        S[oT : oT + K, oW : oW + self.R] = G.sum(axis=1).T @ self.Cm["omegaT"]
-        return self.M.T @ (S + S.T) @ self.M
+        I, K, M = self.I, self.K, self.M
+        H = M[oD : oD + I].T @ ((G.sum(axis=2).T @ self.Cm["omegaI"]) @ M[oI:oW])
+        H = H + M[oT : oT + K].T @ ((G.sum(axis=1).T @ self.Cm["omegaT"]) @ M[oW : oW + self.R])
+        return H + H.T
 
     def theta_from(self, delta, tau, lam=None):
         """Coordinates of shared item locations delta, thresholds tau and global effects lam (centred over the
@@ -2058,6 +2322,16 @@ class MixedDesign:
             lam = np.asarray(lam, float)
             phi[oL : oL + self.R] = lam - lam[self.anchors].mean()
         return np.linalg.lstsq(self.M, phi - self.phi0, rcond=None)[0]
+
+
+def _chol_solve(A, g):
+    """A^-1 g by Cholesky factorisation, or None if A is not positive definite."""
+    from scipy.linalg import cho_factor, cho_solve
+
+    try:
+        return cho_solve(cho_factor(A, check_finite=False), g, check_finite=False)
+    except np.linalg.LinAlgError:
+        return None
 
 
 def fit_mixed_composite(design, D, t, u, Q, theta0, tol=1e-10, max_iter=100, fixed=()):
@@ -2095,17 +2369,16 @@ def fit_mixed_composite(design, D, t, u, Q, theta0, tol=1e-10, max_iter=100, fix
     ix = np.ix_(free, free)
     for it in range(1, max_iter + 1):
         gf, inf_f, fis_f = g[free], info[ix], fisher[ix]
-        try:
-            ev = np.linalg.eigvalsh(inf_f)
-            pd_ = ev.min() > 0
-            if pd_:
-                sf = np.linalg.solve(inf_f, gf)
-            elif np.linalg.eigvalsh(fis_f).min() > 0:  # indefinite away from the optimum: Gauss-Newton
-                sf = np.linalg.solve(fis_f, gf)
-            else:
-                sf = gf / max(np.abs(gf).max(), 1.0) * 0.1
-        except np.linalg.LinAlgError:
+        if not (np.isfinite(inf_f).all() and np.isfinite(fis_f).all()):
             break
+        # a Cholesky factorisation succeeds exactly when the matrix is positive definite, so it both tests that and
+        # gives the Newton step
+        sf = _chol_solve(inf_f, gf)
+        pd_ = sf is not None
+        if not pd_:
+            sf = _chol_solve(fis_f, gf)  # indefinite away from the optimum: Gauss-Newton
+            if sf is None:
+                sf = gf / max(np.abs(gf).max(), 1.0) * 0.1
         if pd_ and float(gf @ sf) < tol:
             converged = True
             break

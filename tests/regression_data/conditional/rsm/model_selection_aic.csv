@@ -1,5 +1,9 @@
 ,RSM vs PCM AIC comparison
 PCM AIC,3987.016952541435
 RSM AIC,3973.689295457152
-p-value,0.0012762508248968644
-Effect,0.6823156147268215
+Relative likelihood,1.0
+Test level,0.0020683620977627304
+delta,0.1
+p-value (close fit),0.9999922851717608
+"p-value (close fit, per item)",1.0
+Delta-hat,0.013575388312880451
