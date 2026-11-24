@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="AutoImportSettings">
+    <option name="autoReloadType" value="SELECTIVE" />
+  </component>
+  <component name="ChangeListManager">
+    <list default="true" id="7f1f9cfd-b3cb-402c-8aca-0efbcf2bca73" name="Changes" comment="">
+      <change beforePath="$PROJECT_DIR$/Examples/Model classes/Extended MFRM bivector/Bivector MFRM example.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Model classes/Extended MFRM bivector/Bivector MFRM example.ipynb" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Model classes/PCM/PCM example.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Model classes/PCM/PCM example.ipynb" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/Model classes/RSM/RSM example.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/Model classes/RSM/RSM example.ipynb" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/raschpy/docs/RaschPy_manual.pdf" beforeDir="false" afterPath="$PROJECT_DIR$/raschpy/docs/RaschPy_manual.pdf" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/raschpy/rsm.py" beforeDir="false" afterPath="$PROJECT_DIR$/raschpy/rsm.py" afterDir="false" />
+    </list>
+    <option name="SHOW_DIALOG" value="false" />
+    <option name="HIGHLIGHT_CONFLICTS" value="true" />
+    <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
+    <option name="LAST_RESOLUTION" value="IGNORE" />
+  </component>
+  <component name="Git.Settings">
+    <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
+  </component>
+  <component name="ProjectColorInfo">{
+  &quot;associatedIndex&quot;: 8
+}</component>
+  <component name="ProjectId" id="33yEbHJmguMdBkKssHFb2dENzlw" />
+  <component name="ProjectViewState">
+    <option name="hideEmptyMiddlePackages" value="true" />
+    <option name="showLibraryContents" value="true" />
+  </component>
+  <component name="PropertiesComponent">{
+  &quot;keyToString&quot;: {
+    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
+    &quot;git-widget-placeholder&quot;: &quot;main&quot;
+  }
+}</component>
+  <component name="SharedIndexes">
+    <attachedChunks>
+      <set>
+        <option value="bundled-python-sdk-9f8e2b94138c-36ea0e71a18c-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-251.26094.141" />
+      </set>
+    </attachedChunks>
+  </component>
+  <component name="TaskManager">
+    <task active="true" id="Default" summary="Default task">
+      <changelist id="7f1f9cfd-b3cb-402c-8aca-0efbcf2bca73" name="Changes" comment="" />
+      <created>1760280982067</created>
+      <option name="number" value="Default" />
+      <option name="presentableId" value="Default" />
+      <updated>1760280982067</updated>
+    </task>
+    <servers />
+  </component>
+  <component name="Vcs.Log.Tabs.Properties">
+    <option name="TAB_STATES">
+      <map>
+        <entry key="MAIN">
+          <value>
+            <State />
+          </value>
+        </entry>
+      </map>
+    </option>
+  </component>
+</project>
